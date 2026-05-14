@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/archivist-api",
+  "crates/archivist-ai",
+  "crates/archivist-config",
+  "crates/archivist-core",
+  "crates/archivist-db",
+  "crates/archivist-ocr",
+  "crates/archivist-paperless",
+  "crates/archivist-worker",
+]
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/rressl/paperless-archivist"
+
+[workspace.dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+argon2 = "0.5"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros", "multipart"] }
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+cookie = "0.18"
+futures = "0.3"
+hex = "0.4"
+http = "1"
+http-body-util = "0.1"
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+mime_guess = "2"
+rand = "0.9"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "migrate"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "process", "time", "fs"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "limit", "request-id", "set-header", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
+uuid = { version = "1", features = ["serde", "v7", "v4"] }
+zeroize = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

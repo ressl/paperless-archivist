@@ -1,0 +1,19 @@
+{
+  "profiles": [
+    {
+      "id": "nvidia-geforce-rtx-4060-ti",
+      "label": "NVIDIA GeForce RTX 4060 Ti",
+      "title": "Empfehlung für NVIDIA GeForce RTX 4060 Ti:",
+      "items": [
+        {
+          "label": "Text / LLM",
+          "model": "qwen3:4b-instruct"
+        },
+        {
+          "label": "Vision / OCR",
+          "model": "glm-ocr"
+        }
+      ]
+    }
+  ]
+}

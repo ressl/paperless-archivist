@@ -1,0 +1,112 @@
+stages:
+  - validate
+  - test
+  - build
+  - scan
+
+variables:
+  RUST_IMAGE: rust:1.95-bookworm
+  NODE_IMAGE: node:26-bookworm
+  CONTAINER_CONTEXT: "."
+  CONTAINER_DOCKERFILE: "Dockerfile"
+  GITLEAKS_CONFIG: policy/gitleaks.toml
+
+.default_retry:
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+      - api_failure
+
+.rust_public_base:
+  image: "$RUST_IMAGE"
+  extends:
+    - .default_retry
+  before_script:
+    - rustup component add rustfmt clippy
+
+.frontend_base:
+  image: "$NODE_IMAGE"
+  cache:
+    key:
+      files:
+        - frontend/pnpm-lock.yaml
+    paths:
+      - frontend/.pnpm-store/
+  before_script:
+    - node --version
+    - npm install -g pnpm@10.33.4
+    - cd frontend
+    - pnpm config set store-dir .pnpm-store
+    - pnpm install --frozen-lockfile
+
+public:rust:fmt:
+  stage: validate
+  extends: .rust_public_base
+  script:
+    - cargo fmt --all -- --check
+
+public:rust:test:
+  stage: test
+  extends: .rust_public_base
+  script:
+    - cargo test --workspace --locked
+
+public:rust:clippy:
+  stage: test
+  extends: .rust_public_base
+  script:
+    - cargo clippy --workspace --all-targets -- -D warnings
+
+public:rust:audit:
+  stage: scan
+  extends: .rust_public_base
+  script:
+    - cargo install cargo-audit --locked
+    - cargo audit
+
+public:rust:deny:
+  stage: scan
+  extends: .rust_public_base
+  script:
+    - cargo install cargo-deny --locked
+    - cargo deny check
+
+frontend:openapi-client:
+  stage: validate
+  extends:
+    - .frontend_base
+    - .default_retry
+  script:
+    - pnpm generate:client
+    - git diff --exit-code -- src/api/schema.ts
+
+frontend:typecheck:
+  stage: test
+  extends:
+    - .frontend_base
+    - .default_retry
+  script:
+    - pnpm typecheck
+
+frontend:build:
+  stage: build
+  extends:
+    - .frontend_base
+    - .default_retry
+  script:
+    - pnpm build
+  artifacts:
+    when: on_success
+    paths:
+      - frontend/dist/
+    expire_in: 7 days
+
+frontend:audit:
+  stage: scan
+  extends:
+    - .frontend_base
+    - .default_retry
+  script:
+    - pnpm audit --audit-level high

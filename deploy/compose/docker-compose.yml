@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: postgres:18
+    command:
+      - postgres
+      - -c
+      - password_encryption=scram-sha-256
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-archivist}
+      POSTGRES_USER: ${POSTGRES_USER:-archivist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-archivist} -d ${POSTGRES_DB:-archivist}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql
+
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: paperless-archivist:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-archivist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-archivist}
+      ARCHIVIST_SECRET_KEY: ${ARCHIVIST_SECRET_KEY:?set ARCHIVIST_SECRET_KEY}
+      ARCHIVIST_ADMIN_USERNAME: ${ARCHIVIST_ADMIN_USERNAME:-admin}
+      ARCHIVIST_ADMIN_PASSWORD: ${ARCHIVIST_ADMIN_PASSWORD:?set ARCHIVIST_ADMIN_PASSWORD}
+      ARCHIVIST_HTTP_ADDR: ${ARCHIVIST_HTTP_ADDR:-0.0.0.0:8080}
+      ARCHIVIST_COOKIE_SECURE: ${ARCHIVIST_COOKIE_SECURE:-false}
+      ARCHIVIST_OIDC_ENABLED: ${ARCHIVIST_OIDC_ENABLED:-false}
+      ARCHIVIST_OIDC_ISSUER_URL: ${ARCHIVIST_OIDC_ISSUER_URL:-}
+      ARCHIVIST_OIDC_CLIENT_ID: ${ARCHIVIST_OIDC_CLIENT_ID:-}
+      ARCHIVIST_OIDC_CLIENT_SECRET: ${ARCHIVIST_OIDC_CLIENT_SECRET:-}
+      ARCHIVIST_OIDC_REDIRECT_URI: ${ARCHIVIST_OIDC_REDIRECT_URI:-}
+      ARCHIVIST_OIDC_ADMIN_USERS: ${ARCHIVIST_OIDC_ADMIN_USERS:-}
+      ARCHIVIST_OIDC_DEFAULT_ROLES: ${ARCHIVIST_OIDC_DEFAULT_ROLES:-viewer}
+      ARCHIVIST_LOG_LEVEL: ${ARCHIVIST_LOG_LEVEL:-info}
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    image: paperless-archivist:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    entrypoint: ["/usr/local/bin/archivist-worker"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-archivist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-archivist}
+      ARCHIVIST_SECRET_KEY: ${ARCHIVIST_SECRET_KEY:?set ARCHIVIST_SECRET_KEY}
+      ARCHIVIST_WORKER_CONCURRENCY: ${ARCHIVIST_WORKER_CONCURRENCY:-2}
+      ARCHIVIST_LOG_LEVEL: ${ARCHIVIST_LOG_LEVEL:-info}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+
+volumes:
+  postgres-data:
+  ollama-data:

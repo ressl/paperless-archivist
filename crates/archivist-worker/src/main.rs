@@ -1,0 +1,955 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Result, anyhow};
+use archivist_ai::{
+    AiResponse, AnthropicClient, ChatRequest, ImageInput, OllamaClient, OpenAiCompatibleClient,
+    TextProvider, VisionProvider, VisionRequest, parse_choice_suggestion, parse_field_suggestion,
+    parse_tag_suggestion, parse_title_suggestion, prompt_for_choice, prompt_for_fields,
+    prompt_for_tags, prompt_for_title,
+};
+use archivist_config::AppConfig;
+use archivist_core::{
+    AiProviderKind, AuditEventInput, ChoiceSuggestion, DocumentPatch, OldTagStrategy,
+    ProcessingMode, RuntimeSettings, Stage, TagSuggestion, TitleSuggestion,
+    validate_choice_suggestion, validate_field_suggestion, validate_tag_suggestion,
+    validate_title_suggestion,
+};
+use archivist_db::{
+    AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, complete_job, connect,
+    create_review_item, create_run_with_jobs, custom_field_ids_for_names, fail_job,
+    get_active_prompt, get_runtime_settings, insert_ai_artifact, is_last_active_job,
+    list_allowed_named_entities, list_allowed_tag_names, list_custom_fields, migrate,
+    named_entity_id_for_name, resolve_secret, tag_ids_for_names, upsert_inventory_item,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+};
+use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
+use archivist_paperless::PaperlessClient;
+use futures::stream::{FuturesUnordered, StreamExt};
+use secrecy::{ExposeSecret, SecretString};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use tokio::signal;
+use tokio::time::sleep;
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config = AppConfig::from_env();
+    config.validate()?;
+    init_tracing(&config.log_level);
+
+    let pool = connect(config.database_url.expose_secret()).await?;
+    migrate(&pool).await?;
+    run_worker(pool, Arc::new(config)).await
+}
+
+fn init_tracing(filter: &str) {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .json()
+        .init();
+}
+
+async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
+    let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
+    info!(%worker_id, "paperless archivist worker started");
+    let mut tick: u64 = 0;
+
+    loop {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!(%worker_id, "worker shutdown requested");
+                return Ok(());
+            }
+            _ = sleep(Duration::from_secs(5)) => {
+                tick += 1;
+                if tick % 12 == 1
+                    && let Err(error) = poll_paperless_triggers(&pool, &config).await
+                {
+                    warn!(error = %error, "trigger polling failed");
+                }
+                if let Err(error) = process_available_jobs(&pool, &config, &worker_id).await {
+                    error!(error = %error, "job processing tick failed");
+                }
+            }
+        }
+    }
+}
+
+async fn process_available_jobs(
+    pool: &DbPool,
+    config: &Arc<AppConfig>,
+    worker_id: &str,
+) -> Result<()> {
+    let jobs = claim_jobs(pool, config.worker_concurrency as i64, worker_id, 300).await?;
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
+    let mut pending = FuturesUnordered::new();
+    for job in jobs {
+        let pool = pool.clone();
+        let config = Arc::clone(config);
+        pending.push(tokio::spawn(async move {
+            let result = process_job(&pool, &config, &job).await;
+            if let Err(error) = &result {
+                let _ = fail_job(&pool, &job, &error.to_string(), true).await;
+            }
+            result
+        }));
+    }
+
+    while let Some(result) = pending.next().await {
+        if let Err(error) = result {
+            warn!(error = %error, "worker task join failed");
+        }
+    }
+    Ok(())
+}
+
+async fn process_job(pool: &DbPool, config: &AppConfig, job: &JobRecord) -> Result<()> {
+    info!(job_id = %job.id, run_id = %job.run_id, document_id = job.paperless_document_id, stage = %job.stage, "processing job");
+    let settings = get_runtime_settings(pool).await?;
+    let paperless = paperless_client(pool, config, &settings).await?;
+
+    match job.stage {
+        Stage::Ocr => process_ocr(pool, config, &paperless, &settings, job).await,
+        Stage::Tags => process_tags(pool, config, &paperless, &settings, job).await,
+        Stage::Title => process_title(pool, config, &paperless, &settings, job).await,
+        Stage::Correspondent => {
+            process_choice(
+                pool,
+                config,
+                &paperless,
+                &settings,
+                job,
+                "correspondent",
+                "paperless_correspondents",
+            )
+            .await
+        }
+        Stage::DocumentType => {
+            process_choice(
+                pool,
+                config,
+                &paperless,
+                &settings,
+                job,
+                "document type",
+                "paperless_document_types",
+            )
+            .await
+        }
+        Stage::Fields => process_fields(pool, config, &paperless, &settings, job).await,
+        Stage::OcrFix | Stage::Apply => Err(anyhow!(
+            "stage {} is not directly executable by the worker",
+            job.stage
+        )),
+    }
+}
+
+async fn process_ocr(
+    pool: &DbPool,
+    config: &AppConfig,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+) -> Result<()> {
+    let original = paperless
+        .download_original(job.paperless_document_id)
+        .await?;
+    let document = paperless.get_document(job.paperless_document_id).await?;
+    let pages = render_document_pages(
+        &original,
+        document.original_file_name.as_deref(),
+        settings.ocr.page_limit,
+    )
+    .await?;
+    if pages.is_empty() {
+        return Err(anyhow!("document rendered zero OCR pages"));
+    }
+
+    let provider = provider_for_stage(settings, Stage::Ocr, true)?;
+    let prompt = get_active_prompt(pool, Stage::Ocr).await?;
+    let mut texts = Vec::new();
+    let mut raw_responses = Vec::new();
+    let started = std::time::Instant::now();
+    for (index, page) in pages.iter().enumerate() {
+        let page_prompt = prompt
+            .as_ref()
+            .map(|prompt| {
+                format!(
+                    "{}\n\nPage {}: transcribe exactly and return only OCR text.",
+                    prompt.content,
+                    index + 1
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "Transcribe page {} exactly. Preserve dates, invoice numbers, totals, names, and line breaks. Return only the OCR text.",
+                    index + 1
+                )
+            });
+        let response = vision_with_provider(
+            pool,
+            config,
+            &provider,
+            VisionRequest {
+                model: provider.model.clone(),
+                temperature: 0.0,
+                prompt: page_prompt,
+                images: vec![ImageInput {
+                    mime_type: page.mime_type.clone(),
+                    bytes: page.bytes.clone(),
+                }],
+            },
+        )
+        .await?;
+        texts.push(response.text);
+        raw_responses.push(response.raw_response);
+    }
+    let text = normalize_ocr_pages(&texts);
+    validate_ocr_text(&text, settings.ocr.min_chars)?;
+
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: Stage::Ocr,
+            provider: &provider.name,
+            model: &provider.model,
+            prompt_id: prompt.as_ref().map(|prompt| prompt.id),
+            input_hash: &hash_bytes(&original),
+            request: None,
+            response: Some(json!({ "pages": raw_responses })),
+            normalized_output: Some(json!({ "content_chars": text.chars().count() })),
+            duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
+        },
+    )
+    .await?;
+
+    let patch = DocumentPatch {
+        content: Some(text),
+        title: None,
+        tags: None,
+        correspondent: None,
+        document_type: None,
+        custom_fields: None,
+    };
+    handle_patch_result(pool, paperless, settings, job, patch, Vec::new()).await
+}
+
+async fn process_tags(
+    pool: &DbPool,
+    config: &AppConfig,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+) -> Result<()> {
+    let document = paperless.get_document(job.paperless_document_id).await?;
+    let content = document.content.unwrap_or_default();
+    let allowed = list_allowed_tag_names(pool).await?;
+    let mut request = prompt_for_tags(&content, &allowed, settings.tagging.max_tags);
+    let prompt_id = apply_active_prompt(pool, Stage::Tags, &mut request).await?;
+    let response = chat_for_stage(pool, config, settings, Stage::Tags, request.clone()).await?;
+    let suggestion = parse_tag_suggestion(&response.text).unwrap_or(TagSuggestion {
+        tags: Vec::new(),
+        new_tags: Vec::new(),
+        confidence: Some(0.0),
+    });
+    let normalized = serde_json::to_value(&suggestion)?;
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: Stage::Tags,
+            provider: &response.provider,
+            model: &response.model,
+            prompt_id,
+            input_hash: &hash_text(&content),
+            request: Some(serde_json::to_value(request)?),
+            response: Some(response.raw_response),
+            normalized_output: Some(normalized.clone()),
+            duration_ms: response.duration_ms,
+        },
+    )
+    .await?;
+
+    match validate_tag_suggestion(
+        suggestion,
+        &allowed,
+        &settings.workflow.tags,
+        &settings.tagging,
+    ) {
+        Ok(valid) => {
+            let selected_ids = tag_ids_for_names(pool, &valid.tags).await?;
+            let mut tag_ids = match settings.tagging.old_tag_strategy {
+                OldTagStrategy::KeepExisting | OldTagStrategy::ReplaceAiManaged => {
+                    document.tags.clone()
+                }
+                OldTagStrategy::RemoveAllBusiness => Vec::new(),
+            };
+            for tag_id in selected_ids {
+                if !tag_ids.contains(&tag_id) {
+                    tag_ids.push(tag_id);
+                }
+            }
+            tag_ids.sort_unstable();
+            tag_ids.dedup();
+            let patch = DocumentPatch {
+                content: None,
+                title: None,
+                tags: Some(tag_ids),
+                correspondent: None,
+                document_type: None,
+                custom_fields: None,
+            };
+            handle_patch_result(pool, paperless, settings, job, patch, valid.warnings).await
+        }
+        Err(errors) => {
+            let patch = json!({
+                "tags": normalized.get("tags").cloned().unwrap_or_else(|| json!([]))
+            });
+            create_review_item(pool, job, patch, json!(errors)).await?;
+            Ok(())
+        }
+    }
+}
+
+async fn process_title(
+    pool: &DbPool,
+    config: &AppConfig,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+) -> Result<()> {
+    let document = paperless.get_document(job.paperless_document_id).await?;
+    let content = document.content.unwrap_or_default();
+    let mut request = prompt_for_title(&content);
+    let prompt_id = apply_active_prompt(pool, Stage::Title, &mut request).await?;
+    let response = chat_for_stage(pool, config, settings, Stage::Title, request.clone()).await?;
+    let suggestion = parse_title_suggestion(&response.text).unwrap_or(TitleSuggestion {
+        title: String::new(),
+        confidence: Some(0.0),
+    });
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: Stage::Title,
+            provider: &response.provider,
+            model: &response.model,
+            prompt_id,
+            input_hash: &hash_text(&content),
+            request: Some(serde_json::to_value(request)?),
+            response: Some(response.raw_response),
+            normalized_output: Some(serde_json::to_value(&suggestion)?),
+            duration_ms: response.duration_ms,
+        },
+    )
+    .await?;
+    match validate_title_suggestion(suggestion, 160, settings.tagging.confidence_threshold) {
+        Ok(valid) => {
+            let patch = DocumentPatch {
+                content: None,
+                title: Some(valid.title),
+                tags: None,
+                correspondent: None,
+                document_type: None,
+                custom_fields: None,
+            };
+            handle_patch_result(pool, paperless, settings, job, patch, Vec::new()).await
+        }
+        Err(errors) => {
+            create_review_item(pool, job, json!({ "title": "" }), json!(errors)).await?;
+            Ok(())
+        }
+    }
+}
+
+async fn process_choice(
+    pool: &DbPool,
+    config: &AppConfig,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    choice_kind: &str,
+    table: &str,
+) -> Result<()> {
+    let allowed = list_allowed_named_entities(pool, table).await?;
+    if allowed.is_empty() {
+        complete_job(pool, job, json!({ "skipped": "no allowed choices" })).await?;
+        return Ok(());
+    }
+    let document = paperless.get_document(job.paperless_document_id).await?;
+    let content = document.content.unwrap_or_default();
+    let mut request = prompt_for_choice(&content, choice_kind, &allowed);
+    let prompt_id = apply_active_prompt(pool, job.stage, &mut request).await?;
+    let response = chat_for_stage(pool, config, settings, job.stage, request.clone()).await?;
+    let suggestion = parse_choice_suggestion(&response.text).unwrap_or(ChoiceSuggestion {
+        name: String::new(),
+        confidence: Some(0.0),
+    });
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: job.stage,
+            provider: &response.provider,
+            model: &response.model,
+            prompt_id,
+            input_hash: &hash_text(&content),
+            request: Some(serde_json::to_value(request)?),
+            response: Some(response.raw_response),
+            normalized_output: Some(serde_json::to_value(&suggestion)?),
+            duration_ms: response.duration_ms,
+        },
+    )
+    .await?;
+    match validate_choice_suggestion(suggestion, &allowed, settings.tagging.confidence_threshold) {
+        Ok(valid) => {
+            let id = named_entity_id_for_name(pool, table, &valid.name)
+                .await?
+                .ok_or_else(|| anyhow!("validated choice disappeared from cache"))?;
+            let patch = if job.stage == Stage::Correspondent {
+                DocumentPatch {
+                    content: None,
+                    title: None,
+                    tags: None,
+                    correspondent: Some(Some(id)),
+                    document_type: None,
+                    custom_fields: None,
+                }
+            } else {
+                DocumentPatch {
+                    content: None,
+                    title: None,
+                    tags: None,
+                    correspondent: None,
+                    document_type: Some(Some(id)),
+                    custom_fields: None,
+                }
+            };
+            handle_patch_result(pool, paperless, settings, job, patch, Vec::new()).await
+        }
+        Err(errors) => {
+            create_review_item(pool, job, json!({ choice_kind: "" }), json!(errors)).await?;
+            Ok(())
+        }
+    }
+}
+
+async fn process_fields(
+    pool: &DbPool,
+    config: &AppConfig,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+) -> Result<()> {
+    let fields = list_custom_fields(pool).await?;
+    if fields.is_empty() {
+        complete_job(
+            pool,
+            job,
+            json!({ "skipped": "no Paperless custom fields configured" }),
+        )
+        .await?;
+        return Ok(());
+    }
+    let document = paperless.get_document(job.paperless_document_id).await?;
+    let content = document.content.unwrap_or_default();
+    let allowed = fields
+        .iter()
+        .map(|field| field.name.clone())
+        .collect::<Vec<_>>();
+    let mut request = prompt_for_fields(&content, &allowed, settings.fields.max_fields);
+    let prompt_id = apply_active_prompt(pool, Stage::Fields, &mut request).await?;
+    let response = chat_for_stage(pool, config, settings, Stage::Fields, request.clone()).await?;
+    let suggestion =
+        parse_field_suggestion(&response.text).unwrap_or(archivist_core::FieldSuggestion {
+            fields: Vec::new(),
+            confidence: Some(0.0),
+        });
+    let normalized = serde_json::to_value(&suggestion)?;
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: Stage::Fields,
+            provider: &response.provider,
+            model: &response.model,
+            prompt_id,
+            input_hash: &hash_text(&content),
+            request: Some(serde_json::to_value(request)?),
+            response: Some(response.raw_response),
+            normalized_output: Some(normalized.clone()),
+            duration_ms: response.duration_ms,
+        },
+    )
+    .await?;
+
+    match validate_field_suggestion(
+        suggestion,
+        &allowed,
+        settings.fields.max_fields,
+        settings.fields.confidence_threshold,
+    ) {
+        Ok(valid) => {
+            let names = valid
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect::<Vec<_>>();
+            let ids = custom_field_ids_for_names(pool, &names).await?;
+            let values = valid
+                .fields
+                .iter()
+                .filter_map(|field| {
+                    ids.iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(&field.name))
+                        .map(|(_, id)| json!({ "field": id, "value": field.value }))
+                })
+                .collect::<Vec<_>>();
+            let patch = DocumentPatch {
+                content: None,
+                title: None,
+                tags: None,
+                correspondent: None,
+                document_type: None,
+                custom_fields: Some(json!(values)),
+            };
+            handle_patch_result(pool, paperless, settings, job, patch, valid.warnings).await
+        }
+        Err(errors) => {
+            create_review_item(
+                pool,
+                job,
+                json!({ "custom_fields": normalized.get("fields").cloned().unwrap_or_else(|| json!([])) }),
+                json!(errors),
+            )
+            .await?;
+            Ok(())
+        }
+    }
+}
+
+async fn handle_patch_result(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    patch: DocumentPatch,
+    warnings: Vec<String>,
+) -> Result<()> {
+    if settings.workflow.mode == ProcessingMode::Review {
+        create_review_item(pool, job, serde_json::to_value(patch)?, json!(warnings)).await?;
+        return Ok(());
+    }
+    let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
+    apply_patch_with_workflow_tags(pool, paperless, settings, job, patch, final_run_stage).await?;
+    complete_job(pool, job, json!({ "applied": true, "warnings": warnings })).await
+}
+
+async fn apply_patch_with_workflow_tags(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    mut patch: DocumentPatch,
+    final_run_stage: bool,
+) -> Result<()> {
+    let document = paperless.get_document(job.paperless_document_id).await?;
+    let tags = paperless.list_tags().await?;
+    let mut tag_ids = patch.tags.clone().unwrap_or(document.tags);
+
+    if let Some(completion_name) = settings.workflow.tags.completion_tag_for_stage(job.stage) {
+        let completion = tags
+            .iter()
+            .find(|tag| tag.name.eq_ignore_ascii_case(completion_name))
+            .ok_or_else(|| anyhow!("completion tag '{completion_name}' missing from Paperless"))?;
+        if !tag_ids.contains(&completion.id) {
+            tag_ids.push(completion.id);
+        }
+    }
+    if final_run_stage
+        && let Some(full) = tags.iter().find(|tag| {
+            tag.name
+                .eq_ignore_ascii_case(&settings.workflow.tags.completion_processed)
+        })
+        && !tag_ids.contains(&full.id)
+    {
+        tag_ids.push(full.id);
+    }
+    for trigger_name in [
+        settings.workflow.tags.trigger_tag_for_stage(job.stage),
+        final_run_stage.then_some(settings.workflow.tags.trigger_process.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(trigger) = tags
+            .iter()
+            .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
+        {
+            tag_ids.retain(|id| *id != trigger.id);
+        }
+    }
+
+    tag_ids.sort_unstable();
+    tag_ids.dedup();
+    patch.tags = Some(tag_ids);
+    let patch_value = serde_json::to_value(&patch)?;
+    paperless
+        .patch_document(job.paperless_document_id, &patch)
+        .await?;
+    append_audit(
+        pool,
+        AuditEventInput {
+            event_type: "document.patch_applied".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: Some(job.run_id),
+            job_id: Some(job.id),
+            paperless_document_id: Some(job.paperless_document_id),
+            before: None,
+            after: Some(patch_value),
+            metadata: Some(json!({ "stage": job.stage })),
+            outcome: "success".to_owned(),
+            error_message: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()> {
+    let settings = get_runtime_settings(pool).await?;
+    let paperless = paperless_client(pool, config, &settings).await?;
+    sync_metadata(pool, &paperless, &settings).await?;
+
+    let tags = paperless.list_tags().await?;
+    let documents = paperless.list_documents().await?;
+    for document in documents {
+        let tag_names = document
+            .tags
+            .iter()
+            .filter_map(|id| tags.iter().find(|tag| tag.id == *id))
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        let stages = settings.workflow.tags.stages_requested_by_tags(&tag_names);
+        if !stages.is_empty() {
+            let trigger = if tag_names
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.trigger_process))
+            {
+                settings.workflow.tags.trigger_process.as_str()
+            } else {
+                "paperless-trigger"
+            };
+            create_run_with_jobs(
+                pool,
+                document.id,
+                &stages,
+                settings.workflow.mode,
+                trigger,
+                "worker",
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn sync_metadata(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+) -> Result<()> {
+    let mut tags = paperless.list_tags().await?;
+    for workflow_tag in settings.workflow.tags.all() {
+        let tag = paperless.ensure_tag(workflow_tag).await?;
+        if !tags.iter().any(|existing| existing.id == tag.id) {
+            tags.push(tag);
+        }
+    }
+    let correspondents = paperless.list_correspondents().await?;
+    let document_types = paperless.list_document_types().await?;
+    let custom_fields = paperless.list_custom_fields().await.unwrap_or_default();
+    let documents = paperless.list_documents().await?;
+
+    let mut tx = pool.begin().await?;
+    for tag in &tags {
+        upsert_paperless_tag(
+            &mut tx,
+            tag.id,
+            &tag.name,
+            tag.slug.as_deref(),
+            tag.color.as_deref(),
+            settings.workflow.tags.is_workflow_tag(&tag.name),
+        )
+        .await?;
+    }
+    for entity in &correspondents {
+        upsert_paperless_named_entity(&mut tx, "paperless_correspondents", entity.id, &entity.name)
+            .await?;
+    }
+    for entity in &document_types {
+        upsert_paperless_named_entity(&mut tx, "paperless_document_types", entity.id, &entity.name)
+            .await?;
+    }
+    for field in &custom_fields {
+        upsert_paperless_custom_field(&mut tx, field.id, &field.name, field.data_type.as_deref())
+            .await?;
+    }
+    for document in &documents {
+        let tag_names = document
+            .tags
+            .iter()
+            .filter_map(|id| tags.iter().find(|tag| tag.id == *id))
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        upsert_inventory_item(
+            &mut tx,
+            &archivist_db::InventoryUpsert {
+                paperless_document_id: document.id,
+                title: document.title.clone(),
+                original_file_name: document.original_file_name.clone(),
+                current_tags: tag_names.clone(),
+                current_tag_ids: document.tags.clone(),
+                correspondent_id: document.correspondent,
+                document_type_id: document.document_type,
+                has_ocr_completion_tag: tag_names
+                    .iter()
+                    .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.completion_ocr)),
+                has_tagging_completion_tag: tag_names.iter().any(|tag| {
+                    tag.eq_ignore_ascii_case(&settings.workflow.tags.completion_tagging)
+                }),
+                has_full_completion_tag: tag_names.iter().any(|tag| {
+                    tag.eq_ignore_ascii_case(&settings.workflow.tags.completion_processed)
+                }),
+            },
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn paperless_client(
+    pool: &DbPool,
+    config: &AppConfig,
+    settings: &RuntimeSettings,
+) -> Result<PaperlessClient> {
+    let secret_id = settings
+        .paperless
+        .token_secret_id
+        .ok_or_else(|| anyhow!("Paperless token is not configured"))?;
+    let token = resolve_secret(pool, &config.secret_key, secret_id)
+        .await?
+        .ok_or_else(|| anyhow!("Paperless token secret reference does not exist"))?;
+    PaperlessClient::new(
+        &settings.paperless.base_url,
+        token,
+        settings.paperless.timeout_seconds,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct StageProvider {
+    name: String,
+    kind: AiProviderKind,
+    base_url: String,
+    model: String,
+    secret_id: Option<Uuid>,
+}
+
+fn provider_for_stage(
+    settings: &RuntimeSettings,
+    stage: Stage,
+    vision: bool,
+) -> Result<StageProvider> {
+    let stage_override = settings
+        .ai
+        .stage_models
+        .iter()
+        .find(|override_model| override_model.stage == stage);
+    let provider_name = stage_override
+        .map(|override_model| override_model.provider.as_str())
+        .unwrap_or(&settings.ai.default_provider);
+    let mut provider = settings
+        .ai
+        .providers
+        .iter()
+        .find(|provider| provider.enabled && provider.name == provider_name)
+        .cloned()
+        .or_else(|| {
+            if provider_name == "ollama" {
+                Some(archivist_core::AiProviderSettings::ollama_default())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| anyhow!("AI provider '{provider_name}' is not configured or disabled"))?;
+    if provider.name == "ollama" {
+        provider.base_url = settings.ai.ollama_base_url.clone();
+    }
+    let model = stage_override
+        .map(|override_model| override_model.model.clone())
+        .filter(|model| !model.trim().is_empty())
+        .or_else(|| {
+            if vision {
+                provider.default_vision_model.clone()
+            } else {
+                provider.default_text_model.clone()
+            }
+        })
+        .unwrap_or_else(|| {
+            if vision {
+                settings.ai.default_vision_model.clone()
+            } else {
+                settings.ai.default_text_model.clone()
+            }
+        });
+    let base_url = provider_base_url(&provider.kind, &provider.base_url);
+    Ok(StageProvider {
+        name: provider.name,
+        kind: provider.kind,
+        base_url,
+        model,
+        secret_id: provider.secret_id,
+    })
+}
+
+fn provider_base_url(kind: &AiProviderKind, configured: &str) -> String {
+    let trimmed = configured.trim();
+    if !trimmed.is_empty() {
+        return trimmed.trim_end_matches('/').to_owned();
+    }
+    match kind {
+        AiProviderKind::Ollama => "http://ollama:11434".to_owned(),
+        AiProviderKind::Openai => "https://api.openai.com/v1".to_owned(),
+        AiProviderKind::Anthropic => "https://api.anthropic.com/v1".to_owned(),
+        AiProviderKind::OpenaiCompatible => "http://localhost:8000/v1".to_owned(),
+    }
+}
+
+async fn apply_active_prompt(
+    pool: &DbPool,
+    stage: Stage,
+    request: &mut ChatRequest,
+) -> Result<Option<Uuid>> {
+    let Some(prompt) = get_active_prompt(pool, stage).await? else {
+        return Ok(None);
+    };
+    request.system_prompt = prompt.content;
+    Ok(Some(prompt.id))
+}
+
+async fn chat_for_stage(
+    pool: &DbPool,
+    config: &AppConfig,
+    settings: &RuntimeSettings,
+    stage: Stage,
+    mut request: ChatRequest,
+) -> Result<AiResponse> {
+    let provider = provider_for_stage(settings, stage, false)?;
+    request.model = provider.model.clone();
+    chat_with_provider(pool, config, &provider, request).await
+}
+
+async fn chat_with_provider(
+    pool: &DbPool,
+    config: &AppConfig,
+    provider: &StageProvider,
+    request: ChatRequest,
+) -> Result<AiResponse> {
+    match provider.kind {
+        AiProviderKind::Ollama => {
+            let client = OllamaClient::new(
+                &provider.base_url,
+                provider_secret(pool, config, provider).await?,
+            )?;
+            client.chat(request).await
+        }
+        AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
+            let client = OpenAiCompatibleClient::new(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(pool, config, provider).await?,
+            )?;
+            client.chat(request).await
+        }
+        AiProviderKind::Anthropic => {
+            let secret = provider_secret(pool, config, provider)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("AI provider '{}' requires an API key secret", provider.name)
+                })?;
+            let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
+            client.chat(request).await
+        }
+    }
+}
+
+async fn vision_with_provider(
+    pool: &DbPool,
+    config: &AppConfig,
+    provider: &StageProvider,
+    request: VisionRequest,
+) -> Result<AiResponse> {
+    match provider.kind {
+        AiProviderKind::Ollama => {
+            let client = OllamaClient::new(
+                &provider.base_url,
+                provider_secret(pool, config, provider).await?,
+            )?;
+            client.vision(request).await
+        }
+        AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
+            let client = OpenAiCompatibleClient::new(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(pool, config, provider).await?,
+            )?;
+            client.vision(request).await
+        }
+        AiProviderKind::Anthropic => {
+            let secret = provider_secret(pool, config, provider)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("AI provider '{}' requires an API key secret", provider.name)
+                })?;
+            let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
+            client.vision(request).await
+        }
+    }
+}
+
+async fn provider_secret(
+    pool: &DbPool,
+    config: &AppConfig,
+    provider: &StageProvider,
+) -> Result<Option<SecretString>> {
+    let Some(secret_id) = provider.secret_id else {
+        return Ok(None);
+    };
+    resolve_secret(pool, &config.secret_key, secret_id).await
+}
+
+fn hash_text(value: &str) -> String {
+    hash_bytes(value.as_bytes())
+}
+
+fn hash_bytes(value: &[u8]) -> String {
+    let digest = Sha256::digest(value);
+    hex::encode(digest)
+}

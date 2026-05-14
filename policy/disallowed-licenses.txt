@@ -1,0 +1,4 @@
+# Licenses that require explicit review before inclusion.
+BUSL-1.1
+Commons-Clause
+SSPL-1.0

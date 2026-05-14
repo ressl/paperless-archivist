@@ -1,0 +1,962 @@
+openapi: 3.1.0
+info:
+  title: Paperless Archivist API
+  version: 0.1.0
+servers:
+  - url: /
+security:
+  - cookieSession: []
+  - bearerToken: []
+components:
+  securitySchemes:
+    cookieSession:
+      type: apiKey
+      in: cookie
+      name: pa_session
+    bearerToken:
+      type: http
+      scheme: bearer
+  schemas:
+    Role:
+      type: string
+      enum: [viewer, reviewer, operator, admin, auditor]
+    Stage:
+      type: string
+      enum: [ocr, ocr_fix, tags, title, correspondent, document_type, fields, apply]
+    ProcessingMode:
+      type: string
+      enum: [review, autopilot]
+    AiProviderKind:
+      type: string
+      enum: [ollama, openai, anthropic, openai_compatible]
+    AiProviderSettings:
+      type: object
+      required: [name, kind, base_url, enabled]
+      properties:
+        name: { type: string }
+        kind: { $ref: "#/components/schemas/AiProviderKind" }
+        base_url: { type: string }
+        default_text_model: { type: [string, "null"] }
+        default_vision_model: { type: [string, "null"] }
+        cost_per_1m_input_tokens_usd: { type: [number, "null"], format: double }
+        cost_per_1m_output_tokens_usd: { type: [number, "null"], format: double }
+        secret_id: { type: [string, "null"], format: uuid }
+        enabled: { type: boolean }
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+    MeResponse:
+      type: object
+      required: [username, roles]
+      properties:
+        username: { type: string }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/Role" }
+        csrf_token:
+          type: [string, "null"]
+    OidcConfigResponse:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        login_url:
+          type: [string, "null"]
+        provider:
+          type: [string, "null"]
+        paperless_login_enabled: { type: boolean }
+    RuntimeSettings:
+      type: object
+      additionalProperties: true
+    UpdateSettingsRequest:
+      type: object
+      required: [settings]
+      properties:
+        settings: { $ref: "#/components/schemas/RuntimeSettings" }
+        paperless_token:
+          type: [string, "null"]
+        provider_secrets:
+          type: [object, "null"]
+          additionalProperties: { type: string }
+    OllamaInstalledModel:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        parameter_size:
+          type: [string, "null"]
+        quantization_level:
+          type: [string, "null"]
+        size_bytes:
+          type: [integer, "null"]
+          format: int64
+        size_gb:
+          type: [number, "null"]
+          format: double
+        modified_at:
+          type: [string, "null"]
+        digest:
+          type: [string, "null"]
+    OllamaInstalledModelsResponse:
+      type: object
+      required: [provider, models]
+      properties:
+        provider: { type: string }
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/OllamaInstalledModel" }
+    BacklogCounts:
+      type: object
+      required:
+        - total_documents
+        - complete
+        - missing_ocr
+        - missing_tagging
+        - missing_title
+        - missing_correspondent
+        - missing_document_type
+        - missing_fields
+        - waiting_review
+        - failed
+        - running
+        - never_processed
+      properties:
+        total_documents: { type: integer, format: int64 }
+        complete: { type: integer, format: int64 }
+        missing_ocr: { type: integer, format: int64 }
+        missing_tagging: { type: integer, format: int64 }
+        missing_title: { type: integer, format: int64 }
+        missing_correspondent: { type: integer, format: int64 }
+        missing_document_type: { type: integer, format: int64 }
+        missing_fields: { type: integer, format: int64 }
+        waiting_review: { type: integer, format: int64 }
+        failed: { type: integer, format: int64 }
+        running: { type: integer, format: int64 }
+        never_processed: { type: integer, format: int64 }
+    DashboardRangeOption:
+      type: object
+      required: [key, label]
+      properties:
+        key: { type: string, enum: ["24h", "7d", "30d", "90d", "12m", "all"] }
+        label: { type: string }
+    DashboardKpis:
+      type: object
+      required: [completion_rate, open_backlog, failure_rate, review_load, running_jobs, throughput]
+      properties:
+        completion_rate: { type: number, format: double }
+        open_backlog: { type: integer, format: int64 }
+        failure_rate: { type: number, format: double }
+        review_load: { type: integer, format: int64 }
+        running_jobs: { type: integer, format: int64 }
+        throughput: { type: integer, format: int64 }
+    DashboardComparison:
+      type: object
+      required: [jobs_created_delta, jobs_succeeded_delta, jobs_failed_delta, open_backlog_delta]
+      properties:
+        jobs_created_delta: { type: integer, format: int64 }
+        jobs_succeeded_delta: { type: integer, format: int64 }
+        jobs_failed_delta: { type: integer, format: int64 }
+        open_backlog_delta: { type: integer, format: int64 }
+    DashboardStageStatus:
+      type: object
+      required: [stage, complete, pending, failed, waiting_review, running]
+      properties:
+        stage: { type: string }
+        complete: { type: integer, format: int64 }
+        pending: { type: integer, format: int64 }
+        failed: { type: integer, format: int64 }
+        waiting_review: { type: integer, format: int64 }
+        running: { type: integer, format: int64 }
+    DashboardTimeBucket:
+      type: object
+      required: [bucket, label, jobs_created, jobs_succeeded, jobs_failed, runs_created, runs_succeeded, runs_failed]
+      properties:
+        bucket: { type: string, format: date-time }
+        label: { type: string }
+        jobs_created: { type: integer, format: int64 }
+        jobs_succeeded: { type: integer, format: int64 }
+        jobs_failed: { type: integer, format: int64 }
+        runs_created: { type: integer, format: int64 }
+        runs_succeeded: { type: integer, format: int64 }
+        runs_failed: { type: integer, format: int64 }
+    DashboardBacklogPoint:
+      type: object
+      required: [bucket, label, total_documents, complete, open_backlog, failed, waiting_review, running]
+      properties:
+        bucket: { type: string, format: date-time }
+        label: { type: string }
+        total_documents: { type: integer, format: int64 }
+        complete: { type: integer, format: int64 }
+        open_backlog: { type: integer, format: int64 }
+        failed: { type: integer, format: int64 }
+        waiting_review: { type: integer, format: int64 }
+        running: { type: integer, format: int64 }
+    DashboardStatusCount:
+      type: object
+      required: [status, count]
+      properties:
+        status: { type: string }
+        count: { type: integer, format: int64 }
+    ProviderUsageStats:
+      type: object
+      required:
+        - provider
+        - model
+        - stage
+        - request_count
+        - avg_duration_ms
+        - p95_duration_ms
+        - input_tokens
+        - output_tokens
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        stage: { type: string }
+        request_count: { type: integer, format: int64 }
+        avg_duration_ms: { type: number, format: double }
+        p95_duration_ms: { type: integer, format: int64 }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        estimated_cost_usd: { type: [number, "null"], format: double }
+    DashboardStats:
+      type: object
+      required:
+        - generated_at
+        - selected_range
+        - available_ranges
+        - kpis
+        - comparison
+        - stage_status
+        - throughput_series
+        - backlog_series
+        - job_status
+        - run_status
+        - review_status
+        - provider_usage
+      properties:
+        generated_at: { type: string, format: date-time }
+        selected_range: { type: string, enum: ["24h", "7d", "30d", "90d", "12m", "all"] }
+        available_ranges:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardRangeOption" }
+        kpis: { $ref: "#/components/schemas/DashboardKpis" }
+        comparison: { $ref: "#/components/schemas/DashboardComparison" }
+        stage_status:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardStageStatus" }
+        throughput_series:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardTimeBucket" }
+        backlog_series:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardBacklogPoint" }
+        job_status:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardStatusCount" }
+        run_status:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardStatusCount" }
+        review_status:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardStatusCount" }
+        provider_usage:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderUsageStats" }
+    DashboardResponse:
+      type: object
+      required: [counts, stats]
+      properties:
+        counts: { $ref: "#/components/schemas/BacklogCounts" }
+        stats: { $ref: "#/components/schemas/DashboardStats" }
+    DocumentInventoryItem:
+      type: object
+      additionalProperties: true
+    ReviewItem:
+      type: object
+      additionalProperties: true
+    AuditEvent:
+      type: object
+      additionalProperties: true
+    Prompt:
+      type: object
+      required: [id, stage, name, version, content, active, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        stage: { $ref: "#/components/schemas/Stage" }
+        name: { type: string }
+        version: { type: integer }
+        content: { type: string }
+        output_schema: true
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    TestPromptRequest:
+      type: object
+      required: [stage, content]
+      properties:
+        stage: { $ref: "#/components/schemas/Stage" }
+        content: { type: string }
+        sample_text:
+          type: [string, "null"]
+        paperless_document_id:
+          type: [integer, "null"]
+        provider_name:
+          type: [string, "null"]
+        model:
+          type: [string, "null"]
+    TestPromptResponse:
+      type: object
+      required: [provider, model, stage, raw_text, validation_errors, warnings, duration_ms]
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        stage: { $ref: "#/components/schemas/Stage" }
+        raw_text: { type: string }
+        parsed: true
+        validation_errors:
+          type: array
+          items: { type: string }
+        warnings:
+          type: array
+          items: { type: string }
+        duration_ms: { type: integer, format: int32 }
+    DocumentChatSource:
+      type: object
+      required: [paperless_document_id, snippet, score, source_kind]
+      properties:
+        paperless_document_id: { type: integer }
+        title:
+          type: [string, "null"]
+        snippet: { type: string }
+        score: { type: number, format: double }
+        source_kind: { type: string }
+    DocumentChatSession:
+      type: object
+      required: [id, title, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        created_by:
+          type: [string, "null"]
+          format: uuid
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DocumentChatMessage:
+      type: object
+      required: [id, session_id, role, content, sources, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant, system] }
+        content: { type: string }
+        provider:
+          type: [string, "null"]
+        model:
+          type: [string, "null"]
+        metadata: true
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/DocumentChatSource" }
+        created_at: { type: string, format: date-time }
+    CreateDocumentChatSessionRequest:
+      type: object
+      properties:
+        title: { type: string }
+    PostDocumentChatMessageRequest:
+      type: object
+      required: [question]
+      properties:
+        question: { type: string, minLength: 3, maxLength: 4000 }
+        document_ids:
+          type: [array, "null"]
+          maxItems: 50
+          items: { type: integer }
+        max_sources:
+          type: integer
+          minimum: 1
+          maximum: 10
+    PostDocumentChatMessageResponse:
+      type: object
+      required: [session_id, user_message_id, assistant_message_id, answer, sources]
+      properties:
+        session_id: { type: string, format: uuid }
+        user_message_id: { type: string, format: uuid }
+        assistant_message_id: { type: string, format: uuid }
+        answer: { type: string }
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/DocumentChatSource" }
+    Session:
+      type: object
+      additionalProperties: true
+    User:
+      type: object
+      additionalProperties: true
+paths:
+  /healthz:
+    get:
+      security: []
+      responses:
+        "200":
+          description: Healthy
+          content:
+            text/plain:
+              schema: { type: string }
+  /readyz:
+    get:
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            text/plain:
+              schema: { type: string }
+  /metrics:
+    get:
+      security: []
+      responses:
+        "200":
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema: { type: string }
+  /api/auth/login:
+    post:
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeResponse" }
+  /api/auth/paperless-login:
+    post:
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Logged in through the optional Paperless login bridge
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeResponse" }
+  /api/auth/oidc/config:
+    get:
+      security: []
+      responses:
+        "200":
+          description: OIDC login availability
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OidcConfigResponse" }
+  /api/auth/oidc/login:
+    get:
+      security: []
+      parameters:
+        - name: return_to
+          in: query
+          schema: { type: string }
+      responses:
+        "307": { description: Redirect to OIDC provider }
+  /api/auth/oidc/callback:
+    get:
+      security: []
+      parameters:
+        - name: code
+          in: query
+          schema: { type: string }
+        - name: state
+          in: query
+          schema: { type: string }
+        - name: error
+          in: query
+          schema: { type: string }
+        - name: error_description
+          in: query
+          schema: { type: string }
+      responses:
+        "303": { description: Login completed and session cookies issued }
+  /api/auth/logout:
+    post:
+      responses:
+        "200": { description: Logged out }
+  /api/auth/me:
+    get:
+      responses:
+        "200":
+          description: Current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeResponse" }
+  /api/auth/change-password:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { type: string, format: password }
+      responses:
+        "200": { description: Password changed and sessions revoked }
+  /api/auth/sessions:
+    get:
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Session" }
+  /api/auth/sessions/{id}/revoke:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Session revoked }
+  /api/settings:
+    get:
+      responses:
+        "200":
+          description: Runtime settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuntimeSettings" }
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateSettingsRequest" }
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuntimeSettings" }
+  /api/settings/test-paperless:
+    post:
+      responses:
+        "200":
+          description: Paperless connection result
+  /api/model-providers/test:
+    post:
+      responses:
+        "200":
+          description: Provider connection result
+  /api/model-providers/{name}/models:
+    post:
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Installed Ollama models for a configured provider
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OllamaInstalledModelsResponse" }
+  /api/secret-references:
+    get:
+      responses:
+        "200":
+          description: Secret references
+  /api/prompts:
+    get:
+      responses:
+        "200":
+          description: Prompts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Prompt" }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stage, name, content]
+              properties:
+                stage: { $ref: "#/components/schemas/Stage" }
+                name: { type: string }
+                content: { type: string }
+                output_schema: true
+                activate: { type: boolean }
+      responses:
+        "200": { description: Created prompt }
+  /api/prompts/{id}/activate:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Prompt activated }
+  /api/prompts/test:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TestPromptRequest" }
+      responses:
+        "200":
+          description: Prompt test result with parsed output and validation errors
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TestPromptResponse" }
+  /api/paperless/sync-metadata:
+    post:
+      responses:
+        "200":
+          description: Sync summary
+  /api/dashboard:
+    get:
+      parameters:
+        - name: range
+          in: query
+          schema:
+            type: string
+            enum: ["24h", "7d", "30d", "90d", "12m", "all"]
+            default: "30d"
+      responses:
+        "200":
+          description: Dashboard counts and analytics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardResponse" }
+  /api/inventory:
+    get:
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Inventory page
+  /api/chat/sessions:
+    get:
+      responses:
+        "200":
+          description: Document chat sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/DocumentChatSession" }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDocumentChatSessionRequest" }
+      responses:
+        "200":
+          description: Created document chat session
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, title]
+                properties:
+                  id: { type: string, format: uuid }
+                  title: { type: string }
+  /api/chat/sessions/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Document chat messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/DocumentChatMessage" }
+  /api/chat/sessions/{id}/messages:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PostDocumentChatMessageRequest" }
+      responses:
+        "200":
+          description: Created user and assistant chat messages
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PostDocumentChatMessageResponse" }
+  /api/documents/{paperless_document_id}/trigger:
+    post:
+      parameters:
+        - name: paperless_document_id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stages:
+                  type: array
+                  items: { $ref: "#/components/schemas/Stage" }
+                mode: { $ref: "#/components/schemas/ProcessingMode" }
+      responses:
+        "200": { description: Created or reused run }
+  /api/batches/ocr:
+    post:
+      responses:
+        "200": { description: Queued missing OCR jobs }
+  /api/batches/tags:
+    post:
+      responses:
+        "200": { description: Queued missing tagging jobs }
+  /api/batches/full:
+    post:
+      responses:
+        "200": { description: Queued missing full pipeline jobs }
+  /api/reviews:
+    get:
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100 }
+      responses:
+        "200": { description: Review queue }
+  /api/reviews/{id}/approve:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Approved and applied }
+  /api/reviews/batch:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, decision]
+              properties:
+                ids:
+                  type: array
+                  maxItems: 100
+                  items: { type: string, format: uuid }
+                decision:
+                  type: string
+                  enum: [approve, reject]
+      responses:
+        "200": { description: Batch review result }
+  /api/reviews/{id}/reject:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Rejected }
+  /api/reviews/{id}/edit:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [patch]
+              properties:
+                patch:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200": { description: Edited and applied }
+  /api/audit:
+    get:
+      responses:
+        "200": { description: Audit events }
+  /api/audit/export.csv:
+    get:
+      responses:
+        "200":
+          description: Audit events as CSV
+          content:
+            text/csv:
+              schema: { type: string }
+  /api/users:
+    get:
+      responses:
+        "200": { description: Users }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, roles]
+              properties:
+                username: { type: string }
+                email: { type: [string, "null"] }
+                password: { type: string, format: password }
+                roles:
+                  type: array
+                  items: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200": { description: Created user }
+  /api/users/{id}/enable:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Enabled user }
+  /api/users/{id}/disable:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Disabled user and revoked sessions }
+  /api/users/{id}/roles:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles:
+                  type: array
+                  items: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200": { description: Updated user roles }
+  /api/users/{id}/reset-password:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+      responses:
+        "200": { description: Reset password and revoked sessions }
+  /api/api-tokens:
+    get:
+      responses:
+        "200": { description: API tokens }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name: { type: string }
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - runs:read
+                      - runs:write
+                      - inventory:read
+                      - batches:write
+                      - reviews:read
+                      - reviews:write
+                      - settings:read
+                      - settings:write
+                      - users:manage
+                      - audit:read
+      responses:
+        "200": { description: Created token, raw token shown once }
+  /api/api-tokens/{id}:
+    delete:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Revoked token }

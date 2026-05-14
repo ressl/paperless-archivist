@@ -1,0 +1,12 @@
+title = "paperless-archivist gitleaks policy"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore generated build and dependency output."
+paths = [
+  '''(^|/)target/''',
+  '''(^|/)frontend/node_modules/''',
+  '''(^|/)frontend/dist/''',
+]
