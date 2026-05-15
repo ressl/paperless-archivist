@@ -397,6 +397,30 @@ cargo test
 The test suite includes golden document fixtures and prompt regression guards.
 Update `docs/PROMPT_RELEASE_NOTES.md` whenever default prompt behavior changes.
 
+## Security Governance
+
+Security settings are managed in the Settings UI:
+
+- audit retention days
+- AI artifact retention days
+- AI artifact storage mode: `redacted`, `metadata_only`, or `full`
+- API token expiry requirement, default TTL, and maximum TTL
+
+Use `redacted` for normal production operation. It preserves model/provider
+metadata and usage information, but redacts document text, prompts, images, and
+raw model text. Use `metadata_only` for stricter privacy. Use `full` only for a
+short diagnostic window and apply retention afterwards.
+
+The Audit page can verify the audit hash chain. New audit events include
+`prev_event_hash` and `event_hash`; legacy events created before this feature
+are reported separately. Retention can also be applied from the Audit page and
+writes an `audit.retention_applied` event with deleted row counts.
+
+API tokens are shown once, stored hashed, scoped, expiring by policy, and can be
+rotated without keeping the old raw token. Rotation revokes the old token,
+creates a new token with the same scopes, returns the raw replacement once, and
+writes an `api_token.rotated` audit event.
+
 ## User and Session Operations
 
 Admins manage local users, roles, password resets, sessions, and API tokens from

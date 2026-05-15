@@ -771,6 +771,8 @@ pub struct RuntimeSettings {
     #[serde(default)]
     pub ai: AiSettings,
     #[serde(default)]
+    pub security: SecuritySettings,
+    #[serde(default)]
     pub workflow: WorkflowSettings,
     #[serde(default)]
     pub ocr: OcrSettings,
@@ -785,6 +787,7 @@ pub struct RuntimeSettings {
 impl RuntimeSettings {
     pub fn normalized(mut self) -> Self {
         self.ai.ensure_default_providers();
+        self.security = self.security.normalized();
         self.workflow.rules.include_tags =
             WorkflowRules::normalized_tags(&self.workflow.rules.include_tags);
         self.workflow.rules.exclude_tags =
@@ -795,6 +798,87 @@ impl RuntimeSettings {
                 .unwrap_or_else(default_tag_output_language);
         self
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecuritySettings {
+    #[serde(default = "default_audit_retention_days")]
+    pub audit_retention_days: i64,
+    #[serde(default = "default_ai_artifact_retention_days")]
+    pub ai_artifact_retention_days: i64,
+    #[serde(default)]
+    pub ai_artifact_storage: AiArtifactStorageMode,
+    #[serde(default = "default_api_token_expiry_required")]
+    pub api_token_expiry_required: bool,
+    #[serde(default = "default_api_token_default_ttl_days")]
+    pub api_token_default_ttl_days: i64,
+    #[serde(default = "default_api_token_max_ttl_days")]
+    pub api_token_max_ttl_days: i64,
+}
+
+impl Default for SecuritySettings {
+    fn default() -> Self {
+        Self {
+            audit_retention_days: default_audit_retention_days(),
+            ai_artifact_retention_days: default_ai_artifact_retention_days(),
+            ai_artifact_storage: AiArtifactStorageMode::Redacted,
+            api_token_expiry_required: default_api_token_expiry_required(),
+            api_token_default_ttl_days: default_api_token_default_ttl_days(),
+            api_token_max_ttl_days: default_api_token_max_ttl_days(),
+        }
+    }
+}
+
+impl SecuritySettings {
+    pub fn normalized(mut self) -> Self {
+        self.audit_retention_days = self.audit_retention_days.clamp(30, 3650);
+        self.ai_artifact_retention_days = self.ai_artifact_retention_days.clamp(1, 365);
+        self.api_token_default_ttl_days = self.api_token_default_ttl_days.clamp(1, 365);
+        self.api_token_max_ttl_days = self.api_token_max_ttl_days.clamp(1, 3650);
+        if self.api_token_default_ttl_days > self.api_token_max_ttl_days {
+            self.api_token_default_ttl_days = self.api_token_max_ttl_days;
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AiArtifactStorageMode {
+    Full,
+    #[default]
+    Redacted,
+    MetadataOnly,
+}
+
+impl Display for AiArtifactStorageMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Full => "full",
+            Self::Redacted => "redacted",
+            Self::MetadataOnly => "metadata_only",
+        })
+    }
+}
+
+fn default_audit_retention_days() -> i64 {
+    365
+}
+
+fn default_ai_artifact_retention_days() -> i64 {
+    30
+}
+
+fn default_api_token_expiry_required() -> bool {
+    true
+}
+
+fn default_api_token_default_ttl_days() -> i64 {
+    90
+}
+
+fn default_api_token_max_ttl_days() -> i64 {
+    365
 }
 
 pub fn normalize_language_tag(value: &str) -> Option<String> {
@@ -2715,6 +2799,48 @@ mod tests {
 
         assert_eq!(suggestion.date, "2026-04-03");
         assert!(suggestion.confidence.unwrap_or_default() >= 0.7);
+    }
+
+    #[test]
+    fn role_permissions_follow_least_privilege_matrix() {
+        assert!(Role::Admin.has_permission(Permission::WriteSettings));
+        assert!(Role::Admin.has_permission(Permission::ManageUsers));
+
+        assert!(Role::Viewer.has_permission(Permission::ReadDashboard));
+        assert!(!Role::Viewer.has_permission(Permission::WriteRuns));
+        assert!(!Role::Viewer.has_permission(Permission::ReadAudit));
+
+        assert!(Role::Reviewer.has_permission(Permission::WriteReviews));
+        assert!(Role::Reviewer.has_permission(Permission::UseChat));
+        assert!(!Role::Reviewer.has_permission(Permission::WriteBatches));
+
+        assert!(Role::Operator.has_permission(Permission::WriteRuns));
+        assert!(Role::Operator.has_permission(Permission::WriteBatches));
+        assert!(!Role::Operator.has_permission(Permission::WriteSettings));
+
+        assert!(Role::Auditor.has_permission(Permission::ReadAudit));
+        assert!(!Role::Auditor.has_permission(Permission::WriteReviews));
+        assert!(!Role::Auditor.has_permission(Permission::ManageUsers));
+    }
+
+    #[test]
+    fn security_settings_normalize_governance_limits() {
+        let settings = SecuritySettings {
+            audit_retention_days: 1,
+            ai_artifact_retention_days: 0,
+            api_token_default_ttl_days: 999,
+            api_token_max_ttl_days: 30,
+            ..Default::default()
+        }
+        .normalized();
+
+        assert_eq!(settings.audit_retention_days, 30);
+        assert_eq!(settings.ai_artifact_retention_days, 1);
+        assert_eq!(settings.api_token_default_ttl_days, 30);
+        assert_eq!(
+            settings.ai_artifact_storage,
+            AiArtifactStorageMode::Redacted
+        );
     }
 
     #[test]

@@ -389,6 +389,7 @@ async fn process_ocr(
                 "language_source": language_detection.source
             })),
             duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
+            storage_mode: settings.security.ai_artifact_storage,
         },
     )
     .await?;
@@ -465,6 +466,7 @@ async fn process_tags(
             response: Some(response.raw_response),
             normalized_output: Some(normalized.clone()),
             duration_ms: response.duration_ms,
+            storage_mode: settings.security.ai_artifact_storage,
         },
     )
     .await?;
@@ -542,6 +544,7 @@ async fn process_title(
             response: Some(response.raw_response),
             normalized_output: Some(serde_json::to_value(&suggestion)?),
             duration_ms: response.duration_ms,
+            storage_mode: settings.security.ai_artifact_storage,
         },
     )
     .await?;
@@ -629,6 +632,7 @@ async fn process_choice(
             response: Some(response.raw_response),
             normalized_output: Some(serde_json::to_value(&suggestion)?),
             duration_ms: response.duration_ms,
+            storage_mode: settings.security.ai_artifact_storage,
         },
     )
     .await?;
@@ -766,6 +770,7 @@ async fn process_document_date(
             response: None,
             normalized_output: Some(normalized.clone()),
             duration_ms: 0,
+            storage_mode: settings.security.ai_artifact_storage,
         },
     )
     .await?;
@@ -870,6 +875,7 @@ async fn process_fields(
             response: Some(response.raw_response),
             normalized_output: Some(normalized.clone()),
             duration_ms: response.duration_ms,
+            storage_mode: settings.security.ai_artifact_storage,
         },
     )
     .await?;

@@ -1723,6 +1723,76 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/audit/integrity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Audit hash-chain verification */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AuditIntegrityReport"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/audit/retention/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Applied configured audit and AI artifact retention */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RetentionResult"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/users": {
         parameters: {
             query?: never;
@@ -1973,12 +2043,54 @@ export interface paths {
                 content: {
                     "application/json": {
                         name: string;
-                        scopes: ("runs:read" | "runs:write" | "inventory:read" | "batches:write" | "reviews:read" | "reviews:write" | "settings:read" | "settings:write" | "users:manage" | "audit:read")[];
+                        expires_in_days?: number | null;
+                        scopes: ("runs:read" | "runs:write" | "inventory:read" | "batches:write" | "chat:write" | "reviews:read" | "reviews:write" | "settings:read" | "settings:write" | "users:manage" | "audit:read")[];
                     };
                 };
             };
             responses: {
                 /** @description Created token */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/api-tokens/{id}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        expires_in_days?: number | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Rotated token */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -2437,6 +2549,23 @@ export interface components {
         };
         AuditEvent: {
             [key: string]: unknown;
+        };
+        AuditIntegrityReport: {
+            ok: boolean;
+            /** Format: int64 */
+            checked_events: number;
+            /** Format: int64 */
+            legacy_events: number;
+            latest_event_hash?: string | null;
+            /** Format: uuid */
+            broken_event_id?: string | null;
+            broken_reason?: string | null;
+        };
+        RetentionResult: {
+            /** Format: int64 */
+            audit_events_deleted: number;
+            /** Format: int64 */
+            ai_artifacts_deleted: number;
         };
         RecoveryCandidate: {
             /** Format: uuid */

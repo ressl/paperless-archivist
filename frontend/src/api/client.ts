@@ -46,6 +46,14 @@ export type RuntimeSettings = {
     providers: AiProvider[];
     external_provider_warning_acknowledged: boolean;
   };
+  security: {
+    audit_retention_days: number;
+    ai_artifact_retention_days: number;
+    ai_artifact_storage: 'full' | 'redacted' | 'metadata_only';
+    api_token_expiry_required: boolean;
+    api_token_default_ttl_days: number;
+    api_token_max_ttl_days: number;
+  };
   workflow: {
     mode: ProcessingMode;
     paused: boolean;
@@ -416,15 +424,32 @@ export type AuditEvent = {
   error_message?: string | null;
   created_at: string;
   metadata?: unknown;
+  prev_event_hash?: string | null;
+  event_hash?: string | null;
 };
 
 export type ApiToken = {
   id: string;
   name: string;
   scopes: string[];
+  expires_at?: string | null;
   revoked_at?: string | null;
   last_used_at?: string | null;
   created_at: string;
+};
+
+export type AuditIntegrityReport = {
+  ok: boolean;
+  checked_events: number;
+  legacy_events: number;
+  latest_event_hash?: string | null;
+  broken_event_id?: string | null;
+  broken_reason?: string | null;
+};
+
+export type RetentionResult = {
+  audit_events_deleted: number;
+  ai_artifacts_deleted: number;
 };
 
 export type Prompt = {
@@ -609,6 +634,8 @@ export const api = {
       body: JSON.stringify({ older_than_seconds: olderThanSeconds })
     }),
   audit: () => request<{ items: AuditEvent[] }>('/api/audit'),
+  auditIntegrity: () => request<AuditIntegrityReport>('/api/audit/integrity'),
+  applyAuditRetention: () => request<RetentionResult>('/api/audit/retention/apply', { method: 'POST' }),
   prompts: () => request<{ items: Prompt[] }>('/api/prompts'),
   promptUsage: () => request<{ items: PromptUsage[] }>('/api/prompts/usage'),
   createPrompt: (input: { stage: Stage; name: string; content: string; output_schema?: unknown; activate?: boolean }) =>
@@ -648,8 +675,13 @@ export const api = {
       body: JSON.stringify({ password })
     }),
   apiTokens: () => request<{ items: ApiToken[] }>('/api/api-tokens'),
-  createApiToken: (input: { name: string; scopes: string[] }) =>
-    request<{ id: string; token: string }>('/api/api-tokens', {
+  createApiToken: (input: { name: string; scopes: string[]; expires_in_days?: number | null }) =>
+    request<{ id: string; token: string; expires_at?: string | null }>('/api/api-tokens', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }),
+  rotateApiToken: (id: string, input: { expires_in_days?: number | null }) =>
+    request<{ id: string; token: string; expires_at?: string | null }>(`/api/api-tokens/${id}/rotate`, {
       method: 'POST',
       body: JSON.stringify(input)
     }),

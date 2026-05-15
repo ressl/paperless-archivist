@@ -750,6 +750,7 @@ Implemented product path:
 - login and RBAC
 - audit logging
 - scoped API tokens
+- API token expiry policy and rotation
 - Docker Compose deployment
 - containerized production deployment support
 - React application shell
@@ -767,6 +768,8 @@ Implemented product path:
 - golden document and prompt regression test coverage
 - batch review actions
 - audit CSV export
+- audit hash-chain verification and retention controls
+- AI artifact privacy modes and retention controls
 - optional Paperless-ngx login bridge
 - tag-based workflow rules
 - worker queue

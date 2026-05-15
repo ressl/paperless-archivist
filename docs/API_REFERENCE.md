@@ -359,6 +359,8 @@ Batch review returns per-item failures for partial failures and writes a
 | --- | --- | --- |
 | `GET` | `/api/audit` | List audit events. |
 | `GET` | `/api/audit/export.csv` | Export recent audit events as CSV. |
+| `GET` | `/api/audit/integrity` | Verify the audit hash chain. |
+| `POST` | `/api/audit/retention/apply` | Apply configured audit and AI-artifact retention. |
 | `GET` | `/api/users` | List local users. |
 | `POST` | `/api/users` | Create a user. |
 | `POST` | `/api/users/{id}/enable` | Enable a user. |
@@ -367,11 +369,21 @@ Batch review returns per-item failures for partial failures and writes a
 | `POST` | `/api/users/{id}/reset-password` | Reset password and revoke sessions. |
 | `GET` | `/api/api-tokens` | List API tokens. |
 | `POST` | `/api/api-tokens` | Create a token and return the raw token once. |
+| `POST` | `/api/api-tokens/{id}/rotate` | Revoke an existing token and return a raw replacement once. |
 | `DELETE` | `/api/api-tokens/{id}` | Revoke an API token. |
 
 Supported API token scopes are `runs:read`, `runs:write`, `inventory:read`,
-`batches:write`, `reviews:read`, `reviews:write`, `settings:read`,
+`batches:write`, `chat:write`, `reviews:read`, `reviews:write`, `settings:read`,
 `settings:write`, `users:manage`, and `audit:read`.
+
+Token creation accepts `expires_in_days`. When omitted, the configured default
+TTL is used. Rotation accepts the same field and preserves the original scopes.
+Retention and token policy are part of runtime settings under `security`.
+
+Audit CSV exports include `prev_event_hash` and `event_hash` for events created
+after hash-chain tracking was enabled. `GET /api/audit/integrity` returns
+whether the current chain verifies, how many hashed events were checked, and how
+many legacy events predate hash-chain tracking.
 
 Roles are:
 

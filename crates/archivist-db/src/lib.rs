@@ -5,16 +5,16 @@ use aes_gcm::aead::{Aead, OsRng, rand_core::RngCore};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use anyhow::{Context, Result, anyhow};
 use archivist_core::{
-    AuditEventInput, BacklogCounts, DashboardBacklogPoint, DashboardComparison,
-    DashboardLiveFailure, DashboardLiveJob, DashboardLiveLlmEvent, DashboardLiveRun,
-    DashboardLiveStatus, DashboardRange, DashboardStageStatus, DashboardStats,
+    AiArtifactStorageMode, AuditEventInput, BacklogCounts, DashboardBacklogPoint,
+    DashboardComparison, DashboardLiveFailure, DashboardLiveJob, DashboardLiveLlmEvent,
+    DashboardLiveRun, DashboardLiveStatus, DashboardRange, DashboardStageStatus, DashboardStats,
     DashboardStatusCount, DashboardTimeBucket, DocumentChatSource, DocumentInventoryItem,
     LanguageDetection, ProcessingMode, ProviderUsageStats, QualityStats, Role, RuntimeSettings,
     ServiceProcessingStatus, Stage, WorkflowRules, WorkflowSafetyStatus, redact_sensitive_json,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -181,6 +181,24 @@ pub struct AuditEventRecord {
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub metadata: Option<Value>,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditIntegrityReport {
+    pub ok: bool,
+    pub checked_events: i64,
+    pub legacy_events: i64,
+    pub latest_event_hash: Option<String>,
+    pub broken_event_id: Option<Uuid>,
+    pub broken_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionResult {
+    pub audit_events_deleted: i64,
+    pub ai_artifacts_deleted: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1168,7 +1186,9 @@ pub async fn create_api_token(
             job_id: None,
             paperless_document_id: None,
             before: None,
-            after: Some(json!({ "id": id, "name": name, "scopes": scopes })),
+            after: Some(
+                json!({ "id": id, "name": name, "scopes": scopes, "expires_at": expires_at }),
+            ),
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
@@ -1204,6 +1224,68 @@ pub async fn revoke_api_token(pool: &DbPool, id: Uuid, actor_id: Uuid) -> Result
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+pub async fn rotate_api_token(
+    pool: &DbPool,
+    id: Uuid,
+    token_hash: &str,
+    actor_id: Uuid,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    let existing = sqlx::query(
+        r#"
+        select name, scopes
+          from api_tokens
+         where id = $1
+           and revoked_at is null
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| anyhow!("API token not found or already revoked"))?;
+    let name: String = existing.try_get("name")?;
+    let scopes: Vec<String> = existing.try_get("scopes")?;
+    sqlx::query("update api_tokens set revoked_at = now() where id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let new_id: Uuid = sqlx::query(
+        r#"
+        insert into api_tokens (name, token_hash, scopes, created_by, expires_at)
+        values ($1, $2, $3, $4, $5)
+        returning id
+        "#,
+    )
+    .bind(format!("{name} rotated"))
+    .bind(token_hash)
+    .bind(&scopes)
+    .bind(actor_id)
+    .bind(expires_at)
+    .fetch_one(&mut *tx)
+    .await?
+    .try_get("id")?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "api_token.rotated".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: Some(json!({ "id": id })),
+            after: Some(json!({ "id": new_id, "source_id": id, "name": name, "scopes": scopes, "expires_at": expires_at })),
+            metadata: None,
+            outcome: "success".to_owned(),
+            error_message: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(new_id)
 }
 
 pub async fn get_runtime_settings(pool: &DbPool) -> Result<RuntimeSettings> {
@@ -4131,17 +4213,12 @@ pub struct AiArtifactInput<'a> {
     pub response: Option<Value>,
     pub normalized_output: Option<Value>,
     pub duration_ms: i32,
+    pub storage_mode: AiArtifactStorageMode,
 }
 
 pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Result<Uuid> {
-    let mut request = input.request;
-    let mut response = input.response;
-    if let Some(value) = &mut request {
-        redact_sensitive_json(value);
-    }
-    if let Some(value) = &mut response {
-        redact_sensitive_json(value);
-    }
+    let request = prepare_ai_artifact_value(input.request, input.storage_mode);
+    let response = prepare_ai_artifact_value(input.response, input.storage_mode);
 
     let id = sqlx::query(
         r#"
@@ -4167,6 +4244,109 @@ pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Re
     .await?
     .try_get("id")?;
     Ok(id)
+}
+
+fn prepare_ai_artifact_value(
+    value: Option<Value>,
+    storage_mode: AiArtifactStorageMode,
+) -> Option<Value> {
+    let mut value = value?;
+    redact_sensitive_json(&mut value);
+    match storage_mode {
+        AiArtifactStorageMode::Full => Some(value),
+        AiArtifactStorageMode::Redacted => {
+            redact_ai_artifact_content(&mut value);
+            Some(value)
+        }
+        AiArtifactStorageMode::MetadataOnly => Some(ai_artifact_metadata_only(&value)),
+    }
+}
+
+fn redact_ai_artifact_content(value: &mut Value) {
+    const CONTENT_KEYS: &[&str] = &[
+        "content",
+        "text",
+        "prompt",
+        "system_prompt",
+        "user_prompt",
+        "response",
+        "images",
+        "image",
+        "bytes",
+        "b64_json",
+        "base64",
+    ];
+
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                if CONTENT_KEYS
+                    .iter()
+                    .any(|needle| key.to_ascii_lowercase().contains(needle))
+                {
+                    *nested = ai_artifact_redaction_summary(nested);
+                } else {
+                    redact_ai_artifact_content(nested);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                redact_ai_artifact_content(nested);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ai_artifact_redaction_summary(value: &Value) -> Value {
+    match value {
+        Value::String(text) => json!({
+            "redacted": true,
+            "kind": "text",
+            "sha256": short_hash(text),
+            "chars": text.chars().count()
+        }),
+        Value::Array(items) => json!({
+            "redacted": true,
+            "kind": "array",
+            "items": items.len()
+        }),
+        Value::Object(map) => json!({
+            "redacted": true,
+            "kind": "object",
+            "keys": map.len()
+        }),
+        Value::Null => Value::Null,
+        other => json!({
+            "redacted": true,
+            "kind": "scalar",
+            "sha256": short_hash(&other.to_string())
+        }),
+    }
+}
+
+fn ai_artifact_metadata_only(value: &Value) -> Value {
+    let mut metadata = json!({
+        "storage": "metadata_only",
+        "sha256": short_hash(&value.to_string()),
+        "json_bytes": value.to_string().len()
+    });
+    if let (Some(target), Value::Object(source)) = (metadata.as_object_mut(), value) {
+        for key in [
+            "model",
+            "provider",
+            "stage",
+            "usage",
+            "options",
+            "done_reason",
+        ] {
+            if let Some(value) = source.get(key) {
+                target.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    metadata
 }
 
 pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
@@ -4557,36 +4737,85 @@ async fn append_audit_tx(
         redact_sensitive_json(value);
     }
 
+    sqlx::query("select pg_advisory_xact_lock(hashtext('paperless_archivist_audit_events'))")
+        .execute(&mut **tx)
+        .await?;
+    let prev_event_hash: Option<String> = sqlx::query(
+        r#"
+        select event_hash
+          from audit_events
+         where event_hash is not null
+         order by created_at desc, id desc
+         limit 1
+        "#,
+    )
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(|row| row.try_get("event_hash"))
+    .transpose()?;
+    let id = Uuid::now_v7();
+    let created_at = Utc::now();
+    let event_hash = audit_event_hash(id, created_at, &prev_event_hash, &event);
+
     sqlx::query(
         r#"
         insert into audit_events (
-          run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
-          before, after, metadata, outcome, error_message
+          id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
+          before, after, metadata, outcome, error_message, prev_event_hash, event_hash, created_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         "#,
     )
+    .bind(id)
     .bind(event.run_id)
     .bind(event.job_id)
     .bind(event.paperless_document_id)
-    .bind(event.event_type)
-    .bind(event.actor_type)
-    .bind(event.actor_id)
-    .bind(event.before)
-    .bind(event.after)
-    .bind(event.metadata)
-    .bind(event.outcome)
-    .bind(event.error_message)
+    .bind(&event.event_type)
+    .bind(&event.actor_type)
+    .bind(&event.actor_id)
+    .bind(&event.before)
+    .bind(&event.after)
+    .bind(&event.metadata)
+    .bind(&event.outcome)
+    .bind(&event.error_message)
+    .bind(&prev_event_hash)
+    .bind(&event_hash)
+    .bind(created_at)
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn audit_event_hash(
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    prev_event_hash: &Option<String>,
+    event: &AuditEventInput,
+) -> String {
+    let canonical = json!({
+        "id": id,
+        "created_at": created_at,
+        "prev_event_hash": prev_event_hash,
+        "run_id": event.run_id,
+        "job_id": event.job_id,
+        "paperless_document_id": event.paperless_document_id,
+        "event_type": &event.event_type,
+        "actor_type": &event.actor_type,
+        "actor_id": &event.actor_id,
+        "before": &event.before,
+        "after": &event.after,
+        "metadata": &event.metadata,
+        "outcome": &event.outcome,
+        "error_message": &event.error_message,
+    });
+    short_hash(&canonical.to_string())
 }
 
 pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEventRecord>> {
     let rows = sqlx::query(
         r#"
         select id, event_type, actor_type, actor_id, paperless_document_id,
-               outcome, error_message, created_at, metadata
+               outcome, error_message, created_at, metadata, prev_event_hash, event_hash
           from audit_events
          order by created_at desc
          limit $1
@@ -4607,9 +4836,137 @@ pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEve
                 error_message: row.try_get("error_message")?,
                 created_at: row.try_get("created_at")?,
                 metadata: row.try_get("metadata")?,
+                prev_event_hash: row.try_get("prev_event_hash")?,
+                event_hash: row.try_get("event_hash")?,
             })
         })
         .collect()
+}
+
+pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityReport> {
+    let legacy_events: i64 =
+        sqlx::query("select count(*)::bigint as count from audit_events where event_hash is null")
+            .fetch_one(pool)
+            .await?
+            .try_get("count")?;
+    let rows = sqlx::query(
+        r#"
+        select id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
+               before, after, metadata, outcome, error_message, created_at,
+               prev_event_hash, event_hash
+          from audit_events
+         where event_hash is not null
+         order by created_at asc, id asc
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut checked_events = 0_i64;
+    let mut latest_event_hash = None;
+    for row in rows {
+        let id: Uuid = row.try_get("id")?;
+        let created_at: DateTime<Utc> = row.try_get("created_at")?;
+        let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
+        let event_hash: String = row.try_get("event_hash")?;
+        if let Some(expected_prev) = &latest_event_hash
+            && prev_event_hash.as_ref() != Some(expected_prev)
+        {
+            return Ok(AuditIntegrityReport {
+                ok: false,
+                checked_events,
+                legacy_events,
+                latest_event_hash,
+                broken_event_id: Some(id),
+                broken_reason: Some("previous event hash does not match chain".to_owned()),
+            });
+        }
+        let event = AuditEventInput {
+            run_id: row.try_get("run_id")?,
+            job_id: row.try_get("job_id")?,
+            paperless_document_id: row.try_get("paperless_document_id")?,
+            event_type: row.try_get("event_type")?,
+            actor_type: row.try_get("actor_type")?,
+            actor_id: row.try_get("actor_id")?,
+            before: row.try_get("before")?,
+            after: row.try_get("after")?,
+            metadata: row.try_get("metadata")?,
+            outcome: row.try_get("outcome")?,
+            error_message: row.try_get("error_message")?,
+        };
+        let expected_hash = audit_event_hash(id, created_at, &prev_event_hash, &event);
+        if expected_hash != event_hash {
+            return Ok(AuditIntegrityReport {
+                ok: false,
+                checked_events,
+                legacy_events,
+                latest_event_hash,
+                broken_event_id: Some(id),
+                broken_reason: Some("event hash does not match event payload".to_owned()),
+            });
+        }
+        checked_events += 1;
+        latest_event_hash = Some(event_hash);
+    }
+
+    Ok(AuditIntegrityReport {
+        ok: true,
+        checked_events,
+        legacy_events,
+        latest_event_hash,
+        broken_event_id: None,
+        broken_reason: None,
+    })
+}
+
+pub async fn apply_security_retention(
+    pool: &DbPool,
+    settings: &RuntimeSettings,
+    actor_id: Uuid,
+) -> Result<RetentionResult> {
+    let security = settings.clone().normalized().security;
+    let now = Utc::now();
+    let artifact_cutoff = now - ChronoDuration::days(security.ai_artifact_retention_days);
+    let audit_cutoff = now - ChronoDuration::days(security.audit_retention_days);
+    let mut tx = pool.begin().await?;
+    let ai_artifacts_deleted = sqlx::query("delete from ai_artifacts where created_at < $1")
+        .bind(artifact_cutoff)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected() as i64;
+    let audit_events_deleted = sqlx::query("delete from audit_events where created_at < $1")
+        .bind(audit_cutoff)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected() as i64;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "audit.retention_applied".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: None,
+            metadata: Some(json!({
+                "audit_retention_days": security.audit_retention_days,
+                "ai_artifact_retention_days": security.ai_artifact_retention_days,
+                "audit_events_deleted": audit_events_deleted,
+                "ai_artifacts_deleted": ai_artifacts_deleted
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+
+    Ok(RetentionResult {
+        audit_events_deleted,
+        ai_artifacts_deleted,
+    })
 }
 
 async fn no_remaining_jobs_tx(tx: &mut Transaction<'_, Postgres>, run_id: Uuid) -> Result<bool> {
@@ -4691,6 +5048,45 @@ mod tests {
         assert_ne!(ciphertext, "paperless-token");
         let plaintext = decrypt_secret(&key, &ciphertext).unwrap();
         assert_eq!(plaintext, "paperless-token");
+    }
+
+    #[test]
+    fn ai_artifact_redaction_removes_prompts_images_and_response_text() {
+        let value = json!({
+            "model": "example",
+            "system_prompt": "secret system prompt",
+            "user_prompt": "full document text",
+            "messages": [
+                { "role": "user", "content": "private content", "images": ["base64-image"] }
+            ],
+            "usage": { "prompt_tokens": 10 }
+        });
+        let stored =
+            prepare_ai_artifact_value(Some(value), AiArtifactStorageMode::Redacted).unwrap();
+        let serialized = stored.to_string();
+
+        assert!(!serialized.contains("secret system prompt"));
+        assert!(!serialized.contains("full document text"));
+        assert!(!serialized.contains("private content"));
+        assert!(!serialized.contains("base64-image"));
+        assert!(serialized.contains("prompt_tokens"));
+        assert!(serialized.contains("redacted"));
+    }
+
+    #[test]
+    fn ai_artifact_metadata_only_keeps_usage_without_raw_content() {
+        let value = json!({
+            "model": "example",
+            "response": "private model text",
+            "usage": { "completion_tokens": 4 }
+        });
+        let stored =
+            prepare_ai_artifact_value(Some(value), AiArtifactStorageMode::MetadataOnly).unwrap();
+        let serialized = stored.to_string();
+
+        assert!(!serialized.contains("private model text"));
+        assert!(serialized.contains("metadata_only"));
+        assert!(serialized.contains("completion_tokens"));
     }
 
     #[test]

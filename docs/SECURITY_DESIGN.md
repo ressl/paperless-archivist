@@ -168,10 +168,11 @@ Token requirements:
 - generated once, shown once
 - stored hashed
 - scoped permissions
-- optional expiry
+- expiry policy with default and maximum TTL
 - last-used timestamp
 - revocation
-- audit event on creation/use/revocation
+- rotation that revokes the old token and returns the raw replacement once
+- audit event on creation/rotation/revocation
 
 Example scopes:
 
@@ -260,8 +261,11 @@ Audit fields:
 - outcome
 - error message if failed
 
-Audit logs must be append-only from application perspective. Admins can define
-retention, but ordinary UI actions must not edit past audit events.
+Audit logs must be append-only from application perspective. New audit events
+are linked with `prev_event_hash` and `event_hash` so operators can verify the
+current hash chain. Admins can define retention and apply it explicitly; the
+retention action writes its own audit event with deleted row counts. Ordinary UI
+actions must not edit past audit events.
 
 ## 8. Data Protection
 
@@ -272,8 +276,7 @@ Rules:
 - do not log full document text by default
 - do not log AI prompts containing full document text by default
 - store AI request/response artifacts with configurable retention
-- support artifact redaction mode
-- allow disabling raw request storage
+- support artifact storage modes: full, redacted, metadata-only
 - allow storing only hashes and normalized output
 - redact API keys and authorization headers everywhere
 - temp files must be deleted after processing

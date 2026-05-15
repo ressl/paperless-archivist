@@ -30,7 +30,8 @@ can be replaced from the UI without rebuilding the application.
   and reject unsafe or low-confidence output.
 - OCR stages return text only because they patch Paperless document content.
 - The worker stores the prompt ID, model, provider, input hash, normalized
-  output, raw response, and duration in AI artifacts for auditability.
+  output, duration, and policy-filtered request/response artifacts. The default
+  security mode redacts document text, prompts, images, and raw model text.
 
 ## Language Context
 

@@ -280,6 +280,7 @@ export function providerDefaults(kind: AiProviderKind): Pick<AiProvider, 'defaul
 
 export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
   const knownProviders = [...settings.ai.providers];
+  const security = settings.security as Partial<RuntimeSettings['security']> | undefined;
   if (!knownProviders.some((provider) => provider.name === ollamaCloudProvider.name)) {
     knownProviders.push(ollamaCloudProvider);
   }
@@ -291,6 +292,15 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
   const selectedProvider = providers.find((provider) => provider.name === settings.ai.default_provider) ?? localOllamaProvider;
   return {
     ...settings,
+    security: {
+      audit_retention_days: 365,
+      ai_artifact_retention_days: 30,
+      ai_artifact_storage: 'redacted',
+      api_token_expiry_required: true,
+      api_token_default_ttl_days: 90,
+      api_token_max_ttl_days: 365,
+      ...(security ?? {})
+    },
     workflow: {
       ...settings.workflow,
       rules: settings.workflow.rules ?? { include_tags: [], exclude_tags: [] }

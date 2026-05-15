@@ -536,6 +536,22 @@ components:
     AuditEvent:
       type: object
       additionalProperties: true
+    AuditIntegrityReport:
+      type: object
+      required: [ok, checked_events, legacy_events]
+      properties:
+        ok: { type: boolean }
+        checked_events: { type: integer, format: int64 }
+        legacy_events: { type: integer, format: int64 }
+        latest_event_hash: { type: [string, "null"] }
+        broken_event_id: { type: [string, "null"], format: uuid }
+        broken_reason: { type: [string, "null"] }
+    RetentionResult:
+      type: object
+      required: [audit_events_deleted, ai_artifacts_deleted]
+      properties:
+        audit_events_deleted: { type: integer, format: int64 }
+        ai_artifacts_deleted: { type: integer, format: int64 }
     RecoveryCandidate:
       type: object
       additionalProperties: false
@@ -1243,6 +1259,22 @@ paths:
           content:
             text/csv:
               schema: { type: string }
+  /api/audit/integrity:
+    get:
+      responses:
+        "200":
+          description: Audit hash-chain verification
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditIntegrityReport" }
+  /api/audit/retention/apply:
+    post:
+      responses:
+        "200":
+          description: Applied configured audit and AI artifact retention
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RetentionResult" }
   /api/users:
     get:
       responses:
@@ -1334,6 +1366,7 @@ paths:
               required: [name, scopes]
               properties:
                 name: { type: string }
+                expires_in_days: { type: [integer, "null"] }
                 scopes:
                   type: array
                   items:
@@ -1343,6 +1376,7 @@ paths:
                       - runs:write
                       - inventory:read
                       - batches:write
+                      - chat:write
                       - reviews:read
                       - reviews:write
                       - settings:read
@@ -1351,6 +1385,23 @@ paths:
                       - audit:read
       responses:
         "200": { description: Created token, raw token shown once }
+  /api/api-tokens/{id}/rotate:
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expires_in_days: { type: [integer, "null"] }
+      responses:
+        "200": { description: Rotated token, raw token shown once }
   /api/api-tokens/{id}:
     delete:
       parameters:

@@ -352,6 +352,21 @@ The core safety rules are already product rules: no direct Paperless database
 writes, no frontend-to-provider calls, no unreviewed autopilot apply without
 validation, and audit events for privileged actions.
 
+## Security Governance
+
+Paperless Archivist is implemented in Rust for the backend, worker, domain
+logic, Paperless client, AI provider adapters, and database access, with a
+React and TypeScript frontend. The security model is enforced server-side:
+Argon2id password hashing, HTTP-only sessions, CSRF protection, RBAC, scoped API
+tokens, audit logging, secret redaction, and no direct browser calls to
+Paperless or model providers.
+
+Product hardening includes API token expiry and rotation, configurable audit
+and AI-artifact retention, AI artifact privacy modes, and audit hash-chain
+verification. The default artifact mode is `redacted`, which keeps operational
+telemetry while removing document text, prompts, images, and raw model text from
+stored AI artifacts.
+
 ## AI Quality And Evaluation
 
 Paperless Archivist treats model output as measured workflow evidence, not as a

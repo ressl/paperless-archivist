@@ -31,6 +31,7 @@ import {
   AiProviderKind,
   ApiToken,
   AuditEvent,
+  AuditIntegrityReport,
   Counts,
   DashboardLiveFailure,
   DashboardRange,
@@ -48,6 +49,7 @@ import {
   PromptTestResponse,
   PromptUsage,
   RecoveryCandidate,
+  RetentionResult,
   ReviewItem,
   Role,
   RuntimeSettings,
@@ -1917,6 +1919,69 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
             />
           </label>
         </fieldset>
+        <fieldset>
+          <legend>{t('settings.security')}</legend>
+          <label>
+            {t('settings.security.audit_retention')}
+            <input
+              type="number"
+              min="30"
+              max="3650"
+              value={settings.security.audit_retention_days}
+              onChange={(event) => update((s) => ({ ...s, security: { ...s.security, audit_retention_days: Number(event.target.value) } }))}
+            />
+          </label>
+          <label>
+            {t('settings.security.ai_artifact_retention')}
+            <input
+              type="number"
+              min="1"
+              max="365"
+              value={settings.security.ai_artifact_retention_days}
+              onChange={(event) => update((s) => ({ ...s, security: { ...s.security, ai_artifact_retention_days: Number(event.target.value) } }))}
+            />
+          </label>
+          <label>
+            {t('settings.security.ai_artifact_storage')}
+            <select
+              value={settings.security.ai_artifact_storage}
+              onChange={(event) => update((s) => ({ ...s, security: { ...s.security, ai_artifact_storage: event.target.value as RuntimeSettings['security']['ai_artifact_storage'] } }))}
+            >
+              <option value="redacted">{t('settings.security.storage.redacted')}</option>
+              <option value="metadata_only">{t('settings.security.storage.metadata_only')}</option>
+              <option value="full">{t('settings.security.storage.full')}</option>
+            </select>
+            <small>{t('settings.security.hint')}</small>
+          </label>
+          <label className="inline">
+            <input
+              type="checkbox"
+              checked={settings.security.api_token_expiry_required}
+              onChange={(event) => update((s) => ({ ...s, security: { ...s.security, api_token_expiry_required: event.target.checked } }))}
+            />
+            {t('settings.security.token_expiry_required')}
+          </label>
+          <label>
+            {t('settings.security.token_default_ttl')}
+            <input
+              type="number"
+              min="1"
+              max="365"
+              value={settings.security.api_token_default_ttl_days}
+              onChange={(event) => update((s) => ({ ...s, security: { ...s.security, api_token_default_ttl_days: Number(event.target.value) } }))}
+            />
+          </label>
+          <label>
+            {t('settings.security.token_max_ttl')}
+            <input
+              type="number"
+              min="1"
+              max="3650"
+              value={settings.security.api_token_max_ttl_days}
+              onChange={(event) => update((s) => ({ ...s, security: { ...s.security, api_token_max_ttl_days: Number(event.target.value) } }))}
+            />
+          </label>
+        </fieldset>
       </div>
       <PageHeader title={t('settings.providers')} />
       <div className="provider-list">
@@ -3039,11 +3104,22 @@ function PromptInfoTooltip({
 }
 
 function Audit({ setError }: { setError: (error: string | null) => void }) {
-  const { t, formatDateTime } = useI18n();
+  const { t, formatDateTime, formatNumber } = useI18n();
   const [items, setItems] = useState<AuditEvent[]>([]);
+  const [integrity, setIntegrity] = useState<AuditIntegrityReport | null>(null);
+  const [retentionResult, setRetentionResult] = useState<RetentionResult | null>(null);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
-    api.audit().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t)));
+    Promise.all([api.audit(), api.auditIntegrity()])
+      .then(([auditData, integrityData]) => {
+        setItems(auditData.items);
+        setIntegrity(integrityData);
+      })
+      .catch((err) => setError(localizedErrorMessage(err, t)));
   }, [setError, t]);
+  const refreshIntegrity = () => api.auditIntegrity()
+    .then(setIntegrity)
+    .catch((err) => setError(localizedErrorMessage(err, t)));
   return (
     <section className="page">
       <PageHeader title="Audit Log" />
@@ -3051,11 +3127,47 @@ function Audit({ setError }: { setError: (error: string | null) => void }) {
         <a className="button-link" href="/api/audit/export.csv">
           <FileText size={16} /> Export CSV
         </a>
+        <button onClick={refreshIntegrity}>
+          <Shield size={16} /> Verify chain
+        </button>
+        <ActionButton
+          icon={<Archive />}
+          label="Apply retention"
+          busy={busy}
+          onClick={() => run(setBusy, setError, () => api.applyAuditRetention().then((result) => {
+            setRetentionResult(result);
+            return Promise.all([api.audit(), api.auditIntegrity()]).then(([auditData, integrityData]) => {
+              setItems(auditData.items);
+              setIntegrity(integrityData);
+            });
+          }), t)}
+        />
       </div>
+      {integrity && (
+        <div className={`connection-feedback ${integrity.ok ? 'success' : 'error'}`}>
+          <header>
+            {integrity.ok ? <Check size={16} /> : <X size={16} />}
+            <strong>{integrity.ok ? 'Audit chain verified' : 'Audit chain problem'}</strong>
+          </header>
+          <p>
+            Checked {formatNumber(integrity.checked_events)} hashed events.
+            {integrity.legacy_events > 0 ? ` ${formatNumber(integrity.legacy_events)} legacy events predate hash-chain tracking.` : ''}
+            {integrity.broken_reason ? ` ${integrity.broken_reason}` : ''}
+          </p>
+        </div>
+      )}
+      {retentionResult && (
+        <div className="connection-feedback success">
+          <header><Check size={16} /><strong>Retention applied</strong></header>
+          <p>
+            Deleted {formatNumber(retentionResult.ai_artifacts_deleted)} AI artifacts and {formatNumber(retentionResult.audit_events_deleted)} audit events outside retention.
+          </p>
+        </div>
+      )}
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>Time</th><th>Event</th><th>Actor</th><th>Document</th><th>Outcome</th></tr>
+            <tr><th>Time</th><th>Event</th><th>Actor</th><th>Document</th><th>Outcome</th><th>Hash</th></tr>
           </thead>
           <tbody>
             {items.map((item) => (
@@ -3065,6 +3177,7 @@ function Audit({ setError }: { setError: (error: string | null) => void }) {
                 <td>{item.actor_type}</td>
                 <td>{item.paperless_document_id || '-'}</td>
                 <td><Status value={item.outcome} /></td>
+                <td>{item.event_hash ? `${item.event_hash.slice(0, 12)}...` : 'legacy'}</td>
               </tr>
             ))}
           </tbody>
@@ -3084,6 +3197,8 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<Role>('viewer');
   const [tokenName, setTokenName] = useState('');
+  const [tokenScopes, setTokenScopes] = useState('runs:read, inventory:read');
+  const [tokenExpiresInDays, setTokenExpiresInDays] = useState(90);
   const [resetPasswords, setResetPasswords] = useState<Record<string, string>>({});
   const load = () =>
     Promise.all([api.users(), api.sessions(), api.apiTokens()])
@@ -3193,28 +3308,51 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
       <PageHeader title="API Tokens" />
       <form className="compact-form" onSubmit={(event) => {
         event.preventDefault();
-        api.createApiToken({ name: tokenName, scopes: ['runs:read', 'inventory:read'] }).then((created) => {
+        api.createApiToken({ name: tokenName, scopes: splitTags(tokenScopes), expires_in_days: tokenExpiresInDays }).then((created) => {
           setNewToken(created.token);
           setTokenName('');
           load();
         }).catch((err) => setError(localizedErrorMessage(err, t)));
       }}>
         <input value={tokenName} onChange={(event) => setTokenName(event.target.value)} placeholder="token name" />
+        <input value={tokenScopes} onChange={(event) => setTokenScopes(event.target.value)} placeholder="scopes, comma separated" />
+        <input
+          type="number"
+          min="1"
+          max="3650"
+          value={tokenExpiresInDays}
+          onChange={(event) => setTokenExpiresInDays(Number(event.target.value))}
+          aria-label="token expiry days"
+        />
         <button><KeyRound size={16} /> Create Token</button>
       </form>
       {newToken && <pre className="token-once">{newToken}</pre>}
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Scopes</th><th>Last Used</th><th>Status</th><th>Action</th></tr></thead>
+          <thead><tr><th>Name</th><th>Scopes</th><th>Expires</th><th>Last Used</th><th>Status</th><th>Action</th></tr></thead>
           <tbody>
             {tokens.map((token) => (
               <tr key={token.id}>
                 <td>{token.name}</td>
                 <td>{token.scopes.join(', ')}</td>
+                <td>{token.expires_at ? formatDateTime(token.expires_at) : '-'}</td>
                 <td>{token.last_used_at ? formatDateTime(token.last_used_at) : '-'}</td>
                 <td>{token.revoked_at ? 'revoked' : 'active'}</td>
                 <td>
-                  {!token.revoked_at && <button title="Revoke token" onClick={() => api.revokeApiToken(token.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>}
+                  {!token.revoked_at && (
+                    <>
+                      <button
+                        title="Rotate token"
+                        onClick={() => api.rotateApiToken(token.id, { expires_in_days: tokenExpiresInDays }).then((created) => {
+                          setNewToken(created.token);
+                          load();
+                        }).catch((err) => setError(localizedErrorMessage(err, t)))}
+                      >
+                        <RotateCcw size={16} />
+                      </button>
+                      <button title="Revoke token" onClick={() => api.revokeApiToken(token.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}

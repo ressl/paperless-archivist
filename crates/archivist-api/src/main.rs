@@ -20,20 +20,21 @@ use archivist_core::{
 };
 use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, OidcUserInput, ReviewItemRecord, append_audit,
-    connect, consume_oidc_login_state, create_document_chat_session, create_oidc_login_state,
-    create_run_with_jobs, create_session, create_user_with_roles, document_chat_session_visible,
-    find_api_token, find_session, find_user_for_login, get_backlog_counts,
-    get_dashboard_live_status, get_dashboard_stats, get_runtime_settings, has_any_user, hash_token,
-    insert_document_chat_message, insert_document_chat_sources, list_allowed_named_entities,
-    list_allowed_tag_names, list_audit_events, list_custom_fields, list_document_chat_messages,
-    list_document_chat_sessions, list_inventory, list_prompt_usage, list_prompts, list_reviews,
-    list_secret_references, list_sessions, list_users, metrics_snapshot as db_metrics_snapshot,
-    migrate, queue_missing_stage, record_login_failure, record_login_success, recover_stale_leases,
-    recover_stuck_runs, recovery_candidates, resolve_secret, review_decision,
-    revoke_session_by_admin, search_document_chat_candidates, set_user_enabled, set_user_roles,
-    update_runtime_settings, update_user_password_hash, upsert_encrypted_secret,
-    upsert_inventory_item, upsert_oidc_user, upsert_paperless_custom_field,
-    upsert_paperless_named_entity, upsert_paperless_tag,
+    apply_security_retention, connect, consume_oidc_login_state, create_document_chat_session,
+    create_oidc_login_state, create_run_with_jobs, create_session, create_user_with_roles,
+    document_chat_session_visible, find_api_token, find_session, find_user_for_login,
+    get_backlog_counts, get_dashboard_live_status, get_dashboard_stats, get_runtime_settings,
+    has_any_user, hash_token, insert_document_chat_message, insert_document_chat_sources,
+    list_allowed_named_entities, list_allowed_tag_names, list_audit_events, list_custom_fields,
+    list_document_chat_messages, list_document_chat_sessions, list_inventory, list_prompt_usage,
+    list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
+    metrics_snapshot as db_metrics_snapshot, migrate, queue_missing_stage, record_login_failure,
+    record_login_success, recover_stale_leases, recover_stuck_runs, recovery_candidates,
+    resolve_secret, review_decision, revoke_session_by_admin, rotate_api_token,
+    search_document_chat_candidates, set_user_enabled, set_user_roles, update_runtime_settings,
+    update_user_password_hash, upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+    verify_audit_integrity,
 };
 use archivist_paperless::{PaperlessClient, PaperlessDocumentDetail};
 use argon2::password_hash::rand_core::OsRng;
@@ -184,12 +185,15 @@ fn router(state: AppState) -> Router {
         )
         .route("/audit", get(audit_events))
         .route("/audit/export.csv", get(audit_export))
+        .route("/audit/integrity", get(audit_integrity))
+        .route("/audit/retention/apply", post(apply_audit_retention))
         .route("/users", get(users).post(create_user))
         .route("/users/{id}/enable", post(enable_user))
         .route("/users/{id}/disable", post(disable_user))
         .route("/users/{id}/roles", post(update_user_roles_endpoint))
         .route("/users/{id}/reset-password", post(reset_user_password))
         .route("/api-tokens", get(api_tokens).post(create_api_token))
+        .route("/api-tokens/{id}/rotate", post(rotate_api_token_endpoint))
         .route("/api-tokens/{id}", delete(revoke_api_token))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2578,7 +2582,7 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
     require(&auth.0, Permission::ReadAudit)?;
     let events = list_audit_events(&state.pool, 10_000).await?;
     let mut body =
-        "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata\n"
+        "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash\n"
             .to_owned();
     for event in events {
         let row = [
@@ -2597,6 +2601,8 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
                 .metadata
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
+            event.prev_event_hash.unwrap_or_default(),
+            event.event_hash.unwrap_or_default(),
         ]
         .into_iter()
         .map(|value| csv_escape(&value))
@@ -2614,6 +2620,26 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
         HeaderValue::from_static("attachment; filename=\"paperless-archivist-audit.csv\""),
     );
     Ok(response)
+}
+
+async fn audit_integrity(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadAudit)?;
+    Ok(Json(json!(verify_audit_integrity(&state.pool).await?)))
+}
+
+async fn apply_audit_retention(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteSettings)?;
+    let actor_id = require_user_session(&auth.0, "audit retention requires a user session")?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    Ok(Json(json!(
+        apply_security_retention(&state.pool, &settings, actor_id).await?
+    )))
 }
 
 fn csv_escape(value: &str) -> String {
@@ -2742,6 +2768,7 @@ async fn api_tokens(State(state): State<AppState>, auth: Authenticated) -> ApiRe
 struct CreateApiTokenRequest {
     name: String,
     scopes: Vec<String>,
+    expires_in_days: Option<i64>,
 }
 
 async fn create_api_token(
@@ -2751,7 +2778,10 @@ async fn create_api_token(
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::ManageUsers)?;
     let actor_id = require_user_session(&auth.0, "API token creation requires a user session")?;
+    validate_api_token_name(&request.name)?;
     validate_api_token_scopes(&request.scopes)?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    let expires_at = api_token_expiry(&settings, request.expires_in_days)?;
     let token = format!("pa_{}", random_token());
     let token_hash = hash_token(&token);
     let id = archivist_db::create_api_token(
@@ -2760,10 +2790,35 @@ async fn create_api_token(
         &token_hash,
         &request.scopes,
         actor_id,
-        None,
+        expires_at,
     )
     .await?;
-    Ok(Json(json!({ "id": id, "token": token })))
+    Ok(Json(
+        json!({ "id": id, "token": token, "expires_at": expires_at }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct RotateApiTokenRequest {
+    expires_in_days: Option<i64>,
+}
+
+async fn rotate_api_token_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RotateApiTokenRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ManageUsers)?;
+    let actor_id = require_user_session(&auth.0, "API token rotation requires a user session")?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    let expires_at = api_token_expiry(&settings, request.expires_in_days)?;
+    let token = format!("pa_{}", random_token());
+    let token_hash = hash_token(&token);
+    let new_id = rotate_api_token(&state.pool, id, &token_hash, actor_id, expires_at).await?;
+    Ok(Json(
+        json!({ "id": new_id, "token": token, "expires_at": expires_at }),
+    ))
 }
 
 async fn revoke_api_token(
@@ -3593,12 +3648,46 @@ fn scope_for_permission(permission: Permission) -> &'static str {
     }
 }
 
+fn validate_api_token_name(name: &str) -> Result<(), ApiError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > 80 {
+        return Err(ApiError::bad_request(
+            "API token name must be between 1 and 80 characters",
+        ));
+    }
+    Ok(())
+}
+
+fn api_token_expiry(
+    settings: &RuntimeSettings,
+    requested_days: Option<i64>,
+) -> Result<Option<chrono::DateTime<Utc>>, ApiError> {
+    let security = settings.clone().normalized().security;
+    let days = requested_days.unwrap_or(security.api_token_default_ttl_days);
+    if days <= 0 {
+        if security.api_token_expiry_required {
+            return Err(ApiError::bad_request(
+                "API token expiry is required by security policy",
+            ));
+        }
+        return Ok(None);
+    }
+    if days > security.api_token_max_ttl_days {
+        return Err(ApiError::bad_request(format!(
+            "API token expiry exceeds maximum of {} days",
+            security.api_token_max_ttl_days
+        )));
+    }
+    Ok(Some(Utc::now() + Duration::days(days)))
+}
+
 fn validate_api_token_scopes(scopes: &[String]) -> Result<(), ApiError> {
     const ALLOWED: &[&str] = &[
         "runs:read",
         "runs:write",
         "inventory:read",
         "batches:write",
+        "chat:write",
         "reviews:read",
         "reviews:write",
         "settings:read",
@@ -3686,7 +3775,12 @@ mod tests {
     #[test]
     fn validates_api_token_scopes() {
         assert!(
-            validate_api_token_scopes(&["runs:read".to_owned(), "users:manage".to_owned()]).is_ok()
+            validate_api_token_scopes(&[
+                "runs:read".to_owned(),
+                "users:manage".to_owned(),
+                "chat:write".to_owned()
+            ])
+            .is_ok()
         );
 
         let empty_error = validate_api_token_scopes(&[]).expect_err("empty scopes are rejected");
@@ -3698,12 +3792,55 @@ mod tests {
     }
 
     #[test]
-    fn maps_manage_users_to_dedicated_scope() {
+    fn permission_scopes_are_explicit_and_accepted() {
+        let permissions = [
+            Permission::ReadDashboard,
+            Permission::ReadRuns,
+            Permission::WriteRuns,
+            Permission::ReadInventory,
+            Permission::WriteBatches,
+            Permission::UseChat,
+            Permission::ReadReviews,
+            Permission::WriteReviews,
+            Permission::ReadSettings,
+            Permission::WriteSettings,
+            Permission::ManageUsers,
+            Permission::ReadAudit,
+        ];
+        for permission in permissions {
+            let scope = scope_for_permission(permission).to_owned();
+            assert!(
+                validate_api_token_scopes(&[scope]).is_ok(),
+                "permission {permission:?} maps to unsupported scope"
+            );
+        }
         assert_eq!(
             scope_for_permission(Permission::ManageUsers),
             "users:manage"
         );
-        assert_eq!(scope_for_permission(Permission::UseChat), "chat:write");
+    }
+
+    #[test]
+    fn api_token_expiry_policy_defaults_and_caps() {
+        let settings = RuntimeSettings::default().normalized();
+        let default_expiry = api_token_expiry(&settings, None).expect("default expiry");
+        assert!(default_expiry.is_some());
+
+        let too_long = api_token_expiry(&settings, Some(10_000)).expect_err("max ttl applies");
+        assert_eq!(too_long.status, StatusCode::BAD_REQUEST);
+
+        let no_expiry = api_token_expiry(
+            &RuntimeSettings {
+                security: archivist_core::SecuritySettings {
+                    api_token_expiry_required: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Some(0),
+        )
+        .expect("optional expiry allowed");
+        assert!(no_expiry.is_none());
     }
 
     #[test]
