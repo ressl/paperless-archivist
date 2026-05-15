@@ -71,6 +71,7 @@ Common status codes:
 | `GET` | `/api/settings` | Read Paperless, AI, workflow, OCR, tagging, and field settings. |
 | `PUT` | `/api/settings` | Save runtime settings plus optional Paperless/provider secret values. |
 | `POST` | `/api/settings/test-paperless` | Test the configured Paperless REST connection. |
+| `POST` | `/api/notifications/test` | Send a safe webhook test payload using the saved notification settings. |
 | `POST` | `/api/model-providers/test` | Test the selected default model provider. |
 | `POST` | `/api/model-providers/{name}/models` | List installed models for a configured Ollama provider. |
 | `PUT` | `/api/workflow/mode` | Change between manual review, auto-select with review, and full auto. |
@@ -78,8 +79,9 @@ Common status codes:
 | `GET` | `/api/secret-references` | List secret references without returning secret values. |
 
 `PUT /api/settings` accepts a `RuntimeSettings` object plus optional secret
-payloads. Secret values are encrypted into secret references and are not returned
-to the frontend after saving.
+payloads: `paperless_token`, `provider_secrets`, and
+`notification_webhook_url`. Secret values are encrypted into secret references
+and are not returned to the frontend after saving.
 
 Default provider records are created for:
 

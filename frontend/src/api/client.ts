@@ -77,6 +77,13 @@ export type RuntimeSettings = {
     api_token_default_ttl_days: number;
     api_token_max_ttl_days: number;
   };
+  notifications: {
+    enabled: boolean;
+    webhook_url_secret_id?: string | null;
+    review_queue_threshold: number;
+    repeated_failure_threshold: number;
+    cooldown_minutes: number;
+  };
   workflow: {
     mode: ProcessingMode;
     paused: boolean;
@@ -586,12 +593,18 @@ export const api = {
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   me: () => request<Me>('/api/auth/me'),
   settings: () => request<RuntimeSettings>('/api/settings'),
-  saveSettings: (settings: RuntimeSettings, paperlessToken?: string, providerSecrets?: Record<string, string>) =>
+  saveSettings: (settings: RuntimeSettings, paperlessToken?: string, providerSecrets?: Record<string, string>, notificationWebhookUrl?: string) =>
     request<RuntimeSettings>('/api/settings', {
       method: 'PUT',
-      body: JSON.stringify({ settings, paperless_token: paperlessToken || null, provider_secrets: providerSecrets || null })
+      body: JSON.stringify({
+        settings,
+        paperless_token: paperlessToken || null,
+        provider_secrets: providerSecrets || null,
+        notification_webhook_url: notificationWebhookUrl || null
+      })
     }),
   testPaperless: () => request<{ ok: boolean; error?: string }>('/api/settings/test-paperless', { method: 'POST' }),
+  testNotification: () => request<{ ok: boolean; error?: string }>('/api/notifications/test', { method: 'POST' }),
   testProvider: () => request<{ ok: boolean; error?: string; details?: unknown }>('/api/model-providers/test', { method: 'POST' }),
   ollamaModels: (providerName: string) =>
     request<{ provider: string; models: OllamaInstalledModel[] }>(`/api/model-providers/${encodeURIComponent(providerName)}/models`, { method: 'POST' }),

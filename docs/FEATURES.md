@@ -94,6 +94,18 @@ Useful capabilities to keep:
   contract.
 - Never write directly to the Paperless database.
 
+### 3.1.1 Packaging And Ecosystem
+
+- Hardened Docker Compose profiles for minimal, local Ollama, external
+  PostgreSQL, and reverse-proxy operation.
+- Public-safe generic Kubernetes package with API, worker, ingress, resources,
+  probes, NetworkPolicy, and secret references.
+- First-run setup wizard for initial Paperless/provider/language/mode/test-run
+  configuration.
+- Webhook-compatible notifications for review backlog, repeated processing
+  failures, and paused full autopilot.
+- Public demo and screenshot workflow based on synthetic documents only.
+
 ### 3.2 PostgreSQL 18 State Engine
 
 - Use PostgreSQL 18 as mandatory database.

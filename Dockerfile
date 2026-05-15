@@ -18,7 +18,7 @@ RUN cargo build --release --locked --workspace
 FROM debian:bookworm-slim AS runtime
 # hadolint ignore=DL3008
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates poppler-utils \
+  && apt-get install -y --no-install-recommends ca-certificates curl poppler-utils \
   && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --create-home archivist
 WORKDIR /app

@@ -281,6 +281,7 @@ export function providerDefaults(kind: AiProviderKind): Pick<AiProvider, 'defaul
 export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
   const knownProviders = [...settings.ai.providers];
   const security = settings.security as Partial<RuntimeSettings['security']> | undefined;
+  const notifications = settings.notifications as Partial<RuntimeSettings['notifications']> | undefined;
   const paperless = settings.paperless as Partial<RuntimeSettings['paperless']>;
   const fields = settings.fields as Partial<RuntimeSettings['fields']>;
   if (!knownProviders.some((provider) => provider.name === ollamaCloudProvider.name)) {
@@ -310,6 +311,14 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
       api_token_default_ttl_days: 90,
       api_token_max_ttl_days: 365,
       ...(security ?? {})
+    },
+    notifications: {
+      enabled: false,
+      webhook_url_secret_id: null,
+      review_queue_threshold: 10,
+      repeated_failure_threshold: 3,
+      cooldown_minutes: 60,
+      ...(notifications ?? {})
     },
     workflow: {
       ...settings.workflow,

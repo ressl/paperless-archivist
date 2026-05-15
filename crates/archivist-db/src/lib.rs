@@ -1895,6 +1895,29 @@ pub async fn update_paperless_sync_cursor(
     Ok(())
 }
 
+pub async fn claim_notification_delivery(
+    pool: &DbPool,
+    event_key: &str,
+    cooldown_minutes: i32,
+) -> Result<bool> {
+    let row = sqlx::query(
+        r#"
+        insert into notification_state (event_key, last_sent_at, updated_at)
+        values ($1, now(), now())
+        on conflict (event_key)
+        do update set last_sent_at = excluded.last_sent_at,
+                      updated_at = now()
+        where notification_state.last_sent_at < now() - make_interval(mins => $2)
+        returning last_sent_at
+        "#,
+    )
+    .bind(event_key)
+    .bind(cooldown_minutes)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
 pub async fn record_document_language(
     pool: &DbPool,
     paperless_document_id: i32,

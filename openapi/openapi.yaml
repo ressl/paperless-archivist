@@ -78,6 +78,8 @@ components:
         settings: { $ref: "#/components/schemas/RuntimeSettings" }
         paperless_token:
           type: [string, "null"]
+        notification_webhook_url:
+          type: [string, "null"]
         provider_secrets:
           type: [object, "null"]
           additionalProperties: { type: string }
@@ -950,6 +952,11 @@ paths:
       responses:
         "200":
           description: Paperless connection result
+  /api/notifications/test:
+    post:
+      responses:
+        "200":
+          description: Notification webhook delivery test result
   /api/model-providers/test:
     post:
       responses:

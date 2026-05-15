@@ -12,16 +12,17 @@ use archivist_ai::{
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, ChoiceSuggestion, DocumentPatch, LanguageDetection,
-    OldTagStrategy, RuntimeSettings, Stage, TagSuggestion, TitleSuggestion,
+    OldTagStrategy, ProcessingMode, RuntimeSettings, Stage, TagSuggestion, TitleSuggestion,
     detect_document_language, extract_issue_date_suggestion, validate_choice_suggestion,
     validate_document_date_suggestion, validate_field_suggestion, validate_tag_suggestion,
     validate_title_suggestion,
 };
 use archivist_db::{
-    AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, complete_job, connect,
-    create_review_item, create_run_with_jobs, custom_field_ids_for_names, fail_job,
-    get_active_prompt, get_runtime_settings, get_workflow_safety_status, insert_ai_artifact,
-    is_last_active_job, list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
+    AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, claim_notification_delivery,
+    complete_job, connect, create_review_item, create_run_with_jobs, custom_field_ids_for_names,
+    fail_job, get_active_prompt, get_backlog_counts, get_dashboard_live_status,
+    get_runtime_settings, get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
+    list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     named_entity_id_for_name, queue_missing_pipeline, record_document_language, resolve_secret,
     selector_document_budget, tag_ids_for_names, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
@@ -31,6 +32,7 @@ use archivist_paperless::{
     PaperlessClient, PaperlessDocumentDetail, PaperlessDocumentSummary, PaperlessTag,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
+use reqwest::Client as HttpClient;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -75,6 +77,16 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 tick += 1;
                 if let Err(error) = process_available_jobs(&pool, &config, &worker_id).await {
                     error!(error = %error, "job processing tick failed");
+                }
+                if tick % 12 == 3
+                    && let Err(error) = timeout(
+                        Duration::from_secs(20),
+                        send_operational_notifications(&pool, &config),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow!("notification tick timed out")))
+                {
+                    warn!(error = %error, "notification tick failed");
                 }
                 if tick % 12 == 1
                     && trigger_poll_running
@@ -186,6 +198,113 @@ async fn process_available_jobs(
         if let Err(error) = result {
             warn!(error = %error, "worker task join failed");
         }
+    }
+    Ok(())
+}
+
+async fn send_operational_notifications(pool: &DbPool, config: &AppConfig) -> Result<()> {
+    let settings = get_runtime_settings(pool).await?;
+    if !settings.notifications.enabled {
+        return Ok(());
+    }
+    let Some(webhook_secret_id) = settings.notifications.webhook_url_secret_id else {
+        return Ok(());
+    };
+    let Some(webhook_url) = resolve_secret(pool, &config.secret_key, webhook_secret_id).await?
+    else {
+        return Ok(());
+    };
+    let cooldown = settings.notifications.cooldown_minutes as i32;
+    let counts = get_backlog_counts(pool).await?;
+    if counts.waiting_review >= settings.notifications.review_queue_threshold
+        && claim_notification_delivery(pool, "review_queue_backlog", cooldown).await?
+    {
+        send_notification_webhook(
+            &webhook_url,
+            json!({
+                "app": "paperless-archivist",
+                "event": "review_queue_backlog",
+                "severity": "warning",
+                "title": "Review queue needs attention",
+                "description": "Paperless Archivist has documents waiting for human review.",
+                "metadata": {
+                    "waiting_review": counts.waiting_review,
+                    "threshold": settings.notifications.review_queue_threshold
+                }
+            }),
+        )
+        .await?;
+    }
+
+    let live = get_dashboard_live_status(pool, &settings).await?;
+    let hard_failures = live
+        .recent_failures
+        .iter()
+        .filter(|failure| failure.status == "failed" || failure.failure_kind == "failed")
+        .count() as i64;
+    if hard_failures >= settings.notifications.repeated_failure_threshold
+        && claim_notification_delivery(pool, "repeated_processing_failures", cooldown).await?
+    {
+        send_notification_webhook(
+            &webhook_url,
+            json!({
+                "app": "paperless-archivist",
+                "event": "repeated_processing_failures",
+                "severity": "error",
+                "title": "Repeated processing failures",
+                "description": "Recent Paperless Archivist jobs are failing. Check the dashboard live status and worker logs.",
+                "metadata": {
+                    "recent_failure_count": hard_failures,
+                    "threshold": settings.notifications.repeated_failure_threshold
+                }
+            }),
+        )
+        .await?;
+    }
+
+    if settings.workflow.mode == ProcessingMode::FullAuto
+        && settings.workflow.paused
+        && claim_notification_delivery(pool, "paused_full_auto", cooldown).await?
+    {
+        send_notification_webhook(
+            &webhook_url,
+            json!({
+                "app": "paperless-archivist",
+                "event": "paused_full_auto",
+                "severity": "warning",
+                "title": "Full autopilot is paused",
+                "description": "Full autopilot is configured but processing is paused.",
+                "metadata": {
+                    "workflow_mode": "full_auto",
+                    "paused": true
+                }
+            }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn send_notification_webhook(
+    webhook_url: &SecretString,
+    payload: serde_json::Value,
+) -> Result<()> {
+    let response = HttpClient::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?
+        .post(webhook_url.expose_secret())
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "notification webhook request failed: {}",
+                error.without_url()
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!("notification webhook returned {status}"));
     }
     Ok(())
 }

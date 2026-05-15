@@ -42,6 +42,11 @@ break-glass account or replace it with named admin accounts after first setup.
 4. Change the bootstrap password or create named admin/operator/reviewer users.
 5. Configure Paperless and the model provider before queueing jobs.
 
+The Settings page shows a first-run setup wizard until the core setup is
+complete. It guides through admin/SSO, Paperless connection, provider setup,
+language settings, workflow mode, and a first test run. Existing configured
+installations skip the wizard automatically.
+
 ## Interface Language
 
 Archivist detects the browser language on first load and stores the selected UI
@@ -390,6 +395,21 @@ Admins can manage:
 API tokens are intended for automation. They are stored hashed and only shown
 once at creation time. Security-sensitive operations such as settings changes
 and model discovery require an interactive browser session.
+
+## Notifications
+
+Admins can configure webhook notifications in Settings:
+
+- enable or disable delivery
+- store the webhook URL as an encrypted secret
+- set the review queue threshold
+- set the repeated failure threshold
+- set the cooldown window
+- send a safe test payload
+
+Worker-generated notifications cover review backlog, repeated recent processing
+failures, and paused full autopilot. Payloads contain safe aggregate metadata
+only, not document content, prompts, raw model output, API keys, or webhook URLs.
 
 ## Audit Log
 

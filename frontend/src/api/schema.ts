@@ -568,6 +568,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/notifications/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Notification webhook delivery test result */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/model-providers/test": {
         parameters: {
             query?: never;
@@ -2264,6 +2297,7 @@ export interface components {
         UpdateSettingsRequest: {
             settings: components["schemas"]["RuntimeSettings"];
             paperless_token?: string | null;
+            notification_webhook_url?: string | null;
             provider_secrets?: {
                 [key: string]: string;
             } | null;

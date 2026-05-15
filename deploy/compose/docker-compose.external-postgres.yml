@@ -1,0 +1,13 @@
+services:
+  postgres:
+    profiles: ["local-postgres-disabled"]
+
+  api:
+    depends_on: !reset []
+    environment:
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:?set EXTERNAL_DATABASE_URL}
+
+  worker:
+    depends_on: !reset []
+    environment:
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:?set EXTERNAL_DATABASE_URL}

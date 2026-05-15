@@ -260,6 +260,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "reqwest",
  "secrecy",
  "serde",
  "serde_json",

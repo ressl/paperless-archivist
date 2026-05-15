@@ -105,9 +105,10 @@ safe enough to run repeatedly on a real archive.
 | Document chat/RAG | Ask questions against retrieved Paperless document content with stored chat sessions and cited sources |
 | Runtime settings | Configure Paperless, providers, prompts, workflow mode, users, sessions, and API tokens from the UI |
 | Maintenance tools | Dry-run completion tag reconciliation, safe bulk apply, recovery tools, and Paperless inventory consistency checks |
+| Setup and notifications | First-run setup wizard plus webhook notifications for review backlog, repeated failures, and paused full autopilot |
 | Workflow rules | Include/exclude batch-processing rules by Paperless tags |
 | Security | Argon2id, sessions, CSRF, RBAC, scoped API tokens, OIDC SSO, optional Paperless login bridge, secret redaction, audit logging |
-| Deployment | Docker Compose for local use; production deployment packaging belongs outside the public source tree |
+| Deployment | Hardened Docker Compose profiles and a public-safe generic Kubernetes package |
 
 ## Screens and Workflow
 
@@ -170,6 +171,13 @@ To include Ollama in the same Compose stack:
 ```bash
 docker compose --profile ollama --env-file deploy/compose/.env -f deploy/compose/docker-compose.yml up --build
 ```
+
+More deployment options:
+
+- [Docker Compose profiles](deploy/compose/README.md)
+- [Generic Kubernetes package](deploy/kubernetes/README.md)
+- [Public demo plan](docs/DEMO.md)
+- [Screenshot workflow](docs/SCREENSHOTS.md)
 
 ## First Run Checklist
 

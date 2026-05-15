@@ -1650,9 +1650,11 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
   const [savedSettings, setSavedSettings] = useState<RuntimeSettings | null>(null);
   const [token, setToken] = useState('');
   const [providerSecrets, setProviderSecrets] = useState<Record<string, string>>({});
+  const [notificationWebhook, setNotificationWebhook] = useState('');
   const [ollamaModels, setOllamaModels] = useState<Record<string, OllamaModelLoadState>>({});
   const [paperlessTest, setPaperlessTest] = useState<ConnectionTestState | null>(null);
   const [providerTest, setProviderTest] = useState<ConnectionTestState | null>(null);
+  const [notificationTest, setNotificationTest] = useState<ConnectionTestState | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const worldLanguages = useMemo(() => languageOptions(locale), [locale]);
@@ -1802,10 +1804,53 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
         setProviderTest(providerTestFailure(selectedDefaultProvider, errorToString(err), t));
       });
   };
+  const runNotificationTest = () => {
+    setNotificationTest({
+      status: 'running',
+      title: t('settings.notifications.test_running.title'),
+      description: t('settings.notifications.test_running.description'),
+      hints: [t('settings.notifications.test_running.hint')]
+    });
+    api
+      .testNotification()
+      .then((data) => {
+        setNotificationTest(data.ok ? {
+          status: 'success',
+          title: t('settings.notifications.success.title'),
+          description: t('settings.notifications.success.description'),
+          hints: [t('settings.notifications.success.hint')]
+        } : {
+          status: 'error',
+          title: t('settings.notifications.failure.title'),
+          description: t('settings.notifications.failure.description'),
+          hints: [
+            t('settings.notifications.failure.hint_url'),
+            t('settings.notifications.failure.hint_reachable'),
+            t('settings.notifications.failure.hint_saved')
+          ],
+          details: sanitizeConnectionDetail(data.error ?? t('generic.request_failed'))
+        });
+      })
+      .catch((err) => {
+        setNotificationTest({
+          status: 'error',
+          title: t('settings.notifications.failure.title'),
+          description: t('settings.notifications.failure.description'),
+          hints: [
+            t('settings.notifications.failure.hint_url'),
+            t('settings.notifications.failure.hint_reachable'),
+            t('settings.notifications.failure.hint_saved')
+          ],
+          details: sanitizeConnectionDetail(errorToString(err))
+        });
+      });
+  };
+  const firstRunSteps = firstRunWizardSteps(settings, savedSettings, selectedDefaultProvider, t);
 
   return (
     <section className="page">
       <PageHeader title={t('settings.title')} />
+      <FirstRunWizard steps={firstRunSteps} />
       <div className="settings-language-row">
         <LanguageSelector compact />
       </div>
@@ -2040,6 +2085,59 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
           </label>
         </fieldset>
         <fieldset>
+          <legend>{t('settings.notifications')}</legend>
+          <label className="inline">
+            <input
+              type="checkbox"
+              checked={settings.notifications.enabled}
+              onChange={(event) => update((s) => ({ ...s, notifications: { ...s.notifications, enabled: event.target.checked } }))}
+            />
+            {t('settings.notifications.enabled')}
+          </label>
+          <label>
+            {t('settings.notifications.webhook_url')}
+            <input
+              value={notificationWebhook}
+              type="password"
+              onChange={(event) => setNotificationWebhook(event.target.value)}
+              placeholder={settings.notifications.webhook_url_secret_id ? t('settings.paperless.configured') : 'https://hooks.example.com/...'}
+            />
+            <small>{t('settings.notifications.webhook_hint')}</small>
+          </label>
+          <label>
+            {t('settings.notifications.review_threshold')}
+            <input
+              type="number"
+              min="1"
+              value={settings.notifications.review_queue_threshold}
+              onChange={(event) => update((s) => ({ ...s, notifications: { ...s.notifications, review_queue_threshold: Number(event.target.value) } }))}
+            />
+          </label>
+          <label>
+            {t('settings.notifications.failure_threshold')}
+            <input
+              type="number"
+              min="1"
+              value={settings.notifications.repeated_failure_threshold}
+              onChange={(event) => update((s) => ({ ...s, notifications: { ...s.notifications, repeated_failure_threshold: Number(event.target.value) } }))}
+            />
+          </label>
+          <label>
+            {t('settings.notifications.cooldown')}
+            <input
+              type="number"
+              min="1"
+              max="1440"
+              value={settings.notifications.cooldown_minutes}
+              onChange={(event) => update((s) => ({ ...s, notifications: { ...s.notifications, cooldown_minutes: Number(event.target.value) } }))}
+            />
+          </label>
+          <button title={t('generic.test')} disabled={notificationTest?.status === 'running'} onClick={runNotificationTest}>
+            <Send size={16} /> {notificationTest?.status === 'running' ? t('generic.testing') : t('generic.test')}
+          </button>
+          <ConnectionTestFeedback state={notificationTest} />
+        </fieldset>
+        <fieldset>
           <legend>{t('settings.security')}</legend>
           <label>
             {t('settings.security.audit_retention')}
@@ -2202,12 +2300,13 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
           icon={<Save />}
           label={t('generic.save')}
           busy={busy}
-          onClick={() => run(setBusy, setError, () => api.saveSettings(settings, token, providerSecrets).then((saved) => {
+          onClick={() => run(setBusy, setError, () => api.saveSettings(settings, token, providerSecrets, notificationWebhook).then((saved) => {
             const nextSettings = withModelDefaults(saved);
             setSettings(nextSettings);
             setSavedSettings(nextSettings);
             setToken('');
             setProviderSecrets({});
+            setNotificationWebhook('');
             setResult(t('generic.saved'));
             refreshInstalledOllamaModels(nextSettings);
           }), t)}
@@ -2216,6 +2315,88 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
       </div>
     </section>
   );
+}
+
+type FirstRunStep = {
+  key: string;
+  label: string;
+  description: string;
+  complete: boolean;
+};
+
+function FirstRunWizard({ steps }: { steps: FirstRunStep[] }) {
+  const { t } = useI18n();
+  if (steps.every((step) => step.complete)) return null;
+  return (
+    <section className="first-run-wizard">
+      <header>
+        <div>
+          <strong>{t('settings.first_run.title')}</strong>
+          <p>{t('settings.first_run.description')}</p>
+        </div>
+        <span>{steps.filter((step) => step.complete).length}/{steps.length}</span>
+      </header>
+      <div className="first-run-steps">
+        {steps.map((step) => (
+          <article className={step.complete ? 'complete' : ''} key={step.key}>
+            {step.complete ? <Check size={16} /> : <Info size={16} />}
+            <div>
+              <strong>{step.label}</strong>
+              <p>{step.description}</p>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function firstRunWizardSteps(
+  settings: RuntimeSettings,
+  savedSettings: RuntimeSettings | null,
+  provider: ModelProviderDescriptor,
+  t: TFunction
+): FirstRunStep[] {
+  const saved = savedSettings ?? settings;
+  const providerNeedsSecret = provider.kind !== 'ollama' || isOllamaCloudProvider(provider);
+  return [
+    {
+      key: 'admin',
+      label: t('settings.first_run.admin.label'),
+      description: t('settings.first_run.admin.description'),
+      complete: true
+    },
+    {
+      key: 'paperless',
+      label: t('settings.first_run.paperless.label'),
+      description: t('settings.first_run.paperless.description'),
+      complete: Boolean(saved.paperless.token_secret_id && saved.paperless.base_url.trim())
+    },
+    {
+      key: 'provider',
+      label: t('settings.first_run.provider.label'),
+      description: t('settings.first_run.provider.description'),
+      complete: Boolean(provider.base_url.trim() && (!providerNeedsSecret || settings.ai.providers.find((entry) => entry.name === provider.name)?.secret_id))
+    },
+    {
+      key: 'language',
+      label: t('settings.first_run.language.label'),
+      description: t('settings.first_run.language.description'),
+      complete: Boolean(settings.tagging.tag_output_language)
+    },
+    {
+      key: 'mode',
+      label: t('settings.first_run.mode.label'),
+      description: t('settings.first_run.mode.description'),
+      complete: Boolean(settings.workflow.mode)
+    },
+    {
+      key: 'test',
+      label: t('settings.first_run.test.label'),
+      description: t('settings.first_run.test.description'),
+      complete: Boolean(saved.paperless.token_secret_id && provider.base_url.trim())
+    }
+  ];
 }
 
 function ConnectionTestFeedback({ state }: { state: ConnectionTestState | null }) {

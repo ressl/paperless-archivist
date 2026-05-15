@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: paperless-archivist-config
+data:
+  ARCHIVIST_HTTP_ADDR: "0.0.0.0:8080"
+  ARCHIVIST_COOKIE_SECURE: "true"
+  ARCHIVIST_OIDC_ENABLED: "false"
+  ARCHIVIST_OIDC_ISSUER_URL: "https://issuer.example.com"
+  ARCHIVIST_OIDC_CLIENT_ID: "paperless-archivist"
+  ARCHIVIST_OIDC_REDIRECT_URI: "https://paperless-archivist.example.com/api/auth/oidc/callback"
+  ARCHIVIST_OIDC_ADMIN_USERS: "admin@example.com"
+  ARCHIVIST_OIDC_DEFAULT_ROLES: "viewer"
+  ARCHIVIST_WORKER_CONCURRENCY: "2"
+  ARCHIVIST_LOG_LEVEL: "info"

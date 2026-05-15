@@ -142,6 +142,7 @@ fn router(state: AppState) -> Router {
         .route("/auth/sessions/{id}/revoke", post(revoke_session_endpoint))
         .route("/settings", get(settings).put(update_settings))
         .route("/settings/test-paperless", post(test_paperless))
+        .route("/notifications/test", post(test_notification))
         .route("/model-providers/test", post(test_provider))
         .route(
             "/model-providers/{name}/models",
@@ -907,6 +908,7 @@ async fn settings(
 struct UpdateSettingsRequest {
     settings: RuntimeSettings,
     paperless_token: Option<String>,
+    notification_webhook_url: Option<String>,
     provider_secrets: Option<HashMap<String, String>>,
 }
 
@@ -954,6 +956,21 @@ async fn update_settings(
                 provider.secret_id = Some(secret_id);
             }
         }
+    }
+    if let Some(webhook_url) = request
+        .notification_webhook_url
+        .take()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let secret_id = upsert_encrypted_secret(
+            &state.pool,
+            &state.config.secret_key,
+            "notification-webhook-url",
+            &SecretString::from(webhook_url),
+            actor_id,
+        )
+        .await?;
+        request.settings.notifications.webhook_url_secret_id = Some(secret_id);
     }
     update_runtime_settings(&state.pool, &request.settings, actor_id).await?;
     Ok(Json(request.settings))
@@ -1443,6 +1460,74 @@ async fn test_provider(
         Ok(value) => Ok(Json(json!({ "ok": true, "details": value }))),
         Err(error) => Ok(Json(json!({ "ok": false, "error": error.to_string() }))),
     }
+}
+
+async fn test_notification(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteSettings)?;
+    require_user_session(&auth.0, "notification tests require a user session")?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    let result = async {
+        let webhook_url = notification_webhook_url(&state, &settings).await?;
+        send_notification_webhook(
+            &webhook_url,
+            json!({
+                "app": "paperless-archivist",
+                "event": "notification.test",
+                "severity": "info",
+                "title": "Paperless Archivist notification test",
+                "description": "Webhook delivery is configured. This payload contains no document content or secrets.",
+                "metadata": {
+                    "source": "settings-test"
+                }
+            }),
+        )
+        .await
+    }
+    .await;
+    match result {
+        Ok(()) => Ok(Json(json!({ "ok": true }))),
+        Err(error) => Ok(Json(json!({ "ok": false, "error": error.to_string() }))),
+    }
+}
+
+async fn notification_webhook_url(state: &AppState, settings: &RuntimeSettings) -> Result<String> {
+    let secret_id = settings
+        .notifications
+        .webhook_url_secret_id
+        .ok_or_else(|| anyhow!("Notification webhook URL is not configured"))?;
+    let webhook_url = resolve_secret(&state.pool, &state.config.secret_key, secret_id)
+        .await?
+        .ok_or_else(|| anyhow!("Notification webhook secret reference does not exist"))?;
+    let parsed = Url::parse(webhook_url.expose_secret())
+        .map_err(|_| anyhow!("Notification webhook URL is invalid"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(anyhow!("Notification webhook URL must use http or https"));
+    }
+    Ok(webhook_url.expose_secret().to_owned())
+}
+
+async fn send_notification_webhook(webhook_url: &str, payload: Value) -> Result<()> {
+    let response = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .post(webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "Notification webhook request failed: {}",
+                error.without_url()
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!("Notification webhook returned {status}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]

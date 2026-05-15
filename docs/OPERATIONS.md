@@ -88,12 +88,25 @@ ollama pull qwen3:8b
 ollama pull qwen2.5vl:7b
 ```
 
+Additional public-safe Compose profiles are documented in
+[`deploy/compose/README.md`](../deploy/compose/README.md):
+
+- minimal local PostgreSQL 18 stack
+- local Ollama profile
+- external PostgreSQL override
+- Caddy reverse-proxy profile
+
+The Compose services run with read-only root filesystems where practical,
+dropped capabilities, private networking, health checks, and configurable
+resource limits.
+
 ## Production Deployment Boundary
 
 The public source repository ships application code, Docker Compose for local
-operation, and public CI. Production Kubernetes manifests, ingress hosts,
-runtime secrets, private registry image digests, and deployment promotion state
-belong in a private deployment repository or equivalent platform automation.
+operation, a generic Kubernetes package, and public CI. Private production
+manifests, ingress hosts, runtime secrets, private registry image digests, and
+deployment promotion state belong in a private deployment repository or
+equivalent platform automation.
 
 Use a managed PostgreSQL 18 instance or a separately operated PostgreSQL 18
 cluster for production. The application schema is migrated by the API on
@@ -116,6 +129,12 @@ Set `ARCHIVIST_OIDC_ADMIN_USERS` to a comma- or whitespace-separated list of
 trusted usernames or email addresses. Matching users receive the admin,
 operator, reviewer, and auditor roles at login. Other new OIDC users receive
 `ARCHIVIST_OIDC_DEFAULT_ROLES`, which defaults to `viewer`.
+
+For non-private Kubernetes users, start from
+[`deploy/kubernetes/README.md`](../deploy/kubernetes/README.md). The package
+contains API and worker Deployments, probes, resources, Service, Ingress,
+NetworkPolicy, and secret references. Patch it with Kustomize or your GitOps
+tooling; do not commit real secrets.
 
 ## Paperless Configuration
 
@@ -223,6 +242,23 @@ initial profile is stored in `frontend/src/hardwareRecommendations.json` so more
 GPU profiles can be added without changing the component. Current NVIDIA
 GeForce RTX 4060 Ti recommendations are `qwen3:4b-instruct` for text/LLM and
 `glm-ocr` for vision/OCR.
+
+## Notifications
+
+Webhook notifications are configured in Settings. The webhook URL is stored as
+an encrypted secret reference and can be tested from the UI. Operational worker
+notifications are cooldown-limited and intentionally do not contain document
+content, prompts, raw model output, API keys, or webhook URLs.
+
+Supported events:
+
+- review queue backlog at or above the configured threshold
+- repeated recent processing failures at or above the configured threshold
+- full autopilot configured but paused
+
+Use the webhook receiver to route alerts to chat, incident tooling, email
+bridges, or automation. The default payload includes `app`, `event`, `severity`,
+`title`, `description`, and safe aggregate metadata only.
 
 Current commercial Ollama Cloud models listed from `https://ollama.com/api/tags`
 on 2026-05-13:

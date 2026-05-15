@@ -773,6 +773,8 @@ pub struct RuntimeSettings {
     #[serde(default)]
     pub security: SecuritySettings,
     #[serde(default)]
+    pub notifications: NotificationSettings,
+    #[serde(default)]
     pub workflow: WorkflowSettings,
     #[serde(default)]
     pub ocr: OcrSettings,
@@ -788,6 +790,7 @@ impl RuntimeSettings {
     pub fn normalized(mut self) -> Self {
         self.ai.ensure_default_providers();
         self.security = self.security.normalized();
+        self.notifications = self.notifications.normalized();
         self.workflow.rules.include_tags =
             WorkflowRules::normalized_tags(&self.workflow.rules.include_tags);
         self.workflow.rules.exclude_tags =
@@ -800,6 +803,53 @@ impl RuntimeSettings {
         self.fields = self.fields.normalized();
         self
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub webhook_url_secret_id: Option<Uuid>,
+    #[serde(default = "default_review_queue_threshold")]
+    pub review_queue_threshold: i64,
+    #[serde(default = "default_repeated_failure_threshold")]
+    pub repeated_failure_threshold: i64,
+    #[serde(default = "default_notification_cooldown_minutes")]
+    pub cooldown_minutes: i64,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url_secret_id: None,
+            review_queue_threshold: default_review_queue_threshold(),
+            repeated_failure_threshold: default_repeated_failure_threshold(),
+            cooldown_minutes: default_notification_cooldown_minutes(),
+        }
+    }
+}
+
+impl NotificationSettings {
+    pub fn normalized(mut self) -> Self {
+        self.review_queue_threshold = self.review_queue_threshold.clamp(1, 100_000);
+        self.repeated_failure_threshold = self.repeated_failure_threshold.clamp(1, 1000);
+        self.cooldown_minutes = self.cooldown_minutes.clamp(1, 1440);
+        self
+    }
+}
+
+fn default_review_queue_threshold() -> i64 {
+    10
+}
+
+fn default_repeated_failure_threshold() -> i64 {
+    3
+}
+
+fn default_notification_cooldown_minutes() -> i64 {
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2926,6 +2976,22 @@ mod tests {
             settings.ai_artifact_storage,
             AiArtifactStorageMode::Redacted
         );
+    }
+
+    #[test]
+    fn notification_settings_normalize_operational_limits() {
+        let settings = NotificationSettings {
+            review_queue_threshold: 0,
+            repeated_failure_threshold: 0,
+            cooldown_minutes: 9999,
+            ..Default::default()
+        }
+        .normalized();
+
+        assert_eq!(settings.review_queue_threshold, 1);
+        assert_eq!(settings.repeated_failure_threshold, 1);
+        assert_eq!(settings.cooldown_minutes, 1440);
+        assert!(!settings.enabled);
     }
 
     #[test]

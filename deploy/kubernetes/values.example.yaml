@@ -1,0 +1,51 @@
+image:
+  repository: ghcr.io/example/paperless-archivist
+  tag: "0.1.0"
+
+ingress:
+  enabled: true
+  className: nginx
+  host: paperless-archivist.example.com
+  tlsSecretName: paperless-archivist-tls
+
+database:
+  existingSecret: paperless-archivist-secrets
+  urlKey: DATABASE_URL
+  engine: PostgreSQL 18
+
+paperless:
+  baseUrl: http://paperless.example.svc.cluster.local:8000
+  tokenStorage: configure in the Settings UI or as an encrypted secret reference
+
+oidc:
+  enabled: false
+  issuerUrl: https://issuer.example.com
+  clientId: paperless-archivist
+  clientSecretKey: ARCHIVIST_OIDC_CLIENT_SECRET
+  redirectUri: https://paperless-archivist.example.com/api/auth/oidc/callback
+  adminUsers: admin@example.com
+  defaultRoles: viewer
+
+providers:
+  ollama:
+    baseUrl: http://ollama.example.svc.cluster.local:11434
+  openai:
+    apiKeyStorage: configure in Settings UI
+  anthropic:
+    apiKeyStorage: configure in Settings UI
+
+resources:
+  api:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+  worker:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi

@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:18
+    restart: unless-stopped
     command:
       - postgres
       - -c
@@ -16,12 +17,15 @@ services:
       retries: 10
     volumes:
       - postgres-data:/var/lib/postgresql
+    networks:
+      - archivist-internal
 
   api:
     build:
       context: ../..
       dockerfile: Dockerfile
     image: paperless-archivist:local
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,19 +46,36 @@ services:
       ARCHIVIST_LOG_LEVEL: ${ARCHIVIST_LOG_LEVEL:-info}
     ports:
       - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     read_only: true
     tmpfs:
       - /tmp
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - archivist-internal
+    deploy:
+      resources:
+        limits:
+          memory: ${ARCHIVIST_API_MEMORY_LIMIT:-768m}
+        reservations:
+          memory: ${ARCHIVIST_API_MEMORY_RESERVATION:-256m}
 
   worker:
     image: paperless-archivist:local
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       api:
-        condition: service_started
+        condition: service_healthy
     entrypoint: ["/usr/local/bin/archivist-worker"]
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-archivist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-archivist}
@@ -66,15 +87,31 @@ services:
       - /tmp
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - archivist-internal
+    deploy:
+      resources:
+        limits:
+          memory: ${ARCHIVIST_WORKER_MEMORY_LIMIT:-1g}
+        reservations:
+          memory: ${ARCHIVIST_WORKER_MEMORY_RESERVATION:-512m}
 
   ollama:
     image: ollama/ollama:latest
     profiles: ["ollama"]
+    restart: unless-stopped
     volumes:
       - ollama-data:/root/.ollama
     ports:
       - "127.0.0.1:11434:11434"
+    networks:
+      - archivist-internal
 
 volumes:
   postgres-data:
   ollama-data:
+
+networks:
+  archivist-internal:

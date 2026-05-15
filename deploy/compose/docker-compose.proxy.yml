@@ -1,0 +1,23 @@
+services:
+  proxy:
+    image: caddy:2
+    profiles: ["reverse-proxy"]
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      ARCHIVIST_PUBLIC_HOST: ${ARCHIVIST_PUBLIC_HOST:-paperless-archivist.example.com}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - archivist-internal
+
+volumes:
+  caddy-data:
+  caddy-config:

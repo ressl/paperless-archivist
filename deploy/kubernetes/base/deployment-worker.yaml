@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paperless-archivist-worker
+  labels:
+    app.kubernetes.io/name: paperless-archivist
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paperless-archivist
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paperless-archivist
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: paperless-archivist
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/example/paperless-archivist:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/archivist-worker"]
+          envFrom:
+            - configMapRef:
+                name: paperless-archivist-config
+            - secretRef:
+                name: paperless-archivist-secrets
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -x /usr/local/bin/archivist-worker"]
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

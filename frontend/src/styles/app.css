@@ -299,6 +299,68 @@ th {
   margin: 0 0 18px;
 }
 
+.first-run-wizard {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 16px;
+  border: 1px solid #c9dbe8;
+  border-radius: 8px;
+  background: #f8fbfd;
+}
+
+.first-run-wizard header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.first-run-wizard header strong {
+  color: var(--ink);
+}
+
+.first-run-wizard header p,
+.first-run-steps p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.first-run-wizard header span {
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: var(--info-soft);
+  color: #28649b;
+  font-weight: 800;
+}
+
+.first-run-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.first-run-steps article {
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.first-run-steps article.complete {
+  border-color: #b7d8cf;
+  background: #f3fbf7;
+}
+
+.first-run-steps article > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
 .workspace {
   min-width: 0;
   padding: 24px;
@@ -1173,6 +1235,7 @@ th {
 	  .dashboard-ops-grid,
 	  .dashboard-metrics,
 	  .maintenance-grid,
+	  .first-run-steps,
 	  .quality-strip {
     grid-template-columns: 1fr;
   }
