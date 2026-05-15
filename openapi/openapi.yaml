@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Paperless Archivist API
-  version: 0.1.0
+  version: 0.2.0
 servers:
   - url: /
 security:
@@ -292,6 +292,21 @@ components:
         output_schema: true
         active: { type: boolean }
         created_at: { type: string, format: date-time }
+    PromptUsage:
+      type: object
+      required: [prompt_id, run_count, job_count, avg_duration_ms]
+      properties:
+        prompt_id: { type: string, format: uuid }
+        run_count: { type: integer, format: int64 }
+        job_count: { type: integer, format: int64 }
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+        avg_duration_ms: { type: number, format: double }
+        last_provider:
+          type: [string, "null"]
+        last_model:
+          type: [string, "null"]
     TestPromptRequest:
       type: object
       required: [stage, content]
@@ -611,6 +626,19 @@ paths:
                 activate: { type: boolean }
       responses:
         "200": { description: Created prompt }
+  /api/prompts/usage:
+    get:
+      responses:
+        "200":
+          description: Prompt usage summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PromptUsage" }
   /api/prompts/{id}/activate:
     post:
       parameters:

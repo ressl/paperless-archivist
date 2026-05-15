@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use archivist_ai::{
-    AiResponse, AnthropicClient, ChatRequest, ImageInput, OllamaClient, OpenAiCompatibleClient,
-    TextProvider, VisionProvider, VisionRequest, parse_choice_suggestion, parse_field_suggestion,
-    parse_tag_suggestion, parse_title_suggestion, prompt_for_choice, prompt_for_fields,
-    prompt_for_tags, prompt_for_title,
+    AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT, ImageInput, OllamaClient,
+    OpenAiCompatibleClient, TextProvider, VisionProvider, VisionRequest, parse_choice_suggestion,
+    parse_field_suggestion, parse_tag_suggestion, parse_title_suggestion, prompt_for_choice,
+    prompt_for_fields, prompt_for_tags, prompt_for_title,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
@@ -190,7 +190,8 @@ async fn process_ocr(
             })
             .unwrap_or_else(|| {
                 format!(
-                    "Transcribe page {} exactly. Preserve dates, invoice numbers, totals, names, and line breaks. Return only the OCR text.",
+                    "{}\n\nPage {}: transcribe exactly and return only OCR text.",
+                    DEFAULT_OCR_SYSTEM_PROMPT,
                     index + 1
                 )
             });

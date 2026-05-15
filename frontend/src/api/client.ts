@@ -2,7 +2,7 @@ import createClient from 'openapi-fetch';
 import type { paths } from './schema';
 
 export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
-export type Stage = 'ocr' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'fields';
+export type Stage = 'ocr' | 'ocr_fix' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'fields';
 export type ProcessingMode = 'review' | 'autopilot';
 export type AiProviderKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible';
 
@@ -284,6 +284,16 @@ export type Prompt = {
   created_at: string;
 };
 
+export type PromptUsage = {
+  prompt_id: string;
+  run_count: number;
+  job_count: number;
+  last_used_at?: string | null;
+  avg_duration_ms: number;
+  last_provider?: string | null;
+  last_model?: string | null;
+};
+
 export type PromptTestResponse = {
   provider: string;
   model: string;
@@ -421,6 +431,7 @@ export const api = {
     }),
   audit: () => request<{ items: AuditEvent[] }>('/api/audit'),
   prompts: () => request<{ items: Prompt[] }>('/api/prompts'),
+  promptUsage: () => request<{ items: PromptUsage[] }>('/api/prompts/usage'),
   createPrompt: (input: { stage: Stage; name: string; content: string; output_schema?: unknown; activate?: boolean }) =>
     request<{ id: string }>('/api/prompts', {
       method: 'POST',

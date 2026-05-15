@@ -234,10 +234,14 @@ rnj-1:8b
 Prompts are versioned per stage and managed from the `Prompts` UI. Creating a
 prompt creates a new immutable version; activating a version writes an audit
 event. Worker AI artifacts reference the active prompt ID used for the job.
+The Prompt Workbench shows the active prompt, older versions, prompt usage,
+stage help, test output, and version comparison so changes can be validated
+before activation.
 
 Default prompts exist for:
 
 - OCR
+- OCR post-processing
 - tags
 - title
 - correspondent

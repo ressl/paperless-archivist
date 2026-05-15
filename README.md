@@ -234,9 +234,28 @@ Paperless Archivist is past scaffolding: the current product path includes the
 Rust API, Rust worker, React + TypeScript UI, PostgreSQL 18 schema, Paperless
 REST integration, provider configuration, dashboard, OCR/tagging jobs, review
 flow, validation-gated autopilot, completion tags, audit events, and document
-chat. Product-phase additions now include a prompt test runner, batch review
-actions, provider usage/cost/latency reporting, audit CSV export, tag-based
-workflow rules, and an optional Paperless-ngx login bridge.
+chat. Product-phase additions now include an advanced Prompt Workbench, batch
+review actions, provider usage/cost/latency reporting, audit CSV export,
+tag-based workflow rules, and an optional Paperless-ngx login bridge.
+
+## Default Prompt Pack
+
+Archivist ships with versioned defaults for OCR, OCR post-processing, tagging,
+title generation, correspondent detection, document type detection, and custom
+field extraction. The prompts are installed into PostgreSQL by migrations,
+visible in the `Prompts` Workbench, and can be tested, compared, versioned, or
+replaced without rebuilding.
+
+The defaults are designed for Paperless archives rather than generic chat:
+classification uses exact Paperless metadata names, workflow/control tags are
+excluded from business tagging, OCR returns raw text only, and structured stages
+return strict JSON that Rust validates before review or apply. See
+[Prompt Pack](docs/PROMPTS.md) for the stage-by-stage behavior.
+
+The Prompt Workbench shows the active prompt, all prior versions, usage counts,
+stage-specific help, safety notes, a test runner, and version comparison. Edits
+create new immutable versions, so teams can tune prompts and roll back without
+losing auditability.
 
 Some features were intentionally deferred from the initial product cut so the
 core workflow could stay reliable and auditable. They are the next

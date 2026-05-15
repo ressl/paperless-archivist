@@ -192,6 +192,17 @@ pub struct PromptRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptUsageRecord {
+    pub prompt_id: Uuid,
+    pub run_count: i64,
+    pub job_count: i64,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub avg_duration_ms: f64,
+    pub last_provider: Option<String>,
+    pub last_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentChatSessionRecord {
     pub id: Uuid,
     pub title: String,
@@ -1250,6 +1261,52 @@ pub async fn get_active_prompt(pool: &DbPool, stage: Stage) -> Result<Option<Pro
     .fetch_optional(pool)
     .await?;
     row.map(prompt_from_row).transpose()
+}
+
+pub async fn list_prompt_usage(pool: &DbPool) -> Result<Vec<PromptUsageRecord>> {
+    let rows = sqlx::query(
+        r#"
+        select ai.prompt_id,
+               count(distinct ai.run_id)::bigint as run_count,
+               count(distinct ai.job_id)::bigint as job_count,
+               max(ai.created_at) as last_used_at,
+               coalesce(avg(ai.duration_ms), 0)::double precision as avg_duration_ms,
+               (
+                 select latest.provider
+                   from ai_artifacts latest
+                  where latest.prompt_id = ai.prompt_id
+                  order by latest.created_at desc
+                  limit 1
+               ) as last_provider,
+               (
+                 select latest.model
+                   from ai_artifacts latest
+                  where latest.prompt_id = ai.prompt_id
+                  order by latest.created_at desc
+                  limit 1
+               ) as last_model
+          from ai_artifacts ai
+         where ai.prompt_id is not null
+         group by ai.prompt_id
+         order by max(ai.created_at) desc
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PromptUsageRecord {
+                prompt_id: row.try_get("prompt_id")?,
+                run_count: row.try_get("run_count")?,
+                job_count: row.try_get("job_count")?,
+                last_used_at: row.try_get("last_used_at")?,
+                avg_duration_ms: row.try_get("avg_duration_ms")?,
+                last_provider: row.try_get("last_provider")?,
+                last_model: row.try_get("last_model")?,
+            })
+        })
+        .collect()
 }
 
 pub async fn create_prompt(

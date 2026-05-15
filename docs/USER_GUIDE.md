@@ -47,6 +47,9 @@ break-glass account or replace it with named admin accounts after first setup.
 Open `Settings` and configure:
 
 - `Paperless Base URL`: the URL the Archivist API can reach.
+  This must point to Paperless-ngx, not to the Paperless Archivist UI. In
+  Docker Compose this is usually `http://paperless:8000`; in Kubernetes use the
+  Paperless service DNS name that is reachable from the Archivist API pod.
 - `Paperless API token`: a Paperless token for a user with permission to read
   documents and update metadata/tags.
 - `Timeout`: how long backend/worker calls may wait for Paperless.
@@ -184,15 +187,37 @@ items failed.
 Use review mode while tuning prompts, models, confidence thresholds, and tag
 rules.
 
-## Prompt Testing
+## Prompt Workbench
 
-Use `Prompts` to test prompt content before activating it:
+Archivist includes default prompts for:
 
-1. Select the stage.
-2. Paste or edit the prompt.
-3. Provide sample text or a Paperless document ID.
-4. Click `Test Prompt`.
-5. Review raw model output, parsed output, validation errors, and duration.
+- OCR and OCR post-processing
+- tags
+- title
+- correspondent
+- document type
+- custom fields
+
+The defaults are versioned database records. They are strict by design:
+classification prompts use exact Paperless metadata names, OCR prompts return
+plain text, and structured stages return JSON for backend validation. See
+[Prompt Pack](PROMPTS.md) for details.
+
+Use `Prompts` to inspect, edit, compare, and test prompt content before
+activating it:
+
+1. Select the stage in the left pipeline list.
+2. Review the active prompt and its version history.
+3. Hover or focus the info icon for the stage purpose, expected output, safety
+   rules, and examples.
+4. Edit the prompt content. Saving creates a new immutable version; it never
+   overwrites older versions.
+5. Compare the editor content with another version when tuning changes.
+6. Provide sample text or a Paperless document ID and click `Test Current
+   Editor`.
+7. Review raw model output, parsed output, validation errors, warnings,
+   provider/model, and duration.
+8. Activate the version only after the test result matches your archive rules.
 
 Prompt tests call the configured model provider and write audit events, but they
 never apply changes to Paperless.

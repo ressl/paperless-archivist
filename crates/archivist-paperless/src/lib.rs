@@ -39,7 +39,9 @@ impl PaperlessClient {
     }
 
     pub async fn test_connection(&self) -> Result<PaperlessStatus> {
-        let url = self.url("api/")?;
+        let mut url = self.url("api/documents/")?;
+        url.query_pairs_mut().append_pair("page_size", "1");
+        let target_url = url.to_string();
         let response = self
             .client
             .get(url)
@@ -47,7 +49,15 @@ impl PaperlessClient {
             .await
             .context("connect to Paperless")?;
         if !response.status().is_success() {
-            return Err(anyhow!("Paperless returned {}", response.status()));
+            let status = response.status();
+            let hint = if matches!(status.as_u16(), 404..=406) {
+                " Check that the Paperless Base URL points to the Paperless-ngx REST service and that the reverse proxy allows API requests with token authentication."
+            } else {
+                ""
+            };
+            return Err(anyhow!(
+                "Paperless returned {status} for {target_url}.{hint}"
+            ));
         }
         Ok(PaperlessStatus { ok: true })
     }

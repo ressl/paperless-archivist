@@ -102,12 +102,13 @@ The browser never contacts Ollama directly.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/prompts` | List prompt versions per stage. |
+| `GET` | `/api/prompts/usage` | Return read-only usage counts and last model/provider per prompt version. |
 | `POST` | `/api/prompts` | Create a new immutable prompt version. |
 | `POST` | `/api/prompts/test` | Test a prompt against sample text or a Paperless document without applying changes. |
 | `POST` | `/api/prompts/{id}/activate` | Activate a prompt version for its stage. |
 
-Prompt stages are `ocr`, `title`, `document_type`, `correspondent`, `tags`, and
-`fields`. Creating or activating prompts writes audit events.
+Prompt stages are `ocr`, `ocr_fix`, `title`, `document_type`, `correspondent`,
+`tags`, and `fields`. Creating or activating prompts writes audit events.
 
 `POST /api/prompts/test` calls the configured text provider, parses the output
 for the selected stage, runs Rust-side validation, returns raw and parsed

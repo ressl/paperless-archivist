@@ -1,11 +1,14 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Activity,
+  AlertTriangle,
   Archive,
   Check,
   ClipboardList,
   Database,
   FileText,
+  GitCompare,
+  History,
   Info,
   KeyRound,
   ListChecks,
@@ -40,6 +43,7 @@ import {
   OllamaInstalledModel,
   Prompt,
   PromptTestResponse,
+  PromptUsage,
   ReviewItem,
   Role,
   RuntimeSettings,
@@ -72,6 +76,7 @@ import {
   withModelDefaults
 } from './modelCatalog';
 import hardwareRecommendations from './hardwareRecommendations.json';
+import { promptStageHelp, promptStageOrder, type PromptStageHelp } from './data/promptHelp';
 
 type Tab = 'dashboard' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users';
 
@@ -527,6 +532,7 @@ function statusChartData(items: DashboardStatusCount[]) {
 function stageLabel(stage: string) {
   const labels: Record<string, string> = {
     ocr: 'OCR',
+    ocr_fix: 'OCR Fix',
     title: 'Title',
     document_type: 'Type',
     correspondent: 'Correspondent',
@@ -844,6 +850,7 @@ function Reviews({ setError }: { setError: (error: string | null) => void }) {
 
 function SettingsPage({ setError }: { setError: (error: string | null) => void }) {
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
+  const [savedSettings, setSavedSettings] = useState<RuntimeSettings | null>(null);
   const [token, setToken] = useState('');
   const [providerSecrets, setProviderSecrets] = useState<Record<string, string>>({});
   const [ollamaModels, setOllamaModels] = useState<Record<string, OllamaModelLoadState>>({});
@@ -906,6 +913,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
       .then((data) => {
         const nextSettings = withModelDefaults(data);
         setSettings(nextSettings);
+        setSavedSettings(nextSettings);
         refreshInstalledOllamaModels(nextSettings);
       })
       .catch((err) => setError(err.message));
@@ -956,6 +964,15 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
     }));
   const selectedDefaultProvider = defaultProvider(settings);
   const runPaperlessTest = () => {
+    if (savedSettings && paperlessSettingsChanged(settings, savedSettings, token)) {
+      setPaperlessTest(paperlessUnsavedSettingsFeedback(settings, savedSettings, token));
+      return;
+    }
+    const baseUrlProblem = paperlessBaseUrlProblem(settings.paperless.base_url);
+    if (baseUrlProblem) {
+      setPaperlessTest(paperlessBaseUrlProblemFeedback(baseUrlProblem));
+      return;
+    }
     setPaperlessTest({
       status: 'running',
       title: 'Paperless-Test läuft',
@@ -998,6 +1015,9 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
             Base URL
             <input value={settings.paperless.base_url} onChange={(event) => update((s) => ({ ...s, paperless: { ...s.paperless, base_url: event.target.value } }))} />
           </label>
+          <p className="field-hint">
+            Use the URL the Archivist backend can reach. Do not enter this Archivist UI URL here.
+          </p>
           <label>
             API token
             <input value={token} type="password" onChange={(event) => setToken(event.target.value)} placeholder={settings.paperless.token_secret_id ? 'Configured' : ''} />
@@ -1209,6 +1229,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
           onClick={() => run(setBusy, setError, () => api.saveSettings(settings, token, providerSecrets).then((saved) => {
             const nextSettings = withModelDefaults(saved);
             setSettings(nextSettings);
+            setSavedSettings(nextSettings);
             setToken('');
             setProviderSecrets({});
             setResult('Saved');
@@ -1269,6 +1290,71 @@ function paperlessTestFailure(error?: string): ConnectionTestState {
   };
 }
 
+function paperlessUnsavedSettingsFeedback(
+  settings: RuntimeSettings,
+  savedSettings: RuntimeSettings,
+  token: string
+): ConnectionTestState {
+  const changedFields = [
+    settings.paperless.base_url.trim() !== savedSettings.paperless.base_url.trim() ? 'Base URL' : null,
+    settings.paperless.timeout_seconds !== savedSettings.paperless.timeout_seconds ? 'Timeout' : null,
+    settings.paperless.login_bridge_enabled !== savedSettings.paperless.login_bridge_enabled ? 'Login bridge' : null,
+    token.trim() ? 'API token' : null
+  ].filter(Boolean);
+  return {
+    status: 'error',
+    title: 'Paperless-Settings noch nicht gespeichert',
+    description: 'Der Verbindungstest nutzt gespeicherte Settings. Deine aktuellen Eingaben sind noch nicht aktiv.',
+    hints: [
+      `Geändert: ${changedFields.join(', ')}.`,
+      'Klicke zuerst auf Save und starte danach den Paperless-Test erneut.',
+      `Aktuell gespeichert ist: ${savedSettings.paperless.base_url || '(leer)'}`
+    ],
+    details: `Unsaved Paperless settings. Current Base URL: ${settings.paperless.base_url || '(empty)'}; saved Base URL: ${savedSettings.paperless.base_url || '(empty)'}`
+  };
+}
+
+function paperlessBaseUrlProblem(baseUrl: string): { reason: 'invalid' | 'self'; baseUrl: string; appOrigin?: string } | null {
+  const trimmed = baseUrl.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { reason: 'invalid', baseUrl: trimmed };
+  }
+  if (typeof window !== 'undefined' && parsed.host === window.location.host) {
+    return { reason: 'self', baseUrl: trimmed, appOrigin: window.location.origin };
+  }
+  return null;
+}
+
+function paperlessBaseUrlProblemFeedback(problem: { reason: 'invalid' | 'self'; baseUrl: string; appOrigin?: string }): ConnectionTestState {
+  if (problem.reason === 'invalid') {
+    return {
+      status: 'error',
+      title: 'Paperless Base URL ist ungültig',
+      description: 'Die Paperless Base URL muss eine vollständige http- oder https-URL sein.',
+      hints: [
+        'Trage die URL ein, die der Archivist-Backend-Pod oder Container erreichen kann.',
+        'Beispiel in Docker Compose: http://paperless:8000',
+        'Speichere die Settings und starte den Test erneut.'
+      ],
+      details: `Invalid Paperless Base URL: ${problem.baseUrl || '(empty)'}`
+    };
+  }
+  return {
+    status: 'error',
+    title: 'Paperless Base URL zeigt auf Archivist',
+    description: 'Die eingetragene Paperless Base URL ist die Archivist-App selbst. Dadurch testet Archivist gegen seine eigene API und nicht gegen Paperless-ngx.',
+    hints: [
+      'Trage die Paperless-ngx URL ein, nicht die Archivist-URL.',
+      'In Kubernetes ist meist der interne Paperless-Service-DNS-Name richtig, nicht die Archivist-Ingress-URL.',
+      'Speichere die Settings und starte den Test erneut.'
+    ],
+    details: `Paperless Base URL points to Archivist itself: ${problem.baseUrl}. App origin: ${problem.appOrigin ?? 'unknown'}`
+  };
+}
+
 function providerTestSuccess(provider: ModelProviderDescriptor): ConnectionTestState {
   const providerName = provider.name || provider.kind;
   const isOllama = provider.kind === 'ollama';
@@ -1297,6 +1383,9 @@ function providerTestFailure(provider: ModelProviderDescriptor, error?: string):
 
 function paperlessProblemDescription(details: string) {
   const lower = details.toLowerCase();
+  if (lower.includes('points to the paperless-ngx service') || lower.includes('406') || lower.includes('not acceptable')) {
+    return 'Archivist erreicht zwar einen Server, aber dieser akzeptiert die Paperless REST-Anfrage nicht.';
+  }
   if (lower.includes('api token') || lower.includes('secret') || lower.includes('token')) {
     return 'Archivist konnte keinen gültigen Paperless API-Token verwenden.';
   }
@@ -1317,6 +1406,14 @@ function paperlessProblemDescription(details: string) {
 
 function paperlessProblemHints(details: string) {
   const lower = details.toLowerCase();
+  if (lower.includes('points to the paperless-ngx service') || lower.includes('406') || lower.includes('not acceptable')) {
+    return [
+      'Prüfe, ob die Base URL wirklich die Paperless-ngx REST API erreicht.',
+      'Falls die Browser-URL über SSO, Proxy-Regeln oder Content-Negotiation läuft, nutze stattdessen die interne Paperless-Service-URL.',
+      'Für Kubernetes ist meist eine interne Service-URL besser als die externe Browser-URL.',
+      'Speichere die Settings vor dem erneuten Test.'
+    ];
+  }
   if (lower.includes('api token') || lower.includes('secret') || lower.includes('token') || lower.includes('401') || lower.includes('403')) {
     return [
       'Erzeuge in Paperless einen neuen API-Token für einen berechtigten User.',
@@ -1343,6 +1440,16 @@ function paperlessProblemHints(details: string) {
     'Prüfe Container-Netzwerk, DNS-Namen, Protokoll http/https und Proxy-Konfiguration.',
     'Speichere geänderte Settings vor dem nächsten Test.'
   ];
+}
+
+function paperlessSettingsChanged(settings: RuntimeSettings, savedSettings: RuntimeSettings, token: string) {
+  return (
+    settings.paperless.base_url.trim() !== savedSettings.paperless.base_url.trim() ||
+    (settings.paperless.public_url ?? '').trim() !== (savedSettings.paperless.public_url ?? '').trim() ||
+    settings.paperless.timeout_seconds !== savedSettings.paperless.timeout_seconds ||
+    settings.paperless.login_bridge_enabled !== savedSettings.paperless.login_bridge_enabled ||
+    Boolean(token.trim())
+  );
 }
 
 function providerProblemDescription(provider: ModelProviderDescriptor, details: string) {
@@ -1626,117 +1733,501 @@ function HardwareRecommendationInfo() {
 
 function Prompts({ setError }: { setError: (error: string | null) => void }) {
   const [items, setItems] = useState<Prompt[]>([]);
-  const [stage, setStage] = useState<Stage>('tags');
-  const [name, setName] = useState('default');
-  const [content, setContent] = useState('');
+  const [usage, setUsage] = useState<PromptUsage[]>([]);
+  const [selectedStage, setSelectedStage] = useState<Stage>('tags');
+  const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
+  const [comparePromptId, setComparePromptId] = useState<string | null>(null);
+  const [editorName, setEditorName] = useState('default');
+  const [editorContent, setEditorContent] = useState('');
   const [activate, setActivate] = useState(true);
   const [sampleText, setSampleText] = useState('');
   const [sampleDocumentId, setSampleDocumentId] = useState('');
   const [testResult, setTestResult] = useState<PromptTestResponse | null>(null);
   const [testing, setTesting] = useState(false);
-  const stages: Stage[] = ['ocr', 'tags', 'title', 'correspondent', 'document_type', 'fields'];
-  const load = () => api.prompts().then((data) => setItems(data.items)).catch((err) => setError(err.message));
+  const [saving, setSaving] = useState(false);
+  const [activating, setActivating] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const usageByPromptId = useMemo(() => {
+    const byId = new Map<string, PromptUsage>();
+    usage.forEach((entry) => byId.set(entry.prompt_id, entry));
+    return byId;
+  }, [usage]);
+  const stagePrompts = useMemo(
+    () =>
+      items
+        .filter((prompt) => prompt.stage === selectedStage)
+        .sort((left, right) => {
+          if (left.name !== right.name) return left.name.localeCompare(right.name);
+          return right.version - left.version;
+        }),
+    [items, selectedStage]
+  );
+  const activePrompt = useMemo(
+    () =>
+      [...stagePrompts]
+        .filter((prompt) => prompt.active)
+        .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())[0] ?? null,
+    [stagePrompts]
+  );
+  const selectedPrompt =
+    stagePrompts.find((prompt) => prompt.id === selectedPromptId) ?? activePrompt ?? stagePrompts[0] ?? null;
+  const comparePrompt = comparePromptId ? stagePrompts.find((prompt) => prompt.id === comparePromptId) ?? null : null;
+  const selectedUsage = selectedPrompt ? usageByPromptId.get(selectedPrompt.id) : undefined;
+  const promptDirty =
+    selectedPrompt == null ||
+    editorName.trim() !== selectedPrompt.name ||
+    editorContent.trimEnd() !== selectedPrompt.content.trimEnd();
+  const stageHelp = promptStageHelp[selectedStage];
+  const promptStats = promptTextStats(editorContent);
+  const diffStats = comparePrompt && selectedPrompt ? promptDiffStats(comparePrompt.content, editorContent) : null;
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [promptData, usageData] = await Promise.all([
+        api.prompts(),
+        api.promptUsage().catch(() => ({ items: [] as PromptUsage[] }))
+      ]);
+      setItems(promptData.items);
+      setUsage(usageData.items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load prompts');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     void load();
   }, []);
 
+  useEffect(() => {
+    if (stagePrompts.length === 0) {
+      setSelectedPromptId(null);
+      return;
+    }
+    if (!selectedPromptId || !stagePrompts.some((prompt) => prompt.id === selectedPromptId)) {
+      setSelectedPromptId(activePrompt?.id ?? stagePrompts[0].id);
+    }
+  }, [activePrompt?.id, selectedPromptId, stagePrompts]);
+
+  useEffect(() => {
+    if (selectedPrompt) {
+      setEditorName(selectedPrompt.name);
+      setEditorContent(selectedPrompt.content);
+      setActivate(true);
+    } else {
+      setEditorName('default');
+      setEditorContent('');
+      setActivate(true);
+    }
+    setComparePromptId((current) => {
+      if (current && stagePrompts.some((prompt) => prompt.id === current && prompt.id !== selectedPrompt?.id)) return current;
+      if (activePrompt && activePrompt.id !== selectedPrompt?.id) return activePrompt.id;
+      return stagePrompts.find((prompt) => prompt.id !== selectedPrompt?.id)?.id ?? null;
+    });
+    setTestResult(null);
+  }, [activePrompt, selectedPrompt?.id, stagePrompts]);
+
   return (
     <section className="page">
-      <PageHeader title="Prompts" />
-      <form className="prompt-form" onSubmit={(event) => {
-        event.preventDefault();
-        api.createPrompt({ stage, name, content, activate }).then(() => {
-          setContent('');
-          load();
-        }).catch((err) => setError(err.message));
-      }}>
-        <label>
-          Stage
-          <select value={stage} onChange={(event) => setStage(event.target.value as Stage)}>
-            {stages.map((entry) => <option key={entry} value={entry}>{entry}</option>)}
-          </select>
-        </label>
-        <label>
-          Name
-          <input value={name} onChange={(event) => setName(event.target.value)} />
-        </label>
-        <label className="wide">
-          Prompt content
-          <textarea value={content} onChange={(event) => setContent(event.target.value)} required />
-        </label>
-        <label>
-          Test document ID
-          <input value={sampleDocumentId} onChange={(event) => setSampleDocumentId(event.target.value)} placeholder="optional" />
-        </label>
-        <label className="wide">
-          Test sample text
-          <textarea value={sampleText} onChange={(event) => setSampleText(event.target.value)} placeholder="Optional; overrides document ID for prompt tests." />
-        </label>
-        <label className="inline">
-          <input type="checkbox" checked={activate} onChange={(event) => setActivate(event.target.checked)} />
-          Activate
-        </label>
-        <button className="primary-button"><Save size={16} /> Save Prompt</button>
-        <button
-          type="button"
-          disabled={testing || !content.trim()}
-          onClick={() => run(setTesting, setError, async () => {
-            const documentId = sampleDocumentId.trim() ? Number(sampleDocumentId) : null;
-            const result = await api.testPrompt({
-              stage,
-              content,
-              sample_text: sampleText.trim() || undefined,
-              paperless_document_id: documentId && Number.isFinite(documentId) ? documentId : null
-            });
-            setTestResult(result);
-          })}
-        >
-          <Play size={16} /> {testing ? 'Testing...' : 'Test Prompt'}
-        </button>
-      </form>
-      {testResult && (
-        <section className="test-result">
+      <div className="prompt-heading">
+        <PageHeader title="Prompt Workbench" />
+        <p>
+          Review active prompts, tune stage-specific behavior, test outputs, and roll back safely. Edits create a new
+          immutable version; older versions remain available.
+        </p>
+      </div>
+      <div className="prompt-workbench">
+        <aside className="prompt-stage-rail" aria-label="Prompt stages">
           <header>
-            <strong>{testResult.provider} / {testResult.model}</strong>
-            <span>{formatMs(testResult.duration_ms)}</span>
-            <Status value={testResult.validation_errors.length === 0 ? 'valid' : 'failed'} />
+            <strong>Pipeline Stages</strong>
+            <span>{items.length} versions</span>
           </header>
-          {testResult.validation_errors.length > 0 && (
-            <ul>
-              {testResult.validation_errors.map((error) => <li key={error}>{error}</li>)}
-            </ul>
+          {promptStageOrder.map((entry) => {
+            const help = promptStageHelp[entry];
+            const prompts = items.filter((prompt) => prompt.stage === entry);
+            const active = prompts.find((prompt) => prompt.active);
+            const usageCount = prompts.reduce((sum, prompt) => sum + (usageByPromptId.get(prompt.id)?.run_count ?? 0), 0);
+            return (
+              <button
+                type="button"
+                key={entry}
+                className={selectedStage === entry ? 'active' : ''}
+                onClick={() => {
+                  setSelectedStage(entry);
+                  setSelectedPromptId(null);
+                  setComparePromptId(null);
+                }}
+              >
+                <span>
+                  <strong>{help.label}</strong>
+                  <em>{active ? `${active.name} v${active.version}` : 'No prompt yet'}</em>
+                </span>
+                <small>{prompts.length} versions · {usageCount} runs</small>
+              </button>
+            );
+          })}
+        </aside>
+        <section className="prompt-editor-card">
+          <header className="prompt-card-header">
+            <div>
+              <div className="prompt-title-row">
+                <h3>{stageHelp.label}</h3>
+                <PromptInfoTooltip label={`${stageHelp.label} guidance`} help={stageHelp} />
+              </div>
+              <p>{stageHelp.purpose}</p>
+            </div>
+            <div className="prompt-header-status">
+              {selectedPrompt?.active ? <Status value="active" /> : <Status value="draft" />}
+              {promptDirty && <span className="dirty-pill">unsaved edits</span>}
+            </div>
+          </header>
+          {loading ? (
+            <div className="empty-state">Loading prompts...</div>
+          ) : (
+            <>
+              <div className="prompt-editor-grid">
+                <label>
+                  Version
+                  <select
+                    value={selectedPrompt?.id ?? ''}
+                    onChange={(event) => setSelectedPromptId(event.target.value || null)}
+                  >
+                    {stagePrompts.length === 0 && <option value="">New prompt</option>}
+                    {stagePrompts.map((prompt) => (
+                      <option key={prompt.id} value={prompt.id}>
+                        {promptOptionLabel(prompt)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Prompt name
+                  <input value={editorName} onChange={(event) => setEditorName(event.target.value)} />
+                </label>
+                <label className="inline prompt-activate-check">
+                  <input type="checkbox" checked={activate} onChange={(event) => setActivate(event.target.checked)} />
+                  Activate after save
+                </label>
+              </div>
+              <label className="prompt-editor-field">
+                Prompt content
+                <textarea
+                  value={editorContent}
+                  onChange={(event) => setEditorContent(event.target.value)}
+                  required
+                  spellCheck={false}
+                />
+              </label>
+              <div className="prompt-editor-actions">
+                <button
+                  className="primary-button"
+                  disabled={saving || !editorName.trim() || !editorContent.trim()}
+                  onClick={() =>
+                    run(setSaving, setError, async () => {
+                      const result = await api.createPrompt({
+                        stage: selectedStage,
+                        name: editorName.trim(),
+                        content: editorContent.trimEnd(),
+                        output_schema: selectedPrompt?.output_schema,
+                        activate
+                      });
+                      await load();
+                      setSelectedPromptId(result.id);
+                    })
+                  }
+                >
+                  <Save size={16} /> {saving ? 'Saving...' : 'Save New Version'}
+                </button>
+                <button
+                  disabled={!selectedPrompt || !promptDirty}
+                  onClick={() => {
+                    setEditorName(selectedPrompt?.name ?? 'default');
+                    setEditorContent(selectedPrompt?.content ?? '');
+                  }}
+                >
+                  <RotateCcw size={16} /> Reset
+                </button>
+                <button
+                  disabled={activating || !selectedPrompt || selectedPrompt.active}
+                  onClick={() =>
+                    selectedPrompt &&
+                    run(setActivating, setError, async () => {
+                      await api.activatePrompt(selectedPrompt.id);
+                      await load();
+                    })
+                  }
+                >
+                  <Check size={16} /> {activating ? 'Activating...' : 'Activate Selected'}
+                </button>
+              </div>
+              <div className="prompt-stats-grid">
+                <PromptStat label="Lines" value={promptStats.lines} />
+                <PromptStat label="Words" value={promptStats.words} />
+                <PromptStat label="Characters" value={promptStats.characters} />
+                <PromptStat label="Runs" value={selectedUsage?.run_count ?? 0} />
+              </div>
+            </>
           )}
-          <details open>
-            <summary>Parsed output</summary>
-            <pre>{JSON.stringify(testResult.parsed ?? null, null, 2)}</pre>
-          </details>
-          <details>
-            <summary>Raw model response</summary>
-            <pre>{testResult.raw_text}</pre>
-          </details>
         </section>
-      )}
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>Stage</th><th>Name</th><th>Version</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
-          <tbody>
-            {items.map((prompt) => (
-              <tr key={prompt.id}>
-                <td>{prompt.stage}</td>
-                <td>{prompt.name}</td>
-                <td>{prompt.version}</td>
-                <td><Status value={prompt.active ? 'active' : 'inactive'} /></td>
-                <td>{new Date(prompt.created_at).toLocaleString()}</td>
-                <td>
-                  {!prompt.active && <button title="Activate prompt" onClick={() => api.activatePrompt(prompt.id).then(load).catch((err) => setError(err.message))}><Check size={16} /> Activate</button>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <aside className="prompt-lab-card">
+          <section>
+            <div className="prompt-section-title">
+              <strong>Stage Guide</strong>
+              <PromptInfoTooltip label="Prompt editing rules" help={stageHelp} compact />
+            </div>
+            <p>{stageHelp.expectedOutput}</p>
+            <ul>
+              {stageHelp.safety.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          </section>
+          <section>
+            <div className="prompt-section-title">
+              <strong>Usage</strong>
+              <History size={16} />
+            </div>
+            {selectedUsage ? (
+              <dl className="prompt-usage">
+                <div><dt>Runs</dt><dd>{selectedUsage.run_count}</dd></div>
+                <div><dt>Jobs</dt><dd>{selectedUsage.job_count}</dd></div>
+                <div><dt>Last used</dt><dd>{selectedUsage.last_used_at ? new Date(selectedUsage.last_used_at).toLocaleString() : '-'}</dd></div>
+                <div><dt>Model</dt><dd>{[selectedUsage.last_provider, selectedUsage.last_model].filter(Boolean).join(' / ') || '-'}</dd></div>
+                <div><dt>Avg duration</dt><dd>{formatMs(selectedUsage.avg_duration_ms)}</dd></div>
+              </dl>
+            ) : (
+              <p className="field-hint">This prompt version has not been used by a worker run yet.</p>
+            )}
+          </section>
+          <section>
+            <div className="prompt-section-title">
+              <strong>Version History</strong>
+              <span>{stagePrompts.length}</span>
+            </div>
+            <div className="prompt-version-list">
+              {stagePrompts.map((prompt) => (
+                <button
+                  key={prompt.id}
+                  type="button"
+                  className={prompt.id === selectedPrompt?.id ? 'active' : ''}
+                  onClick={() => setSelectedPromptId(prompt.id)}
+                >
+                  <span>{prompt.name} v{prompt.version}</span>
+                  <small>{prompt.active ? 'active' : new Date(prompt.created_at).toLocaleDateString()}</small>
+                </button>
+              ))}
+              {stagePrompts.length === 0 && <p className="field-hint">No prompt exists for this stage yet.</p>}
+            </div>
+          </section>
+        </aside>
+      </div>
+      <div className="prompt-lab-grid">
+        <section className="prompt-test-card">
+          <header className="prompt-section-title">
+            <strong>Prompt Test Runner</strong>
+            <span>{stageHelp.shortLabel}</span>
+          </header>
+          <div className="prompt-test-grid">
+            <label>
+              Test document ID
+              <input value={sampleDocumentId} onChange={(event) => setSampleDocumentId(event.target.value)} placeholder="optional" />
+            </label>
+            <label className="wide">
+              Test sample text
+              <textarea
+                value={sampleText}
+                onChange={(event) => setSampleText(event.target.value)}
+                placeholder="Optional; overrides document ID for prompt tests."
+              />
+            </label>
+          </div>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={testing || !editorContent.trim()}
+            onClick={() => run(setTesting, setError, async () => {
+              const documentId = sampleDocumentId.trim() ? Number(sampleDocumentId) : null;
+              const result = await api.testPrompt({
+                stage: selectedStage,
+                content: editorContent,
+                sample_text: sampleText.trim() || undefined,
+                paperless_document_id: documentId && Number.isFinite(documentId) ? documentId : null
+              });
+              setTestResult(result);
+            })}
+          >
+            <Play size={16} /> {testing ? 'Testing...' : 'Test Current Editor'}
+          </button>
+          {testResult && (
+            <section className="test-result">
+              <header>
+                <strong>{testResult.provider} / {testResult.model}</strong>
+                <span>{formatMs(testResult.duration_ms)}</span>
+                <Status value={testResult.validation_errors.length === 0 ? 'valid' : 'failed'} />
+              </header>
+              {testResult.validation_errors.length > 0 && (
+                <ul>
+                  {testResult.validation_errors.map((error) => <li key={error}>{error}</li>)}
+                </ul>
+              )}
+              {testResult.warnings.length > 0 && (
+                <ul className="prompt-warning-list">
+                  {testResult.warnings.map((warning) => <li key={warning}><AlertTriangle size={14} /> {warning}</li>)}
+                </ul>
+              )}
+              <details open>
+                <summary>Parsed output</summary>
+                <pre>{JSON.stringify(testResult.parsed ?? null, null, 2)}</pre>
+              </details>
+              <details>
+                <summary>Raw model response</summary>
+                <pre>{testResult.raw_text}</pre>
+              </details>
+            </section>
+          )}
+        </section>
+        <section className="prompt-compare-card">
+          <header className="prompt-section-title">
+            <strong>Version Compare</strong>
+            <GitCompare size={16} />
+          </header>
+          <label>
+            Compare against
+            <select value={comparePromptId ?? ''} onChange={(event) => setComparePromptId(event.target.value || null)}>
+              <option value="">No comparison</option>
+              {stagePrompts
+                .filter((prompt) => prompt.id !== selectedPrompt?.id)
+                .map((prompt) => (
+                  <option key={prompt.id} value={prompt.id}>{promptOptionLabel(prompt)}</option>
+                ))}
+            </select>
+          </label>
+          {diffStats ? (
+            <>
+              <div className="prompt-diff-summary">
+                <PromptStat label="Changed lines" value={diffStats.changedLines} />
+                <PromptStat label="Added lines" value={diffStats.addedLines} />
+                <PromptStat label="Removed lines" value={diffStats.removedLines} />
+              </div>
+              <div className="prompt-diff">
+                <div>
+                  <strong>{comparePrompt?.name} v{comparePrompt?.version}</strong>
+                  <pre>{comparePrompt?.content}</pre>
+                </div>
+                <div>
+                  <strong>Current editor</strong>
+                  <pre>{editorContent}</pre>
+                </div>
+              </div>
+            </>
+          ) : (
+            <p className="field-hint">Select another version to compare it with the current editor content.</p>
+          )}
+        </section>
       </div>
     </section>
+  );
+}
+
+function promptOptionLabel(prompt: Prompt) {
+  return `${prompt.name} v${prompt.version}${prompt.active ? ' (active)' : ''}`;
+}
+
+function promptTextStats(value: string) {
+  const trimmed = value.trim();
+  return {
+    lines: value ? value.split(/\r?\n/).length : 0,
+    words: trimmed ? trimmed.split(/\s+/).length : 0,
+    characters: value.length
+  };
+}
+
+function promptDiffStats(before: string, after: string) {
+  const beforeLines = before.split(/\r?\n/);
+  const afterLines = after.split(/\r?\n/);
+  const max = Math.max(beforeLines.length, afterLines.length);
+  let changedLines = 0;
+  for (let index = 0; index < max; index += 1) {
+    if ((beforeLines[index] ?? '') !== (afterLines[index] ?? '')) changedLines += 1;
+  }
+  return {
+    changedLines,
+    addedLines: Math.max(afterLines.length - beforeLines.length, 0),
+    removedLines: Math.max(beforeLines.length - afterLines.length, 0)
+  };
+}
+
+function PromptStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="prompt-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function PromptInfoTooltip({
+  label,
+  help,
+  compact
+}: {
+  label: string;
+  help: PromptStageHelp;
+  compact?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const tooltipId = useId();
+  const shellRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
+      if (shellRef.current && !shellRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('touchstart', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('touchstart', onPointerDown);
+    };
+  }, [open]);
+
+  return (
+    <span
+      className="tooltip-shell prompt-tooltip-shell"
+      ref={shellRef}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        className="info-button"
+        aria-label={label}
+        aria-describedby={open ? tooltipId : undefined}
+        onClick={() => setOpen((value) => !value)}
+        onFocus={() => setOpen(true)}
+      >
+        <Info size={16} />
+      </button>
+      {open && (
+        <span className={`prompt-info-tooltip${compact ? ' compact' : ''}`} id={tooltipId} role="tooltip">
+          <strong>{help.label}</strong>
+          <span>{help.purpose}</span>
+          {!compact && (
+            <>
+              <em>{help.expectedOutput}</em>
+              <ul>
+                {help.safety.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </>
+          )}
+        </span>
+      )}
+    </span>
   );
 }
 

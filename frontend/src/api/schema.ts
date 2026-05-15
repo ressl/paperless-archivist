@@ -735,6 +735,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/prompts/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Prompt usage summaries */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items?: components["schemas"]["PromptUsage"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/prompts/{id}/activate": {
         parameters: {
             query?: never;
@@ -1994,6 +2031,20 @@ export interface components {
             active: boolean;
             /** Format: date-time */
             created_at: string;
+        };
+        PromptUsage: {
+            /** Format: uuid */
+            prompt_id: string;
+            /** Format: int64 */
+            run_count: number;
+            /** Format: int64 */
+            job_count: number;
+            /** Format: date-time */
+            last_used_at?: string | null;
+            /** Format: double */
+            avg_duration_ms: number;
+            last_provider?: string | null;
+            last_model?: string | null;
         };
         TestPromptRequest: {
             stage: components["schemas"]["Stage"];

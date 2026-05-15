@@ -13,6 +13,7 @@ Archivist.
 | AI coding agent | [AI Agent Guide](AI_AGENT_GUIDE.md) | Repository map, safety boundaries, implementation checklist |
 | API integrator | [API Reference](API_REFERENCE.md) | Endpoints, auth, request/response behavior |
 | Security reviewer | [Security Design](SECURITY_DESIGN.md) | Auth, RBAC, sessions, CSRF, secrets, audit boundaries |
+| Prompt author | [Prompt Pack](PROMPTS.md) | Default prompts, output contracts, upgrade behavior |
 
 ## Product And Architecture
 
@@ -23,6 +24,7 @@ Archivist.
 - [PostgreSQL 18 Design](POSTGRESQL_18_DESIGN.md)
 - [Frontend Design](FRONTEND_DESIGN.md)
 - [Branding](BRANDING.md)
+- [Prompt Pack](PROMPTS.md)
 
 ## How To Read The Docs
 

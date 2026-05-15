@@ -25,7 +25,7 @@ use archivist_db::{
     get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
     insert_document_chat_sources, list_allowed_named_entities, list_allowed_tag_names,
     list_audit_events, list_custom_fields, list_document_chat_messages,
-    list_document_chat_sessions, list_inventory, list_prompts, list_reviews,
+    list_document_chat_sessions, list_inventory, list_prompt_usage, list_prompts, list_reviews,
     list_secret_references, list_sessions, list_users, metrics_snapshot as db_metrics_snapshot,
     migrate, queue_missing_stage, record_login_failure, record_login_success, resolve_secret,
     review_decision, revoke_session_by_admin, search_document_chat_candidates, set_user_enabled,
@@ -144,6 +144,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/secret-references", get(secret_references))
         .route("/prompts", get(prompts).post(create_prompt_endpoint))
+        .route("/prompts/usage", get(prompt_usage))
         .route("/prompts/test", post(test_prompt_endpoint))
         .route("/prompts/{id}/activate", post(activate_prompt_endpoint))
         .route("/paperless/sync-metadata", post(sync_paperless))
@@ -912,6 +913,16 @@ async fn prompts(State(state): State<AppState>, auth: Authenticated) -> ApiResul
     Ok(Json(json!({ "items": list_prompts(&state.pool).await? })))
 }
 
+async fn prompt_usage(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadSettings)?;
+    Ok(Json(
+        json!({ "items": list_prompt_usage(&state.pool).await? }),
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 struct CreatePromptRequest {
     stage: Stage,
@@ -1135,7 +1146,16 @@ async fn build_prompt_test_chat_request(
             ),
             temperature: 0.0,
         }),
-        Stage::OcrFix | Stage::Apply => Err(anyhow!(
+        Stage::OcrFix => Ok(ChatRequest {
+            model: String::new(),
+            system_prompt: String::new(),
+            user_prompt: format!(
+                "Test this OCR post-processing prompt against sample OCR text. Return corrected text only.\n\nOCR text:\n{}",
+                sample_text.chars().take(12_000).collect::<String>()
+            ),
+            temperature: 0.0,
+        }),
+        Stage::Apply => Err(anyhow!(
             "prompt testing is not supported for stage {}",
             request.stage
         )),
@@ -1264,12 +1284,12 @@ async fn parse_prompt_test_output(
                 warnings: Vec::new(),
             },
         },
-        Stage::Ocr => PromptTestParsed {
+        Stage::Ocr | Stage::OcrFix => PromptTestParsed {
             parsed: Some(json!({ "content": text })),
             validation_errors: Vec::new(),
             warnings: Vec::new(),
         },
-        Stage::OcrFix | Stage::Apply => PromptTestParsed {
+        Stage::Apply => PromptTestParsed {
             parsed: None,
             validation_errors: vec![format!("unsupported stage: {stage}")],
             warnings: Vec::new(),
