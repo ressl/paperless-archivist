@@ -185,11 +185,14 @@ More deployment options:
 
 | Guide | Audience |
 | --- | --- |
+| [Installation Guide](docs/INSTALLATION.md) | First install, Compose, Kubernetes, local development |
 | [User Guide](docs/USER_GUIDE.md) | Operators, reviewers, and admins using the UI |
+| [Feature Reference](docs/FEATURE_REFERENCE.md) | Complete product capability map |
 | [Operations Guide](docs/OPERATIONS.md) | Deploying, backing up, monitoring, and troubleshooting |
 | [API Reference](docs/API_REFERENCE.md) | API clients and integration authors |
-| [Security Design](docs/SECURITY_DESIGN.md) and [Security Policy](SECURITY.md) | Security review and vulnerability reporting |
+| [Security Guide](docs/SECURITY.md), [Security Design](docs/SECURITY_DESIGN.md), and [Security Policy](SECURITY.md) | Secure operation, review, and vulnerability reporting |
 | [AI Agent Guide](docs/AI_AGENT_GUIDE.md) | AI coding agents and contributors |
+| [FAQ](docs/FAQ.md) and [Troubleshooting](docs/TROUBLESHOOTING.md) | Common questions and failure modes |
 | [Stability Policy](docs/STABILITY.md) | v1.0 compatibility and support expectations |
 | [Accessibility Audit](docs/ACCESSIBILITY.md) | Keyboard, focus, tooltip, and screen-reader checks |
 | [Performance Guide](docs/PERFORMANCE.md) | Large archive sizing and benchmark workflow |

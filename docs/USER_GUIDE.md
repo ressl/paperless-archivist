@@ -4,6 +4,10 @@ This guide explains how to use Paperless Archivist after it is installed. It is
 written for operators, reviewers, and administrators who need to run a safe
 document AI workflow around Paperless-ngx.
 
+For first installation, start with [`INSTALLATION.md`](INSTALLATION.md). For
+errors and failure modes, use [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md). For a
+complete capability map, use [`FEATURE_REFERENCE.md`](FEATURE_REFERENCE.md).
+
 ## What Archivist Does
 
 Paperless Archivist connects to Paperless-ngx through the Paperless REST API and

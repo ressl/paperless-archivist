@@ -13,6 +13,7 @@ Use this checklist before tagging a GA release.
 - [ ] `npm --prefix frontend run accessibility:check`
 - [ ] `npm --prefix frontend run typecheck`
 - [ ] `npm --prefix frontend run build`
+- [ ] `node scripts/verify/docs_link_check.mjs`
 - [ ] `docker compose --env-file deploy/compose/.env.example -f deploy/compose/docker-compose.yml config`
 - [ ] `docker compose --env-file deploy/compose/.env.example -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.external-postgres.yml config`
 - [ ] `kubectl kustomize deploy/kubernetes/base`
