@@ -148,6 +148,7 @@ const defaultCounts: Counts = {
   missing_title: 0,
   missing_correspondent: 0,
   missing_document_type: 0,
+  missing_document_date: 0,
   missing_fields: 0,
   waiting_review: 0,
   failed: 0,
@@ -705,7 +706,7 @@ const defaultDashboardRanges: Array<{ key: DashboardRange; label: string }> = [
   { key: 'all', label: 'All' }
 ];
 
-const defaultStageStatus = ['ocr', 'title', 'document_type', 'correspondent', 'tags', 'fields'].map((stage) => ({
+const defaultStageStatus = ['ocr', 'title', 'document_type', 'correspondent', 'document_date', 'tags', 'fields'].map((stage) => ({
   stage,
   complete: 0,
   pending: 0,
@@ -761,6 +762,7 @@ function stageLabel(stage: string) {
     ocr_fix: 'OCR Fix',
     title: 'Title',
     document_type: 'Type',
+    document_date: 'Date',
     correspondent: 'Correspondent',
     tags: 'Tags',
     fields: 'Fields',
@@ -858,6 +860,7 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
               <th>Tags</th>
               <th>Title</th>
               <th>Type</th>
+              <th>Date</th>
               <th>Run</th>
               <th>Actions</th>
             </tr>
@@ -872,6 +875,7 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
                 <td><Status value={item.tagging_status} /></td>
                 <td><Status value={item.title_status} /></td>
                 <td><Status value={item.document_type_status} /></td>
+                <td><Status value={item.document_date_status} /> {item.document_date ?? ''}</td>
                 <td>{item.current_run_status || '-'}</td>
                 <td className="row-actions">
                   <button title="Trigger OCR" onClick={() => api.triggerDocument(item.paperless_document_id, ['ocr'], 'manual_review').then(load).catch((err) => setError(err.message))}>
@@ -1085,28 +1089,246 @@ function Reviews({ setError }: { setError: (error: string | null) => void }) {
       </div>
       <div className="review-list">
         {items.map((item) => (
-          <article className="review-item" key={item.id}>
-            <header>
-              <label className="inline">
-                <input type="checkbox" checked={selected.includes(item.id)} onChange={() => toggleSelected(item.id)} />
-                <strong>Document {item.paperless_document_id}</strong>
-              </label>
-              <span>{item.stage}</span>
-            </header>
-            <pre>{JSON.stringify(item.suggested_patch, null, 2)}</pre>
-            <footer>
-              <button title="Approve" onClick={() => api.approveReview(item.id).then(load).catch((err) => setError(err.message))}>
-                <Check size={16} /> Approve
-              </button>
-              <button title="Reject" onClick={() => api.rejectReview(item.id).then(load).catch((err) => setError(err.message))}>
-                <X size={16} /> Reject
-              </button>
-            </footer>
-          </article>
+          <ReviewCard
+            key={item.id}
+            item={item}
+            selected={selected.includes(item.id)}
+            onSelect={() => toggleSelected(item.id)}
+            onReload={load}
+            setError={setError}
+          />
         ))}
       </div>
     </section>
   );
+}
+
+type ReviewPatchRecord = Record<string, unknown> & {
+  standard_metadata?: Record<string, unknown>;
+};
+
+type ReviewEditState = {
+  title?: string;
+  correspondent?: string;
+  document_type?: string;
+  created?: string;
+};
+
+function ReviewCard({
+  item,
+  selected,
+  onSelect,
+  onReload,
+  setError
+}: {
+  item: ReviewItem;
+  selected: boolean;
+  onSelect: () => void;
+  onReload: () => void;
+  setError: (error: string | null) => void;
+}) {
+  const patch = asReviewPatch(item.suggested_patch);
+  const metadata = asReviewPatch(patch?.standard_metadata);
+  const [edit, setEdit] = useState<ReviewEditState>(() => reviewEditStateFromPatch(patch));
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setEdit(reviewEditStateFromPatch(patch));
+  }, [item.id]);
+
+  const applyEdited = async () => {
+    if (!patch) {
+      setError('Review patch is not editable because it is not an object.');
+      return;
+    }
+    const editedPatch = buildEditedReviewPatch(patch, edit);
+    if (editedPatch === null) {
+      setError('Edited review patch contains an invalid numeric ID.');
+      return;
+    }
+    await run(setBusy, setError, async () => {
+      await api.editReview(item.id, editedPatch);
+      onReload();
+    });
+  };
+
+  const warnings = reviewWarnings(item.validation_warnings);
+  const rows = standardMetadataRows(item.stage, patch, metadata);
+
+  return (
+    <article className="review-item">
+      <header>
+        <label className="inline">
+          <input type="checkbox" checked={selected} onChange={onSelect} />
+          <strong>Document {item.paperless_document_id}</strong>
+        </label>
+        <span>{stageLabel(item.stage as Stage) ?? item.stage}</span>
+      </header>
+
+      {rows.length > 0 && (
+        <div className="metadata-review">
+          {rows.map((row) => (
+            <div className={`metadata-review-row ${row.lowConfidence ? 'low-confidence' : ''}`} key={row.field}>
+              <div>
+                <strong>{row.label}</strong>
+                <small>Current: {row.current ?? 'empty'}</small>
+              </div>
+              <div>
+                <span>Suggestion: {row.suggested ?? 'empty'}</span>
+                {row.confidence !== null && <small>Confidence: {(row.confidence * 100).toFixed(0)}%</small>}
+                {row.evidence && <small>Evidence: {row.evidence}</small>}
+              </div>
+              {row.editableKey && (
+                <label>
+                  Edit
+                  <input
+                    type={row.editableKey === 'created' ? 'date' : 'text'}
+                    value={edit[row.editableKey] ?? ''}
+                    onChange={(event) => setEdit((current) => ({ ...current, [row.editableKey!]: event.target.value }))}
+                    placeholder={row.placeholder}
+                  />
+                </label>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div className="review-warnings">
+          {warnings.map((warning) => (
+            <span key={warning}><AlertTriangle size={14} /> {warning}</span>
+          ))}
+        </div>
+      )}
+
+      <details>
+        <summary>Raw patch</summary>
+        <pre>{JSON.stringify(item.suggested_patch, null, 2)}</pre>
+      </details>
+
+      <footer>
+        <button title="Approve" disabled={busy} onClick={() => api.approveReview(item.id).then(onReload).catch((err) => setError(err.message))}>
+          <Check size={16} /> Approve
+        </button>
+        {patch && Object.keys(edit).length > 0 && (
+          <button title="Apply edited patch" disabled={busy} onClick={() => void applyEdited()}>
+            <Save size={16} /> Apply edited
+          </button>
+        )}
+        <button title="Reject" disabled={busy} onClick={() => api.rejectReview(item.id).then(onReload).catch((err) => setError(err.message))}>
+          <X size={16} /> Reject
+        </button>
+      </footer>
+    </article>
+  );
+}
+
+function asReviewPatch(value: unknown): ReviewPatchRecord | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as ReviewPatchRecord;
+  }
+  return null;
+}
+
+function reviewEditStateFromPatch(patch: ReviewPatchRecord | null): ReviewEditState {
+  if (!patch) return {};
+  const state: ReviewEditState = {};
+  if (Object.prototype.hasOwnProperty.call(patch, 'title')) state.title = String(patch.title ?? '');
+  if (Object.prototype.hasOwnProperty.call(patch, 'correspondent')) state.correspondent = String(patch.correspondent ?? '');
+  if (Object.prototype.hasOwnProperty.call(patch, 'document_type')) state.document_type = String(patch.document_type ?? '');
+  if (Object.prototype.hasOwnProperty.call(patch, 'created')) state.created = String(patch.created ?? '');
+  return state;
+}
+
+function buildEditedReviewPatch(patch: ReviewPatchRecord, edit: ReviewEditState): Record<string, unknown> | null {
+  const edited: Record<string, unknown> = { ...patch };
+  delete edited.standard_metadata;
+  if (edit.title !== undefined) edited.title = edit.title.trim();
+  if (edit.created !== undefined) edited.created = edit.created.trim();
+  for (const key of ['correspondent', 'document_type'] as const) {
+    if (edit[key] === undefined) continue;
+    const trimmed = edit[key]!.trim();
+    if (trimmed === '') {
+      edited[key] = null;
+      continue;
+    }
+    const numeric = Number(trimmed);
+    if (!Number.isInteger(numeric) || numeric <= 0) return null;
+    edited[key] = numeric;
+  }
+  return edited;
+}
+
+function reviewWarnings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((warning) => typeof warning === 'string' ? warning : JSON.stringify(warning)).slice(0, 10);
+}
+
+function standardMetadataRows(stage: string, patch: ReviewPatchRecord | null, metadata: ReviewPatchRecord | null) {
+  if (!patch) return [];
+  const rows: Array<{
+    field: string;
+    label: string;
+    current?: string;
+    suggested?: string;
+    confidence: number | null;
+    evidence?: string;
+    lowConfidence: boolean;
+    editableKey?: keyof ReviewEditState;
+    placeholder?: string;
+  }> = [];
+  const confidence = numericMetadata(metadata?.confidence);
+  if (stage === 'correspondent' && Object.prototype.hasOwnProperty.call(patch, 'correspondent')) {
+    rows.push({
+      field: 'correspondent',
+      label: 'Correspondent',
+      current: metadataValue(metadata?.current_correspondent),
+      suggested: metadataValue(metadata?.suggested_name) ?? metadataValue(patch.correspondent),
+      confidence,
+      evidence: metadataValue(metadata?.evidence),
+      lowConfidence: confidence !== null && confidence < 0.7,
+      editableKey: 'correspondent',
+      placeholder: 'Paperless correspondent ID'
+    });
+  }
+  if (stage === 'document_type' && Object.prototype.hasOwnProperty.call(patch, 'document_type')) {
+    rows.push({
+      field: 'document_type',
+      label: 'Document type',
+      current: metadataValue(metadata?.current_document_type),
+      suggested: metadataValue(metadata?.suggested_name) ?? metadataValue(patch.document_type),
+      confidence,
+      evidence: metadataValue(metadata?.evidence),
+      lowConfidence: confidence !== null && confidence < 0.7,
+      editableKey: 'document_type',
+      placeholder: 'Paperless document type ID'
+    });
+  }
+  if (stage === 'document_date' && Object.prototype.hasOwnProperty.call(patch, 'created')) {
+    rows.push({
+      field: 'document_date',
+      label: 'Document date',
+      current: metadataValue(metadata?.current_date),
+      suggested: metadataValue(metadata?.suggested_date) ?? metadataValue(patch.created),
+      confidence,
+      evidence: metadataValue(metadata?.evidence),
+      lowConfidence: confidence !== null && confidence < 0.7,
+      editableKey: 'created',
+      placeholder: 'YYYY-MM-DD'
+    });
+  }
+  return rows;
+}
+
+function numericMetadata(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function metadataValue(value: unknown): string | undefined {
+  if (value === null || value === undefined || value === '') return undefined;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return JSON.stringify(value);
 }
 
 function SettingsPage({ setError }: { setError: (error: string | null) => void }) {
@@ -1387,6 +1609,34 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
           <label>
             Field confidence
             <input type="number" min="0" max="1" step="0.05" value={settings.fields.confidence_threshold} onChange={(event) => update((s) => ({ ...s, fields: { ...s.fields, confidence_threshold: Number(event.target.value) } }))} />
+          </label>
+          <label>
+            Metadata confidence
+            <input type="number" min="0" max="1" step="0.05" value={settings.metadata.confidence_threshold} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, confidence_threshold: Number(event.target.value) } }))} />
+          </label>
+          <label>
+            Date confidence
+            <input type="number" min="0" max="1" step="0.05" value={settings.metadata.document_date_confidence_threshold} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, document_date_confidence_threshold: Number(event.target.value) } }))} />
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={settings.metadata.overwrite_existing_correspondent} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, overwrite_existing_correspondent: event.target.checked } }))} />
+            Overwrite existing correspondent
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={settings.metadata.overwrite_existing_document_type} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, overwrite_existing_document_type: event.target.checked } }))} />
+            Overwrite existing document type
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={settings.metadata.overwrite_existing_document_date} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, overwrite_existing_document_date: event.target.checked } }))} />
+            Overwrite existing document date
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={settings.metadata.allow_new_correspondents} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, allow_new_correspondents: event.target.checked } }))} />
+            Allow new correspondents to be proposed
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={settings.metadata.allow_new_document_types} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, allow_new_document_types: event.target.checked } }))} />
+            Allow new document types to be proposed
           </label>
           <label className="inline">
             <input type="checkbox" checked={settings.tagging.allow_new_tags} onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, allow_new_tags: event.target.checked } }))} />

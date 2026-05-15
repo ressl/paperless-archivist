@@ -2,7 +2,7 @@ import createClient from 'openapi-fetch';
 import type { paths } from './schema';
 
 export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
-export type Stage = 'ocr' | 'ocr_fix' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'fields';
+export type Stage = 'ocr' | 'ocr_fix' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'document_date' | 'fields';
 export type PipelineStage = Stage | 'apply';
 export type ProcessingMode = 'manual_review' | 'auto_select_review' | 'full_auto';
 export type AiProviderKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible';
@@ -69,6 +69,15 @@ export type RuntimeSettings = {
     old_tag_strategy: string;
     tag_output_language: string;
   };
+  metadata: {
+    overwrite_existing_correspondent: boolean;
+    overwrite_existing_document_type: boolean;
+    overwrite_existing_document_date: boolean;
+    allow_new_correspondents: boolean;
+    allow_new_document_types: boolean;
+    confidence_threshold: number;
+    document_date_confidence_threshold: number;
+  };
   fields: {
     max_fields: number;
     confidence_threshold: number;
@@ -100,6 +109,7 @@ export type Counts = {
   missing_title: number;
   missing_correspondent: number;
   missing_document_type: number;
+  missing_document_date: number;
   missing_fields: number;
   waiting_review: number;
   failed: number;
@@ -277,11 +287,13 @@ export type InventoryItem = {
   title_status: string;
   correspondent_status: string;
   document_type_status: string;
+  document_date_status: string;
   fields_status: string;
   current_run_status?: string | null;
   last_error?: string | null;
   needs_review: boolean;
   complete: boolean;
+  document_date?: string | null;
   detected_language?: string | null;
   detected_language_confidence?: number | null;
   detected_language_source?: string | null;

@@ -53,6 +53,7 @@ Useful capabilities to keep:
 - title generation
 - correspondent classification
 - document type classification
+- document date extraction
 - tag classification
 - custom field extraction
 - prompt management UI
@@ -271,6 +272,7 @@ For every document show:
 - title status
 - correspondent status
 - document type status
+- document date status
 - custom fields status
 - current run status
 - last successful run
@@ -304,6 +306,7 @@ Must show:
 - documents missing title generation
 - documents missing correspondent classification
 - documents missing document type classification
+- documents missing document date extraction
 - documents missing custom field extraction
 - documents waiting for review
 - documents failed
@@ -331,6 +334,7 @@ ai-tags
 ai-title
 ai-correspondent
 ai-document-type
+ai-document-date
 ai-fields
 ```
 
@@ -353,6 +357,7 @@ archivist-tags
 ai-processed-title
 ai-processed-correspondent
 ai-processed-document-type
+ai-processed-document-date
 ai-processed-fields
 ```
 
@@ -465,7 +470,19 @@ Features:
 - new document type requires review by default
 - mark `ai-processed-document-type` after success
 
-### 3.19 Custom Field Extraction
+### 3.19 Document Date Extraction
+
+Features:
+
+- extract the Paperless document date / issue date as ISO `YYYY-MM-DD`
+- prefer issue, invoice, letter, contract, statement, and certificate dates
+- avoid scan, upload, processing, delivery, payment due, and reminder due dates
+- use detected document language and multilingual date formats
+- route ambiguous or low-confidence dates through review
+- protect existing Paperless document dates unless overwrite is explicitly enabled
+- mark `ai-processed-document-date` after success
+
+### 3.20 Custom Field Extraction
 
 Features:
 

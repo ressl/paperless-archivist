@@ -13,8 +13,9 @@ use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, ChoiceSuggestion, DocumentPatch, LanguageDetection,
     OldTagStrategy, RuntimeSettings, Stage, TagSuggestion, TitleSuggestion,
-    detect_document_language, validate_choice_suggestion, validate_field_suggestion,
-    validate_tag_suggestion, validate_title_suggestion,
+    detect_document_language, extract_issue_date_suggestion, validate_choice_suggestion,
+    validate_document_date_suggestion, validate_field_suggestion, validate_tag_suggestion,
+    validate_title_suggestion,
 };
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, complete_job, connect,
@@ -26,7 +27,9 @@ use archivist_db::{
     upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
-use archivist_paperless::{PaperlessClient, PaperlessDocumentSummary, PaperlessTag};
+use archivist_paperless::{
+    PaperlessClient, PaperlessDocumentDetail, PaperlessDocumentSummary, PaperlessTag,
+};
 use futures::stream::{FuturesUnordered, StreamExt};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
@@ -187,6 +190,7 @@ async fn process_job(pool: &DbPool, config: &AppConfig, job: &JobRecord) -> Resu
             )
             .await
         }
+        Stage::DocumentDate => process_document_date(pool, &paperless, &settings, job).await,
         Stage::Fields => process_fields(pool, config, &paperless, &settings, job).await,
         Stage::OcrFix | Stage::Apply => Err(anyhow!(
             "stage {} is not directly executable by the worker",
@@ -306,9 +310,10 @@ async fn process_ocr(
         tags: None,
         correspondent: None,
         document_type: None,
+        created: None,
         custom_fields: None,
     };
-    handle_patch_result(pool, paperless, settings, job, patch, Vec::new()).await
+    handle_patch_result(pool, paperless, settings, job, patch, Vec::new(), None).await
 }
 
 async fn language_context_for_content(
@@ -402,9 +407,10 @@ async fn process_tags(
                 tags: Some(tag_ids),
                 correspondent: None,
                 document_type: None,
+                created: None,
                 custom_fields: None,
             };
-            handle_patch_result(pool, paperless, settings, job, patch, valid.warnings).await
+            handle_patch_result(pool, paperless, settings, job, patch, valid.warnings, None).await
         }
         Err(errors) => {
             let patch = json!({
@@ -458,9 +464,10 @@ async fn process_title(
                 tags: None,
                 correspondent: None,
                 document_type: None,
+                created: None,
                 custom_fields: None,
             };
-            handle_patch_result(pool, paperless, settings, job, patch, Vec::new()).await
+            handle_patch_result(pool, paperless, settings, job, patch, Vec::new(), None).await
         }
         Err(errors) => {
             create_review_item(pool, job, json!({ "title": "" }), json!(errors)).await?;
@@ -484,6 +491,30 @@ async fn process_choice(
         return Ok(());
     }
     let document = paperless.get_document(job.paperless_document_id).await?;
+    if job.stage == Stage::Correspondent
+        && document.correspondent.is_some()
+        && !settings.metadata.overwrite_existing_correspondent
+    {
+        complete_job(
+            pool,
+            job,
+            json!({ "skipped": "Paperless correspondent already set" }),
+        )
+        .await?;
+        return Ok(());
+    }
+    if job.stage == Stage::DocumentType
+        && document.document_type.is_some()
+        && !settings.metadata.overwrite_existing_document_type
+    {
+        complete_job(
+            pool,
+            job,
+            json!({ "skipped": "Paperless document type already set" }),
+        )
+        .await?;
+        return Ok(());
+    }
     let content = document.content.unwrap_or_default();
     let language = language_context_for_content(pool, settings, job, &content).await?;
     let mut request = prompt_for_choice(&content, choice_kind, &allowed, &language);
@@ -492,7 +523,9 @@ async fn process_choice(
     let suggestion = parse_choice_suggestion(&response.text).unwrap_or(ChoiceSuggestion {
         name: String::new(),
         confidence: Some(0.0),
+        evidence: None,
     });
+    let suggestion_for_review = suggestion.clone();
     insert_ai_artifact(
         pool,
         AiArtifactInput {
@@ -510,7 +543,12 @@ async fn process_choice(
         },
     )
     .await?;
-    match validate_choice_suggestion(suggestion, &allowed, settings.tagging.confidence_threshold) {
+    let patch_key = if job.stage == Stage::DocumentType {
+        "document_type"
+    } else {
+        choice_kind
+    };
+    match validate_choice_suggestion(suggestion, &allowed, settings.metadata.confidence_threshold) {
         Ok(valid) => {
             let id = named_entity_id_for_name(pool, table, &valid.name)
                 .await?
@@ -522,6 +560,7 @@ async fn process_choice(
                     tags: None,
                     correspondent: Some(Some(id)),
                     document_type: None,
+                    created: None,
                     custom_fields: None,
                 }
             } else {
@@ -531,13 +570,165 @@ async fn process_choice(
                     tags: None,
                     correspondent: None,
                     document_type: Some(Some(id)),
+                    created: None,
                     custom_fields: None,
                 }
             };
-            handle_patch_result(pool, paperless, settings, job, patch, Vec::new()).await
+            handle_patch_result(
+                pool,
+                paperless,
+                settings,
+                job,
+                patch,
+                Vec::new(),
+                Some(json!({
+                    "field": patch_key,
+                    "suggested_name": valid.name,
+                    "confidence": valid.confidence,
+                    "evidence": valid.evidence,
+                    "current_correspondent": document.correspondent,
+                    "current_document_type": document.document_type
+                })),
+            )
+            .await
         }
         Err(errors) => {
-            create_review_item(pool, job, json!({ choice_kind: "" }), json!(errors)).await?;
+            create_review_item(
+                pool,
+                job,
+                json!({
+                    patch_key: "",
+                    "standard_metadata": {
+                        "field": patch_key,
+                        "suggested_name": suggestion_for_review.name,
+                        "confidence": suggestion_for_review.confidence,
+                        "evidence": suggestion_for_review.evidence
+                    }
+                }),
+                json!(errors),
+            )
+            .await?;
+            Ok(())
+        }
+    }
+}
+
+async fn process_document_date(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+) -> Result<()> {
+    let document = paperless.get_document(job.paperless_document_id).await?;
+    if document
+        .created
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+        && !settings.metadata.overwrite_existing_document_date
+    {
+        complete_job(
+            pool,
+            job,
+            json!({ "skipped": "Paperless document date already set" }),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let content = document.content.unwrap_or_default();
+    let language = if content.trim().is_empty() {
+        LanguageDetection::unknown("heuristic")
+    } else {
+        detect_document_language(&content)
+    };
+    record_document_language(
+        pool,
+        job.paperless_document_id,
+        &language,
+        Some(job.run_id),
+        Some(job.id),
+        "worker",
+    )
+    .await?;
+
+    let suggestion = extract_issue_date_suggestion(&content, &language).unwrap_or_else(|| {
+        archivist_core::DocumentDateSuggestion {
+            date: String::new(),
+            confidence: Some(0.0),
+            evidence: None,
+            warnings: vec!["no document date candidate found".to_owned()],
+        }
+    });
+    let normalized = serde_json::to_value(&suggestion)?;
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: Stage::DocumentDate,
+            provider: "heuristic",
+            model: "date-regex-v1",
+            prompt_id: None,
+            input_hash: &hash_text(&content),
+            request: Some(json!({
+                "language": language.language,
+                "language_confidence": language.confidence
+            })),
+            response: None,
+            normalized_output: Some(normalized.clone()),
+            duration_ms: 0,
+        },
+    )
+    .await?;
+
+    match validate_document_date_suggestion(
+        suggestion,
+        settings.metadata.document_date_confidence_threshold,
+    ) {
+        Ok(valid) => {
+            let patch = DocumentPatch {
+                content: None,
+                title: None,
+                tags: None,
+                correspondent: None,
+                document_type: None,
+                created: Some(valid.date.clone()),
+                custom_fields: None,
+            };
+            handle_patch_result(
+                pool,
+                paperless,
+                settings,
+                job,
+                patch,
+                valid.warnings.clone(),
+                Some(json!({
+                    "field": "document_date",
+                    "suggested_date": valid.date,
+                    "confidence": valid.confidence,
+                    "evidence": valid.evidence,
+                    "current_date": document.created
+                })),
+            )
+            .await
+        }
+        Err(errors) => {
+            create_review_item(
+                pool,
+                job,
+                json!({
+                    "created": normalized.get("date").cloned().unwrap_or_else(|| json!("")),
+                    "standard_metadata": {
+                        "field": "document_date",
+                        "suggested_date": normalized.get("date").cloned().unwrap_or_else(|| json!("")),
+                        "confidence": normalized.get("confidence").cloned().unwrap_or(json!(null)),
+                        "evidence": normalized.get("evidence").cloned().unwrap_or(json!(null)),
+                        "warnings": normalized.get("warnings").cloned().unwrap_or_else(|| json!([]))
+                    }
+                }),
+                json!(errors),
+            )
+            .await?;
             Ok(())
         }
     }
@@ -622,9 +813,10 @@ async fn process_fields(
                 tags: None,
                 correspondent: None,
                 document_type: None,
+                created: None,
                 custom_fields: Some(json!(values)),
             };
-            handle_patch_result(pool, paperless, settings, job, patch, valid.warnings).await
+            handle_patch_result(pool, paperless, settings, job, patch, valid.warnings, None).await
         }
         Err(errors) => {
             create_review_item(
@@ -646,9 +838,16 @@ async fn handle_patch_result(
     job: &JobRecord,
     patch: DocumentPatch,
     warnings: Vec<String>,
+    review_metadata: Option<serde_json::Value>,
 ) -> Result<()> {
     if job.mode.requires_manual_review() {
-        create_review_item(pool, job, serde_json::to_value(patch)?, json!(warnings)).await?;
+        let mut review_patch = serde_json::to_value(patch)?;
+        if let Some(metadata) = review_metadata
+            && let Some(object) = review_patch.as_object_mut()
+        {
+            object.insert("standard_metadata".to_owned(), metadata);
+        }
+        create_review_item(pool, job, review_patch, json!(warnings)).await?;
         return Ok(());
     }
     let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
@@ -666,7 +865,7 @@ async fn apply_patch_with_workflow_tags(
 ) -> Result<()> {
     let document = paperless.get_document(job.paperless_document_id).await?;
     let tags = paperless.list_tags().await?;
-    let mut tag_ids = patch.tags.clone().unwrap_or(document.tags);
+    let mut tag_ids = patch.tags.clone().unwrap_or_else(|| document.tags.clone());
 
     if let Some(completion_name) = settings.workflow.tags.completion_tag_for_stage(job.stage) {
         let completion = paperless.ensure_tag(completion_name).await?;
@@ -700,7 +899,9 @@ async fn apply_patch_with_workflow_tags(
     tag_ids.sort_unstable();
     tag_ids.dedup();
     patch.tags = Some(tag_ids);
-    let patch_value = serde_json::to_value(&patch)?;
+    prune_unchanged_patch_fields(&mut patch, &document);
+    let before_value = audit_before_for_patch(&document, &patch);
+    let patch_value = audit_patch_payload(&patch);
     paperless
         .patch_document(job.paperless_document_id, &patch)
         .await?;
@@ -713,7 +914,7 @@ async fn apply_patch_with_workflow_tags(
             run_id: Some(job.run_id),
             job_id: Some(job.id),
             paperless_document_id: Some(job.paperless_document_id),
-            before: None,
+            before: Some(before_value),
             after: Some(patch_value),
             metadata: Some(json!({ "stage": job.stage })),
             outcome: "success".to_owned(),
@@ -722,6 +923,131 @@ async fn apply_patch_with_workflow_tags(
     )
     .await?;
     Ok(())
+}
+
+fn prune_unchanged_patch_fields(patch: &mut DocumentPatch, document: &PaperlessDocumentDetail) {
+    if patch.content.as_deref() == document.content.as_deref() {
+        patch.content = None;
+    }
+    if patch.title == document.title {
+        patch.title = None;
+    }
+    if patch
+        .tags
+        .as_ref()
+        .is_some_and(|tags| same_i32_set(tags, &document.tags))
+    {
+        patch.tags = None;
+    }
+    if patch
+        .correspondent
+        .as_ref()
+        .is_some_and(|value| *value == document.correspondent)
+    {
+        patch.correspondent = None;
+    }
+    if patch
+        .document_type
+        .as_ref()
+        .is_some_and(|value| *value == document.document_type)
+    {
+        patch.document_type = None;
+    }
+    if patch
+        .created
+        .as_deref()
+        .is_some_and(|value| document_date_equals(document.created.as_deref(), value))
+    {
+        patch.created = None;
+    }
+}
+
+fn same_i32_set(left: &[i32], right: &[i32]) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_unstable();
+    left.dedup();
+    right.sort_unstable();
+    right.dedup();
+    left == right
+}
+
+fn document_date_equals(current: Option<&str>, requested: &str) -> bool {
+    current
+        .map(|value| value.get(..10).unwrap_or(value) == requested)
+        .unwrap_or(false)
+}
+
+fn audit_before_for_patch(
+    document: &PaperlessDocumentDetail,
+    patch: &DocumentPatch,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    if patch.content.is_some() {
+        object.insert(
+            "content".to_owned(),
+            audit_text_metadata(document.content.as_deref().unwrap_or_default()),
+        );
+    }
+    if patch.title.is_some() {
+        object.insert("title".to_owned(), json!(document.title));
+    }
+    if patch.tags.is_some() {
+        object.insert("tags".to_owned(), json!(document.tags));
+    }
+    if patch.correspondent.is_some() {
+        object.insert("correspondent".to_owned(), json!(document.correspondent));
+    }
+    if patch.document_type.is_some() {
+        object.insert("document_type".to_owned(), json!(document.document_type));
+    }
+    if patch.created.is_some() {
+        object.insert("created".to_owned(), json!(document.created));
+    }
+    if patch.custom_fields.is_some() {
+        object.insert("custom_fields".to_owned(), json!({ "present": "redacted" }));
+    }
+    serde_json::Value::Object(object)
+}
+
+fn audit_patch_payload(patch: &DocumentPatch) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    if let Some(content) = &patch.content {
+        object.insert("content".to_owned(), audit_text_metadata(content));
+    }
+    if let Some(title) = &patch.title {
+        object.insert("title".to_owned(), json!(title));
+    }
+    if let Some(tags) = &patch.tags {
+        object.insert("tags".to_owned(), json!(tags));
+    }
+    if let Some(correspondent) = &patch.correspondent {
+        object.insert("correspondent".to_owned(), json!(correspondent));
+    }
+    if let Some(document_type) = &patch.document_type {
+        object.insert("document_type".to_owned(), json!(document_type));
+    }
+    if let Some(created) = &patch.created {
+        object.insert("created".to_owned(), json!(created));
+    }
+    if let Some(custom_fields) = &patch.custom_fields {
+        object.insert(
+            "custom_fields".to_owned(),
+            json!({
+                "sha256": hash_text(&custom_fields.to_string()),
+                "redacted": true
+            }),
+        );
+    }
+    serde_json::Value::Object(object)
+}
+
+fn audit_text_metadata(value: &str) -> serde_json::Value {
+    json!({
+        "sha256": hash_text(value),
+        "chars": value.chars().count(),
+        "redacted": true
+    })
 }
 
 async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()> {
@@ -845,6 +1171,7 @@ async fn sync_metadata(
                 current_tag_ids: document.tags.clone(),
                 correspondent_id: document.correspondent,
                 document_type_id: document.document_type,
+                document_date: document.created.clone(),
                 has_ocr_completion_tag: tag_names
                     .iter()
                     .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.completion_ocr)),
@@ -1056,4 +1383,62 @@ fn hash_text(value: &str) -> String {
 fn hash_bytes(value: &[u8]) -> String {
     let digest = Sha256::digest(value);
     hex::encode(digest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn document_detail() -> PaperlessDocumentDetail {
+        PaperlessDocumentDetail {
+            id: 42,
+            title: Some("Existing title".to_owned()),
+            created: Some("2026-03-14".to_owned()),
+            content: Some("private OCR text".to_owned()),
+            tags: vec![1, 2],
+            correspondent: Some(7),
+            document_type: Some(9),
+            original_file_name: Some("document.pdf".to_owned()),
+        }
+    }
+
+    #[test]
+    fn unchanged_standard_metadata_is_pruned_before_patch() {
+        let document = document_detail();
+        let mut patch = DocumentPatch {
+            content: None,
+            title: Some("Existing title".to_owned()),
+            tags: Some(vec![2, 1]),
+            correspondent: Some(Some(7)),
+            document_type: Some(Some(9)),
+            created: Some("2026-03-14".to_owned()),
+            custom_fields: None,
+        };
+
+        prune_unchanged_patch_fields(&mut patch, &document);
+
+        assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn audit_payload_redacts_content_and_custom_fields() {
+        let patch = DocumentPatch {
+            content: Some("private OCR text".to_owned()),
+            title: Some("New title".to_owned()),
+            tags: Some(vec![1, 2, 3]),
+            correspondent: Some(Some(7)),
+            document_type: None,
+            created: Some("2026-03-14".to_owned()),
+            custom_fields: Some(json!([{ "field": 1, "value": "private value" }])),
+        };
+
+        let audit = audit_patch_payload(&patch);
+        assert_eq!(audit["content"]["redacted"], Value::Bool(true));
+        assert_eq!(audit["content"]["chars"], Value::from(16));
+        assert!(audit["content"].get("sha256").is_some());
+        assert_eq!(audit["custom_fields"]["redacted"], Value::Bool(true));
+        assert!(!audit.to_string().contains("private OCR text"));
+        assert!(!audit.to_string().contains("private value"));
+    }
 }

@@ -1881,7 +1881,7 @@ export interface components {
         /** @enum {string} */
         Role: "viewer" | "reviewer" | "operator" | "admin" | "auditor";
         /** @enum {string} */
-        Stage: "ocr" | "ocr_fix" | "tags" | "title" | "correspondent" | "document_type" | "fields" | "apply";
+        Stage: "ocr" | "ocr_fix" | "tags" | "title" | "correspondent" | "document_type" | "document_date" | "fields" | "apply";
         /** @enum {string} */
         ProcessingMode: "manual_review" | "auto_select_review" | "full_auto";
         /** @enum {string} */
@@ -2174,7 +2174,44 @@ export interface components {
         DocumentInventoryItem: {
             [key: string]: unknown;
         };
+        StandardMetadataSuggestion: {
+            /** @enum {string} */
+            field?: "correspondent" | "document_type" | "document_date";
+            suggested_name?: string | null;
+            /** Format: date */
+            suggested_date?: string | null;
+            current_correspondent?: number | null;
+            current_document_type?: number | null;
+            current_date?: string | null;
+            /** Format: float */
+            confidence?: number | null;
+            evidence?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        DocumentPatch: {
+            content?: string;
+            title?: string;
+            tags?: number[];
+            correspondent?: number | null;
+            document_type?: number | null;
+            /** Format: date */
+            created?: string;
+            custom_fields?: unknown;
+            standard_metadata?: components["schemas"]["StandardMetadataSuggestion"];
+        };
         ReviewItem: {
+            /** Format: uuid */
+            id: string;
+            paperless_document_id: number;
+            stage: components["schemas"]["Stage"];
+            status: string;
+            suggested_patch: components["schemas"]["DocumentPatch"];
+            edited_patch?: components["schemas"]["DocumentPatch"] | null;
+            validation_warnings?: unknown;
+            /** Format: date-time */
+            created_at: string;
+        } & {
             [key: string]: unknown;
         };
         AuditEvent: {

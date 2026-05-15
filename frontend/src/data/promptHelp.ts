@@ -17,6 +17,7 @@ export const promptStageOrder: Stage[] = [
   'title',
   'correspondent',
   'document_type',
+  'document_date',
   'fields'
 ];
 
@@ -98,6 +99,19 @@ export const promptStageHelp: Record<Stage, PromptStageHelp> = {
       'Return an empty name with low confidence when no allowed value clearly matches.'
     ],
     examples: ['Invoice, Receipt, Contract, Statement, Letter, Certificate, Notice, Tax Document.']
+  },
+  document_date: {
+    stage: 'document_date',
+    label: 'Document Date',
+    shortLabel: 'Date',
+    purpose: 'Extracts the Paperless document date from explicit issue, invoice, letter, contract, or statement date evidence.',
+    expectedOutput: 'Strict JSON: {"date":"YYYY-MM-DD","confidence":0.0,"evidence":"short source snippet","warnings":[]}',
+    safety: [
+      'Prefer issue, invoice, letter, contract, statement, or certificate dates.',
+      'Do not use scan, upload, due, delivery, payment, or processing dates as the document date.',
+      'Return low confidence with evidence when the date context is ambiguous.'
+    ],
+    examples: ['Rechnungsdatum: 2026-04-12 becomes 2026-04-12.', 'Payment due dates should trigger a warning, not an automatic apply.']
   },
   fields: {
     stage: 'fields',

@@ -32,7 +32,8 @@ events.
 - Runtime settings for Paperless, AI providers, prompts, workflow mode, and security operations.
 - Paperless metadata and document inventory sync.
 - OCR and vision processing through model providers.
-- Tagging, title, correspondent, document type, and custom field suggestions.
+- Tagging, title, correspondent, document type, document date, and custom field
+  suggestions.
 - Local document language detection with BCP-47 tags and language-aware prompts.
 - Review queue for approve/reject/edit workflows.
 - Document chat/RAG over Paperless document content with stored sources.
@@ -76,10 +77,12 @@ docs/
 4. The worker fetches document content/original files through the Paperless REST API.
 5. The worker calls the configured AI provider and stores an AI artifact.
 6. Rust validation bounds and normalizes model output.
-7. In `manual_review` or `auto_select_review` mode, suggestions go to `review_items`.
-8. In `full_auto` mode, valid suggestions are applied through Paperless REST.
-9. Successful apply operations add completion tags and remove trigger tags.
-10. Every meaningful state change writes an audit event.
+7. Standard metadata suggestions include evidence, confidence, and current
+   Paperless values for review.
+8. In `manual_review` or `auto_select_review` mode, suggestions go to `review_items`.
+9. In `full_auto` mode, valid suggestions are applied through Paperless REST.
+10. Successful apply operations add completion tags and remove trigger tags.
+11. Every meaningful state change writes an audit event.
 
 ## Document Chat Flow
 

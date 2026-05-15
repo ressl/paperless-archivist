@@ -247,6 +247,7 @@ Default prompts exist for:
 - title
 - correspondent
 - document type
+- document date
 - custom fields
 
 ## Workflow Tags
@@ -260,6 +261,7 @@ ai-tags
 ai-title
 ai-correspondent
 ai-document-type
+ai-document-date
 ai-fields
 ```
 
@@ -272,6 +274,7 @@ archivist-tags
 ai-processed-title
 ai-processed-correspondent
 ai-processed-document-type
+ai-processed-document-date
 ai-processed-fields
 ```
 
@@ -387,6 +390,20 @@ should be reviewed before enabling `full_auto` broadly. `Tag output language` in
 Settings affects only newly generated business tags; existing tags,
 correspondents, document types, names, dates, and identifiers are not translated
 automatically.
+
+## Standard Metadata Operations
+
+Correspondent and document type suggestions are matched against the latest
+synced Paperless metadata cache. Run Paperless sync after adding or renaming
+Paperless correspondents or document types. Document date extraction is local and
+normalizes explicit issue/invoice/letter dates to `YYYY-MM-DD`; due, scan,
+upload, and processing dates should remain in review unless operators lower the
+date confidence threshold.
+
+Overwrite settings are off by default. Keep them off while onboarding so
+existing curated Paperless fields are not replaced. If overwrite is enabled,
+review audit events and Paperless history after the first batch before enabling
+`full_auto`.
 
 ## Document Chat
 

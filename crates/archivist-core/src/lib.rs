@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -277,6 +277,7 @@ pub enum Stage {
     Title,
     Correspondent,
     DocumentType,
+    DocumentDate,
     Fields,
     Apply,
 }
@@ -288,6 +289,7 @@ impl Stage {
             Self::Title,
             Self::DocumentType,
             Self::Correspondent,
+            Self::DocumentDate,
             Self::Tags,
             Self::Fields,
         ]
@@ -301,6 +303,7 @@ impl Stage {
             Self::Title => "title",
             Self::Correspondent => "correspondent",
             Self::DocumentType => "document_type",
+            Self::DocumentDate => "document_date",
             Self::Fields => "fields",
             Self::Apply => "processed",
         }
@@ -316,6 +319,7 @@ impl Display for Stage {
             Self::Title => "title",
             Self::Correspondent => "correspondent",
             Self::DocumentType => "document_type",
+            Self::DocumentDate => "document_date",
             Self::Fields => "fields",
             Self::Apply => "apply",
         };
@@ -334,6 +338,7 @@ impl FromStr for Stage {
             "title" => Ok(Self::Title),
             "correspondent" => Ok(Self::Correspondent),
             "document_type" => Ok(Self::DocumentType),
+            "document_date" | "issue_date" => Ok(Self::DocumentDate),
             "fields" => Ok(Self::Fields),
             "apply" => Ok(Self::Apply),
             _ => Err(ParseEnumError {
@@ -608,6 +613,8 @@ pub struct WorkflowTags {
     pub trigger_title: String,
     pub trigger_correspondent: String,
     pub trigger_document_type: String,
+    #[serde(default = "default_trigger_document_date_tag")]
+    pub trigger_document_date: String,
     pub trigger_fields: String,
     pub completion_processed: String,
     pub completion_ocr: String,
@@ -615,6 +622,8 @@ pub struct WorkflowTags {
     pub completion_title: String,
     pub completion_correspondent: String,
     pub completion_document_type: String,
+    #[serde(default = "default_completion_document_date_tag")]
+    pub completion_document_date: String,
     pub completion_fields: String,
     pub review_needed: String,
     pub failed: String,
@@ -631,6 +640,7 @@ impl Default for WorkflowTags {
             trigger_title: "ai-title".to_owned(),
             trigger_correspondent: "ai-correspondent".to_owned(),
             trigger_document_type: "ai-document-type".to_owned(),
+            trigger_document_date: default_trigger_document_date_tag(),
             trigger_fields: "ai-fields".to_owned(),
             completion_processed: "ai-processed".to_owned(),
             completion_ocr: "archivist-ocr".to_owned(),
@@ -638,6 +648,7 @@ impl Default for WorkflowTags {
             completion_title: "ai-processed-title".to_owned(),
             completion_correspondent: "ai-processed-correspondent".to_owned(),
             completion_document_type: "ai-processed-document-type".to_owned(),
+            completion_document_date: default_completion_document_date_tag(),
             completion_fields: "ai-processed-fields".to_owned(),
             review_needed: "ai-review-needed".to_owned(),
             failed: "ai-failed".to_owned(),
@@ -645,6 +656,14 @@ impl Default for WorkflowTags {
             failed_tagging: "ai-failed-tagging".to_owned(),
         }
     }
+}
+
+fn default_trigger_document_date_tag() -> String {
+    "ai-document-date".to_owned()
+}
+
+fn default_completion_document_date_tag() -> String {
+    "ai-processed-document-date".to_owned()
 }
 
 impl WorkflowTags {
@@ -656,6 +675,7 @@ impl WorkflowTags {
             &self.trigger_title,
             &self.trigger_correspondent,
             &self.trigger_document_type,
+            &self.trigger_document_date,
             &self.trigger_fields,
             &self.completion_processed,
             &self.completion_ocr,
@@ -663,6 +683,7 @@ impl WorkflowTags {
             &self.completion_title,
             &self.completion_correspondent,
             &self.completion_document_type,
+            &self.completion_document_date,
             &self.completion_fields,
             &self.review_needed,
             &self.failed,
@@ -684,6 +705,7 @@ impl WorkflowTags {
             Stage::Title => Some(&self.completion_title),
             Stage::Correspondent => Some(&self.completion_correspondent),
             Stage::DocumentType => Some(&self.completion_document_type),
+            Stage::DocumentDate => Some(&self.completion_document_date),
             Stage::Fields => Some(&self.completion_fields),
             Stage::Apply => Some(&self.completion_processed),
             Stage::OcrFix => None,
@@ -697,6 +719,7 @@ impl WorkflowTags {
             Stage::Title => Some(&self.trigger_title),
             Stage::Correspondent => Some(&self.trigger_correspondent),
             Stage::DocumentType => Some(&self.trigger_document_type),
+            Stage::DocumentDate => Some(&self.trigger_document_date),
             Stage::Fields => Some(&self.trigger_fields),
             Stage::OcrFix | Stage::Apply => None,
         }
@@ -727,6 +750,9 @@ impl WorkflowTags {
         if normalized.contains(&self.trigger_document_type.to_ascii_lowercase()) {
             stages.insert(Stage::DocumentType);
         }
+        if normalized.contains(&self.trigger_document_date.to_ascii_lowercase()) {
+            stages.insert(Stage::DocumentDate);
+        }
         if normalized.contains(&self.trigger_fields.to_ascii_lowercase()) {
             stages.insert(Stage::Fields);
         }
@@ -750,6 +776,8 @@ pub struct RuntimeSettings {
     pub ocr: OcrSettings,
     #[serde(default)]
     pub tagging: TaggingSettings,
+    #[serde(default)]
+    pub metadata: MetadataSettings,
     #[serde(default)]
     pub fields: FieldSettings,
 }
@@ -1135,6 +1163,31 @@ fn default_tag_output_language() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataSettings {
+    pub overwrite_existing_correspondent: bool,
+    pub overwrite_existing_document_type: bool,
+    pub overwrite_existing_document_date: bool,
+    pub allow_new_correspondents: bool,
+    pub allow_new_document_types: bool,
+    pub confidence_threshold: f32,
+    pub document_date_confidence_threshold: f32,
+}
+
+impl Default for MetadataSettings {
+    fn default() -> Self {
+        Self {
+            overwrite_existing_correspondent: false,
+            overwrite_existing_document_type: false,
+            overwrite_existing_document_date: false,
+            allow_new_correspondents: false,
+            allow_new_document_types: false,
+            confidence_threshold: 0.65,
+            document_date_confidence_threshold: 0.7,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OldTagStrategy {
     KeepExisting,
@@ -1192,6 +1245,8 @@ pub enum ValidationError {
     InvalidTitle,
     #[error("unknown choice: {0}")]
     UnknownChoice(String),
+    #[error("invalid document date: {0}")]
+    InvalidDate(String),
 }
 
 pub fn validate_tag_suggestion(
@@ -1321,6 +1376,307 @@ pub fn validate_title_suggestion(
 pub struct ChoiceSuggestion {
     pub name: String,
     pub confidence: Option<f32>,
+    #[serde(default)]
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentDateSuggestion {
+    pub date: String,
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub evidence: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+pub fn extract_issue_date_suggestion(
+    text: &str,
+    language: &LanguageDetection,
+) -> Option<DocumentDateSuggestion> {
+    let candidates = extract_date_candidates(text);
+    let mut best: Option<(NaiveDate, f32, String, Vec<String>)> = None;
+    for (date, evidence) in candidates {
+        let context = evidence.to_lowercase();
+        let mut score = if contains_issue_date_label(&context, &language.language) {
+            0.9
+        } else if contains_due_or_processing_label(&context) {
+            0.35
+        } else {
+            0.62
+        };
+        if date.year() < 1990 || date.year() > Utc::now().year() + 1 {
+            score -= 0.25;
+        }
+        let warnings = if contains_due_or_processing_label(&context) {
+            vec!["date context looks like due/processing/scan date".to_owned()]
+        } else {
+            Vec::new()
+        };
+        if best
+            .as_ref()
+            .map(|(_, best_score, _, _)| score > *best_score)
+            .unwrap_or(true)
+        {
+            best = Some((date, score, evidence, warnings));
+        }
+    }
+
+    best.map(
+        |(date, confidence, evidence, warnings)| DocumentDateSuggestion {
+            date: date.format("%Y-%m-%d").to_string(),
+            confidence: Some(confidence.clamp(0.0, 0.99)),
+            evidence: Some(evidence),
+            warnings,
+        },
+    )
+}
+
+pub fn validate_document_date_suggestion(
+    suggestion: DocumentDateSuggestion,
+    confidence_threshold: f32,
+) -> Result<DocumentDateSuggestion, Vec<ValidationError>> {
+    let mut errors = Vec::new();
+    if NaiveDate::parse_from_str(&suggestion.date, "%Y-%m-%d").is_err() {
+        errors.push(ValidationError::InvalidDate(suggestion.date.clone()));
+    }
+    let confidence = suggestion.confidence.unwrap_or(0.0).clamp(0.0, 1.0);
+    if confidence < confidence_threshold {
+        errors.push(ValidationError::LowConfidence {
+            actual: confidence,
+            threshold: confidence_threshold,
+        });
+    }
+    if errors.is_empty() {
+        Ok(DocumentDateSuggestion {
+            confidence: Some(confidence),
+            ..suggestion
+        })
+    } else {
+        Err(errors)
+    }
+}
+
+fn extract_date_candidates(text: &str) -> Vec<(NaiveDate, String)> {
+    let mut candidates = Vec::new();
+    let normalized_text = normalize_date_digits(text);
+    let iso = Regex::new(r"(?i)(.{0,48}?)(\d{4})-(\d{2})-(\d{2})(.{0,48})")
+        .expect("valid iso date regex");
+    for captures in iso.captures_iter(&normalized_text).take(25) {
+        let year = captures.get(2).and_then(|m| m.as_str().parse::<i32>().ok());
+        let month = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
+        let day = captures.get(4).and_then(|m| m.as_str().parse::<u32>().ok());
+        if let (Some(year), Some(month), Some(day)) = (year, month, day)
+            && let Some(date) = NaiveDate::from_ymd_opt(year, month, day)
+        {
+            candidates.push((
+                date,
+                captures
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+            ));
+        }
+    }
+
+    let numeric = Regex::new(r"(?i)(.{0,48}?)(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(.{0,48})")
+        .expect("valid numeric date regex");
+    for captures in numeric.captures_iter(&normalized_text).take(25) {
+        let day = captures.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+        let month = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
+        let year = captures.get(4).and_then(|m| parse_year(m.as_str()));
+        if let (Some(day), Some(month), Some(year)) = (day, month, year)
+            && let Some(date) = NaiveDate::from_ymd_opt(year, month, day)
+        {
+            candidates.push((
+                date,
+                captures
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+            ));
+        }
+    }
+
+    let cjk =
+        Regex::new(r"(?i)(.{0,48}?)(\d{4})\s*[年/]\s*(\d{1,2})\s*[月/]\s*(\d{1,2})\s*日?(.{0,48})")
+            .expect("valid CJK date regex");
+    for captures in cjk.captures_iter(&normalized_text).take(25) {
+        let year = captures.get(2).and_then(|m| m.as_str().parse::<i32>().ok());
+        let month = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
+        let day = captures.get(4).and_then(|m| m.as_str().parse::<u32>().ok());
+        if let (Some(year), Some(month), Some(day)) = (year, month, day)
+            && let Some(date) = NaiveDate::from_ymd_opt(year, month, day)
+        {
+            candidates.push((
+                date,
+                captures
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+            ));
+        }
+    }
+
+    let day_month_name =
+        Regex::new(r"(?i)(.{0,48}?)(\d{1,2})\.?\s+([\p{L}.]+)\s+(\d{2,4})(.{0,48})")
+            .expect("valid day-month-name date regex");
+    for captures in day_month_name.captures_iter(&normalized_text).take(25) {
+        let day = captures.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+        let month = captures.get(3).and_then(|m| month_number(m.as_str()));
+        let year = captures.get(4).and_then(|m| parse_year(m.as_str()));
+        if let (Some(day), Some(month), Some(year)) = (day, month, year)
+            && let Some(date) = NaiveDate::from_ymd_opt(year, month, day)
+        {
+            candidates.push((
+                date,
+                captures
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+            ));
+        }
+    }
+
+    let month_name_day =
+        Regex::new(r"(?i)(.{0,48}?)([\p{L}.]+)\s+(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(\d{4})(.{0,48})")
+            .expect("valid month-name-day date regex");
+    for captures in month_name_day.captures_iter(&normalized_text).take(25) {
+        let month = captures.get(2).and_then(|m| month_number(m.as_str()));
+        let day = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
+        let year = captures.get(4).and_then(|m| parse_year(m.as_str()));
+        if let (Some(day), Some(month), Some(year)) = (day, month, year)
+            && let Some(date) = NaiveDate::from_ymd_opt(year, month, day)
+        {
+            candidates.push((
+                date,
+                captures
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned(),
+            ));
+        }
+    }
+
+    candidates
+}
+
+fn normalize_date_digits(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '٠' | '۰' | '०' => '0',
+            '١' | '۱' | '१' => '1',
+            '٢' | '۲' | '२' => '2',
+            '٣' | '۳' | '३' => '3',
+            '٤' | '۴' | '४' => '4',
+            '٥' | '۵' | '५' => '5',
+            '٦' | '۶' | '६' => '6',
+            '٧' | '۷' | '७' => '7',
+            '٨' | '۸' | '८' => '8',
+            '٩' | '۹' | '९' => '9',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn parse_year(value: &str) -> Option<i32> {
+    let year = value.parse::<i32>().ok()?;
+    if value.len() == 2 {
+        Some(if year >= 70 { 1900 + year } else { 2000 + year })
+    } else {
+        Some(year)
+    }
+}
+
+fn month_number(value: &str) -> Option<u32> {
+    let normalized = value
+        .trim_matches('.')
+        .to_lowercase()
+        .replace(['é', 'è', 'ê'], "e")
+        .replace('ä', "a")
+        .replace('ö', "o")
+        .replace('ü', "u")
+        .replace('ş', "s")
+        .replace('ı', "i")
+        .replace('ğ', "g")
+        .replace('ç', "c")
+        .replace(['á', 'à', 'ã'], "a")
+        .replace(['ó', 'ò', 'õ'], "o")
+        .replace('ń', "n")
+        .replace(['ź', 'ż'], "z")
+        .replace('ł', "l");
+    match normalized.as_str() {
+        "jan" | "january" | "januar" | "janvier" | "gennaio" | "enero" | "janeiro" | "styczen"
+        | "ocak" => Some(1),
+        "feb" | "february" | "februar" | "fevrier" | "febbraio" | "febrero" | "fevereiro"
+        | "luty" | "subat" => Some(2),
+        "mar" | "march" | "marz" | "maerz" | "mars" | "marzo" | "marco" | "maart" | "marzec"
+        | "mart" => Some(3),
+        "apr" | "april" | "avril" | "aprile" | "abril" | "kwiecien" | "nisan" => Some(4),
+        "may" | "mai" | "maggio" | "mayo" | "maio" | "mei" | "maj" | "mayis" => Some(5),
+        "jun" | "june" | "juni" | "juin" | "giugno" | "junio" | "junho" | "czerwiec"
+        | "haziran" => Some(6),
+        "jul" | "july" | "juli" | "juillet" | "luglio" | "julio" | "julho" | "lipiec"
+        | "temmuz" => Some(7),
+        "aug" | "august" | "aout" | "agosto" | "sierpien" | "agustos" => Some(8),
+        "sep" | "sept" | "september" | "septembre" | "settembre" | "septiembre" | "setembro"
+        | "wrzesien" | "eylul" => Some(9),
+        "oct" | "okt" | "october" | "oktober" | "octobre" | "ottobre" | "octubre" | "outubro"
+        | "pazdziernik" | "ekim" => Some(10),
+        "nov" | "november" | "novembre" | "noviembre" | "listopad" | "kasim" => Some(11),
+        "dec" | "dez" | "december" | "dezember" | "decembre" | "dicembre" | "diciembre"
+        | "dezembro" | "grudzien" | "aralik" => Some(12),
+        _ => None,
+    }
+}
+
+fn contains_issue_date_label(context: &str, language: &str) -> bool {
+    let labels = match language {
+        "de" => &["rechnungsdatum", "ausstellungsdatum", "datum", "vom"][..],
+        "fr" => &["date de facture", "date d'émission", "date"][..],
+        "it" => &["data fattura", "data di emissione", "data"][..],
+        "es" => &["fecha de factura", "fecha de emisión", "fecha"][..],
+        "pt" => &["data da fatura", "data de emissão", "data"][..],
+        "nl" => &["factuurdatum", "datum"][..],
+        "pl" => &["data wystawienia", "data faktury", "data"][..],
+        "tr" => &["fatura tarihi", "duzenleme tarihi", "tarih"][..],
+        "ar" => &["تاريخ الفاتورة", "تاريخ الإصدار", "التاريخ"][..],
+        "he" => &["תאריך חשבונית", "תאריך הנפקה", "תאריך"][..],
+        "hi" => &["चालान दिनांक", "जारी करने की तारीख", "दिनांक"][..],
+        "zh" => &["发票日期", "開票日期", "日期"][..],
+        "ja" => &["請求日", "発行日", "日付"][..],
+        _ => &["invoice date", "issue date", "document date", "date"][..],
+    };
+    labels.iter().any(|label| context.contains(label))
+}
+
+fn contains_due_or_processing_label(context: &str) -> bool {
+    [
+        "due",
+        "faellig",
+        "fällig",
+        "zahlbar",
+        "payment",
+        "scan",
+        "scanned",
+        "uploaded",
+        "processed",
+        "lieferdatum",
+        "delivery",
+    ]
+    .iter()
+    .any(|label| context.contains(label))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1444,6 +1800,7 @@ pub fn validate_choice_suggestion(
         Ok(ChoiceSuggestion {
             name: normalized.to_owned(),
             confidence: suggestion.confidence,
+            evidence: suggestion.evidence,
         })
     } else {
         Err(errors)
@@ -1463,6 +1820,8 @@ pub struct DocumentPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_type: Option<Option<i32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_fields: Option<Value>,
 }
 
@@ -1473,6 +1832,7 @@ impl DocumentPatch {
             && self.tags.is_none()
             && self.correspondent.is_none()
             && self.document_type.is_none()
+            && self.created.is_none()
             && self.custom_fields.is_none()
     }
 }
@@ -1486,6 +1846,7 @@ pub struct BacklogCounts {
     pub missing_title: i64,
     pub missing_correspondent: i64,
     pub missing_document_type: i64,
+    pub missing_document_date: i64,
     pub missing_fields: i64,
     pub waiting_review: i64,
     pub failed: i64,
@@ -1870,6 +2231,7 @@ pub struct DocumentInventoryItem {
     pub title_status: String,
     pub correspondent_status: String,
     pub document_type_status: String,
+    pub document_date_status: String,
     pub fields_status: String,
     pub current_run_status: Option<String>,
     pub last_run_id: Option<Uuid>,
@@ -1877,6 +2239,7 @@ pub struct DocumentInventoryItem {
     pub next_required_stage: Option<String>,
     pub needs_review: bool,
     pub complete: bool,
+    pub document_date: Option<String>,
     pub detected_language: Option<String>,
     pub detected_language_confidence: Option<f32>,
     pub detected_language_source: Option<String>,
@@ -2262,6 +2625,23 @@ mod tests {
         );
 
         assert!(detected.language == "mul" || detected.confidence < 0.7);
+    }
+
+    #[test]
+    fn extracts_issue_date_over_due_date() {
+        let language = LanguageDetection {
+            language: "de".to_owned(),
+            confidence: 0.9,
+            source: "test".to_owned(),
+        };
+        let suggestion = extract_issue_date_suggestion(
+            "Rechnungsdatum: 03.04.2026\nZahlbar bis: 30.04.2026",
+            &language,
+        )
+        .expect("date suggestion");
+
+        assert_eq!(suggestion.date, "2026-04-03");
+        assert!(suggestion.confidence.unwrap_or_default() >= 0.7);
     }
 
     #[test]

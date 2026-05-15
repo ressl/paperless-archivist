@@ -183,6 +183,7 @@ impl PaperlessClient {
                 tags: Some(tag_ids),
                 correspondent: None,
                 document_type: None,
+                created: None,
                 custom_fields: None,
             },
         )
@@ -282,6 +283,8 @@ pub struct PaperlessDocumentSummary {
     pub id: i32,
     pub title: Option<String>,
     #[serde(default)]
+    pub created: Option<String>,
+    #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
     pub tags: Vec<i32>,
@@ -295,6 +298,8 @@ pub struct PaperlessDocumentSummary {
 pub struct PaperlessDocumentDetail {
     pub id: i32,
     pub title: Option<String>,
+    #[serde(default)]
+    pub created: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]

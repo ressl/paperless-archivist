@@ -1,0 +1,107 @@
+[
+  {
+    "language": "de",
+    "text": "Muster Energie AG\nRechnung\nRechnungsdatum: 14. März 2026\nFaellig am: 30.04.2026",
+    "expected_correspondent": "Muster Energie AG",
+    "expected_document_type": "Invoice",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "en",
+    "text": "Acme Bank\nStatement\nIssue date: March 14, 2026\nPayment due: April 30, 2026",
+    "expected_correspondent": "Acme Bank",
+    "expected_document_type": "Statement",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "fr",
+    "text": "Assurance Exemple\nContrat\nDate d'émission: 14 mars 2026",
+    "expected_correspondent": "Assurance Exemple",
+    "expected_document_type": "Contract",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "it",
+    "text": "Clinica Esempio\nCertificato medico\nData di emissione: 14 marzo 2026",
+    "expected_correspondent": "Clinica Esempio",
+    "expected_document_type": "Medical",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "es",
+    "text": "Tienda Ejemplo\nRecibo\nFecha de emisión: 14 marzo 2026",
+    "expected_correspondent": "Tienda Ejemplo",
+    "expected_document_type": "Receipt",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "pt",
+    "text": "Autoridade Exemplo\nAviso\nData de emissão: 14 março 2026",
+    "expected_correspondent": "Autoridade Exemplo",
+    "expected_document_type": "Government",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "nl",
+    "text": "Voorbeeld Bank\nFactuurdatum: 14 maart 2026\nDocument: bankafschrift",
+    "expected_correspondent": "Voorbeeld Bank",
+    "expected_document_type": "Bank",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "pl",
+    "text": "Urzad Przyklad\nPodatek\nData wystawienia: 14 marzec 2026",
+    "expected_correspondent": "Urzad Przyklad",
+    "expected_document_type": "Tax",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "tr",
+    "text": "Ornek Sigorta\nPolice\nFatura tarihi: 14 Mart 2026",
+    "expected_correspondent": "Ornek Sigorta",
+    "expected_document_type": "Insurance",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "ar",
+    "text": "شركة مثال\nفاتورة\nتاريخ الفاتورة: ١٤/٠٣/٢٠٢٦",
+    "expected_correspondent": "شركة مثال",
+    "expected_document_type": "Invoice",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "he",
+    "text": "בנק דוגמה\nתאריך חשבונית: 14/03/2026",
+    "expected_correspondent": "בנק דוגמה",
+    "expected_document_type": "Bank",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "hi",
+    "text": "उदाहरण अस्पताल\nचालान दिनांक: १४/०३/२०२६",
+    "expected_correspondent": "उदाहरण अस्पताल",
+    "expected_document_type": "Medical",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "zh",
+    "text": "示例公司\n发票日期: 2026年03月14日",
+    "expected_correspondent": "示例公司",
+    "expected_document_type": "Invoice",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "ja",
+    "text": "サンプル株式会社\n請求日: 2026年03月14日",
+    "expected_correspondent": "サンプル株式会社",
+    "expected_document_type": "Invoice",
+    "expected_document_date": "2026-03-14"
+  },
+  {
+    "language": "mixed",
+    "text": "Acme GmbH\nInvoice / Rechnung\nIssue date: 2026-03-14\nScanned on 2026-03-16",
+    "expected_correspondent": "Acme GmbH",
+    "expected_document_type": "Invoice",
+    "expected_document_date": "2026-03-14"
+  }
+]

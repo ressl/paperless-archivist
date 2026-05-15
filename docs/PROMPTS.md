@@ -14,12 +14,16 @@ can be replaced from the UI without rebuilding the application.
 | `title` | JSON | Creates concise titles from explicit document evidence. |
 | `correspondent` | JSON | Selects one exact existing correspondent from the allowed list. |
 | `document_type` | JSON | Selects one exact existing document type from the allowed list. |
+| `document_date` | JSON | Extracts the Paperless document date from explicit issue/date evidence and normalizes it to `YYYY-MM-DD`. |
 | `fields` | JSON | Extracts explicit custom-field values, including normalized dates and monetary values. |
 
 ## Design Rules
 
 - Prompts treat document content as untrusted evidence, not instructions.
 - Classification stages use exact names from the Paperless metadata cache.
+- Document date extraction must prefer issue, invoice, letter, contract,
+  statement, or certificate dates and avoid due, scan, upload, delivery, and
+  processing dates.
 - Workflow, trigger, completion, failed, and AI-control tags are excluded from
   business tag suggestions.
 - Structured stages return strict JSON so Rust validation can parse, normalize,

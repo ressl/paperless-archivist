@@ -130,8 +130,9 @@ Run sync before processing:
 2. Click `Sync`.
 3. Wait for the inventory to update.
 
-Sync reads Paperless metadata, tags, correspondents, document types, custom
-fields, and document status through the REST API.
+Sync reads Paperless metadata, tags, correspondents, document types, the
+Paperless document date, custom fields, and document status through the REST
+API.
 
 ## Dashboard
 
@@ -139,7 +140,7 @@ Use the dashboard to understand operational state:
 
 - total documents
 - complete documents
-- open OCR/tagging/title/field backlog
+- open OCR/tagging/title/correspondent/document type/document date/field backlog
 - failed jobs
 - running jobs
 - review load
@@ -181,8 +182,11 @@ In `manual_review` and `auto_select_review` modes, AI suggestions are not
 applied automatically.
 
 1. Open `Review`.
-2. Inspect the suggested patch.
-3. Approve, reject, or edit the suggestion.
+2. Inspect the suggested patch. Standard metadata review items show current
+   value, suggested value, confidence, evidence, and warnings.
+3. Approve, reject, or edit the suggestion. For correspondent and document type
+   reviews, edit the Paperless numeric ID if the reviewer needs a different
+   existing value. For document date reviews, edit the ISO date directly.
 4. Approved changes are applied through the Paperless REST API.
 5. The action writes an audit event.
 
@@ -193,6 +197,21 @@ items failed.
 Use review mode while tuning prompts, models, confidence thresholds, and tag
 rules.
 
+## Standard Paperless Metadata
+
+Archivist processes the normal Paperless fields separately from custom fields:
+
+- `correspondent`: selected from synced Paperless correspondents.
+- `document_type`: selected from synced Paperless document types.
+- `document_date`: written to the Paperless `created` field as `YYYY-MM-DD`.
+
+Existing non-empty values are protected by default. Admins can enable overwrite
+for correspondent, document type, and document date independently in Settings.
+The metadata confidence threshold controls correspondent/type suggestions; the
+date confidence threshold controls document date extraction. Creation/proposal
+toggles are conservative defaults for future controlled creation workflows and
+should remain off unless the team has a review process for new Paperless values.
+
 ## Prompt Workbench
 
 Archivist includes default prompts for:
@@ -202,6 +221,7 @@ Archivist includes default prompts for:
 - title
 - correspondent
 - document type
+- document date
 - custom fields
 
 The defaults are versioned database records. They are strict by design:

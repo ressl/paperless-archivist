@@ -92,7 +92,7 @@ safe enough to run repeatedly on a real archive.
 | --- | --- |
 | Paperless integration | REST API only, no direct database writes, document inventory sync, tag and metadata patching |
 | OCR pipeline | Vision/OCR stage with configurable models and resumable worker jobs |
-| Tagging pipeline | Title, correspondent, document type, tag, and field suggestions with Rust-side validation |
+| Tagging pipeline | Title, correspondent, document type, document date, tag, and field suggestions with Rust-side validation |
 | Language intelligence | Local language detection stores BCP-47 tags, feeds prompt context, and lets operators choose the language for newly generated tags |
 | Review flow | Approve, reject, or edit AI suggestions before they are applied |
 | Workflow modes | Manual trigger + review, autopilot selector + review, or full autopilot |
@@ -249,9 +249,11 @@ tag-based workflow rules, and an optional Paperless-ngx login bridge.
 | Full autopilot | `full_auto` | Archivist automatically queues documents with missing enabled stages | Valid suggestions are applied to Paperless automatically |
 
 Successful OCR and tagging stages add `archivist-ocr` and `archivist-tags`.
-The final stage in a run also adds `ai-processed`. Trigger tags are removed
-after the corresponding stage succeeds so the worker can resume safely without
-looping over already-completed work.
+Standard metadata stages can add `ai-processed-correspondent`,
+`ai-processed-document-type`, and `ai-processed-document-date`. The final stage
+in a run also adds `ai-processed`. Trigger tags are removed after the
+corresponding stage succeeds so the worker can resume safely without looping
+over already-completed work.
 
 ## Language Intelligence
 
@@ -263,13 +265,32 @@ generated business tags in the operator-selected language. Existing Paperless
 tags, correspondents, document types, dates, names, and identifiers are kept
 exact unless a reviewer explicitly changes them.
 
+## Paperless Standard Metadata
+
+Archivist can fill the standard Paperless fields that users normally maintain by
+hand:
+
+- **Correspondent:** selected from the synced Paperless correspondents by exact
+  name, with confidence and evidence shown in review.
+- **Document type:** selected from the synced Paperless document types by exact
+  name.
+- **Document date:** extracted as ISO `YYYY-MM-DD` from issue, invoice, letter,
+  contract, statement, or certificate date evidence. Due dates, scan dates,
+  upload dates, and processing dates are treated as risky and routed to review
+  unless confidence is high.
+
+The worker only writes through the Paperless REST API. Existing non-empty
+standard fields are protected by default; admins can explicitly allow overwrite
+in Settings. Review items show the current value, suggested value, confidence,
+evidence, warnings, and editable field controls before apply.
+
 ## Default Prompt Pack
 
 Archivist ships with versioned defaults for OCR, OCR post-processing, tagging,
-title generation, correspondent detection, document type detection, and custom
-field extraction. The prompts are installed into PostgreSQL by migrations,
-visible in the `Prompts` Workbench, and can be tested, compared, versioned, or
-replaced without rebuilding.
+title generation, correspondent detection, document type detection, document
+date extraction, and custom field extraction. The prompts are installed into
+PostgreSQL by migrations, visible in the `Prompts` Workbench, and can be tested,
+compared, versioned, or replaced without rebuilding.
 
 The defaults are designed for Paperless archives rather than generic chat:
 classification uses exact Paperless metadata names, workflow/control tags are
@@ -311,7 +332,7 @@ permanent scorecard.
 | Main focus | Operated AI pipeline with review, audit, dashboard, and safe apply | LLM-enhanced OCR and AI metadata suggestions | Auto-classification, smart tagging, and RAG chat | Web-UI configured AI middleware with vision OCR and document chat | Document AI workspace with chat, OCR, enrichment, and KPI views | Core document management system |
 | Paperless DB writes | No, REST API only | Uses Paperless API | Uses Paperless API | Uses Paperless API | Uses app proxy/API layer | Owns the Paperless database |
 | OCR enhancement | Yes, OCR stage with vision models | Strong focus: LLM OCR plus Azure, Google Document AI, and Docling options | Mostly depends on Paperless OCR | Vision OCR plus OCR post-processing | Ollama OCR plus MuPDF processing | Classical OCR pipeline |
-| Tagging and metadata | Titles, tags, correspondent, document type, fields | Titles, tags, created date, correspondent, custom fields | Titles, tags, document type, correspondent | Title, tags, type, correspondent, custom fields | AI metadata enrichment | Matching rules and classifier |
+| Tagging and metadata | Titles, tags, correspondent, document type, document date, fields | Titles, tags, created date, correspondent, custom fields | Titles, tags, document type, correspondent | Title, tags, type, correspondent, custom fields | AI metadata enrichment | Matching rules and classifier |
 | Review before apply | First-class review queue with approve, reject, edit | Web UI review and auto processing | Manual processing UI | Preview and process queue | Inspect and patch workflow | Native UI review of normal metadata |
 | Autopilot | Yes, validation-gated | Yes, via auto tags/processing | Yes, automatic processing rules | Yes, scheduler and trigger tags | Processing pipeline | Native consume/classification automation |
 | Resumable worker jobs | Yes, PostgreSQL-backed leases, retries, idempotent apply | Container workflow | Queue/process workflow | Process queue and scheduler | Processing lifecycle | Paperless task queue |

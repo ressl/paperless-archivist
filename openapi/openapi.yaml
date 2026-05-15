@@ -22,7 +22,7 @@ components:
       enum: [viewer, reviewer, operator, admin, auditor]
     Stage:
       type: string
-      enum: [ocr, ocr_fix, tags, title, correspondent, document_type, fields, apply]
+      enum: [ocr, ocr_fix, tags, title, correspondent, document_type, document_date, fields, apply]
     ProcessingMode:
       type: string
       enum: [manual_review, auto_select_review, full_auto]
@@ -373,9 +373,65 @@ components:
     DocumentInventoryItem:
       type: object
       additionalProperties: true
+    StandardMetadataSuggestion:
+      type: object
+      additionalProperties: true
+      properties:
+        field:
+          type: string
+          enum: [correspondent, document_type, document_date]
+        suggested_name:
+          type: [string, "null"]
+        suggested_date:
+          type: [string, "null"]
+          format: date
+        current_correspondent:
+          type: [integer, "null"]
+        current_document_type:
+          type: [integer, "null"]
+        current_date:
+          type: [string, "null"]
+        confidence:
+          type: [number, "null"]
+          format: float
+        evidence:
+          type: [string, "null"]
+    DocumentPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        content: { type: string }
+        title: { type: string }
+        tags:
+          type: array
+          items: { type: integer }
+        correspondent:
+          type: [integer, "null"]
+        document_type:
+          type: [integer, "null"]
+        created:
+          type: string
+          format: date
+        custom_fields: true
+        standard_metadata:
+          $ref: "#/components/schemas/StandardMetadataSuggestion"
     ReviewItem:
       type: object
       additionalProperties: true
+      required: [id, paperless_document_id, stage, status, suggested_patch, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        paperless_document_id: { type: integer }
+        stage: { $ref: "#/components/schemas/Stage" }
+        status: { type: string }
+        suggested_patch:
+          $ref: "#/components/schemas/DocumentPatch"
+        edited_patch:
+          oneOf:
+            - $ref: "#/components/schemas/DocumentPatch"
+            - type: "null"
+        validation_warnings: true
+        created_at: { type: string, format: date-time }
     AuditEvent:
       type: object
       additionalProperties: true

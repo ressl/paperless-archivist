@@ -108,7 +108,8 @@ The browser never contacts Ollama directly.
 | `POST` | `/api/prompts/{id}/activate` | Activate a prompt version for its stage. |
 
 Prompt stages are `ocr`, `ocr_fix`, `title`, `document_type`, `correspondent`,
-`tags`, and `fields`. Creating or activating prompts writes audit events.
+`document_date`, `tags`, and `fields`. Creating or activating prompts writes
+audit events.
 
 `POST /api/prompts/test` calls the configured text provider, parses the output
 for the selected stage, runs Rust-side validation, returns raw and parsed
@@ -118,7 +119,7 @@ output, and writes a `prompt.tested` audit event. It never patches Paperless.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/paperless/sync-metadata` | Synchronize document metadata, tags, correspondents, document types, and custom fields from Paperless. |
+| `POST` | `/api/paperless/sync-metadata` | Synchronize document metadata, tags, correspondents, document types, document dates, and custom fields from Paperless. |
 | `GET` | `/api/inventory?limit=100&offset=0` | List the local document inventory and per-stage status. |
 | `POST` | `/api/documents/{paperless_document_id}/trigger` | Queue selected stages for one Paperless document. |
 | `POST` | `/api/batches/ocr` | Queue OCR for documents missing OCR. |
@@ -180,6 +181,7 @@ Response shape:
     "missing_title": 0,
     "missing_correspondent": 0,
     "missing_document_type": 0,
+    "missing_document_date": 0,
     "missing_fields": 0,
     "waiting_review": 0,
     "failed": 0,
@@ -277,13 +279,18 @@ Edit body:
 {
   "patch": {
     "title": "Corrected title",
-    "tags": ["Invoices", "2026"]
+    "correspondent": 12,
+    "document_type": 4,
+    "created": "2026-04-12",
+    "tags": [10, 42]
   }
 }
 ```
 
 Apply actions write to Paperless through the Paperless REST API, update local run
-state, adjust workflow tags, and write audit events.
+state, adjust workflow tags, and write audit events. Patch bodies use Paperless
+numeric IDs for `correspondent`, `document_type`, and `tags`; the Paperless
+document date is `created` in ISO `YYYY-MM-DD` format.
 
 Batch review returns per-item failures for partial failures and writes a
 `review.batch_approve` or `review.batch_reject` audit event.

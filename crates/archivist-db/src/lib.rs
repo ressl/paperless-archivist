@@ -1674,6 +1674,7 @@ pub struct InventoryUpsert {
     pub current_tag_ids: Vec<i32>,
     pub correspondent_id: Option<i32>,
     pub document_type_id: Option<i32>,
+    pub document_date: Option<String>,
     pub has_ocr_completion_tag: bool,
     pub has_tagging_completion_tag: bool,
     pub has_full_completion_tag: bool,
@@ -1698,11 +1699,11 @@ pub async fn upsert_inventory_item(
         r#"
         insert into document_inventory (
           paperless_document_id, title, original_file_name, current_tags, current_tag_ids,
-          correspondent_id, document_type_id,
+          correspondent_id, document_type_id, document_date,
           has_ocr_completion_tag, has_tagging_completion_tag, has_full_completion_tag,
           ocr_status, tagging_status, complete, last_seen_at, updated_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now())
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
         on conflict (paperless_document_id)
         do update set title = excluded.title,
                       original_file_name = excluded.original_file_name,
@@ -1710,6 +1711,7 @@ pub async fn upsert_inventory_item(
                       current_tag_ids = excluded.current_tag_ids,
                       correspondent_id = excluded.correspondent_id,
                       document_type_id = excluded.document_type_id,
+                      document_date = excluded.document_date,
                       has_ocr_completion_tag = excluded.has_ocr_completion_tag,
                       has_tagging_completion_tag = excluded.has_tagging_completion_tag,
                       has_full_completion_tag = excluded.has_full_completion_tag,
@@ -1727,6 +1729,7 @@ pub async fn upsert_inventory_item(
     .bind(&item.current_tag_ids)
     .bind(item.correspondent_id)
     .bind(item.document_type_id)
+    .bind(&item.document_date)
     .bind(item.has_ocr_completion_tag)
     .bind(item.has_tagging_completion_tag)
     .bind(item.has_full_completion_tag)
@@ -1938,9 +1941,10 @@ pub async fn get_backlog_counts(pool: &DbPool) -> Result<BacklogCounts> {
           count(*) filter (where title_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_title,
           count(*) filter (where correspondent_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_correspondent,
           count(*) filter (where document_type_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_document_type,
+          count(*) filter (where document_date_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_document_date,
           count(*) filter (where fields_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_fields,
           count(*) filter (where needs_review or current_run_status = 'waiting_review')::bigint as waiting_review,
-          count(*) filter (where ocr_status = 'failed' or tagging_status = 'failed' or title_status = 'failed' or correspondent_status = 'failed' or document_type_status = 'failed' or fields_status = 'failed')::bigint as failed,
+          count(*) filter (where ocr_status = 'failed' or tagging_status = 'failed' or title_status = 'failed' or correspondent_status = 'failed' or document_type_status = 'failed' or document_date_status = 'failed' or fields_status = 'failed')::bigint as failed,
           count(*) filter (where current_run_status in ('queued', 'running', 'applying'))::bigint as running,
           count(*) filter (where last_run_id is null)::bigint as never_processed
         from document_inventory
@@ -1957,6 +1961,7 @@ pub async fn get_backlog_counts(pool: &DbPool) -> Result<BacklogCounts> {
         missing_title: row.try_get("missing_title")?,
         missing_correspondent: row.try_get("missing_correspondent")?,
         missing_document_type: row.try_get("missing_document_type")?,
+        missing_document_date: row.try_get("missing_document_date")?,
         missing_fields: row.try_get("missing_fields")?,
         waiting_review: row.try_get("waiting_review")?,
         failed: row.try_get("failed")?,
@@ -1970,10 +1975,10 @@ pub async fn record_dashboard_snapshot(pool: &DbPool, counts: &BacklogCounts) ->
         r#"
         insert into dashboard_snapshots (
           total_documents, complete, missing_ocr, missing_tagging, missing_title,
-          missing_correspondent, missing_document_type, missing_fields, waiting_review,
+          missing_correspondent, missing_document_type, missing_document_date, missing_fields, waiting_review,
           failed, running, never_processed
         )
-        select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+        select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
         where not exists (
           select 1 from dashboard_snapshots
            where captured_at >= now() - interval '5 minutes'
@@ -1987,6 +1992,7 @@ pub async fn record_dashboard_snapshot(pool: &DbPool, counts: &BacklogCounts) ->
     .bind(counts.missing_title)
     .bind(counts.missing_correspondent)
     .bind(counts.missing_document_type)
+    .bind(counts.missing_document_date)
     .bind(counts.missing_fields)
     .bind(counts.waiting_review)
     .bind(counts.failed)
@@ -2501,6 +2507,7 @@ async fn stage_status(pool: &DbPool) -> Result<Vec<DashboardStageStatus>> {
           union all select 'title', title_status, current_run_status from document_inventory
           union all select 'document_type', document_type_status, current_run_status from document_inventory
           union all select 'correspondent', correspondent_status, current_run_status from document_inventory
+          union all select 'document_date', document_date_status, current_run_status from document_inventory
           union all select 'tags', tagging_status, current_run_status from document_inventory
           union all select 'fields', fields_status, current_run_status from document_inventory
         ),
@@ -2707,8 +2714,8 @@ pub async fn list_inventory(
         r#"
         select paperless_document_id, title, original_file_name, current_tags, ocr_status,
                tagging_status, title_status, correspondent_status, document_type_status,
-               fields_status, current_run_status, last_run_id, last_error,
-               next_required_stage, needs_review, complete, detected_language,
+               document_date_status, fields_status, current_run_status, last_run_id, last_error,
+               next_required_stage, needs_review, complete, document_date, detected_language,
                detected_language_confidence, detected_language_source, last_seen_at
           from document_inventory
          order by paperless_document_id desc
@@ -2732,6 +2739,7 @@ pub async fn list_inventory(
                 title_status: row.try_get("title_status")?,
                 correspondent_status: row.try_get("correspondent_status")?,
                 document_type_status: row.try_get("document_type_status")?,
+                document_date_status: row.try_get("document_date_status")?,
                 fields_status: row.try_get("fields_status")?,
                 current_run_status: row.try_get("current_run_status")?,
                 last_run_id: row.try_get("last_run_id")?,
@@ -2739,6 +2747,7 @@ pub async fn list_inventory(
                 next_required_stage: row.try_get("next_required_stage")?,
                 needs_review: row.try_get("needs_review")?,
                 complete: row.try_get("complete")?,
+                document_date: row.try_get("document_date")?,
                 detected_language: row.try_get("detected_language")?,
                 detected_language_confidence: row.try_get("detected_language_confidence")?,
                 detected_language_source: row.try_get("detected_language_source")?,
@@ -3152,6 +3161,7 @@ pub async fn queue_missing_pipeline(
                title_status,
                correspondent_status,
                document_type_status,
+               document_date_status,
                fields_status,
                has_ocr_completion_tag,
                has_tagging_completion_tag,
@@ -3178,6 +3188,7 @@ pub async fn queue_missing_pipeline(
                 title_status: row.try_get("title_status")?,
                 correspondent_status: row.try_get("correspondent_status")?,
                 document_type_status: row.try_get("document_type_status")?,
+                document_date_status: row.try_get("document_date_status")?,
                 fields_status: row.try_get("fields_status")?,
                 has_ocr_completion_tag: row.try_get("has_ocr_completion_tag")?,
                 has_tagging_completion_tag: row.try_get("has_tagging_completion_tag")?,
@@ -3201,6 +3212,7 @@ struct InventoryStageState {
     title_status: String,
     correspondent_status: String,
     document_type_status: String,
+    document_date_status: String,
     fields_status: String,
     has_ocr_completion_tag: bool,
     has_tagging_completion_tag: bool,
@@ -3226,6 +3238,7 @@ fn missing_pipeline_stages_for_inventory(
             Stage::Title => stage_needs_work(&state.title_status),
             Stage::Correspondent => stage_needs_work(&state.correspondent_status),
             Stage::DocumentType => stage_needs_work(&state.document_type_status),
+            Stage::DocumentDate => stage_needs_work(&state.document_date_status),
             Stage::Fields => stage_needs_work(&state.fields_status),
             Stage::OcrFix | Stage::Apply => false,
         })
@@ -3853,7 +3866,7 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
     append_audit_tx(
         &mut tx,
         AuditEventInput {
-            event_type: "document.patch_applied".to_owned(),
+            event_type: "review.applied".to_owned(),
             actor_type: "user".to_owned(),
             actor_id: Some(actor_id.to_string()),
             run_id: Some(run_id),
@@ -4079,6 +4092,7 @@ fn status_column_for_stage(stage: Stage) -> Result<&'static str> {
         Stage::Title => Ok("title_status"),
         Stage::Correspondent => Ok("correspondent_status"),
         Stage::DocumentType => Ok("document_type_status"),
+        Stage::DocumentDate => Ok("document_date_status"),
         Stage::Fields => Ok("fields_status"),
         Stage::OcrFix | Stage::Apply => Err(anyhow!("stage does not map to inventory status")),
     }
@@ -4174,6 +4188,7 @@ mod tests {
                 title_status: "unknown".to_owned(),
                 correspondent_status: "unknown".to_owned(),
                 document_type_status: "unknown".to_owned(),
+                document_date_status: "unknown".to_owned(),
                 fields_status: "unknown".to_owned(),
                 has_ocr_completion_tag: true,
                 has_tagging_completion_tag: true,
@@ -4193,6 +4208,7 @@ mod tests {
                 title_status: "unknown".to_owned(),
                 correspondent_status: "unknown".to_owned(),
                 document_type_status: "unknown".to_owned(),
+                document_date_status: "unknown".to_owned(),
                 fields_status: "unknown".to_owned(),
                 has_ocr_completion_tag: false,
                 has_tagging_completion_tag: false,

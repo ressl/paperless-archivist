@@ -130,7 +130,8 @@ Paperless is accessed only through `archivist-paperless`.
 
 Allowed:
 
-- REST reads for documents, tags, correspondents, document types, custom fields
+- REST reads for documents, tags, correspondents, document types, document dates,
+  custom fields
 - REST patches for document metadata
 - REST tag creation and tag updates
 
@@ -142,6 +143,16 @@ Forbidden:
 
 Apply logic must be idempotent where possible. Completion tags and trigger tag
 cleanup should happen after successful stage completion.
+
+Standard metadata writes map to Paperless fields as follows:
+
+- correspondent -> `correspondent` numeric Paperless ID
+- document type -> `document_type` numeric Paperless ID
+- document date / issue date -> `created` ISO `YYYY-MM-DD`
+
+Protect existing non-empty values unless the matching overwrite setting is
+enabled. Audit payloads should contain before/after metadata but redact OCR text
+and custom field values by hash/length rather than storing raw private content.
 
 ## AI Providers
 
@@ -215,13 +226,17 @@ Never let raw model output directly mutate Paperless.
 Document language is detected locally in `archivist-core` and persisted on
 `document_inventory` as a BCP-47 tag, confidence, and source. Worker prompt
 builders must pass a `PromptLanguageContext` into tagging, title,
-correspondent, document type, and field prompts. Existing Paperless metadata
-values must remain exact; only newly generated business tags use the configured
-`tag_output_language`.
+correspondent, document type, document date, and field prompts. Existing
+Paperless metadata values must remain exact; only newly generated business tags
+use the configured `tag_output_language`.
 
 When extending language detection, add representative samples to
 `crates/archivist-core/tests/fixtures/language_samples.json` and cover prompt
 rendering without requiring a live provider.
+
+When extending standard metadata extraction, add public-safe examples to
+`crates/archivist-core/tests/fixtures/standard_metadata_samples.json`. Fixtures
+must not contain real personal documents or private infrastructure details.
 
 ## Document Chat/RAG
 
