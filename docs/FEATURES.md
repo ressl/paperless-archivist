@@ -767,6 +767,9 @@ Implemented product path:
 - optional Paperless-ngx login bridge
 - tag-based workflow rules
 - worker queue
+- worker trace IDs and structured telemetry
+- Prometheus metrics for selector, retries, model errors, and apply latency
+- Dashboard recovery tools for stale leases and stuck runs
 - OCR stage
 - tagging stage
 - title/correspondent/document type stages

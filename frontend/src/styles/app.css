@@ -450,12 +450,13 @@ th {
 
 .operations-strip {
   display: grid;
-  grid-template-columns: minmax(260px, 1.1fr) repeat(2, minmax(220px, 1fr));
+  grid-template-columns: minmax(280px, 1.2fr) repeat(3, minmax(200px, 1fr));
   gap: 12px;
 }
 
 .autopilot-card,
 .service-card,
+.recovery-panel,
 .live-processing-panel {
   min-width: 0;
   border: 1px solid var(--line);
@@ -568,6 +569,43 @@ th {
   color: var(--muted);
   font-size: 12px;
   font-style: normal;
+}
+
+.recovery-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 14px 16px;
+  background: #fff;
+}
+
+.recovery-panel strong {
+  display: block;
+  color: var(--ink);
+}
+
+.recovery-panel p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.recovery-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recovery-counts span {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .dashboard-metrics {
@@ -1108,6 +1146,11 @@ th {
   }
 
   .autopilot-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recovery-panel {
     align-items: stretch;
     flex-direction: column;
   }

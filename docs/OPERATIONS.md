@@ -297,6 +297,11 @@ Worker behavior:
 - writes audit events for job, review, and apply actions
 
 Workers are safe to scale horizontally.
+Every job log line includes a trace ID equal to the pipeline run ID, plus job
+ID, document ID, stage, attempt, duration, and failure class. The Dashboard live
+panel shows the same trace ID prefix for active jobs so operators can correlate
+UI state, JSON logs, audit rows, and database records without exposing document
+content.
 
 ## Metrics
 
@@ -306,8 +311,29 @@ Prometheus metrics are available without authentication:
 curl http://127.0.0.1:8080/metrics
 ```
 
-The service exports queued/running/failed/succeeded jobs, pending reviews,
-active runs, and audit event count.
+The service exports:
+
+- queued/running/failed/succeeded jobs
+- pending reviews, active runs, and audit event count
+- automatic selector run count and queued-document count
+- retry-scheduled count
+- model-stage error count
+- Paperless apply success/failure count
+- Paperless apply latency count, sum, and p95
+
+Recommended initial alert rules:
+
+- `paperless_archivist_jobs_failed > 0` for 15 minutes
+- `increase(paperless_archivist_job_retries_scheduled_total[30m]) > 10`
+- `paperless_archivist_model_errors_total > 0` for 15 minutes
+- `paperless_archivist_apply_latency_ms_p95 > 10000` for 15 minutes
+- `paperless_archivist_runs_active > 0` with no successful jobs for 60 minutes
+
+Suggested SLOs for production archives:
+
+- 99% of Paperless apply operations finish below 10 seconds.
+- 95% of selected documents leave `queued` or `running` state within 30 minutes.
+- Full-auto model-stage hard failure rate stays below 1% over 24 hours.
 
 ## Dashboard Analytics
 
@@ -497,6 +523,10 @@ Common failures:
   is `Retry Scheduled` or `Retry Ready`, the worker will retry it after backoff;
   repeated hard failures usually indicate a model/runtime issue or an input page
   the selected vision model cannot handle.
+- stale `running` jobs: open Dashboard recovery tools, refresh candidates, then
+  requeue stale leases. The endpoint is `POST /api/operations/recovery/stale-leases`.
+- active runs without active jobs: use `POST /api/operations/recovery/stuck-runs`
+  after inspecting the recovery candidates. The operation writes audit events.
 - `pdftoppm exited`: verify Poppler is installed and the PDF is readable.
 - repeated `validation` failures: use review mode and inspect AI output.
 - empty dashboard history: query the dashboard after migration `0004`; snapshot

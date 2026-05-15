@@ -138,6 +138,8 @@ output, and writes a `prompt.tested` audit event. It never patches Paperless.
 `selector`, `llm`, `paperless`, active runs/jobs, recent retries/failures,
 workflow safety state, and the next selector scan estimate. It is intentionally
 status-only and does not expose document content or provider secrets.
+Active runs and jobs include `trace_id`, which is the pipeline run UUID used in
+worker JSON logs and audit correlation.
 
 Inventory and Review responses include an optional `debug_context` object with
 selector reason, workflow mode, pause/dry-run state, detected prompt language,
@@ -153,6 +155,23 @@ with the existing inventory/review permissions.
 | `POST` | `/api/batches/ocr` | Queue OCR for documents missing OCR. |
 | `POST` | `/api/batches/tags` | Queue tagging for documents missing tagging. |
 | `POST` | `/api/batches/full` | Queue the configured full pipeline for open documents. |
+
+## Operations Recovery
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/operations/recovery?older_than_seconds=600` | List stale leases and active runs that have no active jobs. |
+| `POST` | `/api/operations/recovery/stale-leases` | Requeue expired running jobs and clear their leases. |
+| `POST` | `/api/operations/recovery/stuck-runs` | Complete all-succeeded stuck runs or fail active runs that no longer have active jobs. |
+
+Recovery writes audit events and requires run write permission plus a browser
+user session for mutable actions. Request body:
+
+```json
+{ "older_than_seconds": 600 }
+```
+
+The value is clamped to 60 seconds through 24 hours.
 
 Single-document trigger body:
 

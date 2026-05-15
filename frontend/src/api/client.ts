@@ -230,6 +230,7 @@ export type WorkflowSafetyStatus = {
 
 export type DashboardLiveRun = {
   id: string;
+  trace_id: string;
   paperless_document_id: number;
   mode: ProcessingMode;
   status: string;
@@ -243,6 +244,7 @@ export type DashboardLiveRun = {
 export type DashboardLiveJob = {
   id: string;
   run_id: string;
+  trace_id: string;
   paperless_document_id: number;
   stage: PipelineStage;
   status: string;
@@ -341,6 +343,24 @@ export type ReviewItem = {
   validation_warnings?: unknown;
   debug_context?: WorkflowDebugContext | null;
   created_at: string;
+};
+
+export type RecoveryCandidate = {
+  run_id: string;
+  job_id?: string | null;
+  paperless_document_id: number;
+  stage?: PipelineStage | null;
+  status: string;
+  lease_owner?: string | null;
+  lease_until?: string | null;
+  updated_at: string;
+  reason: string;
+};
+
+export type RecoverySummary = {
+  stale_leases_requeued: number;
+  stuck_runs_failed: number;
+  stuck_runs_completed: number;
 };
 
 export type DocumentChatSource = {
@@ -558,6 +578,20 @@ export const api = {
     request<{ ok: boolean }>(`/api/reviews/${id}/edit`, {
       method: 'POST',
       body: JSON.stringify({ patch })
+    }),
+  recoveryStatus: (olderThanSeconds = 600) =>
+    request<{ older_than_seconds: number; items: RecoveryCandidate[] }>(
+      `/api/operations/recovery?older_than_seconds=${encodeURIComponent(String(olderThanSeconds))}`
+    ),
+  recoverStaleLeases: (olderThanSeconds = 600) =>
+    request<{ older_than_seconds: number; summary: RecoverySummary }>('/api/operations/recovery/stale-leases', {
+      method: 'POST',
+      body: JSON.stringify({ older_than_seconds: olderThanSeconds })
+    }),
+  recoverStuckRuns: (olderThanSeconds = 600) =>
+    request<{ older_than_seconds: number; summary: RecoverySummary }>('/api/operations/recovery/stuck-runs', {
+      method: 'POST',
+      body: JSON.stringify({ older_than_seconds: olderThanSeconds })
     }),
   audit: () => request<{ items: AuditEvent[] }>('/api/audit'),
   prompts: () => request<{ items: Prompt[] }>('/api/prompts'),

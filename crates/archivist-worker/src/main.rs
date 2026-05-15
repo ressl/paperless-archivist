@@ -36,7 +36,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::signal;
 use tokio::time::{sleep, timeout};
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -85,8 +85,9 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                     let config = Arc::clone(&config);
                     let trigger_poll_running = Arc::clone(&trigger_poll_running);
                     tokio::spawn(async move {
+                        let trace_id = Uuid::now_v7();
                         let started = std::time::Instant::now();
-                        info!("trigger polling started");
+                        info!(%trace_id, "trigger polling started");
                         let result = timeout(
                             Duration::from_secs(300),
                             poll_paperless_triggers(&pool, &config),
@@ -94,13 +95,13 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                         .await;
                         match result {
                             Ok(Ok(())) => {
-                                info!(duration_ms = started.elapsed().as_millis() as u64, "trigger polling completed");
+                                info!(%trace_id, duration_ms = started.elapsed().as_millis() as u64, "trigger polling completed");
                             }
                             Ok(Err(error)) => {
-                                warn!(error = %error, duration_ms = started.elapsed().as_millis() as u64, "trigger polling failed");
+                                warn!(%trace_id, error = %error, duration_ms = started.elapsed().as_millis() as u64, "trigger polling failed");
                             }
                             Err(_) => {
-                                warn!(duration_ms = started.elapsed().as_millis() as u64, "trigger polling timed out");
+                                warn!(%trace_id, duration_ms = started.elapsed().as_millis() as u64, "trigger polling timed out");
                             }
                         }
                         trigger_poll_running.store(false, Ordering::Release);
@@ -140,13 +141,45 @@ async fn process_available_jobs(
     for job in jobs {
         let pool = pool.clone();
         let config = Arc::clone(config);
-        pending.push(tokio::spawn(async move {
-            let result = process_job(&pool, &config, &job).await;
-            if let Err(error) = &result {
-                let _ = fail_job(&pool, &job, &error.to_string(), true).await;
+        let trace_id = job.run_id;
+        let span = info_span!(
+            "archivist_job",
+            trace_id = %trace_id,
+            run_id = %job.run_id,
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            stage = %job.stage,
+            attempt = job.attempts
+        );
+        pending.push(tokio::spawn(
+            async move {
+                let started = std::time::Instant::now();
+                let result = process_job(&pool, &config, &job).await;
+                if let Err(error) = &result {
+                    let failure_class = classify_processing_failure(error);
+                    warn!(
+                        error = %error,
+                        failure_class = failure_class.as_str(),
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "job processing failed"
+                    );
+                    let _ = fail_job(
+                        &pool,
+                        &job,
+                        &error.to_string(),
+                        failure_class.is_retryable(),
+                    )
+                    .await;
+                } else {
+                    info!(
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "job processing completed"
+                    );
+                }
+                result
             }
-            result
-        }));
+            .instrument(span),
+        ));
     }
 
     while let Some(result) = pending.next().await {
@@ -155,6 +188,62 @@ async fn process_available_jobs(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessingFailureClass {
+    Transient,
+    Permanent,
+}
+
+impl ProcessingFailureClass {
+    fn is_retryable(self) -> bool {
+        matches!(self, Self::Transient)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Permanent => "permanent",
+        }
+    }
+}
+
+fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass {
+    let message = error
+        .chain()
+        .map(|cause| cause.to_string().to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let transient_markers = [
+        "timeout",
+        "timed out",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "temporarily unavailable",
+        "service unavailable",
+        "internal server error",
+        "ollama",
+        "runner process no longer running",
+        "database",
+        "pool timed out",
+        "broken pipe",
+        "dns",
+        "network",
+        "502",
+        "503",
+        "504",
+    ];
+
+    if transient_markers
+        .iter()
+        .any(|marker| message.contains(marker))
+    {
+        ProcessingFailureClass::Transient
+    } else {
+        ProcessingFailureClass::Permanent
+    }
 }
 
 async fn process_job(pool: &DbPool, config: &AppConfig, job: &JobRecord) -> Result<()> {
@@ -928,9 +1017,32 @@ async fn apply_patch_with_workflow_tags(
     prune_unchanged_patch_fields(&mut patch, &document);
     let before_value = audit_before_for_patch(&document, &patch);
     let patch_value = audit_patch_payload(&patch);
-    paperless
+    let apply_started = std::time::Instant::now();
+    if let Err(error) = paperless
         .patch_document(job.paperless_document_id, &patch)
+        .await
+    {
+        let duration_ms = apply_started.elapsed().as_millis() as u64;
+        append_audit(
+            pool,
+            AuditEventInput {
+                event_type: "document.patch_apply_failed".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: Some(job.run_id),
+                job_id: Some(job.id),
+                paperless_document_id: Some(job.paperless_document_id),
+                before: Some(before_value),
+                after: Some(patch_value),
+                metadata: Some(json!({ "stage": job.stage, "duration_ms": duration_ms })),
+                outcome: "failed".to_owned(),
+                error_message: Some(error.to_string()),
+            },
+        )
         .await?;
+        return Err(error);
+    }
+    let duration_ms = apply_started.elapsed().as_millis() as u64;
     append_audit(
         pool,
         AuditEventInput {
@@ -942,7 +1054,7 @@ async fn apply_patch_with_workflow_tags(
             paperless_document_id: Some(job.paperless_document_id),
             before: Some(before_value),
             after: Some(patch_value),
-            metadata: Some(json!({ "stage": job.stage })),
+            metadata: Some(json!({ "stage": job.stage, "duration_ms": duration_ms })),
             outcome: "success".to_owned(),
             error_message: None,
         },
@@ -1538,5 +1650,39 @@ mod tests {
         assert_eq!(audit["custom_fields"]["redacted"], Value::Bool(true));
         assert!(!audit.to_string().contains("private OCR text"));
         assert!(!audit.to_string().contains("private value"));
+    }
+
+    #[test]
+    fn classifies_integration_interruptions_as_transient() {
+        let cases = [
+            anyhow!("Paperless request timed out while downloading original"),
+            anyhow!(
+                "Ollama vision returned 500 Internal Server Error: runner process no longer running"
+            ),
+            anyhow!("PostgreSQL database pool timed out while claiming jobs"),
+        ];
+
+        for error in cases {
+            assert_eq!(
+                classify_processing_failure(&error),
+                ProcessingFailureClass::Transient
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_validation_and_configuration_errors_as_permanent() {
+        let cases = [
+            anyhow!("Paperless returned 406 Not Acceptable"),
+            anyhow!("model response did not contain valid JSON"),
+            anyhow!("unknown allowed tag returned by model"),
+        ];
+
+        for error in cases {
+            assert_eq!(
+                classify_processing_failure(&error),
+                ProcessingFailureClass::Permanent
+            );
+        }
     }
 }

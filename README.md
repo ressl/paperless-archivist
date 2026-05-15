@@ -255,7 +255,9 @@ review actions, provider usage/cost/latency reporting, audit CSV export,
 tag-based workflow rules, and an optional Paperless-ngx login bridge.
 Full-auto operations include pause/resume, dry-run, hourly/daily document
 limits, and dashboard debug context for the selector, Paperless, and model
-pipeline.
+pipeline. Reliability features include trace IDs across worker logs and live UI,
+Prometheus metrics for selector/retry/model/apply health, and operator recovery
+tools for stale leases or stuck runs.
 
 ## Workflow Modes
 

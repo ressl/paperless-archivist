@@ -28,9 +28,10 @@ use archivist_db::{
     list_allowed_tag_names, list_audit_events, list_custom_fields, list_document_chat_messages,
     list_document_chat_sessions, list_inventory, list_prompt_usage, list_prompts, list_reviews,
     list_secret_references, list_sessions, list_users, metrics_snapshot as db_metrics_snapshot,
-    migrate, queue_missing_stage, record_login_failure, record_login_success, resolve_secret,
-    review_decision, revoke_session_by_admin, search_document_chat_candidates, set_user_enabled,
-    set_user_roles, update_runtime_settings, update_user_password_hash, upsert_encrypted_secret,
+    migrate, queue_missing_stage, record_login_failure, record_login_success, recover_stale_leases,
+    recover_stuck_runs, recovery_candidates, resolve_secret, review_decision,
+    revoke_session_by_admin, search_document_chat_candidates, set_user_enabled, set_user_roles,
+    update_runtime_settings, update_user_password_hash, upsert_encrypted_secret,
     upsert_inventory_item, upsert_oidc_user, upsert_paperless_custom_field,
     upsert_paperless_named_entity, upsert_paperless_tag,
 };
@@ -172,6 +173,15 @@ fn router(state: AppState) -> Router {
         .route("/reviews/{id}/approve", post(approve_review))
         .route("/reviews/{id}/reject", post(reject_review))
         .route("/reviews/{id}/edit", post(edit_review))
+        .route("/operations/recovery", get(recovery_status))
+        .route(
+            "/operations/recovery/stale-leases",
+            post(recover_stale_leases_endpoint),
+        )
+        .route(
+            "/operations/recovery/stuck-runs",
+            post(recover_stuck_runs_endpoint),
+        )
         .route("/audit", get(audit_events))
         .route("/audit/export.csv", get(audit_export))
         .route("/users", get(users).post(create_user))
@@ -280,7 +290,34 @@ async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
             "paperless_archivist_runs_active {}\n",
             "# HELP paperless_archivist_audit_events Audit events total\n",
             "# TYPE paperless_archivist_audit_events counter\n",
-            "paperless_archivist_audit_events {}\n"
+            "paperless_archivist_audit_events {}\n",
+            "# HELP paperless_archivist_selector_runs_total Automatic selector runs\n",
+            "# TYPE paperless_archivist_selector_runs_total counter\n",
+            "paperless_archivist_selector_runs_total {}\n",
+            "# HELP paperless_archivist_selector_documents_queued_total Documents queued by automatic selector\n",
+            "# TYPE paperless_archivist_selector_documents_queued_total counter\n",
+            "paperless_archivist_selector_documents_queued_total {}\n",
+            "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures\n",
+            "# TYPE paperless_archivist_job_retries_scheduled_total counter\n",
+            "paperless_archivist_job_retries_scheduled_total {}\n",
+            "# HELP paperless_archivist_model_errors_total Jobs with model-stage error messages\n",
+            "# TYPE paperless_archivist_model_errors_total gauge\n",
+            "paperless_archivist_model_errors_total {}\n",
+            "# HELP paperless_archivist_apply_success_total Successful Paperless apply operations\n",
+            "# TYPE paperless_archivist_apply_success_total counter\n",
+            "paperless_archivist_apply_success_total {}\n",
+            "# HELP paperless_archivist_apply_failure_total Failed Paperless apply operations\n",
+            "# TYPE paperless_archivist_apply_failure_total counter\n",
+            "paperless_archivist_apply_failure_total {}\n",
+            "# HELP paperless_archivist_apply_latency_ms_sum Sum of observed Paperless apply latency in milliseconds\n",
+            "# TYPE paperless_archivist_apply_latency_ms_sum counter\n",
+            "paperless_archivist_apply_latency_ms_sum {}\n",
+            "# HELP paperless_archivist_apply_latency_ms_count Count of observed Paperless apply latency samples\n",
+            "# TYPE paperless_archivist_apply_latency_ms_count counter\n",
+            "paperless_archivist_apply_latency_ms_count {}\n",
+            "# HELP paperless_archivist_apply_latency_ms_p95 Rolling p95 of observed Paperless apply latency in milliseconds\n",
+            "# TYPE paperless_archivist_apply_latency_ms_p95 gauge\n",
+            "paperless_archivist_apply_latency_ms_p95 {}\n"
         ),
         snapshot.jobs_queued,
         snapshot.jobs_running,
@@ -288,7 +325,16 @@ async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
         snapshot.jobs_succeeded,
         snapshot.reviews_pending,
         snapshot.runs_active,
-        snapshot.audit_events
+        snapshot.audit_events,
+        snapshot.selector_runs_total,
+        snapshot.selector_documents_queued_total,
+        snapshot.job_retries_scheduled_total,
+        snapshot.model_errors_total,
+        snapshot.apply_success_total,
+        snapshot.apply_failure_total,
+        snapshot.apply_latency_ms_sum,
+        snapshot.apply_latency_ms_count,
+        snapshot.apply_latency_ms_p95
     );
     let mut response = body.into_response();
     response.headers_mut().insert(
@@ -2461,6 +2507,63 @@ async fn edit_review(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Debug, Deserialize)]
+struct RecoveryQuery {
+    older_than_seconds: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecoveryRequest {
+    older_than_seconds: Option<i64>,
+}
+
+fn recovery_window_seconds(value: Option<i64>) -> i64 {
+    value.unwrap_or(600).clamp(60, 86_400)
+}
+
+async fn recovery_status(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Query(query): Query<RecoveryQuery>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadRuns)?;
+    let older_than_seconds = recovery_window_seconds(query.older_than_seconds);
+    Ok(Json(json!({
+        "older_than_seconds": older_than_seconds,
+        "items": recovery_candidates(&state.pool, older_than_seconds).await?
+    })))
+}
+
+async fn recover_stale_leases_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<RecoveryRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteRuns)?;
+    let actor_id = require_user_session(&auth.0, "recovery requires a user session")?;
+    let older_than_seconds = recovery_window_seconds(request.older_than_seconds);
+    let summary = recover_stale_leases(&state.pool, older_than_seconds, actor_id).await?;
+    Ok(Json(json!({
+        "older_than_seconds": older_than_seconds,
+        "summary": summary
+    })))
+}
+
+async fn recover_stuck_runs_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<RecoveryRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteRuns)?;
+    let actor_id = require_user_session(&auth.0, "recovery requires a user session")?;
+    let older_than_seconds = recovery_window_seconds(request.older_than_seconds);
+    let summary = recover_stuck_runs(&state.pool, older_than_seconds, actor_id).await?;
+    Ok(Json(json!({
+        "older_than_seconds": older_than_seconds,
+        "summary": summary
+    })))
+}
+
 async fn audit_events(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -2694,9 +2797,36 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
     prune_unchanged_patch_fields(&mut patch, &document);
     let before = audit_before_for_patch(&document, &patch);
     let after = audit_patch_payload(&patch);
-    client
+    let apply_started = std::time::Instant::now();
+    if let Err(error) = client
         .patch_document(review.paperless_document_id, &patch)
+        .await
+    {
+        let duration_ms = apply_started.elapsed().as_millis() as u64;
+        append_audit(
+            &state.pool,
+            AuditEventInput {
+                event_type: "document.patch_apply_failed".to_owned(),
+                actor_type: "user".to_owned(),
+                actor_id: Some(actor_id.to_string()),
+                run_id: Some(review.run_id),
+                job_id: review.job_id,
+                paperless_document_id: Some(review.paperless_document_id),
+                before: Some(before),
+                after: Some(after),
+                metadata: Some(json!({
+                    "stage": review.stage,
+                    "review_id": review.id,
+                    "duration_ms": duration_ms
+                })),
+                outcome: "failed".to_owned(),
+                error_message: Some(error.to_string()),
+            },
+        )
         .await?;
+        return Err(error);
+    }
+    let duration_ms = apply_started.elapsed().as_millis() as u64;
     append_audit(
         &state.pool,
         AuditEventInput {
@@ -2708,7 +2838,11 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
             paperless_document_id: Some(review.paperless_document_id),
             before: Some(before),
             after: Some(after),
-            metadata: Some(json!({ "stage": review.stage, "review_id": review.id })),
+            metadata: Some(json!({
+                "stage": review.stage,
+                "review_id": review.id,
+                "duration_ms": duration_ms
+            })),
             outcome: "success".to_owned(),
             error_message: None,
         },

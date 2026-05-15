@@ -47,6 +47,7 @@ import {
   Prompt,
   PromptTestResponse,
   PromptUsage,
+  RecoveryCandidate,
   ReviewItem,
   Role,
   RuntimeSettings,
@@ -323,6 +324,8 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
   const [range, setRange] = useState<DashboardRange>('24h');
   const [busy, setBusy] = useState(false);
   const [modeBusy, setModeBusy] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recovery, setRecovery] = useState<{ older_than_seconds: number; items: RecoveryCandidate[] } | null>(null);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
   const load = () =>
     api
@@ -338,6 +341,11 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
       .dashboardLive()
       .then(setLive)
       .catch((err) => setError(localizedErrorMessage(err, t)));
+  const loadRecovery = () =>
+    api
+      .recoveryStatus()
+      .then(setRecovery)
+      .catch((err) => setError(localizedErrorMessage(err, t)));
 
   useEffect(() => {
     void load();
@@ -349,11 +357,13 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
 
   useEffect(() => {
     void loadLive();
+    if (canManageSettings) void loadRecovery();
     const timer = window.setInterval(() => {
       void loadLive();
+      if (canManageSettings) void loadRecovery();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [canManageSettings]);
 
   const updateDashboardWorkflowMode = async (nextMode: ProcessingMode) => {
     const settings = await api.updateWorkflowMode(nextMode);
@@ -393,6 +403,14 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         : current
     );
     await loadLive();
+  };
+  const recoverStaleLeases = async () => {
+    await api.recoverStaleLeases(recovery?.older_than_seconds ?? 600);
+    await Promise.all([loadLive(), loadRecovery()]);
+  };
+  const recoverStuckRuns = async () => {
+    await api.recoverStuckRuns(recovery?.older_than_seconds ?? 600);
+    await Promise.all([load(), loadLive(), loadRecovery()]);
   };
 
   const openBacklog = counts.total_documents - counts.complete;
@@ -464,6 +482,16 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         <ServiceStatusCard label="LLM" icon={<Activity size={18} />} status={live?.llm} />
         <ServiceStatusCard label="Paperless" icon={<Database size={18} />} status={live?.paperless} />
       </div>
+
+      {canManageSettings && (
+        <RecoveryPanel
+          recovery={recovery}
+          busy={recoveryBusy}
+          onRefresh={() => void run(setRecoveryBusy, setError, loadRecovery, t)}
+          onRecoverLeases={() => void run(setRecoveryBusy, setError, recoverStaleLeases, t)}
+          onRecoverRuns={() => void run(setRecoveryBusy, setError, recoverStuckRuns, t)}
+        />
+      )}
 
       <div className="metric-grid dashboard-metrics">
         {metrics.map(({ label, value, tone, delta }) => (
@@ -687,6 +715,48 @@ function ServiceStatusCard({
   );
 }
 
+function RecoveryPanel({
+  recovery,
+  busy,
+  onRefresh,
+  onRecoverLeases,
+  onRecoverRuns
+}: {
+  recovery: { older_than_seconds: number; items: RecoveryCandidate[] } | null;
+  busy: boolean;
+  onRefresh: () => void;
+  onRecoverLeases: () => void;
+  onRecoverRuns: () => void;
+}) {
+  const { t, formatNumber } = useI18n();
+  const items = recovery?.items ?? [];
+  const staleLeases = items.filter((item) => item.reason === 'stale_lease').length;
+  const stuckRuns = items.filter((item) => item.reason === 'stuck_run_without_active_jobs').length;
+  return (
+    <section className="recovery-panel">
+      <div>
+        <strong>{t('dashboard.recovery.title')}</strong>
+        <p>{t('dashboard.recovery.description')}</p>
+      </div>
+      <div className="recovery-counts">
+        <span>{t('dashboard.recovery.stale_leases')}: {formatNumber(staleLeases)}</span>
+        <span>{t('dashboard.recovery.stuck_runs')}: {formatNumber(stuckRuns)}</span>
+      </div>
+      <div className="toolbar">
+        <button type="button" disabled={busy} onClick={onRefresh}>
+          <RefreshCw size={16} /> {t('generic.refresh')}
+        </button>
+        <button type="button" disabled={busy || staleLeases === 0} onClick={onRecoverLeases}>
+          <RotateCcw size={16} /> {t('dashboard.recovery.requeue_leases')}
+        </button>
+        <button type="button" disabled={busy || stuckRuns === 0} onClick={onRecoverRuns}>
+          <AlertTriangle size={16} /> {t('dashboard.recovery.recover_runs')}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
   const { t, formatNumber, formatRelativeTime: formatRelative } = useI18n();
   const activeJobs = live?.active_jobs ?? [];
@@ -729,7 +799,11 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
               <span>{stageLabel(job.stage, t)} · {t('dashboard.live.attempt', { attempts: job.attempts, max: job.max_attempts })}</span>
             </div>
             <Status value={job.status} />
-            <small>{job.lease_owner ? t('dashboard.live.worker', { worker: job.lease_owner }) : formatRelative(job.updated_at)}</small>
+            <small>
+              {job.lease_owner ? t('dashboard.live.worker', { worker: job.lease_owner }) : formatRelative(job.updated_at)}
+              {' · '}
+              {t('dashboard.live.trace', { trace: shortId(job.trace_id) })}
+            </small>
           </article>
         ))}
       </section>
@@ -887,6 +961,10 @@ function formatMs(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '-';
   if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
   return `${Math.round(value)}ms`;
+}
+
+function shortId(value: string) {
+  return value.slice(0, 8);
 }
 
 function formatCost(value?: number | null) {

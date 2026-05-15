@@ -275,9 +275,10 @@ components:
         last_event_at: { type: [string, "null"], format: date-time }
     DashboardLiveRun:
       type: object
-      required: [id, paperless_document_id, mode, status, trigger_tag, stages, created_at, updated_at]
+      required: [id, trace_id, paperless_document_id, mode, status, trigger_tag, stages, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
+        trace_id: { type: string, format: uuid }
         paperless_document_id: { type: integer }
         mode: { $ref: "#/components/schemas/ProcessingMode" }
         status: { type: string }
@@ -290,10 +291,11 @@ components:
         updated_at: { type: string, format: date-time }
     DashboardLiveJob:
       type: object
-      required: [id, run_id, paperless_document_id, stage, status, attempts, max_attempts, updated_at]
+      required: [id, run_id, trace_id, paperless_document_id, stage, status, attempts, max_attempts, updated_at]
       properties:
         id: { type: string, format: uuid }
         run_id: { type: string, format: uuid }
+        trace_id: { type: string, format: uuid }
         paperless_document_id: { type: integer }
         stage: { $ref: "#/components/schemas/Stage" }
         status: { type: string }
@@ -506,6 +508,50 @@ components:
     AuditEvent:
       type: object
       additionalProperties: true
+    RecoveryCandidate:
+      type: object
+      additionalProperties: false
+      required: [run_id, paperless_document_id, status, updated_at, reason]
+      properties:
+        run_id: { type: string, format: uuid }
+        job_id: { type: [string, "null"], format: uuid }
+        paperless_document_id: { type: integer }
+        stage:
+          oneOf:
+            - $ref: "#/components/schemas/Stage"
+            - type: "null"
+        status: { type: string }
+        lease_owner: { type: [string, "null"] }
+        lease_until: { type: [string, "null"], format: date-time }
+        updated_at: { type: string, format: date-time }
+        reason: { type: string }
+    RecoverySummary:
+      type: object
+      additionalProperties: false
+      required: [stale_leases_requeued, stuck_runs_failed, stuck_runs_completed]
+      properties:
+        stale_leases_requeued: { type: integer }
+        stuck_runs_failed: { type: integer }
+        stuck_runs_completed: { type: integer }
+    RecoveryRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        older_than_seconds: { type: integer, minimum: 60, maximum: 86400 }
+    RecoveryStatusResponse:
+      type: object
+      required: [older_than_seconds, items]
+      properties:
+        older_than_seconds: { type: integer }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RecoveryCandidate" }
+    RecoveryActionResponse:
+      type: object
+      required: [older_than_seconds, summary]
+      properties:
+        older_than_seconds: { type: integer }
+        summary: { $ref: "#/components/schemas/RecoverySummary" }
     Prompt:
       type: object
       required: [id, stage, name, version, content, active, created_at]
@@ -1119,6 +1165,44 @@ paths:
                   additionalProperties: true
       responses:
         "200": { description: Edited and applied }
+  /api/operations/recovery:
+    get:
+      parameters:
+        - name: older_than_seconds
+          in: query
+          schema: { type: integer, minimum: 60, maximum: 86400, default: 600 }
+      responses:
+        "200":
+          description: Stale lease and stuck run recovery candidates
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryStatusResponse" }
+  /api/operations/recovery/stale-leases:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecoveryRequest" }
+      responses:
+        "200":
+          description: Requeued stale running jobs whose leases are older than the recovery window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryActionResponse" }
+  /api/operations/recovery/stuck-runs:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecoveryRequest" }
+      responses:
+        "200":
+          description: Completed or failed active runs that no longer have active jobs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryActionResponse" }
   /api/audit:
     get:
       responses:

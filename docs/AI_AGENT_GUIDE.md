@@ -196,6 +196,11 @@ Preserve these properties:
 - apply operations avoid duplicate writes where practical
 - every meaningful state transition is auditable
 - model output is stored as an artifact before or alongside review/apply state
+- worker logs use the pipeline run UUID as `trace_id`; keep new logs structured
+  and free of document text, prompts with private content, tokens, or URLs with
+  credentials
+- recovery endpoints may requeue stale leases or close stuck runs, and must
+  always write audit events
 
 When changing worker behavior, inspect both API queue creation and worker
 claim/apply logic.

@@ -253,6 +253,35 @@ pub struct MetricsSnapshot {
     pub reviews_pending: i64,
     pub runs_active: i64,
     pub audit_events: i64,
+    pub selector_runs_total: i64,
+    pub selector_documents_queued_total: i64,
+    pub job_retries_scheduled_total: i64,
+    pub model_errors_total: i64,
+    pub apply_success_total: i64,
+    pub apply_failure_total: i64,
+    pub apply_latency_ms_count: i64,
+    pub apply_latency_ms_sum: i64,
+    pub apply_latency_ms_p95: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryCandidate {
+    pub run_id: Uuid,
+    pub job_id: Option<Uuid>,
+    pub paperless_document_id: i32,
+    pub stage: Option<Stage>,
+    pub status: String,
+    pub lease_owner: Option<String>,
+    pub lease_until: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoverySummary {
+    pub stale_leases_requeued: i64,
+    pub stuck_runs_failed: i64,
+    pub stuck_runs_completed: i64,
 }
 
 pub async fn has_any_user(pool: &DbPool) -> Result<bool> {
@@ -2217,8 +2246,10 @@ async fn dashboard_live_runs(pool: &DbPool) -> Result<Vec<DashboardLiveRun>> {
         .map(|row| {
             let mode: String = row.try_get("mode")?;
             let stages: Value = row.try_get("stages")?;
+            let id: Uuid = row.try_get("id")?;
             Ok(DashboardLiveRun {
-                id: row.try_get("id")?,
+                id,
+                trace_id: id,
                 paperless_document_id: row.try_get("paperless_document_id")?,
                 mode: mode.parse()?,
                 status: row.try_get("status")?,
@@ -2250,9 +2281,11 @@ async fn dashboard_live_jobs(pool: &DbPool) -> Result<Vec<DashboardLiveJob>> {
     rows.into_iter()
         .map(|row| {
             let stage: String = row.try_get("stage")?;
+            let run_id: Uuid = row.try_get("run_id")?;
             Ok(DashboardLiveJob {
                 id: row.try_get("id")?,
-                run_id: row.try_get("run_id")?,
+                run_id,
+                trace_id: run_id,
                 paperless_document_id: row.try_get("paperless_document_id")?,
                 stage: stage.parse()?,
                 status: row.try_get("status")?,
@@ -4075,7 +4108,39 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
           (select count(*)::bigint from jobs where status = 'succeeded') as jobs_succeeded,
           (select count(*)::bigint from review_items where status = 'pending') as reviews_pending,
           (select count(*)::bigint from pipeline_runs where status in ('queued', 'running', 'waiting_review', 'applying')) as runs_active,
-          (select count(*)::bigint from audit_events) as audit_events
+          (select count(*)::bigint from audit_events) as audit_events,
+          (select count(*)::bigint from audit_events where event_type = 'workflow.selector_ran') as selector_runs_total,
+          coalesce((
+            select sum(coalesce((after ->> 'queued')::bigint, 0))::bigint
+              from audit_events
+             where event_type = 'workflow.selector_ran'
+          ), 0) as selector_documents_queued_total,
+          (select count(*)::bigint from audit_events where event_type = 'job.retry_scheduled') as job_retries_scheduled_total,
+          (select count(*)::bigint
+             from jobs
+            where error_message is not null
+              and stage in ('ocr', 'tags', 'title', 'correspondent', 'document_type', 'fields')
+          ) as model_errors_total,
+          (select count(*)::bigint from audit_events where event_type = 'document.patch_applied' and outcome = 'success') as apply_success_total,
+          (select count(*)::bigint from audit_events where event_type = 'document.patch_apply_failed' and outcome = 'failed') as apply_failure_total,
+          coalesce((
+            select count(*)::bigint
+              from audit_events
+             where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and metadata ? 'duration_ms'
+          ), 0) as apply_latency_ms_count,
+          coalesce((
+            select sum((metadata ->> 'duration_ms')::bigint)::bigint
+              from audit_events
+             where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and metadata ? 'duration_ms'
+          ), 0) as apply_latency_ms_sum,
+          coalesce((
+            select (percentile_disc(0.95) within group (order by (metadata ->> 'duration_ms')::bigint))::bigint
+              from audit_events
+             where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and metadata ? 'duration_ms'
+          ), 0) as apply_latency_ms_p95
         "#,
     )
     .fetch_one(pool)
@@ -4088,6 +4153,315 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
         reviews_pending: row.try_get("reviews_pending")?,
         runs_active: row.try_get("runs_active")?,
         audit_events: row.try_get("audit_events")?,
+        selector_runs_total: row.try_get("selector_runs_total")?,
+        selector_documents_queued_total: row.try_get("selector_documents_queued_total")?,
+        job_retries_scheduled_total: row.try_get("job_retries_scheduled_total")?,
+        model_errors_total: row.try_get("model_errors_total")?,
+        apply_success_total: row.try_get("apply_success_total")?,
+        apply_failure_total: row.try_get("apply_failure_total")?,
+        apply_latency_ms_count: row.try_get("apply_latency_ms_count")?,
+        apply_latency_ms_sum: row.try_get("apply_latency_ms_sum")?,
+        apply_latency_ms_p95: row.try_get("apply_latency_ms_p95")?,
+    })
+}
+
+pub async fn recovery_candidates(
+    pool: &DbPool,
+    older_than_seconds: i64,
+) -> Result<Vec<RecoveryCandidate>> {
+    let rows = sqlx::query(
+        r#"
+        select j.run_id,
+               j.id as job_id,
+               j.paperless_document_id,
+               j.stage,
+               j.status,
+               j.lease_owner,
+               j.lease_until,
+               j.updated_at,
+               'stale_lease' as reason
+          from jobs j
+         where j.status = 'running'
+           and j.lease_until < now() - make_interval(secs => $1)
+        union all
+        select r.id as run_id,
+               null::uuid as job_id,
+               r.paperless_document_id,
+               null::text as stage,
+               r.status,
+               null::text as lease_owner,
+               null::timestamptz as lease_until,
+               r.updated_at,
+               'stuck_run_without_active_jobs' as reason
+          from pipeline_runs r
+         where r.status in ('queued', 'running', 'applying')
+           and r.updated_at < now() - make_interval(secs => $1)
+           and not exists (
+             select 1
+               from jobs j
+              where j.run_id = r.id
+                and j.status in ('queued', 'running', 'waiting_review')
+           )
+         order by updated_at asc
+         limit 100
+        "#,
+    )
+    .bind(older_than_seconds as f64)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let stage: Option<String> = row.try_get("stage")?;
+            Ok(RecoveryCandidate {
+                run_id: row.try_get("run_id")?,
+                job_id: row.try_get("job_id")?,
+                paperless_document_id: row.try_get("paperless_document_id")?,
+                stage: stage.map(|stage| stage.parse()).transpose()?,
+                status: row.try_get("status")?,
+                lease_owner: row.try_get("lease_owner")?,
+                lease_until: row.try_get("lease_until")?,
+                updated_at: row.try_get("updated_at")?,
+                reason: row.try_get("reason")?,
+            })
+        })
+        .collect()
+}
+
+pub async fn recover_stale_leases(
+    pool: &DbPool,
+    older_than_seconds: i64,
+    actor_id: Uuid,
+) -> Result<RecoverySummary> {
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        with stale as (
+          select id, run_id, paperless_document_id
+            from jobs
+           where status = 'running'
+             and lease_until < now() - make_interval(secs => $1)
+           for update
+        )
+        update jobs j
+           set status = 'queued',
+               lease_owner = null,
+               lease_until = null,
+               run_after = now(),
+               updated_at = now()
+          from stale
+         where j.id = stale.id
+        returning j.id, j.run_id, j.paperless_document_id
+        "#,
+    )
+    .bind(older_than_seconds as f64)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let run_ids = rows
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("run_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let document_ids = rows
+        .iter()
+        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let job_ids = rows
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    if !run_ids.is_empty() {
+        sqlx::query(
+            r#"
+            update pipeline_runs
+               set status = 'queued',
+                   updated_at = now()
+             where id = any($1)
+               and status = 'running'
+            "#,
+        )
+        .bind(&run_ids)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'queued',
+                   updated_at = now()
+             where paperless_document_id = any($1)
+               and current_run_status = 'running'
+            "#,
+        )
+        .bind(&document_ids)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "operations.stale_leases_requeued".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({ "count": job_ids.len(), "job_ids": job_ids })),
+            metadata: Some(json!({ "older_than_seconds": older_than_seconds })),
+            outcome: "success".to_owned(),
+            error_message: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(RecoverySummary {
+        stale_leases_requeued: job_ids.len() as i64,
+        stuck_runs_failed: 0,
+        stuck_runs_completed: 0,
+    })
+}
+
+pub async fn recover_stuck_runs(
+    pool: &DbPool,
+    older_than_seconds: i64,
+    actor_id: Uuid,
+) -> Result<RecoverySummary> {
+    let mut tx = pool.begin().await?;
+    let completed = sqlx::query(
+        r#"
+        with stuck as (
+          select r.id, r.paperless_document_id
+            from pipeline_runs r
+           where r.status in ('queued', 'running', 'applying')
+             and r.updated_at < now() - make_interval(secs => $1)
+             and exists (select 1 from jobs j where j.run_id = r.id)
+             and not exists (
+               select 1
+                 from jobs j
+                where j.run_id = r.id
+                  and j.status <> 'succeeded'
+             )
+           for update
+        )
+        update pipeline_runs r
+           set status = 'succeeded',
+               finished_at = coalesce(finished_at, now()),
+               updated_at = now()
+          from stuck
+         where r.id = stuck.id
+        returning r.id, r.paperless_document_id
+        "#,
+    )
+    .bind(older_than_seconds as f64)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let failed = sqlx::query(
+        r#"
+        with stuck as (
+          select r.id, r.paperless_document_id
+            from pipeline_runs r
+           where r.status in ('queued', 'running', 'applying')
+             and r.updated_at < now() - make_interval(secs => $1)
+             and not exists (
+               select 1
+                 from jobs j
+                where j.run_id = r.id
+                  and j.status in ('queued', 'running', 'waiting_review')
+             )
+           for update
+        )
+        update pipeline_runs r
+           set status = 'failed',
+               error_message = 'Recovered stuck run with no active jobs',
+               finished_at = coalesce(finished_at, now()),
+               updated_at = now()
+          from stuck
+         where r.id = stuck.id
+        returning r.id, r.paperless_document_id
+        "#,
+    )
+    .bind(older_than_seconds as f64)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let completed_document_ids = completed
+        .iter()
+        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let failed_document_ids = failed
+        .iter()
+        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let completed_run_ids = completed
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let failed_run_ids = failed
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    if !completed_document_ids.is_empty() {
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'succeeded',
+                   complete = true,
+                   updated_at = now()
+             where paperless_document_id = any($1)
+            "#,
+        )
+        .bind(&completed_document_ids)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if !failed_document_ids.is_empty() {
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'failed',
+                   last_error = 'Recovered stuck run with no active jobs',
+                   updated_at = now()
+             where paperless_document_id = any($1)
+            "#,
+        )
+        .bind(&failed_document_ids)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "operations.stuck_runs_recovered".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({
+                "completed": completed_run_ids.len(),
+                "failed": failed_run_ids.len(),
+                "completed_run_ids": completed_run_ids,
+                "failed_run_ids": failed_run_ids
+            })),
+            metadata: Some(json!({ "older_than_seconds": older_than_seconds })),
+            outcome: "success".to_owned(),
+            error_message: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(RecoverySummary {
+        stale_leases_requeued: 0,
+        stuck_runs_failed: failed_document_ids.len() as i64,
+        stuck_runs_completed: completed_document_ids.len() as i64,
     })
 }
 
@@ -4254,6 +4628,7 @@ mod tests {
         let job = DashboardLiveJob {
             id: Uuid::now_v7(),
             run_id: Uuid::now_v7(),
+            trace_id: Uuid::now_v7(),
             paperless_document_id: 42,
             stage: Stage::Tags,
             status: "running".to_owned(),

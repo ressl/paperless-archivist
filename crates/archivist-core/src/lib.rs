@@ -2127,6 +2127,7 @@ pub struct ServiceProcessingStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardLiveRun {
     pub id: Uuid,
+    pub trace_id: Uuid,
     pub paperless_document_id: i32,
     pub mode: ProcessingMode,
     pub status: String,
@@ -2141,6 +2142,7 @@ pub struct DashboardLiveRun {
 pub struct DashboardLiveJob {
     pub id: Uuid,
     pub run_id: Uuid,
+    pub trace_id: Uuid,
     pub paperless_document_id: i32,
     pub stage: Stage,
     pub status: String,

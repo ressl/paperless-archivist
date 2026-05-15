@@ -1540,6 +1540,121 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/operations/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    older_than_seconds?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Stale lease and stuck run recovery candidates */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecoveryStatusResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/recovery/stale-leases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RecoveryRequest"];
+                };
+            };
+            responses: {
+                /** @description Requeued stale running jobs whose leases are older than the recovery window */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecoveryActionResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/recovery/stuck-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RecoveryRequest"];
+                };
+            };
+            responses: {
+                /** @description Completed or failed active runs that no longer have active jobs */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecoveryActionResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/audit": {
         parameters: {
             query?: never;
@@ -2131,6 +2246,8 @@ export interface components {
         DashboardLiveRun: {
             /** Format: uuid */
             id: string;
+            /** Format: uuid */
+            trace_id: string;
             paperless_document_id: number;
             mode: components["schemas"]["ProcessingMode"];
             status: string;
@@ -2148,6 +2265,8 @@ export interface components {
             id: string;
             /** Format: uuid */
             run_id: string;
+            /** Format: uuid */
+            trace_id: string;
             paperless_document_id: number;
             stage: components["schemas"]["Stage"];
             status: string;
@@ -2293,6 +2412,37 @@ export interface components {
         };
         AuditEvent: {
             [key: string]: unknown;
+        };
+        RecoveryCandidate: {
+            /** Format: uuid */
+            run_id: string;
+            /** Format: uuid */
+            job_id?: string | null;
+            paperless_document_id: number;
+            stage?: components["schemas"]["Stage"] | null;
+            status: string;
+            lease_owner?: string | null;
+            /** Format: date-time */
+            lease_until?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+            reason: string;
+        };
+        RecoverySummary: {
+            stale_leases_requeued: number;
+            stuck_runs_failed: number;
+            stuck_runs_completed: number;
+        };
+        RecoveryRequest: {
+            older_than_seconds?: number;
+        };
+        RecoveryStatusResponse: {
+            older_than_seconds: number;
+            items: components["schemas"]["RecoveryCandidate"][];
+        };
+        RecoveryActionResponse: {
+            older_than_seconds: number;
+            summary: components["schemas"]["RecoverySummary"];
         };
         Prompt: {
             /** Format: uuid */
