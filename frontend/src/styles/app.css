@@ -1390,6 +1390,18 @@ th {
   border-radius: inherit;
 }
 
+@media (max-width: 1100px) {
+  .dashboard-ops-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .live-processing-panel {
+    position: static;
+  }
+  .operations-strip {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 900px) {
   .cost-panel-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -1403,6 +1415,29 @@ th {
   .kpi-secondary,
   .kpi-tertiary {
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+}
+
+@media (max-width: 800px) {
+  .drawer {
+    width: 100vw;
+    padding: 14px;
+  }
+  .dashboard-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .dashboard-heading-actions {
+    justify-content: flex-start;
+  }
+  .health-badge {
+    flex-wrap: wrap;
+  }
+  .health-badge .freshness-indicator {
+    padding-left: 0;
+    border-left: none;
+    margin-left: 0;
+    width: 100%;
   }
 }
 
@@ -1635,6 +1670,7 @@ th {
 .status {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   min-height: 24px;
   padding: 3px 8px;
   border-radius: 999px;
@@ -1642,6 +1678,10 @@ th {
   color: var(--ink-2);
   font-size: 12px;
   font-weight: 700;
+}
+
+.status svg {
+  flex: 0 0 auto;
 }
 
 .status.success {

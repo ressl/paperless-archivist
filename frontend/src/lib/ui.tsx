@@ -1,4 +1,5 @@
 import { useMemo, type ReactNode } from 'react';
+import { AlertTriangle, Check, CircleDashed, Eye, Info } from 'lucide-react';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { statusLabel } from './format';
 
@@ -6,16 +7,32 @@ export function PageHeader({ title }: { title: string }) {
   return <header className="page-header"><h2>{title}</h2></header>;
 }
 
+type StatusTone = 'success' | 'danger' | 'info' | 'review' | 'neutral';
+
+const STATUS_ICONS: Record<StatusTone, ReactNode> = {
+  success: <Check size={12} aria-hidden="true" />,
+  danger: <AlertTriangle size={12} aria-hidden="true" />,
+  info: <Info size={12} aria-hidden="true" />,
+  review: <Eye size={12} aria-hidden="true" />,
+  neutral: <CircleDashed size={12} aria-hidden="true" />
+};
+
 export function Status({ value }: { value: string }) {
   const { t } = useI18n();
-  const tone = useMemo(() => {
+  const tone = useMemo<StatusTone>(() => {
     if (['succeeded', 'success', 'complete'].includes(value)) return 'success';
     if (['failed', 'error'].includes(value)) return 'danger';
     if (['running', 'queued', 'applying', 'retry_scheduled', 'retry_ready'].includes(value)) return 'info';
     if (['waiting_review', 'review'].includes(value)) return 'review';
     return 'neutral';
   }, [value]);
-  return <span className={`status ${tone}`}>{statusLabel(value, t)}</span>;
+  const label = statusLabel(value, t);
+  return (
+    <span className={`status ${tone}`} role="status" aria-label={label}>
+      {STATUS_ICONS[tone]}
+      <span className="status-label">{label}</span>
+    </span>
+  );
 }
 
 export function ActionButton({ icon, label, busy, onClick }: { icon: ReactNode; label: string; busy: boolean; onClick: () => void | Promise<void> }) {

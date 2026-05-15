@@ -182,7 +182,7 @@ type TimelineEntry = {
 
 function ChartPanel({ title, wide, children }: { title: string; wide?: boolean; children: ReactNode }) {
   return (
-    <section className={`chart-panel${wide ? ' wide' : ''}`}>
+    <section className={`chart-panel${wide ? ' wide' : ''}`} role="region" aria-label={title}>
       <h3>{title}</h3>
       {children}
     </section>
