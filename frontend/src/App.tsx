@@ -33,6 +33,7 @@ import {
   AuditEvent,
   Counts,
   DashboardRange,
+  DashboardLiveStatus,
   DashboardStats,
   DashboardStatusCount,
   DocumentChatMessage,
@@ -41,6 +42,7 @@ import {
   Me,
   OidcConfig,
   OllamaInstalledModel,
+  ProcessingMode,
   Prompt,
   PromptTestResponse,
   PromptUsage,
@@ -57,10 +59,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   Legend,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -77,6 +76,7 @@ import {
 } from './modelCatalog';
 import hardwareRecommendations from './hardwareRecommendations.json';
 import { promptStageHelp, promptStageOrder, type PromptStageHelp } from './data/promptHelp';
+import { buildInfo, buildInfoLabel } from './buildInfo';
 
 type Tab = 'dashboard' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users';
 
@@ -148,6 +148,7 @@ export function App() {
   if (!me) return <Login onLogin={setMe} />;
 
   const canUseChat = me.roles.some((role) => role === 'admin' || role === 'reviewer' || role === 'operator');
+  const canManageSettings = me.roles.some((role) => role === 'admin');
 
   return (
     <div className="app-shell">
@@ -169,6 +170,11 @@ export function App() {
           <NavButton icon={<Shield />} label="Audit" active={tab === 'audit'} onClick={() => setTab('audit')} />
           <NavButton icon={<UserPlus />} label="Users" active={tab === 'users'} onClick={() => setTab('users')} />
         </nav>
+        <div className="sidebar-version" aria-label={buildInfoLabel} title={buildInfoLabel}>
+          <span>Version</span>
+          <strong>{buildInfo.version}</strong>
+          {buildInfo.buildNumber && <small>Build {buildInfo.buildNumber}</small>}
+        </div>
         <button
           className="ghost-button"
           title="Logout"
@@ -190,7 +196,7 @@ export function App() {
             </button>
           </div>
         )}
-        {tab === 'dashboard' && <Dashboard setError={setError} />}
+        {tab === 'dashboard' && <Dashboard setError={setError} canManageSettings={canManageSettings} />}
         {tab === 'inventory' && <Inventory setError={setError} />}
         {tab === 'chat' && canUseChat && <DocumentChat setError={setError} />}
         {tab === 'reviews' && <Reviews setError={setError} />}
@@ -274,18 +280,27 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   );
 }
 
-function Dashboard({ setError }: { setError: (error: string | null) => void }) {
+function Dashboard({ setError, canManageSettings }: { setError: (error: string | null) => void; canManageSettings: boolean }) {
   const [counts, setCounts] = useState<Counts>(defaultCounts);
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [range, setRange] = useState<DashboardRange>('30d');
+  const [live, setLive] = useState<DashboardLiveStatus | null>(null);
+  const [range, setRange] = useState<DashboardRange>('24h');
   const [busy, setBusy] = useState(false);
+  const [modeBusy, setModeBusy] = useState(false);
+  const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
   const load = () =>
     api
       .dashboard(range)
       .then((data) => {
         setCounts(data.counts);
         setStats(data.stats);
+        setLastLoadedAt(new Date().toISOString());
       })
+      .catch((err) => setError(err.message));
+  const loadLive = () =>
+    api
+      .dashboardLive()
+      .then(setLive)
       .catch((err) => setError(err.message));
 
   useEffect(() => {
@@ -296,15 +311,30 @@ function Dashboard({ setError }: { setError: (error: string | null) => void }) {
     return () => window.clearInterval(timer);
   }, [range]);
 
+  useEffect(() => {
+    void loadLive();
+    const timer = window.setInterval(() => {
+      void loadLive();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const toggleAutopilot = async () => {
+    const nextMode = live?.autopilot_enabled ? 'review' : 'autopilot';
+    const settings = await api.updateWorkflowMode(nextMode);
+    setLive((current) =>
+      current
+        ? {
+            ...current,
+            workflow_mode: settings.workflow.mode,
+            autopilot_enabled: settings.workflow.mode === 'autopilot'
+          }
+        : current
+    );
+    await loadLive();
+  };
+
   const openBacklog = counts.total_documents - counts.complete;
-  const completionEmpty = counts.total_documents === 0;
-  const completionData = completionEmpty
-    ? [{ name: 'No Documents', value: 1 }]
-    : [
-        { name: 'Complete', value: counts.complete },
-        { name: 'Open', value: Math.max(openBacklog, 0) }
-      ];
-  const completionColors = completionEmpty ? ['#d8e0e6'] : ['#147f7a', '#a9782b'];
   const stageData = (stats?.stage_status.length ? stats.stage_status : defaultStageStatus).map((stage) => ({
     stage: stageLabel(stage.stage),
     Complete: stage.complete,
@@ -316,36 +346,62 @@ function Dashboard({ setError }: { setError: (error: string | null) => void }) {
   const jobStatusData = statusChartData(stats?.job_status.length ? stats.job_status : defaultJobStatus);
   const runStatusData = statusChartData(stats?.run_status.length ? stats.run_status : defaultRunStatus);
   const comparison = stats?.comparison;
+  const runningJobs = stats?.kpis.running_jobs ?? counts.running;
 
   const metrics = [
-    ['Total Documents', counts.total_documents, 'neutral', null],
-    ['Complete', counts.complete, 'success', comparison?.jobs_succeeded_delta],
-    ['Open Backlog', openBacklog, 'warning', comparison?.open_backlog_delta],
-    ['Review Load', counts.waiting_review, 'review', null],
-    ['Failed', counts.failed, 'danger', comparison?.jobs_failed_delta],
-    ['Running', counts.running, 'info', null],
-    ['Throughput', stats?.kpis.throughput ?? 0, 'success', comparison?.jobs_succeeded_delta],
-    ['Queued Jobs', jobStatusData.find((item) => item.status === 'queued')?.count ?? 0, 'neutral', comparison?.jobs_created_delta]
-  ] as const;
+    { label: 'Open Backlog', value: stats?.kpis.open_backlog ?? openBacklog, tone: 'warning', delta: comparison?.open_backlog_delta },
+    { label: 'Running Now', value: runningJobs, tone: 'info', delta: null },
+    { label: 'Review Queue', value: counts.waiting_review, tone: 'review', delta: null },
+    { label: 'Failed', value: counts.failed, tone: 'danger', delta: comparison?.jobs_failed_delta },
+    { label: 'Throughput', value: stats?.kpis.throughput ?? 0, tone: 'success', delta: comparison?.jobs_succeeded_delta },
+    { label: 'Completion', value: formatPercent(stats?.kpis.completion_rate ?? 0), tone: 'neutral', delta: null }
+  ];
 
   return (
-    <section className="page">
+    <section className="page dashboard-page">
       <div className="dashboard-heading">
-        <PageHeader title="Backlog Dashboard" />
-        <div className="range-tabs" aria-label="Dashboard range">
-          {(stats?.available_ranges ?? defaultDashboardRanges).map((option) => (
-            <button
-              key={option.key}
-              className={range === option.key ? 'active' : ''}
-              onClick={() => setRange(option.key)}
-            >
-              {option.label}
-            </button>
-          ))}
+        <div>
+          <PageHeader title="Operations Dashboard" />
+          <p>
+            Last refresh {lastLoadedAt ? formatRelativeTime(lastLoadedAt) : '-'}.
+          </p>
+        </div>
+        <div className="dashboard-heading-actions">
+          <div className="range-tabs" aria-label="Dashboard range">
+            {(stats?.available_ranges ?? defaultDashboardRanges).map((option) => (
+              <button
+                key={option.key}
+                className={range === option.key ? 'active' : ''}
+                onClick={() => setRange(option.key)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <button
+            className="primary-button"
+            disabled={busy}
+            onClick={() => void run(setBusy, setError, async () => Promise.all([load(), loadLive()]))}
+          >
+            <RefreshCw size={16} /> {busy ? 'Refreshing...' : 'Refresh'}
+          </button>
         </div>
       </div>
-      <div className="metric-grid">
-        {metrics.map(([label, value, tone, delta]) => (
+
+      <div className="operations-strip">
+        <AutoProcessingCard
+          enabled={live?.autopilot_enabled ?? false}
+          mode={live?.workflow_mode ?? 'review'}
+          busy={modeBusy}
+          canToggle={canManageSettings}
+          onToggle={() => void run(setModeBusy, setError, toggleAutopilot)}
+        />
+        <ServiceStatusCard label="LLM" icon={<Activity size={18} />} status={live?.llm} />
+        <ServiceStatusCard label="Paperless" icon={<Database size={18} />} status={live?.paperless} />
+      </div>
+
+      <div className="metric-grid dashboard-metrics">
+        {metrics.map(({ label, value, tone, delta }) => (
           <div className={`metric ${tone}`} key={label}>
             <span>{label}</span>
             <strong>{value}</strong>
@@ -353,87 +409,70 @@ function Dashboard({ setError }: { setError: (error: string | null) => void }) {
           </div>
         ))}
       </div>
-      <div className="dashboard-grid">
-        <ChartPanel title="Completion">
-          <ResponsiveContainer width="100%" height={260}>
-            <PieChart>
-              <Pie data={completionData} dataKey="value" nameKey="name" innerRadius={62} outerRadius={96} paddingAngle={4}>
-                {completionData.map((entry, index) => (
-                  <Cell key={entry.name} fill={completionColors[index] ?? '#d8e0e6'} />
-                ))}
-              </Pie>
-              <Tooltip />
-              <Legend />
-            </PieChart>
-          </ResponsiveContainer>
-        </ChartPanel>
-        <ChartPanel title="Stage Health" wide>
-          <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={stageData}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="stage" />
-              <YAxis allowDecimals={false} />
-              <Tooltip />
-              <Legend />
-              <Bar dataKey="Complete" stackId="stage" fill="#147f7a" />
-              <Bar dataKey="Pending" stackId="stage" fill="#a9782b" />
-              <Bar dataKey="Review" stackId="stage" fill="#28649b" />
-              <Bar dataKey="Running" stackId="stage" fill="#5b8fb9" />
-              <Bar dataKey="Failed" stackId="stage" fill="#a6403a" />
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartPanel>
-        <ChartPanel title="Throughput" wide>
-          <ResponsiveContainer width="100%" height={280}>
-            <AreaChart data={stats?.throughput_series ?? []}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="label" />
-              <YAxis allowDecimals={false} />
-              <Tooltip />
-              <Legend />
-              <Area type="monotone" dataKey="jobs_created" name="Created" stroke="#28649b" fill="#dbe9f5" />
-              <Area type="monotone" dataKey="jobs_succeeded" name="Succeeded" stroke="#147f7a" fill="#d9eeee" />
-              <Area type="monotone" dataKey="jobs_failed" name="Failed" stroke="#a6403a" fill="#f5dddd" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </ChartPanel>
-        <ChartPanel title="Backlog Trend" wide>
-          <ResponsiveContainer width="100%" height={280}>
-            <AreaChart data={stats?.backlog_series ?? []}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="label" />
-              <YAxis allowDecimals={false} />
-              <Tooltip />
-              <Legend />
-              <Area type="monotone" dataKey="open_backlog" name="Open" stroke="#a9782b" fill="#f1e5d0" />
-              <Area type="monotone" dataKey="complete" name="Complete" stroke="#147f7a" fill="#d9eeee" />
-              <Area type="monotone" dataKey="failed" name="Failed" stroke="#a6403a" fill="#f5dddd" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </ChartPanel>
-        <ChartPanel title="Job Status">
-          <ResponsiveContainer width="100%" height={240}>
-            <BarChart data={jobStatusData} layout="vertical" margin={{ left: 12 }}>
-              <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-              <XAxis type="number" allowDecimals={false} />
-              <YAxis type="category" dataKey="label" width={92} />
-              <Tooltip />
-              <Bar dataKey="count" fill="#28649b" radius={[0, 4, 4, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartPanel>
-        <ChartPanel title="Run Status">
-          <ResponsiveContainer width="100%" height={240}>
-            <BarChart data={runStatusData} layout="vertical" margin={{ left: 12 }}>
-              <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-              <XAxis type="number" allowDecimals={false} />
-              <YAxis type="category" dataKey="label" width={92} />
-              <Tooltip />
-              <Bar dataKey="count" fill="#147f7a" radius={[0, 4, 4, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartPanel>
+
+      <div className="dashboard-ops-grid">
+        <div className="dashboard-analytics">
+          <ChartPanel title={`Throughput (${range})`} wide>
+            <ResponsiveContainer width="100%" height={280}>
+              <AreaChart data={stats?.throughput_series ?? []}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="label" />
+                <YAxis allowDecimals={false} />
+                <Tooltip />
+                <Legend />
+                <Area type="monotone" dataKey="jobs_created" name="Created" stroke="#28649b" fill="#dbe9f5" />
+                <Area type="monotone" dataKey="jobs_succeeded" name="Succeeded" stroke="#147f7a" fill="#d9eeee" />
+                <Area type="monotone" dataKey="jobs_failed" name="Failed" stroke="#a6403a" fill="#f5dddd" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </ChartPanel>
+          <ChartPanel title="Stage Health" wide>
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={stageData}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="stage" />
+                <YAxis allowDecimals={false} />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="Complete" stackId="stage" fill="#147f7a" />
+                <Bar dataKey="Pending" stackId="stage" fill="#a9782b" />
+                <Bar dataKey="Review" stackId="stage" fill="#28649b" />
+                <Bar dataKey="Running" stackId="stage" fill="#5b8fb9" />
+                <Bar dataKey="Failed" stackId="stage" fill="#a6403a" />
+              </BarChart>
+            </ResponsiveContainer>
+          </ChartPanel>
+          <div className="dashboard-grid compact">
+            <ChartPanel title="Backlog Trend">
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={stats?.backlog_series ?? []}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="label" />
+                  <YAxis allowDecimals={false} />
+                  <Tooltip />
+                  <Legend />
+                  <Area type="monotone" dataKey="open_backlog" name="Open" stroke="#a9782b" fill="#f1e5d0" />
+                  <Area type="monotone" dataKey="complete" name="Complete" stroke="#147f7a" fill="#d9eeee" />
+                  <Area type="monotone" dataKey="failed" name="Failed" stroke="#a6403a" fill="#f5dddd" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </ChartPanel>
+            <ChartPanel title="Queue State">
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={jobStatusData} layout="vertical" margin={{ left: 12 }}>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                  <XAxis type="number" allowDecimals={false} />
+                  <YAxis type="category" dataKey="label" width={92} />
+                  <Tooltip />
+                  <Bar dataKey="count" fill="#28649b" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartPanel>
+          </div>
+        </div>
+        <LiveProcessingPanel live={live} />
       </div>
+
       <ChartPanel title="Provider Usage, Tokens, And Latency" wide>
         <div className="table-wrap compact-table">
           <table>
@@ -469,14 +508,147 @@ function Dashboard({ setError }: { setError: (error: string | null) => void }) {
           </table>
         </div>
       </ChartPanel>
-      <div className="toolbar">
-        <ActionButton icon={<RefreshCw />} label="Refresh" busy={busy} onClick={() => run(setBusy, setError, load)} />
+      <ChartPanel title="Run Status" wide>
+        <ResponsiveContainer width="100%" height={220}>
+          <BarChart data={runStatusData} layout="vertical" margin={{ left: 12 }}>
+            <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+            <XAxis type="number" allowDecimals={false} />
+            <YAxis type="category" dataKey="label" width={110} />
+            <Tooltip />
+            <Bar dataKey="count" fill="#147f7a" radius={[0, 4, 4, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </ChartPanel>
+      <div className="toolbar dashboard-queue-actions">
         <ActionButton icon={<RefreshCw />} label="Sync" busy={busy} onClick={() => run(setBusy, setError, api.syncPaperless).then(load)} />
         <ActionButton icon={<FileText />} label="Queue OCR" busy={busy} onClick={() => run(setBusy, setError, api.queueOcr).then(load)} />
         <ActionButton icon={<Tags />} label="Queue Tags" busy={busy} onClick={() => run(setBusy, setError, api.queueTags).then(load)} />
         <ActionButton icon={<Play />} label="Queue Full" busy={busy} onClick={() => run(setBusy, setError, api.queueFull).then(load)} />
       </div>
     </section>
+  );
+}
+
+function AutoProcessingCard({
+  enabled,
+  mode,
+  busy,
+  canToggle,
+  onToggle
+}: {
+  enabled: boolean;
+  mode: ProcessingMode;
+  busy: boolean;
+  canToggle: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <section className={`autopilot-card ${enabled ? 'enabled' : 'disabled'}`}>
+      <div>
+        <span>Auto Processing</span>
+        <strong>{enabled ? 'Autopilot on' : 'Review mode'}</strong>
+        <p>{enabled ? 'Validated suggestions are applied automatically.' : 'Suggestions wait in the review queue.'}</p>
+      </div>
+      <button className="toggle-button" type="button" disabled={busy || !canToggle} aria-pressed={enabled} onClick={onToggle}>
+        <Power size={16} />
+        {busy ? 'Updating...' : !canToggle ? 'Admin only' : mode === 'autopilot' ? 'Turn off' : 'Turn on'}
+      </button>
+    </section>
+  );
+}
+
+function ServiceStatusCard({
+  label,
+  icon,
+  status
+}: {
+  label: string;
+  icon: ReactNode;
+  status?: DashboardLiveStatus['llm'] | null;
+}) {
+  const state = status?.state ?? 'idle';
+  return (
+    <section className={`service-card ${state}`}>
+      <header>
+        <span>{icon}</span>
+        <strong>{label}</strong>
+        <Status value={state} />
+      </header>
+      <p>{status?.title ?? 'Loading status...'}</p>
+      <small>{status?.description ?? 'Waiting for the next live status refresh.'}</small>
+      <em>{status?.last_event_at ? formatRelativeTime(status.last_event_at) : 'No activity yet'}</em>
+    </section>
+  );
+}
+
+function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
+  const activeJobs = live?.active_jobs ?? [];
+  const activeRuns = live?.active_runs ?? [];
+  const recentEvents = live?.recent_llm_events ?? [];
+  const recentFailures = live?.recent_failures ?? [];
+
+  return (
+    <aside className="live-processing-panel">
+      <header>
+        <div>
+          <strong>Live Processing</strong>
+          <span>debugging light</span>
+        </div>
+        <Status value={live?.workflow_mode ?? 'loading'} />
+      </header>
+      <div className="live-summary">
+        <div>
+          <span>Runs</span>
+          <strong>{activeRuns.length}</strong>
+        </div>
+        <div>
+          <span>Jobs</span>
+          <strong>{activeJobs.length}</strong>
+        </div>
+        <div>
+          <span>Failures</span>
+          <strong>{recentFailures.length}</strong>
+        </div>
+      </div>
+
+      <section className="live-debug-section">
+        <h3>Active Jobs</h3>
+        {activeJobs.length === 0 && <p className="empty-state compact">No active jobs right now.</p>}
+        {activeJobs.slice(0, 8).map((job) => (
+          <article className="live-job" key={job.id}>
+            <div>
+              <strong>Document {job.paperless_document_id}</strong>
+              <span>{stageLabel(job.stage)} · attempt {job.attempts}/{job.max_attempts}</span>
+            </div>
+            <Status value={job.status} />
+            <small>{job.lease_owner ? `Worker ${job.lease_owner}` : formatRelativeTime(job.updated_at)}</small>
+          </article>
+        ))}
+      </section>
+
+      <section className="live-debug-section">
+        <h3>Latest LLM Calls</h3>
+        {recentEvents.length === 0 && <p className="empty-state compact">No LLM calls recorded yet.</p>}
+        {recentEvents.slice(0, 5).map((event) => (
+          <article className="live-event" key={event.id}>
+            <strong>{event.provider} / {event.model}</strong>
+            <span>{stageLabel(event.stage)} · {formatMs(event.duration_ms ?? 0)} · {formatRelativeTime(event.created_at)}</span>
+          </article>
+        ))}
+      </section>
+
+      <section className="live-debug-section">
+        <h3>Recent Failures</h3>
+        {recentFailures.length === 0 && <p className="empty-state compact">No recent failures.</p>}
+        {recentFailures.slice(0, 5).map((failure) => (
+          <article className="live-failure" key={failure.id}>
+            <strong>Document {failure.paperless_document_id} · {stageLabel(failure.stage)}</strong>
+            <span>{failure.error_message}</span>
+            <small>{formatRelativeTime(failure.updated_at)}</small>
+          </article>
+        ))}
+      </section>
+    </aside>
   );
 }
 
@@ -537,7 +709,8 @@ function stageLabel(stage: string) {
     document_type: 'Type',
     correspondent: 'Correspondent',
     tags: 'Tags',
-    fields: 'Fields'
+    fields: 'Fields',
+    apply: 'Apply'
   };
   return labels[stage] ?? statusLabel(stage);
 }
@@ -552,6 +725,25 @@ function statusLabel(value: string) {
 function formatDelta(value: number) {
   if (value === 0) return '0 vs previous';
   return `${value > 0 ? '+' : ''}${value} vs previous`;
+}
+
+function formatPercent(value: number) {
+  if (!Number.isFinite(value)) return '0%';
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatRelativeTime(value?: string | null) {
+  if (!value) return '-';
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return '-';
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 10) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(value).toLocaleString();
 }
 
 function formatMs(value: number) {

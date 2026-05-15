@@ -916,6 +916,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboard/live": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Live processing and lightweight debug status */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLiveStatus"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/mode": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateWorkflowModeRequest"];
+                };
+            };
+            responses: {
+                /** @description Updated runtime settings */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RuntimeSettings"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/inventory": {
         parameters: {
             query?: never;
@@ -2006,6 +2080,88 @@ export interface components {
             run_status: components["schemas"]["DashboardStatusCount"][];
             review_status: components["schemas"]["DashboardStatusCount"][];
             provider_usage: components["schemas"]["ProviderUsageStats"][];
+        };
+        ServiceProcessingStatus: {
+            /** @enum {string} */
+            state: "idle" | "running" | "error";
+            title: string;
+            description: string;
+            /** Format: date-time */
+            last_event_at?: string | null;
+        };
+        DashboardLiveRun: {
+            /** Format: uuid */
+            id: string;
+            paperless_document_id: number;
+            mode: components["schemas"]["ProcessingMode"];
+            status: string;
+            trigger_tag: string;
+            stages: components["schemas"]["Stage"][];
+            /** Format: date-time */
+            started_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        DashboardLiveJob: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            run_id: string;
+            paperless_document_id: number;
+            stage: components["schemas"]["Stage"];
+            status: string;
+            attempts: number;
+            max_attempts: number;
+            lease_owner?: string | null;
+            /** Format: date-time */
+            lease_until?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+            error_message?: string | null;
+        };
+        DashboardLiveLlmEvent: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            run_id: string;
+            /** Format: uuid */
+            job_id?: string | null;
+            stage: components["schemas"]["Stage"];
+            provider: string;
+            model: string;
+            duration_ms?: number | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        DashboardLiveFailure: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            run_id: string;
+            paperless_document_id: number;
+            stage: components["schemas"]["Stage"];
+            status: string;
+            attempts: number;
+            error_message: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        DashboardLiveStatus: {
+            /** Format: date-time */
+            generated_at: string;
+            workflow_mode: components["schemas"]["ProcessingMode"];
+            autopilot_enabled: boolean;
+            llm: components["schemas"]["ServiceProcessingStatus"];
+            paperless: components["schemas"]["ServiceProcessingStatus"];
+            active_runs: components["schemas"]["DashboardLiveRun"][];
+            active_jobs: components["schemas"]["DashboardLiveJob"][];
+            recent_llm_events: components["schemas"]["DashboardLiveLlmEvent"][];
+            recent_failures: components["schemas"]["DashboardLiveFailure"][];
+        };
+        UpdateWorkflowModeRequest: {
+            mode: components["schemas"]["ProcessingMode"];
         };
         DashboardResponse: {
             counts: components["schemas"]["BacklogCounts"];

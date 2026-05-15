@@ -5,10 +5,12 @@ use aes_gcm::aead::{Aead, OsRng, rand_core::RngCore};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use anyhow::{Context, Result, anyhow};
 use archivist_core::{
-    AuditEventInput, BacklogCounts, DashboardBacklogPoint, DashboardComparison, DashboardRange,
-    DashboardStageStatus, DashboardStats, DashboardStatusCount, DashboardTimeBucket,
-    DocumentChatSource, DocumentInventoryItem, ProcessingMode, ProviderUsageStats, Role,
-    RuntimeSettings, Stage, WorkflowRules, redact_sensitive_json,
+    AuditEventInput, BacklogCounts, DashboardBacklogPoint, DashboardComparison,
+    DashboardLiveFailure, DashboardLiveJob, DashboardLiveLlmEvent, DashboardLiveRun,
+    DashboardLiveStatus, DashboardRange, DashboardStageStatus, DashboardStats,
+    DashboardStatusCount, DashboardTimeBucket, DocumentChatSource, DocumentInventoryItem,
+    ProcessingMode, ProviderUsageStats, Role, RuntimeSettings, ServiceProcessingStatus, Stage,
+    WorkflowRules, redact_sensitive_json,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -1969,6 +1971,298 @@ pub async fn get_dashboard_stats(
     })
 }
 
+pub async fn get_dashboard_live_status(
+    pool: &DbPool,
+    settings: &RuntimeSettings,
+) -> Result<DashboardLiveStatus> {
+    let now = Utc::now();
+    let active_runs = dashboard_live_runs(pool).await?;
+    let active_jobs = dashboard_live_jobs(pool).await?;
+    let recent_llm_events = dashboard_live_llm_events(pool).await?;
+    let recent_failures = dashboard_live_failures(pool).await?;
+    let latest_paperless_event = latest_paperless_audit_event(pool).await?;
+
+    Ok(DashboardLiveStatus {
+        generated_at: now,
+        workflow_mode: settings.workflow.mode,
+        autopilot_enabled: settings.workflow.mode == ProcessingMode::Autopilot,
+        llm: llm_processing_status(&active_jobs, &recent_llm_events, &recent_failures),
+        paperless: paperless_processing_status(
+            &active_jobs,
+            latest_paperless_event.as_ref(),
+            &recent_failures,
+        ),
+        active_runs,
+        active_jobs,
+        recent_llm_events,
+        recent_failures,
+    })
+}
+
+async fn dashboard_live_runs(pool: &DbPool) -> Result<Vec<DashboardLiveRun>> {
+    let rows = sqlx::query(
+        r#"
+        select id, paperless_document_id, mode, status, trigger_tag, stages,
+               started_at, created_at, updated_at
+          from pipeline_runs
+         where status in ('queued', 'running', 'waiting_review', 'applying')
+         order by updated_at desc
+         limit 8
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let mode: String = row.try_get("mode")?;
+            let stages: Value = row.try_get("stages")?;
+            Ok(DashboardLiveRun {
+                id: row.try_get("id")?,
+                paperless_document_id: row.try_get("paperless_document_id")?,
+                mode: mode.parse()?,
+                status: row.try_get("status")?,
+                trigger_tag: row.try_get("trigger_tag")?,
+                stages: serde_json::from_value(stages).unwrap_or_default(),
+                started_at: row.try_get("started_at")?,
+                created_at: row.try_get("created_at")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .collect()
+}
+
+async fn dashboard_live_jobs(pool: &DbPool) -> Result<Vec<DashboardLiveJob>> {
+    let rows = sqlx::query(
+        r#"
+        select id, run_id, paperless_document_id, stage, status, attempts,
+               max_attempts, lease_owner, lease_until, updated_at, error_message
+          from jobs
+         where status in ('queued', 'running', 'waiting_review')
+         order by case status when 'running' then 0 when 'queued' then 1 else 2 end,
+                  updated_at desc
+         limit 16
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let stage: String = row.try_get("stage")?;
+            Ok(DashboardLiveJob {
+                id: row.try_get("id")?,
+                run_id: row.try_get("run_id")?,
+                paperless_document_id: row.try_get("paperless_document_id")?,
+                stage: stage.parse()?,
+                status: row.try_get("status")?,
+                attempts: row.try_get("attempts")?,
+                max_attempts: row.try_get("max_attempts")?,
+                lease_owner: row.try_get("lease_owner")?,
+                lease_until: row.try_get("lease_until")?,
+                updated_at: row.try_get("updated_at")?,
+                error_message: row.try_get("error_message")?,
+            })
+        })
+        .collect()
+}
+
+async fn dashboard_live_llm_events(pool: &DbPool) -> Result<Vec<DashboardLiveLlmEvent>> {
+    let rows = sqlx::query(
+        r#"
+        select id, run_id, job_id, stage, provider, model, duration_ms, created_at
+          from ai_artifacts
+         order by created_at desc
+         limit 8
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let stage: String = row.try_get("stage")?;
+            Ok(DashboardLiveLlmEvent {
+                id: row.try_get("id")?,
+                run_id: row.try_get("run_id")?,
+                job_id: row.try_get("job_id")?,
+                stage: stage.parse()?,
+                provider: row.try_get("provider")?,
+                model: row.try_get("model")?,
+                duration_ms: row.try_get("duration_ms")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect()
+}
+
+async fn dashboard_live_failures(pool: &DbPool) -> Result<Vec<DashboardLiveFailure>> {
+    let rows = sqlx::query(
+        r#"
+        select id, run_id, paperless_document_id, stage, status, attempts,
+               coalesce(error_message, 'Job failed without details') as error_message,
+               updated_at
+          from jobs
+         where status = 'failed' or error_message is not null
+         order by updated_at desc
+         limit 8
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let stage: String = row.try_get("stage")?;
+            Ok(DashboardLiveFailure {
+                id: row.try_get("id")?,
+                run_id: row.try_get("run_id")?,
+                paperless_document_id: row.try_get("paperless_document_id")?,
+                stage: stage.parse()?,
+                status: row.try_get("status")?,
+                attempts: row.try_get("attempts")?,
+                error_message: row.try_get("error_message")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct PaperlessAuditEvent {
+    event_type: String,
+    outcome: String,
+    created_at: DateTime<Utc>,
+    error_message: Option<String>,
+}
+
+async fn latest_paperless_audit_event(pool: &DbPool) -> Result<Option<PaperlessAuditEvent>> {
+    let row = sqlx::query(
+        r#"
+        select event_type, outcome, created_at, error_message
+          from audit_events
+         where event_type in ('paperless.sync', 'document.patch_applied')
+         order by created_at desc
+         limit 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| {
+        Ok(PaperlessAuditEvent {
+            event_type: row.try_get("event_type")?,
+            outcome: row.try_get("outcome")?,
+            created_at: row.try_get("created_at")?,
+            error_message: row.try_get("error_message")?,
+        })
+    })
+    .transpose()
+}
+
+fn llm_processing_status(
+    active_jobs: &[DashboardLiveJob],
+    recent_llm_events: &[DashboardLiveLlmEvent],
+    recent_failures: &[DashboardLiveFailure],
+) -> ServiceProcessingStatus {
+    if let Some(job) = active_jobs.iter().find(|job| job.status == "running") {
+        return ServiceProcessingStatus {
+            state: "running".to_owned(),
+            title: "LLM processing active".to_owned(),
+            description: format!(
+                "{} job for Paperless document {} is running.",
+                job.stage, job.paperless_document_id
+            ),
+            last_event_at: Some(job.updated_at),
+        };
+    }
+
+    if let Some(failure) = recent_failures.first() {
+        return ServiceProcessingStatus {
+            state: "error".to_owned(),
+            title: "Recent processing failure".to_owned(),
+            description: failure.error_message.clone(),
+            last_event_at: Some(failure.updated_at),
+        };
+    }
+
+    if let Some(event) = recent_llm_events.first() {
+        return ServiceProcessingStatus {
+            state: "idle".to_owned(),
+            title: "LLM idle".to_owned(),
+            description: format!(
+                "Last model call: {} / {} for {}.",
+                event.provider, event.model, event.stage
+            ),
+            last_event_at: Some(event.created_at),
+        };
+    }
+
+    ServiceProcessingStatus {
+        state: "idle".to_owned(),
+        title: "LLM idle".to_owned(),
+        description: "No model activity recorded yet.".to_owned(),
+        last_event_at: None,
+    }
+}
+
+fn paperless_processing_status(
+    active_jobs: &[DashboardLiveJob],
+    latest_event: Option<&PaperlessAuditEvent>,
+    recent_failures: &[DashboardLiveFailure],
+) -> ServiceProcessingStatus {
+    if let Some(job) = active_jobs.iter().find(|job| job.status == "running") {
+        return ServiceProcessingStatus {
+            state: "running".to_owned(),
+            title: "Paperless processing active".to_owned(),
+            description: format!(
+                "Document {} is being read or updated for {}.",
+                job.paperless_document_id, job.stage
+            ),
+            last_event_at: Some(job.updated_at),
+        };
+    }
+
+    if let Some(event) = latest_event
+        && event.outcome != "success"
+    {
+        return ServiceProcessingStatus {
+            state: "error".to_owned(),
+            title: "Recent Paperless action failed".to_owned(),
+            description: event
+                .error_message
+                .clone()
+                .unwrap_or_else(|| format!("{} ended with {}", event.event_type, event.outcome)),
+            last_event_at: Some(event.created_at),
+        };
+    }
+
+    if let Some(failure) = recent_failures.first() {
+        return ServiceProcessingStatus {
+            state: "error".to_owned(),
+            title: "Recent document processing failure".to_owned(),
+            description: failure.error_message.clone(),
+            last_event_at: Some(failure.updated_at),
+        };
+    }
+
+    if let Some(event) = latest_event {
+        return ServiceProcessingStatus {
+            state: "idle".to_owned(),
+            title: "Paperless idle".to_owned(),
+            description: format!("Last Paperless action: {}.", event.event_type),
+            last_event_at: Some(event.created_at),
+        };
+    }
+
+    ServiceProcessingStatus {
+        state: "idle".to_owned(),
+        title: "Paperless idle".to_owned(),
+        description: "No Paperless sync or patch activity recorded yet.".to_owned(),
+        last_event_at: None,
+    }
+}
+
 async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<ProviderUsageStats>> {
     let rows = sqlx::query(
         r#"
@@ -3587,5 +3881,44 @@ mod tests {
         assert_ne!(ciphertext, "paperless-token");
         let plaintext = decrypt_secret(&key, &ciphertext).unwrap();
         assert_eq!(plaintext, "paperless-token");
+    }
+
+    #[test]
+    fn live_llm_status_prefers_running_jobs() {
+        let now = Utc::now();
+        let job = DashboardLiveJob {
+            id: Uuid::now_v7(),
+            run_id: Uuid::now_v7(),
+            paperless_document_id: 42,
+            stage: Stage::Tags,
+            status: "running".to_owned(),
+            attempts: 1,
+            max_attempts: 3,
+            lease_owner: Some("worker-1".to_owned()),
+            lease_until: Some(now),
+            updated_at: now,
+            error_message: None,
+        };
+
+        let status = llm_processing_status(&[job], &[], &[]);
+
+        assert_eq!(status.state, "running");
+        assert!(status.description.contains("42"));
+    }
+
+    #[test]
+    fn live_paperless_status_reports_failed_audit_event() {
+        let now = Utc::now();
+        let event = PaperlessAuditEvent {
+            event_type: "paperless.sync".to_owned(),
+            outcome: "failed".to_owned(),
+            created_at: now,
+            error_message: Some("Paperless timeout".to_owned()),
+        };
+
+        let status = paperless_processing_status(&[], Some(&event), &[]);
+
+        assert_eq!(status.state, "error");
+        assert_eq!(status.description, "Paperless timeout");
     }
 }

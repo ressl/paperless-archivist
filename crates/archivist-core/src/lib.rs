@@ -545,6 +545,54 @@ impl AiSettings {
     pub fn ensure_default_providers(&mut self) {
         AiProviderSettings::append_missing_defaults(&mut self.providers);
     }
+
+    pub fn default_model_for_provider(
+        &self,
+        provider: &AiProviderSettings,
+        vision: bool,
+    ) -> String {
+        let global_default = if vision {
+            &self.default_vision_model
+        } else {
+            &self.default_text_model
+        };
+        let provider_default = if vision {
+            provider.default_vision_model.as_deref()
+        } else {
+            provider.default_text_model.as_deref()
+        };
+        let hard_default = if vision {
+            default_vision_model()
+        } else {
+            default_text_model()
+        };
+
+        if provider.name == self.default_provider {
+            non_empty_model(global_default)
+                .or_else(|| provider_default.and_then(non_empty_model))
+                .unwrap_or(hard_default)
+        } else {
+            provider_default
+                .and_then(non_empty_model)
+                .or_else(|| non_empty_model(global_default))
+                .unwrap_or(hard_default)
+        }
+    }
+
+    pub fn model_for_stage_provider(
+        &self,
+        provider: &AiProviderSettings,
+        stage: Stage,
+        vision: bool,
+    ) -> String {
+        self.stage_models
+            .iter()
+            .find(|override_model| {
+                override_model.stage == stage && override_model.provider == provider.name
+            })
+            .and_then(|override_model| non_empty_model(&override_model.model))
+            .unwrap_or_else(|| self.default_model_for_provider(provider, vision))
+    }
 }
 
 fn default_provider_name() -> String {
@@ -561,6 +609,11 @@ fn default_text_model() -> String {
 
 fn default_vision_model() -> String {
     "qwen2.5vl:7b".to_owned()
+}
+
+fn non_empty_model(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1141,9 +1194,9 @@ pub struct BacklogCounts {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DashboardRange {
+    #[default]
     Last24Hours,
     Last7Days,
-    #[default]
     Last30Days,
     Last90Days,
     Last12Months,
@@ -1348,6 +1401,79 @@ pub struct ProviderUsageStats {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub estimated_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardLiveStatus {
+    pub generated_at: DateTime<Utc>,
+    pub workflow_mode: ProcessingMode,
+    pub autopilot_enabled: bool,
+    pub llm: ServiceProcessingStatus,
+    pub paperless: ServiceProcessingStatus,
+    pub active_runs: Vec<DashboardLiveRun>,
+    pub active_jobs: Vec<DashboardLiveJob>,
+    pub recent_llm_events: Vec<DashboardLiveLlmEvent>,
+    pub recent_failures: Vec<DashboardLiveFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceProcessingStatus {
+    pub state: String,
+    pub title: String,
+    pub description: String,
+    pub last_event_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardLiveRun {
+    pub id: Uuid,
+    pub paperless_document_id: i32,
+    pub mode: ProcessingMode,
+    pub status: String,
+    pub trigger_tag: String,
+    pub stages: Vec<Stage>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardLiveJob {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub paperless_document_id: i32,
+    pub stage: Stage,
+    pub status: String,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub lease_owner: Option<String>,
+    pub lease_until: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardLiveLlmEvent {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub job_id: Option<Uuid>,
+    pub stage: Stage,
+    pub provider: String,
+    pub model: String,
+    pub duration_ms: Option<i32>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardLiveFailure {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub paperless_document_id: i32,
+    pub stage: Stage,
+    pub status: String,
+    pub attempts: i32,
+    pub error_message: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1679,7 +1805,71 @@ mod tests {
     }
 
     #[test]
+    fn default_provider_uses_runtime_default_models_before_provider_defaults() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.default_provider = "ollama".to_owned();
+        settings.ai.default_text_model = "qwen3-paperless:8b".to_owned();
+        settings.ai.default_vision_model = "glm-ocr:latest".to_owned();
+        let provider = settings
+            .ai
+            .providers
+            .iter()
+            .find(|provider| provider.name == "ollama")
+            .expect("ollama provider");
+
+        assert_eq!(
+            settings.ai.default_model_for_provider(provider, false),
+            "qwen3-paperless:8b"
+        );
+        assert_eq!(
+            settings.ai.default_model_for_provider(provider, true),
+            "glm-ocr:latest"
+        );
+    }
+
+    #[test]
+    fn non_default_provider_keeps_provider_default_model() {
+        let settings = RuntimeSettings::default();
+        let provider = settings
+            .ai
+            .providers
+            .iter()
+            .find(|provider| provider.name == "openai")
+            .expect("openai provider");
+
+        assert_eq!(
+            settings.ai.default_model_for_provider(provider, false),
+            "gpt-5.5"
+        );
+    }
+
+    #[test]
+    fn stage_model_override_wins_over_runtime_and_provider_defaults() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.default_vision_model = "glm-ocr:latest".to_owned();
+        settings.ai.stage_models.push(StageModelOverride {
+            stage: Stage::Ocr,
+            provider: "ollama".to_owned(),
+            model: "ocr-special:latest".to_owned(),
+        });
+        let provider = settings
+            .ai
+            .providers
+            .iter()
+            .find(|provider| provider.name == "ollama")
+            .expect("ollama provider");
+
+        assert_eq!(
+            settings
+                .ai
+                .model_for_stage_provider(provider, Stage::Ocr, true),
+            "ocr-special:latest"
+        );
+    }
+
+    #[test]
     fn dashboard_ranges_parse_with_expected_granularity() {
+        assert_eq!(DashboardRange::default().key(), "24h");
         assert_eq!(
             "24h".parse::<DashboardRange>().unwrap().granularity(),
             DashboardGranularity::Hour

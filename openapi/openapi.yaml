@@ -265,6 +265,103 @@ components:
         provider_usage:
           type: array
           items: { $ref: "#/components/schemas/ProviderUsageStats" }
+    ServiceProcessingStatus:
+      type: object
+      required: [state, title, description]
+      properties:
+        state: { type: string, enum: [idle, running, error] }
+        title: { type: string }
+        description: { type: string }
+        last_event_at: { type: [string, "null"], format: date-time }
+    DashboardLiveRun:
+      type: object
+      required: [id, paperless_document_id, mode, status, trigger_tag, stages, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        paperless_document_id: { type: integer }
+        mode: { $ref: "#/components/schemas/ProcessingMode" }
+        status: { type: string }
+        trigger_tag: { type: string }
+        stages:
+          type: array
+          items: { $ref: "#/components/schemas/Stage" }
+        started_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DashboardLiveJob:
+      type: object
+      required: [id, run_id, paperless_document_id, stage, status, attempts, max_attempts, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        paperless_document_id: { type: integer }
+        stage: { $ref: "#/components/schemas/Stage" }
+        status: { type: string }
+        attempts: { type: integer }
+        max_attempts: { type: integer }
+        lease_owner: { type: [string, "null"] }
+        lease_until: { type: [string, "null"], format: date-time }
+        updated_at: { type: string, format: date-time }
+        error_message: { type: [string, "null"] }
+    DashboardLiveLlmEvent:
+      type: object
+      required: [id, run_id, stage, provider, model, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        job_id: { type: [string, "null"], format: uuid }
+        stage: { $ref: "#/components/schemas/Stage" }
+        provider: { type: string }
+        model: { type: string }
+        duration_ms: { type: [integer, "null"] }
+        created_at: { type: string, format: date-time }
+    DashboardLiveFailure:
+      type: object
+      required: [id, run_id, paperless_document_id, stage, status, attempts, error_message, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        paperless_document_id: { type: integer }
+        stage: { $ref: "#/components/schemas/Stage" }
+        status: { type: string }
+        attempts: { type: integer }
+        error_message: { type: string }
+        updated_at: { type: string, format: date-time }
+    DashboardLiveStatus:
+      type: object
+      required:
+        - generated_at
+        - workflow_mode
+        - autopilot_enabled
+        - llm
+        - paperless
+        - active_runs
+        - active_jobs
+        - recent_llm_events
+        - recent_failures
+      properties:
+        generated_at: { type: string, format: date-time }
+        workflow_mode: { $ref: "#/components/schemas/ProcessingMode" }
+        autopilot_enabled: { type: boolean }
+        llm: { $ref: "#/components/schemas/ServiceProcessingStatus" }
+        paperless: { $ref: "#/components/schemas/ServiceProcessingStatus" }
+        active_runs:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardLiveRun" }
+        active_jobs:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardLiveJob" }
+        recent_llm_events:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardLiveLlmEvent" }
+        recent_failures:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardLiveFailure" }
+    UpdateWorkflowModeRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode: { $ref: "#/components/schemas/ProcessingMode" }
     DashboardResponse:
       type: object
       required: [counts, stats]
@@ -674,13 +771,34 @@ paths:
           schema:
             type: string
             enum: ["24h", "7d", "30d", "90d", "12m", "all"]
-            default: "30d"
+            default: "24h"
       responses:
         "200":
           description: Dashboard counts and analytics
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DashboardResponse" }
+  /api/dashboard/live:
+    get:
+      responses:
+        "200":
+          description: Live processing and lightweight debug status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardLiveStatus" }
+  /api/workflow/mode:
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateWorkflowModeRequest" }
+      responses:
+        "200":
+          description: Updated runtime settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuntimeSettings" }
   /api/inventory:
     get:
       parameters:

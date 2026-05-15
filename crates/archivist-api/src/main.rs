@@ -21,17 +21,17 @@ use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, OidcUserInput, ReviewItemRecord, append_audit,
     connect, consume_oidc_login_state, create_document_chat_session, create_oidc_login_state,
     create_run_with_jobs, create_session, create_user_with_roles, document_chat_session_visible,
-    find_api_token, find_session, find_user_for_login, get_backlog_counts, get_dashboard_stats,
-    get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
-    insert_document_chat_sources, list_allowed_named_entities, list_allowed_tag_names,
-    list_audit_events, list_custom_fields, list_document_chat_messages,
+    find_api_token, find_session, find_user_for_login, get_backlog_counts,
+    get_dashboard_live_status, get_dashboard_stats, get_runtime_settings, has_any_user, hash_token,
+    insert_document_chat_message, insert_document_chat_sources, list_allowed_named_entities,
+    list_allowed_tag_names, list_audit_events, list_custom_fields, list_document_chat_messages,
     list_document_chat_sessions, list_inventory, list_prompt_usage, list_prompts, list_reviews,
     list_secret_references, list_sessions, list_users, metrics_snapshot as db_metrics_snapshot,
     migrate, queue_missing_stage, record_login_failure, record_login_success, resolve_secret,
     review_decision, revoke_session_by_admin, search_document_chat_candidates, set_user_enabled,
-    set_user_roles, update_user_password_hash, upsert_encrypted_secret, upsert_inventory_item,
-    upsert_oidc_user, upsert_paperless_custom_field, upsert_paperless_named_entity,
-    upsert_paperless_tag,
+    set_user_roles, update_runtime_settings, update_user_password_hash, upsert_encrypted_secret,
+    upsert_inventory_item, upsert_oidc_user, upsert_paperless_custom_field,
+    upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_paperless::PaperlessClient;
 use argon2::password_hash::rand_core::OsRng;
@@ -42,7 +42,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -149,6 +149,8 @@ fn router(state: AppState) -> Router {
         .route("/prompts/{id}/activate", post(activate_prompt_endpoint))
         .route("/paperless/sync-metadata", post(sync_paperless))
         .route("/dashboard", get(dashboard))
+        .route("/dashboard/live", get(dashboard_live))
+        .route("/workflow/mode", put(update_workflow_mode))
         .route("/inventory", get(inventory))
         .route(
             "/chat/sessions",
@@ -894,7 +896,7 @@ async fn update_settings(
             }
         }
     }
-    archivist_db::update_runtime_settings(&state.pool, &request.settings, actor_id).await?;
+    update_runtime_settings(&state.pool, &request.settings, actor_id).await?;
     Ok(Json(request.settings))
 }
 
@@ -1421,11 +1423,7 @@ fn provider_by_name(settings: &RuntimeSettings, name: &str) -> Result<ApiProvide
     if provider.name == "ollama" {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
-    let model = provider
-        .default_text_model
-        .clone()
-        .filter(|model| !model.trim().is_empty())
-        .unwrap_or_else(|| settings.ai.default_text_model.clone());
+    let model = settings.ai.default_model_for_provider(&provider, false);
     let base_url = provider_base_url(&provider.kind, &provider.base_url);
     Ok(ApiProvider {
         name: provider.name,
@@ -1459,11 +1457,7 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
     if provider.name == "ollama" {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
-    let model = provider
-        .default_text_model
-        .clone()
-        .filter(|model| !model.trim().is_empty())
-        .unwrap_or_else(|| settings.ai.default_text_model.clone());
+    let model = settings.ai.default_model_for_provider(&provider, false);
     let base_url = provider_base_url(&provider.kind, &provider.base_url);
     Ok(ApiProvider {
         name: provider.name,
@@ -1730,6 +1724,35 @@ async fn dashboard(
     let settings = get_runtime_settings(&state.pool).await?;
     enrich_provider_usage_costs(&mut stats.provider_usage, &settings);
     Ok(Json(json!({ "counts": counts, "stats": stats })))
+}
+
+async fn dashboard_live(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadDashboard)?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    Ok(Json(json!(
+        get_dashboard_live_status(&state.pool, &settings).await?
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateWorkflowModeRequest {
+    mode: ProcessingMode,
+}
+
+async fn update_workflow_mode(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<UpdateWorkflowModeRequest>,
+) -> ApiResult<Json<RuntimeSettings>> {
+    require(&auth.0, Permission::WriteSettings)?;
+    let actor_id = require_user_session(&auth.0, "workflow mode updates require a user session")?;
+    let mut settings = get_runtime_settings(&state.pool).await?;
+    settings.workflow.mode = request.mode;
+    update_runtime_settings(&state.pool, &settings, actor_id).await?;
+    Ok(Json(settings))
 }
 
 fn enrich_provider_usage_costs(usage: &mut [ProviderUsageStats], settings: &RuntimeSettings) {

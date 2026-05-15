@@ -803,23 +803,9 @@ fn provider_for_stage(
     if provider.name == "ollama" {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
-    let model = stage_override
-        .map(|override_model| override_model.model.clone())
-        .filter(|model| !model.trim().is_empty())
-        .or_else(|| {
-            if vision {
-                provider.default_vision_model.clone()
-            } else {
-                provider.default_text_model.clone()
-            }
-        })
-        .unwrap_or_else(|| {
-            if vision {
-                settings.ai.default_vision_model.clone()
-            } else {
-                settings.ai.default_text_model.clone()
-            }
-        });
+    let model = settings
+        .ai
+        .model_for_stage_provider(&provider, stage, vision);
     let base_url = provider_base_url(&provider.kind, &provider.base_url);
     Ok(StageProvider {
         name: provider.name,

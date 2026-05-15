@@ -3,6 +3,7 @@ import type { paths } from './schema';
 
 export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
 export type Stage = 'ocr' | 'ocr_fix' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'fields';
+export type PipelineStage = Stage | 'apply';
 export type ProcessingMode = 'review' | 'autopilot';
 export type AiProviderKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible';
 
@@ -194,6 +195,73 @@ export type DashboardStats = {
 export type DashboardResponse = {
   counts: Counts;
   stats: DashboardStats;
+};
+
+export type ServiceProcessingStatus = {
+  state: 'idle' | 'running' | 'error' | string;
+  title: string;
+  description: string;
+  last_event_at?: string | null;
+};
+
+export type DashboardLiveRun = {
+  id: string;
+  paperless_document_id: number;
+  mode: ProcessingMode;
+  status: string;
+  trigger_tag: string;
+  stages: PipelineStage[];
+  started_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DashboardLiveJob = {
+  id: string;
+  run_id: string;
+  paperless_document_id: number;
+  stage: PipelineStage;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  lease_owner?: string | null;
+  lease_until?: string | null;
+  updated_at: string;
+  error_message?: string | null;
+};
+
+export type DashboardLiveLlmEvent = {
+  id: string;
+  run_id: string;
+  job_id?: string | null;
+  stage: PipelineStage;
+  provider: string;
+  model: string;
+  duration_ms?: number | null;
+  created_at: string;
+};
+
+export type DashboardLiveFailure = {
+  id: string;
+  run_id: string;
+  paperless_document_id: number;
+  stage: PipelineStage;
+  status: string;
+  attempts: number;
+  error_message: string;
+  updated_at: string;
+};
+
+export type DashboardLiveStatus = {
+  generated_at: string;
+  workflow_mode: ProcessingMode;
+  autopilot_enabled: boolean;
+  llm: ServiceProcessingStatus;
+  paperless: ServiceProcessingStatus;
+  active_runs: DashboardLiveRun[];
+  active_jobs: DashboardLiveJob[];
+  recent_llm_events: DashboardLiveLlmEvent[];
+  recent_failures: DashboardLiveFailure[];
 };
 
 export type InventoryItem = {
@@ -388,7 +456,13 @@ export const api = {
   ollamaModels: (providerName: string) =>
     request<{ provider: string; models: OllamaInstalledModel[] }>(`/api/model-providers/${encodeURIComponent(providerName)}/models`, { method: 'POST' }),
   syncPaperless: () => request<Record<string, number>>('/api/paperless/sync-metadata', { method: 'POST' }),
-  dashboard: (range: DashboardRange = '30d') => request<DashboardResponse>(`/api/dashboard?range=${encodeURIComponent(range)}`),
+  dashboard: (range: DashboardRange = '24h') => request<DashboardResponse>(`/api/dashboard?range=${encodeURIComponent(range)}`),
+  dashboardLive: () => request<DashboardLiveStatus>('/api/dashboard/live'),
+  updateWorkflowMode: (mode: ProcessingMode) =>
+    request<RuntimeSettings>('/api/workflow/mode', {
+      method: 'PUT',
+      body: JSON.stringify({ mode })
+    }),
   inventory: () => request<{ items: InventoryItem[] }>('/api/inventory?limit=200'),
   queueOcr: () => request<{ queued: number }>('/api/batches/ocr', { method: 'POST' }),
   queueTags: () => request<{ queued: number }>('/api/batches/tags', { method: 'POST' }),
