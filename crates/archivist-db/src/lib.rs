@@ -10,7 +10,7 @@ use archivist_core::{
     DashboardLiveStatus, DashboardRange, DashboardStageStatus, DashboardStats,
     DashboardStatusCount, DashboardTimeBucket, DocumentChatSource, DocumentInventoryItem,
     LanguageDetection, ProcessingMode, ProviderUsageStats, Role, RuntimeSettings,
-    ServiceProcessingStatus, Stage, WorkflowRules, redact_sensitive_json,
+    ServiceProcessingStatus, Stage, WorkflowRules, WorkflowSafetyStatus, redact_sensitive_json,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -166,6 +166,7 @@ pub struct ReviewItemRecord {
     pub suggested_patch: Value,
     pub edited_patch: Option<Value>,
     pub validation_warnings: Value,
+    pub debug_context: Option<Value>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2076,11 +2077,23 @@ pub async fn get_dashboard_live_status(
     let recent_llm_events = dashboard_live_llm_events(pool).await?;
     let recent_failures = dashboard_live_failures(pool).await?;
     let latest_paperless_event = latest_paperless_audit_event(pool).await?;
+    let workflow_safety = get_workflow_safety_status(pool, settings).await?;
+    let selector_ready = settings.workflow.mode.auto_select_documents()
+        && !workflow_safety.paused
+        && workflow_safety
+            .hourly_remaining
+            .is_none_or(|remaining| remaining > 0)
+        && workflow_safety
+            .daily_remaining
+            .is_none_or(|remaining| remaining > 0);
 
     Ok(DashboardLiveStatus {
         generated_at: now,
         workflow_mode: settings.workflow.mode,
-        autopilot_enabled: settings.workflow.mode.auto_select_documents(),
+        autopilot_enabled: selector_ready,
+        workflow_safety: workflow_safety.clone(),
+        selector: selector_processing_status(settings, &workflow_safety),
+        next_selector_scan_at: selector_ready.then_some(now + chrono::Duration::seconds(60)),
         llm: llm_processing_status(&active_jobs, &recent_llm_events, &recent_failures),
         paperless: paperless_processing_status(
             &active_jobs,
@@ -2092,6 +2105,98 @@ pub async fn get_dashboard_live_status(
         recent_llm_events,
         recent_failures,
     })
+}
+
+pub async fn get_workflow_safety_status(
+    pool: &DbPool,
+    settings: &RuntimeSettings,
+) -> Result<WorkflowSafetyStatus> {
+    let hourly_used = auto_selector_runs_since(pool, "1 hour").await?;
+    let daily_used = auto_selector_runs_since(pool, "1 day").await?;
+    Ok(WorkflowSafetyStatus {
+        paused: settings.workflow.paused,
+        dry_run: settings.workflow.dry_run,
+        hourly_document_limit: settings.workflow.hourly_document_limit,
+        daily_document_limit: settings.workflow.daily_document_limit,
+        hourly_remaining: remaining_budget(settings.workflow.hourly_document_limit, hourly_used),
+        daily_remaining: remaining_budget(settings.workflow.daily_document_limit, daily_used),
+    })
+}
+
+async fn auto_selector_runs_since(pool: &DbPool, interval: &str) -> Result<i64> {
+    sqlx::query_scalar(
+        r#"
+        select count(distinct paperless_document_id)::bigint
+          from pipeline_runs
+         where trigger_tag = 'auto-selector'
+           and created_at >= now() - $1::interval
+        "#,
+    )
+    .bind(interval)
+    .fetch_one(pool)
+    .await
+    .context("count auto-selector runs")
+}
+
+fn remaining_budget(limit: Option<i64>, used: i64) -> Option<i64> {
+    limit.map(|limit| (limit - used).max(0))
+}
+
+pub fn selector_document_budget(safety: &WorkflowSafetyStatus) -> Option<i64> {
+    [safety.hourly_remaining, safety.daily_remaining]
+        .into_iter()
+        .flatten()
+        .min()
+}
+
+fn selector_processing_status(
+    settings: &RuntimeSettings,
+    safety: &WorkflowSafetyStatus,
+) -> ServiceProcessingStatus {
+    if safety.paused {
+        return ServiceProcessingStatus {
+            state: "paused".to_owned(),
+            title: "Auto selector paused".to_owned(),
+            description: "Automatic document selection is paused. Manual queues remain available."
+                .to_owned(),
+            last_event_at: None,
+        };
+    }
+    if !settings.workflow.mode.auto_select_documents() {
+        return ServiceProcessingStatus {
+            state: "idle".to_owned(),
+            title: "Manual mode".to_owned(),
+            description:
+                "The selector is disabled because the workflow mode requires manual triggers."
+                    .to_owned(),
+            last_event_at: None,
+        };
+    }
+    if selector_document_budget(safety).is_some_and(|remaining| remaining <= 0) {
+        return ServiceProcessingStatus {
+            state: "limited".to_owned(),
+            title: "Auto selector limit reached".to_owned(),
+            description: "Hourly or daily document limits are exhausted for the current window."
+                .to_owned(),
+            last_event_at: None,
+        };
+    }
+    ServiceProcessingStatus {
+        state: if safety.dry_run { "dry_run" } else { "running" }.to_owned(),
+        title: if safety.dry_run {
+            "Auto selector dry-run".to_owned()
+        } else {
+            "Auto selector ready".to_owned()
+        },
+        description: if safety.dry_run {
+            "Documents can be selected and evaluated, but validated patches are not auto-applied."
+                .to_owned()
+        } else {
+            "Automatic document selection is enabled and within configured safety limits."
+                .to_owned()
+        },
+        last_event_at: None,
+    }
 }
 
 async fn dashboard_live_runs(pool: &DbPool) -> Result<Vec<DashboardLiveRun>> {
@@ -3150,6 +3255,7 @@ pub async fn queue_missing_pipeline(
     trigger_tag: &str,
     actor: &str,
     rules: &WorkflowRules,
+    max_documents: Option<i64>,
 ) -> Result<i64> {
     let include_tags = WorkflowRules::normalized_tags(&rules.include_tags);
     let exclude_tags = WorkflowRules::normalized_tags(&rules.exclude_tags);
@@ -3180,6 +3286,9 @@ pub async fn queue_missing_pipeline(
 
     let mut created = 0;
     for row in rows {
+        if max_documents.is_some_and(|limit| created >= limit) {
+            break;
+        }
         let stages = missing_pipeline_stages_for_inventory(
             enabled_stages,
             InventoryStageState {
@@ -3585,11 +3694,21 @@ pub async fn list_reviews(
     let rows = if let Some(status) = status {
         sqlx::query(
             r#"
-            select id, run_id, job_id, paperless_document_id, stage, status,
-                   suggested_patch, edited_patch, validation_warnings, created_at
-              from review_items
-             where status = $1
-             order by created_at desc
+            select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
+                   ri.suggested_patch, ri.edited_patch, ri.validation_warnings, ri.created_at,
+                   jsonb_build_object(
+                     'detected_language', di.detected_language,
+                     'detected_language_confidence', di.detected_language_confidence,
+                     'detected_language_source', di.detected_language_source,
+                     'current_run_status', di.current_run_status,
+                     'last_error', di.last_error,
+                     'next_required_stage', di.next_required_stage
+                   ) as debug_context
+              from review_items ri
+              left join document_inventory di
+                on di.paperless_document_id = ri.paperless_document_id
+             where ri.status = $1
+             order by ri.created_at desc
              limit $2
             "#,
         )
@@ -3600,10 +3719,20 @@ pub async fn list_reviews(
     } else {
         sqlx::query(
             r#"
-            select id, run_id, job_id, paperless_document_id, stage, status,
-                   suggested_patch, edited_patch, validation_warnings, created_at
-              from review_items
-             order by created_at desc
+            select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
+                   ri.suggested_patch, ri.edited_patch, ri.validation_warnings, ri.created_at,
+                   jsonb_build_object(
+                     'detected_language', di.detected_language,
+                     'detected_language_confidence', di.detected_language_confidence,
+                     'detected_language_source', di.detected_language_source,
+                     'current_run_status', di.current_run_status,
+                     'last_error', di.last_error,
+                     'next_required_stage', di.next_required_stage
+                   ) as debug_context
+              from review_items ri
+              left join document_inventory di
+                on di.paperless_document_id = ri.paperless_document_id
+             order by ri.created_at desc
              limit $1
             "#,
         )
@@ -3625,6 +3754,7 @@ pub async fn list_reviews(
                 suggested_patch: row.try_get("suggested_patch")?,
                 edited_patch: row.try_get("edited_patch")?,
                 validation_warnings: row.try_get("validation_warnings")?,
+                debug_context: row.try_get("debug_context")?,
                 created_at: row.try_get("created_at")?,
             })
         })
@@ -3768,6 +3898,7 @@ pub async fn pending_review_for_apply(
             suggested_patch: row.try_get("suggested_patch")?,
             edited_patch: row.try_get("edited_patch")?,
             validation_warnings: row.try_get("validation_warnings")?,
+            debug_context: None,
             created_at: row.try_get("created_at")?,
         })
     })
@@ -4176,6 +4307,30 @@ mod tests {
 
         assert_eq!(status.state, "idle");
         assert_eq!(status.title, "LLM idle");
+    }
+
+    #[test]
+    fn selector_document_budget_uses_tightest_remaining_limit() {
+        let safety = WorkflowSafetyStatus {
+            paused: false,
+            dry_run: false,
+            hourly_document_limit: Some(10),
+            daily_document_limit: Some(100),
+            hourly_remaining: Some(4),
+            daily_remaining: Some(25),
+        };
+
+        assert_eq!(selector_document_budget(&safety), Some(4));
+
+        let unlimited = WorkflowSafetyStatus {
+            hourly_document_limit: None,
+            daily_document_limit: None,
+            hourly_remaining: None,
+            daily_remaining: None,
+            ..safety
+        };
+
+        assert_eq!(selector_document_budget(&unlimited), None);
     }
 
     #[test]

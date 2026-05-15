@@ -990,6 +990,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workflow/controls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateWorkflowControlsRequest"];
+                };
+            };
+            responses: {
+                /** @description Updated runtime settings */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RuntimeSettings"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
     "/api/inventory": {
         parameters: {
             query?: never;
@@ -2157,6 +2196,10 @@ export interface components {
             generated_at: string;
             workflow_mode: components["schemas"]["ProcessingMode"];
             autopilot_enabled: boolean;
+            workflow_safety: components["schemas"]["WorkflowSafetyStatus"];
+            selector: components["schemas"]["ServiceProcessingStatus"];
+            /** Format: date-time */
+            next_selector_scan_at?: string | null;
             llm: components["schemas"]["ServiceProcessingStatus"];
             paperless: components["schemas"]["ServiceProcessingStatus"];
             active_runs: components["schemas"]["DashboardLiveRun"][];
@@ -2167,11 +2210,44 @@ export interface components {
         UpdateWorkflowModeRequest: {
             mode: components["schemas"]["ProcessingMode"];
         };
+        WorkflowSafetyStatus: {
+            paused: boolean;
+            dry_run: boolean;
+            hourly_document_limit?: number | null;
+            daily_document_limit?: number | null;
+            hourly_remaining?: number | null;
+            daily_remaining?: number | null;
+        };
+        UpdateWorkflowControlsRequest: {
+            paused?: boolean;
+            dry_run?: boolean;
+            hourly_document_limit?: number | null;
+            daily_document_limit?: number | null;
+        };
+        WorkflowDebugContext: {
+            selector_reason?: string | null;
+            workflow_mode?: components["schemas"]["ProcessingMode"] | null;
+            workflow_paused?: boolean | null;
+            dry_run?: boolean | null;
+            prompt_language?: string | null;
+            tag_output_language?: string | null;
+            detected_language?: string | null;
+            /** Format: float */
+            detected_language_confidence?: number | null;
+            detected_language_source?: string | null;
+            current_run_status?: string | null;
+            last_error?: string | null;
+            next_required_stage?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         DashboardResponse: {
             counts: components["schemas"]["BacklogCounts"];
             stats: components["schemas"]["DashboardStats"];
         };
         DocumentInventoryItem: {
+            debug_context?: components["schemas"]["WorkflowDebugContext"] | null;
+        } & {
             [key: string]: unknown;
         };
         StandardMetadataSuggestion: {
@@ -2209,6 +2285,7 @@ export interface components {
             suggested_patch: components["schemas"]["DocumentPatch"];
             edited_patch?: components["schemas"]["DocumentPatch"] | null;
             validation_warnings?: unknown;
+            debug_context?: components["schemas"]["WorkflowDebugContext"] | null;
             /** Format: date-time */
             created_at: string;
         } & {

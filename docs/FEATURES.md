@@ -543,7 +543,10 @@ Must support:
 - allow/disallow new tags
 - allow/disallow metadata overwrite
 - fallback to review on validation failure
+- global pause/resume for automatic selector polling
 - dry-run mode
+- hourly and daily document limits
+- live debug context for selector, language, prompt, and apply decisions
 
 ### 3.22 Batch Processing All Documents
 

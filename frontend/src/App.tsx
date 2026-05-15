@@ -362,7 +362,33 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         ? {
             ...current,
             workflow_mode: settings.workflow.mode,
-            autopilot_enabled: settings.workflow.mode !== 'manual_review'
+            autopilot_enabled: settings.workflow.mode !== 'manual_review' && !settings.workflow.paused,
+            workflow_safety: {
+              ...current.workflow_safety,
+              paused: settings.workflow.paused,
+              dry_run: settings.workflow.dry_run,
+              hourly_document_limit: settings.workflow.hourly_document_limit,
+              daily_document_limit: settings.workflow.daily_document_limit
+            }
+          }
+        : current
+    );
+    await loadLive();
+  };
+  const updateDashboardPause = async (paused: boolean) => {
+    const settings = await api.updateWorkflowControls({ paused });
+    setLive((current) =>
+      current
+        ? {
+            ...current,
+            autopilot_enabled: settings.workflow.mode !== 'manual_review' && !settings.workflow.paused,
+            workflow_safety: {
+              ...current.workflow_safety,
+              paused: settings.workflow.paused,
+              dry_run: settings.workflow.dry_run,
+              hourly_document_limit: settings.workflow.hourly_document_limit,
+              daily_document_limit: settings.workflow.daily_document_limit
+            }
           }
         : current
     );
@@ -427,10 +453,14 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         <AutoProcessingCard
           enabled={live?.autopilot_enabled ?? false}
           mode={live?.workflow_mode ?? 'manual_review'}
+          safety={live?.workflow_safety}
+          nextSelectorScanAt={live?.next_selector_scan_at}
           busy={modeBusy}
           canToggle={canManageSettings}
           onModeChange={(mode) => void run(setModeBusy, setError, () => updateDashboardWorkflowMode(mode), t)}
+          onPauseChange={(paused) => void run(setModeBusy, setError, () => updateDashboardPause(paused), t)}
         />
+        <ServiceStatusCard label={t('dashboard.live.selector')} icon={<ListChecks size={18} />} status={live?.selector} />
         <ServiceStatusCard label="LLM" icon={<Activity size={18} />} status={live?.llm} />
         <ServiceStatusCard label="Paperless" icon={<Database size={18} />} status={live?.paperless} />
       </div>
@@ -567,25 +597,51 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
 function AutoProcessingCard({
   enabled,
   mode,
+  safety,
+  nextSelectorScanAt,
   busy,
   canToggle,
-  onModeChange
+  onModeChange,
+  onPauseChange
 }: {
   enabled: boolean;
   mode: ProcessingMode;
+  safety?: DashboardLiveStatus['workflow_safety'] | null;
+  nextSelectorScanAt?: string | null;
   busy: boolean;
   canToggle: boolean;
   onModeChange: (mode: ProcessingMode) => void;
+  onPauseChange: (paused: boolean) => void;
 }) {
-  const { t } = useI18n();
+  const { t, formatRelativeTime: formatRelative } = useI18n();
+  const paused = safety?.paused ?? false;
+  const details = [
+    safety?.dry_run ? t('dashboard.auto.dry_run') : null,
+    (safety?.hourly_document_limit || safety?.daily_document_limit)
+      ? `${t('dashboard.auto.limits')}: ${[
+          safety.hourly_remaining != null ? `${safety.hourly_remaining}/h ${t('dashboard.auto.remaining')}` : null,
+          safety.daily_remaining != null ? `${safety.daily_remaining}/d ${t('dashboard.auto.remaining')}` : null
+        ].filter(Boolean).join(', ')}`
+      : null,
+    nextSelectorScanAt ? t('dashboard.auto.next_scan', { time: formatRelative(nextSelectorScanAt) }) : null
+  ].filter(Boolean);
   return (
     <section className={`autopilot-card ${enabled ? 'enabled' : 'disabled'}`}>
       <div>
         <span>{t('dashboard.auto.title')}</span>
         <strong>{workflowModeLabel(mode, t)}</strong>
         <p>{workflowModeDescription(mode, t)}</p>
+        {details.length > 0 && <small>{details.join(' · ')}</small>}
       </div>
       <div className="mode-button-group" role="group" aria-label={t('dashboard.auto.processing_mode')}>
+        <button
+          type="button"
+          disabled={busy || !canToggle}
+          aria-pressed={paused}
+          onClick={() => onPauseChange(!paused)}
+        >
+          <Power size={16} /> {paused ? t('dashboard.auto.resume') : t('dashboard.auto.pause')}
+        </button>
         {workflowModeOptions.map((option) => (
           <button
             key={option.value}
@@ -886,6 +942,7 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
               <th>{t('inventory.type')}</th>
               <th>{t('inventory.date')}</th>
               <th>{t('inventory.run')}</th>
+              <th>{t('inventory.debug')}</th>
               <th>{t('inventory.actions')}</th>
             </tr>
           </thead>
@@ -901,6 +958,7 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
                 <td><Status value={item.document_type_status} /></td>
                 <td><Status value={item.document_date_status} /> {item.document_date ?? ''}</td>
                 <td>{item.current_run_status || '-'}</td>
+                <td><DebugContextDetails context={item.debug_context} compact /></td>
                 <td className="row-actions">
                   <button title={t('inventory.trigger_ocr')} onClick={() => api.triggerDocument(item.paperless_document_id, ['ocr'], 'manual_review').then(load).catch((err) => setError(localizedErrorMessage(err, t)))}>
                     <FileText size={16} />
@@ -1231,6 +1289,8 @@ function ReviewCard({
         </div>
       )}
 
+      <DebugContextDetails context={item.debug_context} />
+
       <details>
         <summary>{t('review.raw_patch')}</summary>
         <pre>{JSON.stringify(item.suggested_patch, null, 2)}</pre>
@@ -1287,6 +1347,38 @@ function buildEditedReviewPatch(patch: ReviewPatchRecord, edit: ReviewEditState)
     edited[key] = numeric;
   }
   return edited;
+}
+
+function DebugContextDetails({
+  context,
+  compact
+}: {
+  context?: InventoryItem['debug_context'] | ReviewItem['debug_context'] | null;
+  compact?: boolean;
+}) {
+  const { t } = useI18n();
+  if (!context) return <span className="field-hint">-</span>;
+  const reason = context.selector_reason ?? context.next_required_stage ?? 'unknown';
+  const promptLanguage = context.prompt_language ?? context.detected_language ?? 'und';
+  const tagLanguage = context.tag_output_language ?? '-';
+  return (
+    <details className={`debug-context${compact ? ' compact' : ''}`}>
+      <summary>
+        {compact
+          ? t('inventory.debug_summary', { reason, promptLanguage, tagLanguage })
+          : t('review.debug_summary', { reason, promptLanguage, tagLanguage })}
+      </summary>
+      <dl>
+        <div><dt>{t('inventory.language')}</dt><dd>{promptLanguage}</dd></div>
+        <div><dt>{t('settings.workflow.tag_output_language')}</dt><dd>{tagLanguage}</dd></div>
+        <div><dt>{t('settings.workflow.mode')}</dt><dd>{context.workflow_mode ?? '-'}</dd></div>
+        <div><dt>{t('settings.workflow.paused')}</dt><dd>{context.workflow_paused ? t('generic.yes') : t('generic.no')}</dd></div>
+        <div><dt>{t('settings.workflow.dry_run')}</dt><dd>{context.dry_run ? t('generic.yes') : t('generic.no')}</dd></div>
+        <div><dt>{t('inventory.run')}</dt><dd>{context.current_run_status ?? '-'}</dd></div>
+        <div><dt>{t('inventory.debug')}</dt><dd>{reason}</dd></div>
+      </dl>
+    </details>
+  );
 }
 
 function reviewWarnings(value: unknown): string[] {
@@ -1605,6 +1697,34 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
               ))}
             </select>
             <small>{workflowModeDescription(settings.workflow.mode, t)}</small>
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={settings.workflow.paused} onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, paused: event.target.checked } }))} />
+            {t('settings.workflow.paused')}
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={settings.workflow.dry_run} onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, dry_run: event.target.checked } }))} />
+            {t('settings.workflow.dry_run')}
+          </label>
+          <label>
+            {t('settings.workflow.hourly_limit')}
+            <input
+              type="number"
+              min="1"
+              value={settings.workflow.hourly_document_limit ?? ''}
+              placeholder={t('settings.workflow.limit_placeholder')}
+              onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, hourly_document_limit: optionalPositiveInteger(event.target.value) } }))}
+            />
+          </label>
+          <label>
+            {t('settings.workflow.daily_limit')}
+            <input
+              type="number"
+              min="1"
+              value={settings.workflow.daily_document_limit ?? ''}
+              placeholder={t('settings.workflow.limit_placeholder')}
+              onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, daily_document_limit: optionalPositiveInteger(event.target.value) } }))}
+            />
           </label>
           <label>
             {t('settings.workflow.ocr_pages')}
@@ -2098,6 +2218,12 @@ function optionalNumber(value: string) {
   if (value.trim() === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function optionalPositiveInteger(value: string) {
+  if (value.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function splitTags(value: string) {

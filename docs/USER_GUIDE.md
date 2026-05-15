@@ -277,13 +277,30 @@ Archivist has three processing modes:
 Full autopilot still validates model output in Rust before applying changes.
 Invalid or risky output can fall back to review depending on workflow settings.
 
+The Dashboard includes operational controls for administrators:
+
+- `Pause` stops automatic selector and trigger polling. Manual queue buttons can
+  still be used for controlled tests.
+- `Dry-run` lets `full_auto` select and process documents, but validated results
+  are written to Review instead of Paperless.
+- `Hourly limit` and `Daily limit` cap automatic document selection. Empty values
+  mean no limit.
+- The live status cards show whether the selector, Paperless, or model provider
+  is idle, running, paused, limited, retrying, or failing.
+
 Safe rollout pattern:
 
 1. Run several batches in `manual_review` mode.
 2. Fix prompts/settings until suggestions are consistently good.
-3. Switch to `auto_select_review` for a small subset of documents.
-4. Watch dashboard failures and audit events.
-5. Switch to `full_auto` only when the results are stable.
+3. Enable a low hourly/daily limit and switch to `auto_select_review`.
+4. Watch dashboard failures, Review debug context, and audit events.
+5. Enable `full_auto` with `Dry-run` first.
+6. Remove dry-run only when the results are stable.
+
+Inventory and Review expose a compact debug context for each document. Use it to
+see why the selector did or did not pick a document, which language was detected
+for prompt context, which tag output language is configured, and whether a run
+is already queued, waiting for review, or blocked by tags.
 
 ## Language And Tag Output
 

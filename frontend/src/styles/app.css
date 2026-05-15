@@ -885,6 +885,48 @@ th {
   font-weight: 700;
 }
 
+.debug-context {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7f9fa;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.debug-context.compact {
+  min-width: 260px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.debug-context summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-weight: 700;
+}
+
+.debug-context dl {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.debug-context dl div {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 8px;
+}
+
+.debug-context dt {
+  color: var(--muted);
+}
+
+.debug-context dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .chat-layout {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);

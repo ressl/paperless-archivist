@@ -221,6 +221,24 @@ claim/apply logic.
 
 Never let raw model output directly mutate Paperless.
 
+Full-auto safety controls are part of the domain contract:
+
+- `workflow.paused` stops automatic selector and trigger polling, but manual API
+  queue actions can still be used for controlled tests.
+- `workflow.dry_run` must route validated full-auto patches to Review instead
+  of applying them.
+- hourly and daily limits are enforced before `queue_missing_pipeline` creates
+  auto-selector runs.
+- selector, pause/resume, dry-run, limit, review, and apply decisions must write
+  audit events without document content or secret values.
+- Inventory and Review debug context may expose status, language, selector
+  reason, and stage names, but not full document text, provider keys, or raw
+  prompts containing private content.
+
+When changing this path, cover pure decision logic with unit tests and run both
+Rust and frontend checks. Prefer adding a structured debug field over parsing
+logs in the UI.
+
 ## Language Intelligence
 
 Document language is detected locally in `archivist-core` and persisted on

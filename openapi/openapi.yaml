@@ -335,6 +335,8 @@ components:
         - generated_at
         - workflow_mode
         - autopilot_enabled
+        - workflow_safety
+        - selector
         - llm
         - paperless
         - active_runs
@@ -345,6 +347,11 @@ components:
         generated_at: { type: string, format: date-time }
         workflow_mode: { $ref: "#/components/schemas/ProcessingMode" }
         autopilot_enabled: { type: boolean }
+        workflow_safety: { $ref: "#/components/schemas/WorkflowSafetyStatus" }
+        selector: { $ref: "#/components/schemas/ServiceProcessingStatus" }
+        next_selector_scan_at:
+          type: [string, "null"]
+          format: date-time
         llm: { $ref: "#/components/schemas/ServiceProcessingStatus" }
         paperless: { $ref: "#/components/schemas/ServiceProcessingStatus" }
         active_runs:
@@ -364,6 +371,61 @@ components:
       required: [mode]
       properties:
         mode: { $ref: "#/components/schemas/ProcessingMode" }
+    WorkflowSafetyStatus:
+      type: object
+      required: [paused, dry_run]
+      properties:
+        paused: { type: boolean }
+        dry_run: { type: boolean }
+        hourly_document_limit:
+          type: [integer, "null"]
+        daily_document_limit:
+          type: [integer, "null"]
+        hourly_remaining:
+          type: [integer, "null"]
+        daily_remaining:
+          type: [integer, "null"]
+    UpdateWorkflowControlsRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        paused: { type: boolean }
+        dry_run: { type: boolean }
+        hourly_document_limit:
+          type: [integer, "null"]
+        daily_document_limit:
+          type: [integer, "null"]
+    WorkflowDebugContext:
+      type: object
+      additionalProperties: true
+      properties:
+        selector_reason:
+          type: [string, "null"]
+        workflow_mode:
+          oneOf:
+            - $ref: "#/components/schemas/ProcessingMode"
+            - type: "null"
+        workflow_paused:
+          type: [boolean, "null"]
+        dry_run:
+          type: [boolean, "null"]
+        prompt_language:
+          type: [string, "null"]
+        tag_output_language:
+          type: [string, "null"]
+        detected_language:
+          type: [string, "null"]
+        detected_language_confidence:
+          type: [number, "null"]
+          format: float
+        detected_language_source:
+          type: [string, "null"]
+        current_run_status:
+          type: [string, "null"]
+        last_error:
+          type: [string, "null"]
+        next_required_stage:
+          type: [string, "null"]
     DashboardResponse:
       type: object
       required: [counts, stats]
@@ -373,6 +435,11 @@ components:
     DocumentInventoryItem:
       type: object
       additionalProperties: true
+      properties:
+        debug_context:
+          oneOf:
+            - $ref: "#/components/schemas/WorkflowDebugContext"
+            - type: "null"
     StandardMetadataSuggestion:
       type: object
       additionalProperties: true
@@ -431,6 +498,10 @@ components:
             - $ref: "#/components/schemas/DocumentPatch"
             - type: "null"
         validation_warnings: true
+        debug_context:
+          oneOf:
+            - $ref: "#/components/schemas/WorkflowDebugContext"
+            - type: "null"
         created_at: { type: string, format: date-time }
     AuditEvent:
       type: object
@@ -851,6 +922,19 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/UpdateWorkflowModeRequest" }
+      responses:
+        "200":
+          description: Updated runtime settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuntimeSettings" }
+  /api/workflow/controls:
+    patch:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateWorkflowControlsRequest" }
       responses:
         "200":
           description: Updated runtime settings

@@ -789,6 +789,7 @@ impl RuntimeSettings {
             WorkflowRules::normalized_tags(&self.workflow.rules.include_tags);
         self.workflow.rules.exclude_tags =
             WorkflowRules::normalized_tags(&self.workflow.rules.exclude_tags);
+        self.workflow = self.workflow.normalized();
         self.tagging.tag_output_language =
             normalize_language_tag(&self.tagging.tag_output_language)
                 .unwrap_or_else(default_tag_output_language);
@@ -1067,6 +1068,14 @@ pub struct WorkflowSettings {
     #[serde(default = "default_processing_mode")]
     pub mode: ProcessingMode,
     #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub hourly_document_limit: Option<i64>,
+    #[serde(default)]
+    pub daily_document_limit: Option<i64>,
+    #[serde(default)]
     pub tags: WorkflowTags,
     #[serde(default)]
     pub rules: WorkflowRules,
@@ -1080,12 +1089,28 @@ impl Default for WorkflowSettings {
     fn default() -> Self {
         Self {
             mode: ProcessingMode::ManualReview,
+            paused: false,
+            dry_run: false,
+            hourly_document_limit: None,
+            daily_document_limit: None,
             tags: WorkflowTags::default(),
             rules: WorkflowRules::default(),
             enabled_stages: Stage::all_business_stages(),
             fallback_to_review_on_validation_failure: true,
         }
     }
+}
+
+impl WorkflowSettings {
+    pub fn normalized(mut self) -> Self {
+        self.hourly_document_limit = normalized_optional_limit(self.hourly_document_limit);
+        self.daily_document_limit = normalized_optional_limit(self.daily_document_limit);
+        self
+    }
+}
+
+fn normalized_optional_limit(value: Option<i64>) -> Option<i64> {
+    value.and_then(|limit| (limit > 0).then(|| limit.min(100_000)))
 }
 
 fn default_processing_mode() -> ProcessingMode {
@@ -2070,12 +2095,25 @@ pub struct DashboardLiveStatus {
     pub generated_at: DateTime<Utc>,
     pub workflow_mode: ProcessingMode,
     pub autopilot_enabled: bool,
+    pub workflow_safety: WorkflowSafetyStatus,
+    pub selector: ServiceProcessingStatus,
+    pub next_selector_scan_at: Option<DateTime<Utc>>,
     pub llm: ServiceProcessingStatus,
     pub paperless: ServiceProcessingStatus,
     pub active_runs: Vec<DashboardLiveRun>,
     pub active_jobs: Vec<DashboardLiveJob>,
     pub recent_llm_events: Vec<DashboardLiveLlmEvent>,
     pub recent_failures: Vec<DashboardLiveFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowSafetyStatus {
+    pub paused: bool,
+    pub dry_run: bool,
+    pub hourly_document_limit: Option<i64>,
+    pub daily_document_limit: Option<i64>,
+    pub hourly_remaining: Option<i64>,
+    pub daily_remaining: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2551,6 +2589,23 @@ mod tests {
         assert!(ProcessingMode::AutoSelectReview.requires_manual_review());
         assert!(ProcessingMode::FullAuto.auto_select_documents());
         assert!(ProcessingMode::FullAuto.auto_apply_validated_suggestions());
+    }
+
+    #[test]
+    fn workflow_settings_normalize_full_auto_safety_limits() {
+        let settings = WorkflowSettings {
+            paused: true,
+            dry_run: true,
+            hourly_document_limit: Some(0),
+            daily_document_limit: Some(250_000),
+            ..WorkflowSettings::default()
+        }
+        .normalized();
+
+        assert!(settings.paused);
+        assert!(settings.dry_run);
+        assert_eq!(settings.hourly_document_limit, None);
+        assert_eq!(settings.daily_document_limit, Some(100_000));
     }
 
     #[test]

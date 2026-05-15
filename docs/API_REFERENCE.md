@@ -73,6 +73,8 @@ Common status codes:
 | `POST` | `/api/settings/test-paperless` | Test the configured Paperless REST connection. |
 | `POST` | `/api/model-providers/test` | Test the selected default model provider. |
 | `POST` | `/api/model-providers/{name}/models` | List installed models for a configured Ollama provider. |
+| `PUT` | `/api/workflow/mode` | Change between manual review, auto-select with review, and full auto. |
+| `PATCH` | `/api/workflow/controls` | Update automation pause, dry-run, and hourly/daily limit controls. |
 | `GET` | `/api/secret-references` | List secret references without returning secret values. |
 
 `PUT /api/settings` accepts a `RuntimeSettings` object plus optional secret
@@ -89,6 +91,21 @@ Default provider records are created for:
 
 Commercial providers require only their API key unless an operator intentionally
 changes the model or base URL.
+
+`PATCH /api/workflow/controls` accepts any subset of:
+
+```json
+{
+  "paused": true,
+  "dry_run": true,
+  "hourly_document_limit": 10,
+  "daily_document_limit": null
+}
+```
+
+The route requires settings write permission and an interactive user session.
+It writes both the normal settings audit event and a workflow-specific audit
+event for pause, resume, dry-run, or limit changes.
 
 `POST /api/model-providers/{name}/models` is read-only but intentionally uses
 POST so browser-session CSRF protection applies before the backend makes an
@@ -116,6 +133,17 @@ for the selected stage, runs Rust-side validation, returns raw and parsed
 output, and writes a `prompt.tested` audit event. It never patches Paperless.
 
 ## Paperless Inventory And Jobs
+
+`GET /api/dashboard/live` returns lightweight processing debug status:
+`selector`, `llm`, `paperless`, active runs/jobs, recent retries/failures,
+workflow safety state, and the next selector scan estimate. It is intentionally
+status-only and does not expose document content or provider secrets.
+
+Inventory and Review responses include an optional `debug_context` object with
+selector reason, workflow mode, pause/dry-run state, detected prompt language,
+tag output language, run status, next required stage, and last error. The field
+is for UI/debugging support and remains safe to display to authenticated users
+with the existing inventory/review permissions.
 
 | Method | Path | Purpose |
 | --- | --- | --- |

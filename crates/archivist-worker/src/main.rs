@@ -20,11 +20,11 @@ use archivist_core::{
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, complete_job, connect,
     create_review_item, create_run_with_jobs, custom_field_ids_for_names, fail_job,
-    get_active_prompt, get_runtime_settings, insert_ai_artifact, is_last_active_job,
-    list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
+    get_active_prompt, get_runtime_settings, get_workflow_safety_status, insert_ai_artifact,
+    is_last_active_job, list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     named_entity_id_for_name, queue_missing_pipeline, record_document_language, resolve_secret,
-    tag_ids_for_names, upsert_inventory_item, upsert_paperless_custom_field,
-    upsert_paperless_named_entity, upsert_paperless_tag,
+    selector_document_budget, tag_ids_for_names, upsert_inventory_item,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{
@@ -840,14 +840,40 @@ async fn handle_patch_result(
     warnings: Vec<String>,
     review_metadata: Option<serde_json::Value>,
 ) -> Result<()> {
-    if job.mode.requires_manual_review() {
+    if job.mode.requires_manual_review() || settings.workflow.dry_run {
         let mut review_patch = serde_json::to_value(patch)?;
         if let Some(metadata) = review_metadata
             && let Some(object) = review_patch.as_object_mut()
         {
             object.insert("standard_metadata".to_owned(), metadata);
         }
-        create_review_item(pool, job, review_patch, json!(warnings)).await?;
+        let mut review_warnings = warnings;
+        if settings.workflow.dry_run && !job.mode.requires_manual_review() {
+            review_warnings.push(
+                "Dry-run is enabled: validated patch was evaluated but not auto-applied."
+                    .to_owned(),
+            );
+        }
+        let review_id = create_review_item(pool, job, review_patch, json!(review_warnings)).await?;
+        if settings.workflow.dry_run && !job.mode.requires_manual_review() {
+            append_audit(
+                pool,
+                AuditEventInput {
+                    event_type: "workflow.dry_run_review_created".to_owned(),
+                    actor_type: "worker".to_owned(),
+                    actor_id: None,
+                    run_id: Some(job.run_id),
+                    job_id: Some(job.id),
+                    paperless_document_id: Some(job.paperless_document_id),
+                    before: None,
+                    after: Some(json!({ "review_id": review_id, "stage": job.stage })),
+                    metadata: Some(json!({ "mode": job.mode })),
+                    outcome: "success".to_owned(),
+                    error_message: None,
+                },
+            )
+            .await?;
+        }
         return Ok(());
     }
     let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
@@ -1052,6 +1078,27 @@ fn audit_text_metadata(value: &str) -> serde_json::Value {
 
 async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()> {
     let settings = get_runtime_settings(pool).await?;
+    if settings.workflow.paused {
+        append_audit(
+            pool,
+            AuditEventInput {
+                event_type: "workflow.selector_skipped".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: None,
+                job_id: None,
+                paperless_document_id: None,
+                before: None,
+                after: None,
+                metadata: Some(json!({ "reason": "paused", "mode": settings.workflow.mode })),
+                outcome: "success".to_owned(),
+                error_message: None,
+            },
+        )
+        .await?;
+        info!("trigger polling skipped because workflow is paused");
+        return Ok(());
+    }
     let paperless = paperless_client(pool, config, &settings).await?;
     let snapshot = sync_metadata(pool, &paperless, &settings).await?;
 
@@ -1090,6 +1137,34 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
         "trigger polling inspected Paperless documents"
     );
     if settings.workflow.mode.auto_select_documents() {
+        let safety = get_workflow_safety_status(pool, &settings).await?;
+        let document_budget = selector_document_budget(&safety);
+        if document_budget.is_some_and(|remaining| remaining <= 0) {
+            append_audit(
+                pool,
+                AuditEventInput {
+                    event_type: "workflow.selector_limit_reached".to_owned(),
+                    actor_type: "worker".to_owned(),
+                    actor_id: None,
+                    run_id: None,
+                    job_id: None,
+                    paperless_document_id: None,
+                    before: None,
+                    after: None,
+                    metadata: Some(json!({
+                        "hourly_document_limit": safety.hourly_document_limit,
+                        "daily_document_limit": safety.daily_document_limit,
+                        "hourly_remaining": safety.hourly_remaining,
+                        "daily_remaining": safety.daily_remaining
+                    })),
+                    outcome: "success".to_owned(),
+                    error_message: None,
+                },
+            )
+            .await?;
+            info!("auto-selector skipped because document limit is exhausted");
+            return Ok(());
+        }
         let auto_selected = queue_missing_pipeline(
             pool,
             &settings.workflow.enabled_stages,
@@ -1097,6 +1172,29 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
             "auto-selector",
             "worker",
             &settings.workflow.rules,
+            document_budget,
+        )
+        .await?;
+        append_audit(
+            pool,
+            AuditEventInput {
+                event_type: "workflow.selector_ran".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: None,
+                job_id: None,
+                paperless_document_id: None,
+                before: None,
+                after: Some(json!({ "queued": auto_selected })),
+                metadata: Some(json!({
+                    "mode": settings.workflow.mode,
+                    "dry_run": settings.workflow.dry_run,
+                    "hourly_remaining": safety.hourly_remaining,
+                    "daily_remaining": safety.daily_remaining
+                })),
+                outcome: "success".to_owned(),
+                error_message: None,
+            },
         )
         .await?;
         info!(

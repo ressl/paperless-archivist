@@ -48,6 +48,10 @@ export type RuntimeSettings = {
   };
   workflow: {
     mode: ProcessingMode;
+    paused: boolean;
+    dry_run: boolean;
+    hourly_document_limit?: number | null;
+    daily_document_limit?: number | null;
     tags: Record<string, string>;
     rules: {
       include_tags: string[];
@@ -215,6 +219,15 @@ export type ServiceProcessingStatus = {
   last_event_at?: string | null;
 };
 
+export type WorkflowSafetyStatus = {
+  paused: boolean;
+  dry_run: boolean;
+  hourly_document_limit?: number | null;
+  daily_document_limit?: number | null;
+  hourly_remaining?: number | null;
+  daily_remaining?: number | null;
+};
+
 export type DashboardLiveRun = {
   id: string;
   paperless_document_id: number;
@@ -269,6 +282,9 @@ export type DashboardLiveStatus = {
   generated_at: string;
   workflow_mode: ProcessingMode;
   autopilot_enabled: boolean;
+  workflow_safety: WorkflowSafetyStatus;
+  selector: ServiceProcessingStatus;
+  next_selector_scan_at?: string | null;
   llm: ServiceProcessingStatus;
   paperless: ServiceProcessingStatus;
   active_runs: DashboardLiveRun[];
@@ -297,6 +313,22 @@ export type InventoryItem = {
   detected_language?: string | null;
   detected_language_confidence?: number | null;
   detected_language_source?: string | null;
+  debug_context?: WorkflowDebugContext | null;
+};
+
+export type WorkflowDebugContext = {
+  selector_reason?: string | null;
+  workflow_mode?: ProcessingMode | string | null;
+  workflow_paused?: boolean | null;
+  dry_run?: boolean | null;
+  prompt_language?: string | null;
+  tag_output_language?: string | null;
+  detected_language?: string | null;
+  detected_language_confidence?: number | null;
+  detected_language_source?: string | null;
+  current_run_status?: string | null;
+  last_error?: string | null;
+  next_required_stage?: string | null;
 };
 
 export type ReviewItem = {
@@ -307,6 +339,7 @@ export type ReviewItem = {
   suggested_patch: unknown;
   edited_patch?: unknown;
   validation_warnings?: unknown;
+  debug_context?: WorkflowDebugContext | null;
   created_at: string;
 };
 
@@ -480,6 +513,11 @@ export const api = {
     request<RuntimeSettings>('/api/workflow/mode', {
       method: 'PUT',
       body: JSON.stringify({ mode })
+    }),
+  updateWorkflowControls: (patch: Partial<Pick<RuntimeSettings['workflow'], 'paused' | 'dry_run' | 'hourly_document_limit' | 'daily_document_limit'>>) =>
+    request<RuntimeSettings>('/api/workflow/controls', {
+      method: 'PATCH',
+      body: JSON.stringify(patch)
     }),
   inventory: () => request<{ items: InventoryItem[] }>('/api/inventory?limit=200'),
   queueOcr: () => request<{ queued: number }>('/api/batches/ocr', { method: 'POST' }),

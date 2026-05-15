@@ -381,6 +381,23 @@ the failed-attempt counter and lock.
 Autopilot never trusts model output directly. Full autopilot applies only a
 validated Rust `DocumentPatch`.
 
+Production rollout should keep automatic selection bounded:
+
+1. Start in `manual_review` and process a representative sample.
+2. Set include/exclude tags so the selector sees only the intended scope.
+3. Enable `auto_select_review` with a small hourly or daily limit.
+4. Watch Dashboard live status, recent retries/failures, Review debug context,
+   and audit events.
+5. Enable `full_auto` with `dry_run` so validated patches still land in Review.
+6. Disable `dry_run` only after successful review of the same document class.
+7. Keep a non-empty daily limit until the archive has had at least one stable
+   processing cycle.
+
+`Pause` is the emergency brake for automation. It stops selector and trigger
+polling but does not delete queued jobs or revoke manual queue actions. The
+worker records pause, resume, selector-run, dry-run review, and limit decisions
+as audit events with redacted metadata.
+
 ## Language Operations
 
 The worker records detected document language on `document_inventory` with a

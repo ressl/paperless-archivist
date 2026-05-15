@@ -11,12 +11,12 @@ use archivist_ai::{
 };
 use archivist_config::AppConfig;
 use archivist_core::{
-    AiProviderKind, AuditEventInput, DashboardRange, DocumentChatSource, DocumentPatch, Permission,
-    ProcessingMode, ProviderUsageStats, Role, RuntimeSettings, Stage, build_document_chat_prompt,
-    detect_document_language, document_chat_snippet, document_chat_terms,
-    extract_issue_date_suggestion, roles_have_permission, score_document_chat_source,
-    validate_choice_suggestion, validate_document_date_suggestion, validate_field_suggestion,
-    validate_tag_suggestion, validate_title_suggestion,
+    AiProviderKind, AuditEventInput, DashboardRange, DocumentChatSource, DocumentInventoryItem,
+    DocumentPatch, Permission, ProcessingMode, ProviderUsageStats, Role, RuntimeSettings, Stage,
+    WorkflowRules, build_document_chat_prompt, detect_document_language, document_chat_snippet,
+    document_chat_terms, extract_issue_date_suggestion, roles_have_permission,
+    score_document_chat_source, validate_choice_suggestion, validate_document_date_suggestion,
+    validate_field_suggestion, validate_tag_suggestion, validate_title_suggestion,
 };
 use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, OidcUserInput, ReviewItemRecord, append_audit,
@@ -43,7 +43,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -152,6 +152,7 @@ fn router(state: AppState) -> Router {
         .route("/dashboard", get(dashboard))
         .route("/dashboard/live", get(dashboard_live))
         .route("/workflow/mode", put(update_workflow_mode))
+        .route("/workflow/controls", patch(update_workflow_controls))
         .route("/inventory", get(inventory))
         .route(
             "/chat/sessions",
@@ -1811,6 +1812,75 @@ async fn update_workflow_mode(
     Ok(Json(settings))
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateWorkflowControlsRequest {
+    paused: Option<bool>,
+    dry_run: Option<bool>,
+    hourly_document_limit: Option<Option<i64>>,
+    daily_document_limit: Option<Option<i64>>,
+}
+
+async fn update_workflow_controls(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<UpdateWorkflowControlsRequest>,
+) -> ApiResult<Json<RuntimeSettings>> {
+    require(&auth.0, Permission::WriteSettings)?;
+    let actor_id =
+        require_user_session(&auth.0, "workflow control updates require a user session")?;
+    let before = get_runtime_settings(&state.pool).await?;
+    let mut settings = before.clone();
+    if let Some(paused) = request.paused {
+        settings.workflow.paused = paused;
+    }
+    if let Some(dry_run) = request.dry_run {
+        settings.workflow.dry_run = dry_run;
+    }
+    if let Some(limit) = request.hourly_document_limit {
+        settings.workflow.hourly_document_limit = limit;
+    }
+    if let Some(limit) = request.daily_document_limit {
+        settings.workflow.daily_document_limit = limit;
+    }
+    settings = settings.normalized();
+    update_runtime_settings(&state.pool, &settings, actor_id).await?;
+
+    let event_type = match (before.workflow.paused, settings.workflow.paused) {
+        (false, true) => "workflow.paused",
+        (true, false) => "workflow.resumed",
+        _ => "workflow.controls_updated",
+    };
+    append_audit(
+        &state.pool,
+        AuditEventInput {
+            event_type: event_type.to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: Some(json!({
+                "paused": before.workflow.paused,
+                "dry_run": before.workflow.dry_run,
+                "hourly_document_limit": before.workflow.hourly_document_limit,
+                "daily_document_limit": before.workflow.daily_document_limit
+            })),
+            after: Some(json!({
+                "paused": settings.workflow.paused,
+                "dry_run": settings.workflow.dry_run,
+                "hourly_document_limit": settings.workflow.hourly_document_limit,
+                "daily_document_limit": settings.workflow.daily_document_limit
+            })),
+            metadata: Some(json!({ "source": "workflow_controls" })),
+            outcome: "success".to_owned(),
+            error_message: None,
+        },
+    )
+    .await?;
+
+    Ok(Json(settings))
+}
+
 fn enrich_provider_usage_costs(usage: &mut [ProviderUsageStats], settings: &RuntimeSettings) {
     for item in usage {
         let Some(provider) = settings
@@ -1847,9 +1917,69 @@ async fn inventory(
     require(&auth.0, Permission::ReadInventory)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let offset = query.offset.unwrap_or(0).max(0);
-    Ok(Json(
-        json!({ "items": list_inventory(&state.pool, limit, offset).await? }),
-    ))
+    let settings = get_runtime_settings(&state.pool).await?;
+    let items = list_inventory(&state.pool, limit, offset)
+        .await?
+        .into_iter()
+        .map(|item| inventory_item_with_debug(item, &settings))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Json(json!({ "items": items })))
+}
+
+fn inventory_item_with_debug(
+    item: DocumentInventoryItem,
+    settings: &RuntimeSettings,
+) -> Result<Value> {
+    let debug_context = inventory_debug_context(&item, settings);
+    let mut value = serde_json::to_value(item)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("debug_context".to_owned(), debug_context);
+    }
+    Ok(value)
+}
+
+fn inventory_debug_context(item: &DocumentInventoryItem, settings: &RuntimeSettings) -> Value {
+    let include_tags = WorkflowRules::normalized_tags(&settings.workflow.rules.include_tags);
+    let exclude_tags = WorkflowRules::normalized_tags(&settings.workflow.rules.exclude_tags);
+    let current_tags = item
+        .current_tags
+        .iter()
+        .map(|tag| tag.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let reason = if settings.workflow.paused {
+        "workflow_paused"
+    } else if item.complete {
+        "complete"
+    } else if item.current_run_status.as_deref().is_some_and(|status| {
+        matches!(status, "queued" | "running" | "waiting_review" | "applying")
+    }) {
+        "already_active"
+    } else if !exclude_tags.is_empty() && exclude_tags.iter().any(|tag| current_tags.contains(tag))
+    {
+        "excluded_by_tag"
+    } else if !include_tags.is_empty() && !include_tags.iter().any(|tag| current_tags.contains(tag))
+    {
+        "missing_include_tag"
+    } else if item.needs_review {
+        "waiting_review"
+    } else if item.next_required_stage.is_some() {
+        "missing_enabled_stage"
+    } else {
+        "no_missing_enabled_stage"
+    };
+    json!({
+        "selector_reason": reason,
+        "workflow_mode": settings.workflow.mode,
+        "workflow_paused": settings.workflow.paused,
+        "dry_run": settings.workflow.dry_run,
+        "prompt_language": item.detected_language.as_deref().unwrap_or("und"),
+        "tag_output_language": settings.tagging.tag_output_language,
+        "detected_language": item.detected_language.clone(),
+        "detected_language_confidence": item.detected_language_confidence,
+        "detected_language_source": item.detected_language_source.clone(),
+        "next_required_stage": item.next_required_stage.clone(),
+        "last_error": item.last_error.clone()
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2152,9 +2282,49 @@ async fn reviews(
     Query(query): Query<ReviewQuery>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::ReadReviews)?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    let items = list_reviews(
+        &state.pool,
+        query.status.as_deref(),
+        query.limit.unwrap_or(100),
+    )
+    .await?
+    .into_iter()
+    .map(|review| review_with_debug(review, &settings))
+    .collect::<Result<Vec<_>>>()?;
     Ok(Json(json!({
-        "items": list_reviews(&state.pool, query.status.as_deref(), query.limit.unwrap_or(100)).await?
+        "items": items
     })))
+}
+
+fn review_with_debug(review: ReviewItemRecord, settings: &RuntimeSettings) -> Result<Value> {
+    let mut value = serde_json::to_value(review)?;
+    if let Some(object) = value.as_object_mut() {
+        let mut debug = object
+            .get("debug_context")
+            .cloned()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        debug.insert("workflow_mode".to_owned(), json!(settings.workflow.mode));
+        debug.insert(
+            "workflow_paused".to_owned(),
+            json!(settings.workflow.paused),
+        );
+        debug.insert("dry_run".to_owned(), json!(settings.workflow.dry_run));
+        debug.insert(
+            "tag_output_language".to_owned(),
+            json!(settings.tagging.tag_output_language),
+        );
+        let prompt_language = debug
+            .get("detected_language")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("und")
+            .to_owned();
+        debug.insert("prompt_language".to_owned(), json!(prompt_language));
+        object.insert("debug_context".to_owned(), Value::Object(debug));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Deserialize)]

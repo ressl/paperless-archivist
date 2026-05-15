@@ -253,6 +253,9 @@ flow, validation-gated workflow modes, completion tags, audit events, and docume
 chat. Product-phase additions now include an advanced Prompt Workbench, batch
 review actions, provider usage/cost/latency reporting, audit CSV export,
 tag-based workflow rules, and an optional Paperless-ngx login bridge.
+Full-auto operations include pause/resume, dry-run, hourly/daily document
+limits, and dashboard debug context for the selector, Paperless, and model
+pipeline.
 
 ## Workflow Modes
 
@@ -261,6 +264,18 @@ tag-based workflow rules, and an optional Paperless-ngx login bridge.
 | Manual trigger + review | `manual_review` | Only explicitly queued documents or Paperless trigger tags | Suggestions wait in the review queue |
 | Autopilot selector + review | `auto_select_review` | Archivist automatically queues documents with missing enabled stages | Suggestions wait in the review queue |
 | Full autopilot | `full_auto` | Archivist automatically queues documents with missing enabled stages | Valid suggestions are applied to Paperless automatically |
+
+Safety controls are available from Dashboard and Settings:
+
+- **Pause/resume:** stops automatic selector and trigger polling while manual UI
+  queue actions remain available.
+- **Dry-run:** lets full-auto select and evaluate documents but routes validated
+  patches into Review instead of applying them.
+- **Hourly/daily limits:** cap how many auto-selected documents can be queued in
+  each rolling window.
+- **Debugging light:** Dashboard, Inventory, and Review expose selector state,
+  next selector scan, detected prompt language, tag output language, run status,
+  and safe failure reasons without exposing document text or secrets.
 
 Successful OCR and tagging stages add `archivist-ocr` and `archivist-tags`.
 Standard metadata stages can add `ai-processed-correspondent`,
