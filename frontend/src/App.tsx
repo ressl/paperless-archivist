@@ -67,7 +67,9 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
   Legend,
+  Line,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -650,6 +652,63 @@ function MaintenanceDrawer({
   );
 }
 
+function CostPanel({ stats, range }: { stats: DashboardStats | null; range: DashboardRange }) {
+  const { t, formatNumber } = useI18n();
+  const total = stats?.kpis.cost_in_range_usd ?? null;
+  const breakdown = stats?.cost_breakdown_by_provider ?? [];
+  const sortedBreakdown = useMemo(() => {
+    return [...breakdown]
+      .filter((item) => item.cost_usd != null && item.cost_usd > 0)
+      .sort((a, b) => (b.cost_usd ?? 0) - (a.cost_usd ?? 0))
+      .slice(0, 8);
+  }, [breakdown]);
+  const series = stats?.cost_series ?? [];
+  const maxBucket = useMemo(() => series.reduce((max, b) => Math.max(max, b.cost_usd ?? 0), 0), [series]);
+  const maxBreakdownCost = sortedBreakdown[0]?.cost_usd ?? 0;
+  return (
+    <section className="cost-panel chart-panel wide">
+      <h3>{t('dashboard.cost.title', { range })}</h3>
+      <p className="chart-panel-subtitle">{t('dashboard.cost.subtitle')}</p>
+      {total == null || total <= 0 ? (
+        <p className="empty-state compact">{t('dashboard.cost.no_data')}</p>
+      ) : (
+        <div className="cost-panel-grid">
+          <div className="cost-total-card">
+            <span>{t('dashboard.cost.total')}</span>
+            <strong>{formatCost(total)}</strong>
+            <em>{formatNumber(series.reduce((sum, b) => sum + b.request_count, 0))} requests</em>
+            <div className="cost-sparkline" aria-hidden="true">
+              {series.map((bucket, idx) => {
+                const heightPct = maxBucket > 0 ? Math.max(2, ((bucket.cost_usd ?? 0) / maxBucket) * 100) : 0;
+                return <span key={`${bucket.bucket}-${idx}`} style={{ height: `${heightPct}%` }} />;
+              })}
+            </div>
+          </div>
+          <div className="cost-breakdown">
+            <strong>{t('dashboard.cost.breakdown')}</strong>
+            <ul>
+              {sortedBreakdown.map((item) => {
+                const pct = maxBreakdownCost > 0 ? Math.round(((item.cost_usd ?? 0) / maxBreakdownCost) * 100) : 0;
+                return (
+                  <li key={`${item.provider}-${item.model}`}>
+                    <div className="cost-breakdown-row">
+                      <span className="cost-breakdown-label">{item.provider} / {item.model}</span>
+                      <strong>{formatCost(item.cost_usd)}</strong>
+                    </div>
+                    <div className="cost-breakdown-track">
+                      <div className="cost-breakdown-fill" style={{ width: `${pct}%` }} />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function QuotaBar({
   label,
   remaining,
@@ -690,7 +749,17 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
   const [counts, setCounts] = useState<Counts>(defaultCounts);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [live, setLive] = useState<DashboardLiveStatus | null>(null);
-  const [range, setRange] = useState<DashboardRange>('24h');
+  const [range, setRange] = useState<DashboardRange>(() => {
+    if (typeof window === 'undefined') return '24h';
+    const stored = window.localStorage.getItem('dashboard.range');
+    const valid: DashboardRange[] = ['24h', '7d', '30d', '90d', '12m', 'all'];
+    if (stored && (valid as string[]).includes(stored)) return stored as DashboardRange;
+    return '24h';
+  });
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dashboard.range', range);
+  }, [range]);
   const [busy, setBusy] = useState(false);
   const [modeBusy, setModeBusy] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
@@ -812,8 +881,24 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
     Failed: stage.failed
   }));
   const jobStatusData = statusChartData(stats?.job_status.length ? stats.job_status : defaultJobStatus, t);
-  const runStatusData = statusChartData(stats?.run_status.length ? stats.run_status : defaultRunStatus, t);
   const comparison = stats?.comparison;
+  const throughputWithRate = useMemo(() => {
+    const series = stats?.throughput_series ?? [];
+    return series.map((bucket) => {
+      const total = bucket.jobs_succeeded + bucket.jobs_failed;
+      const success_rate = total > 0 ? Math.round((bucket.jobs_succeeded / total) * 100) : null;
+      return { ...bucket, success_rate };
+    });
+  }, [stats?.throughput_series]);
+  const backlogWithRate = useMemo(() => {
+    const series = stats?.backlog_series ?? [];
+    return series.map((point) => {
+      const completion_rate = point.total_documents > 0
+        ? Math.round((point.complete / point.total_documents) * 100)
+        : 0;
+      return { ...point, completion_rate };
+    });
+  }, [stats?.backlog_series]);
   const runningJobs = stats?.kpis.running_jobs ?? counts.running;
 
   const healthScore = computeHealthScore(stats, live);
@@ -965,32 +1050,34 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         <div className="dashboard-analytics">
           <ChartPanel title={t('dashboard.chart.throughput', { range })} wide>
             <ResponsiveContainer width="100%" height={280}>
-              <AreaChart data={stats?.throughput_series ?? []}>
+              <ComposedChart data={throughputWithRate}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="label" />
-                <YAxis allowDecimals={false} />
+                <YAxis yAxisId="count" allowDecimals={false} />
+                <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" />
                 <Tooltip />
                 <Legend />
-                <Area type="monotone" dataKey="jobs_created" name={t('dashboard.chart.created')} stroke="#28649b" fill="#dbe9f5" />
-                <Area type="monotone" dataKey="jobs_succeeded" name={t('dashboard.chart.succeeded')} stroke="#147f7a" fill="#d9eeee" />
-                <Area type="monotone" dataKey="jobs_failed" name={t('dashboard.chart.failed')} stroke="#a6403a" fill="#f5dddd" />
-              </AreaChart>
+                <Area yAxisId="count" type="monotone" dataKey="jobs_created" name={t('dashboard.chart.created')} stroke="#28649b" fill="#dbe9f5" />
+                <Area yAxisId="count" type="monotone" dataKey="jobs_succeeded" name={t('dashboard.chart.succeeded')} stroke="#147f7a" fill="#d9eeee" />
+                <Area yAxisId="count" type="monotone" dataKey="jobs_failed" name={t('dashboard.chart.failed')} stroke="#a6403a" fill="#f5dddd" />
+                <Line yAxisId="rate" type="monotone" dataKey="success_rate" name={t('dashboard.chart.success_rate')} stroke="#0f5f5b" strokeWidth={2} dot={false} />
+              </ComposedChart>
             </ResponsiveContainer>
           </ChartPanel>
           <StageMatrix stats={stats} onStageSelect={() => undefined} />
           <div className="dashboard-grid compact">
             <ChartPanel title={t('dashboard.chart.backlog_trend')}>
               <ResponsiveContainer width="100%" height={240}>
-                <AreaChart data={stats?.backlog_series ?? []}>
+                <ComposedChart data={backlogWithRate}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="label" />
-                  <YAxis allowDecimals={false} />
+                  <YAxis yAxisId="count" allowDecimals={false} />
+                  <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" />
                   <Tooltip />
                   <Legend />
-                  <Area type="monotone" dataKey="open_backlog" name={t('dashboard.chart.open')} stroke="#a9782b" fill="#f1e5d0" />
-                  <Area type="monotone" dataKey="complete" name={t('dashboard.chart.complete')} stroke="#147f7a" fill="#d9eeee" />
-                  <Area type="monotone" dataKey="failed" name={t('dashboard.chart.failed')} stroke="#a6403a" fill="#f5dddd" />
-                </AreaChart>
+                  <Area yAxisId="count" type="monotone" dataKey="open_backlog" name={t('dashboard.chart.open')} stroke="#a9782b" fill="#f1e5d0" />
+                  <Line yAxisId="rate" type="monotone" dataKey="completion_rate" name={t('dashboard.chart.completion_rate')} stroke="#147f7a" strokeWidth={2} dot={false} />
+                </ComposedChart>
               </ResponsiveContainer>
             </ChartPanel>
             <ChartPanel title={t('dashboard.chart.queue_state')}>
@@ -1033,6 +1120,8 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
           <strong>{formatNumber(stats?.quality.uncertainty_reviews ?? 0)}</strong>
         </div>
       </div>
+
+      <CostPanel stats={stats} range={range} />
 
       <ChartPanel title={t('dashboard.chart.provider_usage')} wide>
         <div className="table-wrap compact-table">
