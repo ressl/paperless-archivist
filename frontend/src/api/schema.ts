@@ -869,7 +869,83 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["PaperlessSyncResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/paperless/consistency": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Paperless metadata consistency report */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PaperlessConsistencyResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/paperless/completion-tags/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["ReconcileCompletionTagsRequest"];
+                };
+            };
+            responses: {
+                /** @description Completion tag reconciliation plan or applied changes */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReconcileCompletionTagsResponse"];
+                    };
                 };
             };
         };
@@ -2206,6 +2282,41 @@ export interface components {
         OllamaInstalledModelsResponse: {
             provider: string;
             models: components["schemas"]["OllamaInstalledModel"][];
+        };
+        PaperlessSyncResponse: {
+            archive?: string;
+            /** @enum {string} */
+            mode?: "full" | "full_initial" | "delta" | "full_after_delta_error";
+            /** Format: date-time */
+            delta_cursor?: string | null;
+            synced_documents?: number;
+        } & {
+            [key: string]: unknown;
+        };
+        PaperlessConsistencyMismatch: {
+            paperless_document_id: number;
+            fields: string[];
+        };
+        PaperlessConsistencyResponse: {
+            ok: boolean;
+            documents_checked: number;
+            missing_local: number[];
+            stale_local: number[];
+            mismatches: components["schemas"]["PaperlessConsistencyMismatch"][];
+        };
+        ReconcileCompletionTagsRequest: {
+            /** @default true */
+            dry_run: boolean;
+            document_ids?: number[];
+        };
+        CompletionTagReconcilePlan: {
+            paperless_document_id: number;
+            add: string[];
+        };
+        ReconcileCompletionTagsResponse: {
+            dry_run: boolean;
+            planned: components["schemas"]["CompletionTagReconcilePlan"][];
+            applied: number[];
         };
         BacklogCounts: {
             /** Format: int64 */

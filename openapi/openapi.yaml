@@ -108,6 +108,66 @@ components:
         models:
           type: array
           items: { $ref: "#/components/schemas/OllamaInstalledModel" }
+    PaperlessSyncResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        archive: { type: string }
+        mode: { type: string, enum: [full, full_initial, delta, full_after_delta_error] }
+        delta_cursor:
+          type: [string, "null"]
+          format: date-time
+        synced_documents: { type: integer }
+    PaperlessConsistencyMismatch:
+      type: object
+      required: [paperless_document_id, fields]
+      properties:
+        paperless_document_id: { type: integer }
+        fields:
+          type: array
+          items: { type: string }
+    PaperlessConsistencyResponse:
+      type: object
+      required: [ok, documents_checked, missing_local, stale_local, mismatches]
+      properties:
+        ok: { type: boolean }
+        documents_checked: { type: integer }
+        missing_local:
+          type: array
+          items: { type: integer }
+        stale_local:
+          type: array
+          items: { type: integer }
+        mismatches:
+          type: array
+          items: { $ref: "#/components/schemas/PaperlessConsistencyMismatch" }
+    ReconcileCompletionTagsRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        dry_run: { type: boolean, default: true }
+        document_ids:
+          type: array
+          items: { type: integer }
+    CompletionTagReconcilePlan:
+      type: object
+      required: [paperless_document_id, add]
+      properties:
+        paperless_document_id: { type: integer }
+        add:
+          type: array
+          items: { type: string }
+    ReconcileCompletionTagsResponse:
+      type: object
+      required: [dry_run, planned, applied]
+      properties:
+        dry_run: { type: boolean }
+        planned:
+          type: array
+          items: { $ref: "#/components/schemas/CompletionTagReconcilePlan" }
+        applied:
+          type: array
+          items: { type: integer }
     BacklogCounts:
       type: object
       required:
@@ -982,6 +1042,30 @@ paths:
       responses:
         "200":
           description: Sync summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaperlessSyncResponse" }
+  /api/paperless/consistency:
+    get:
+      responses:
+        "200":
+          description: Paperless metadata consistency report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaperlessConsistencyResponse" }
+  /api/paperless/completion-tags/reconcile:
+    post:
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReconcileCompletionTagsRequest" }
+      responses:
+        "200":
+          description: Completion tag reconciliation plan or applied changes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconcileCompletionTagsResponse" }
   /api/dashboard:
     get:
       parameters:

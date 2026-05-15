@@ -29,6 +29,20 @@ export type OllamaInstalledModel = {
   digest?: string | null;
 };
 
+export type PaperlessConsistencyResult = {
+  ok: boolean;
+  documents_checked: number;
+  missing_local: number[];
+  stale_local: number[];
+  mismatches: Array<{ paperless_document_id: number; fields: string[] }>;
+};
+
+export type CompletionTagReconcileResult = {
+  dry_run: boolean;
+  planned: Array<{ paperless_document_id: number; add: string[] }>;
+  applied: number[];
+};
+
 export type RuntimeSettings = {
   paperless: {
     base_url: string;
@@ -36,6 +50,15 @@ export type RuntimeSettings = {
     token_secret_id?: string | null;
     timeout_seconds: number;
     login_bridge_enabled: boolean;
+    delta_sync_enabled: boolean;
+    delta_sync_overlap_minutes: number;
+    active_archive: string;
+    archive_profiles: Array<{
+      name: string;
+      base_url: string;
+      token_secret_id?: string | null;
+      enabled: boolean;
+    }>;
   };
   ai: {
     default_provider: string;
@@ -93,6 +116,12 @@ export type RuntimeSettings = {
   fields: {
     max_fields: number;
     confidence_threshold: number;
+    mappings: Array<{
+      field_name: string;
+      enabled: boolean;
+      aliases: string[];
+      instructions?: string | null;
+    }>;
   };
 };
 
@@ -566,7 +595,13 @@ export const api = {
   testProvider: () => request<{ ok: boolean; error?: string; details?: unknown }>('/api/model-providers/test', { method: 'POST' }),
   ollamaModels: (providerName: string) =>
     request<{ provider: string; models: OllamaInstalledModel[] }>(`/api/model-providers/${encodeURIComponent(providerName)}/models`, { method: 'POST' }),
-  syncPaperless: () => request<Record<string, number>>('/api/paperless/sync-metadata', { method: 'POST' }),
+  syncPaperless: () => request<Record<string, unknown>>('/api/paperless/sync-metadata', { method: 'POST' }),
+  paperlessConsistency: () => request<PaperlessConsistencyResult>('/api/paperless/consistency'),
+  reconcileCompletionTags: (input: { dry_run?: boolean; document_ids?: number[] }) =>
+    request<CompletionTagReconcileResult>('/api/paperless/completion-tags/reconcile', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }),
   dashboard: (range: DashboardRange = '24h') => request<DashboardResponse>(`/api/dashboard?range=${encodeURIComponent(range)}`),
   dashboardLive: () => request<DashboardLiveStatus>('/api/dashboard/live'),
   updateWorkflowMode: (mode: ProcessingMode) =>

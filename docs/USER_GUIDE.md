@@ -69,6 +69,11 @@ Open `Settings` and configure:
 - `Paperless API token`: a Paperless token for a user with permission to read
   documents and update metadata/tags.
 - `Timeout`: how long backend/worker calls may wait for Paperless.
+- `Delta sync`: optional. After a successful full sync, use modified-since
+  polling with a configurable overlap window so later syncs scan only recently
+  changed Paperless documents.
+- `Active archive profile`: selects the Paperless archive profile used by the
+  API and worker. The default profile uses the normal Paperless URL and token.
 - `Allow Paperless-ngx login bridge`: optional. When enabled, users can log in
   with Paperless credentials. Archivist verifies the credentials through the
   Paperless token endpoint, does not store the Paperless password, and creates a
@@ -147,8 +152,19 @@ Run sync before processing:
 3. Wait for the inventory to update.
 
 Sync reads Paperless metadata, tags, correspondents, document types, the
-Paperless document date, custom fields, and document status through the REST
-API.
+Paperless document date, modified timestamp, custom fields, and document status
+through the REST API.
+
+Admins can also use the Paperless maintenance panel:
+
+- `Check consistency` reports documents missing from local inventory, stale
+  local inventory rows, and metadata mismatches between Paperless and Archivist.
+- `Plan tag reconcile` performs a dry run for completion tags.
+- `Apply planned tags` applies the planned full completion tag updates after the
+  dry run has been reviewed.
+
+Completion-tag reconcile only adds the full completion tag when all enabled
+stage completion tags already exist on the Paperless document.
 
 ## Dashboard
 
@@ -227,6 +243,19 @@ The metadata confidence threshold controls correspondent/type suggestions; the
 date confidence threshold controls document date extraction. Creation/proposal
 toggles are conservative defaults for future controlled creation workflows and
 should remain off unless the team has a review process for new Paperless values.
+
+## Custom Field Mappings
+
+Settings include custom-field mappings for Paperless custom fields. Use one line
+per field:
+
+```text
+Field name | enabled | alias one; alias two | instructions
+```
+
+Set the second column to `disabled` to exclude a field from AI extraction.
+Aliases and instructions help the prompt map business terminology to the exact
+Paperless custom field name while keeping the existing settings schema.
 
 ## Prompt Workbench
 

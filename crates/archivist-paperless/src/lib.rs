@@ -82,6 +82,17 @@ impl PaperlessClient {
         self.get_paginated("api/documents/").await
     }
 
+    pub async fn list_documents_modified_since(
+        &self,
+        since: &str,
+    ) -> Result<Vec<PaperlessDocumentSummary>> {
+        let mut url = self.url("api/documents/")?;
+        url.query_pairs_mut()
+            .append_pair("page_size", "100")
+            .append_pair("modified__gt", since);
+        self.get_paginated_url(url).await
+    }
+
     pub async fn get_document(&self, id: i32) -> Result<PaperlessDocumentDetail> {
         let url = self.url(&format!("api/documents/{id}/"))?;
         self.get_json(url).await
@@ -196,6 +207,13 @@ impl PaperlessClient {
     {
         let mut url = self.url(path)?;
         url.query_pairs_mut().append_pair("page_size", "100");
+        self.get_paginated_url(url).await
+    }
+
+    async fn get_paginated_url<T>(&self, mut url: Url) -> Result<Vec<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
         let mut items = Vec::new();
 
         loop {
@@ -285,6 +303,8 @@ pub struct PaperlessDocumentSummary {
     #[serde(default)]
     pub created: Option<String>,
     #[serde(default)]
+    pub modified: Option<String>,
+    #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
     pub tags: Vec<i32>,
@@ -300,6 +320,8 @@ pub struct PaperlessDocumentDetail {
     pub title: Option<String>,
     #[serde(default)]
     pub created: Option<String>,
+    #[serde(default)]
+    pub modified: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]

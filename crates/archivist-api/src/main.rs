@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -28,15 +28,16 @@ use archivist_db::{
     list_allowed_named_entities, list_allowed_tag_names, list_audit_events, list_custom_fields,
     list_document_chat_messages, list_document_chat_sessions, list_inventory, list_prompt_usage,
     list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
-    metrics_snapshot as db_metrics_snapshot, migrate, queue_missing_stage, record_login_failure,
-    record_login_success, recover_stale_leases, recover_stuck_runs, recovery_candidates,
-    resolve_secret, review_decision, revoke_session_by_admin, rotate_api_token,
-    search_document_chat_candidates, set_user_enabled, set_user_roles, update_runtime_settings,
-    update_user_password_hash, upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
+    metrics_snapshot as db_metrics_snapshot, migrate, paperless_sync_cursor, queue_missing_stage,
+    record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
+    recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
+    rotate_api_token, search_document_chat_candidates, set_user_enabled, set_user_roles,
+    update_paperless_sync_cursor, update_runtime_settings, update_user_password_hash,
+    upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
     verify_audit_integrity,
 };
-use archivist_paperless::{PaperlessClient, PaperlessDocumentDetail};
+use archivist_paperless::{PaperlessClient, PaperlessDocumentDetail, PaperlessTag};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Argon2, Params};
@@ -49,7 +50,7 @@ use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use cookie::{Cookie, SameSite};
 use jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER as JWT_CRYPTO_PROVIDER;
 use jsonwebtoken::jwk::JwkSet;
@@ -60,6 +61,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256, Sha384, Sha512};
+use sqlx::Row;
 use tokio::net::TcpListener;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -151,6 +153,11 @@ fn router(state: AppState) -> Router {
         .route("/prompts/test", post(test_prompt_endpoint))
         .route("/prompts/{id}/activate", post(activate_prompt_endpoint))
         .route("/paperless/sync-metadata", post(sync_paperless))
+        .route("/paperless/consistency", get(paperless_consistency))
+        .route(
+            "/paperless/completion-tags/reconcile",
+            post(reconcile_completion_tags),
+        )
         .route("/dashboard", get(dashboard))
         .route("/dashboard/live", get(dashboard_live))
         .route("/workflow/mode", put(update_workflow_mode))
@@ -1198,6 +1205,7 @@ async fn build_prompt_test_chat_request(
             let allowed = list_custom_fields(&state.pool)
                 .await?
                 .into_iter()
+                .filter(|field| settings.fields.field_enabled(&field.name))
                 .map(|field| field.name)
                 .collect::<Vec<_>>();
             Ok(prompt_for_fields(
@@ -1336,6 +1344,7 @@ async fn parse_prompt_test_output(
                     .await
                     .unwrap_or_default()
                     .into_iter()
+                    .filter(|field| settings.fields.field_enabled(&field.name))
                     .map(|field| field.name)
                     .collect::<Vec<_>>();
                 match validate_field_suggestion(
@@ -1807,6 +1816,224 @@ async fn sync_paperless(
     )
     .await?;
     Ok(Json(summary))
+}
+
+async fn paperless_consistency(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadInventory)?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
+    let documents = client.list_documents().await?;
+    let rows = sqlx::query(
+        r#"
+        select paperless_document_id, title, current_tag_ids, correspondent_id,
+               document_type_id, document_date
+          from document_inventory
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let mut inventory = HashMap::new();
+    for row in rows {
+        inventory.insert(
+            row.try_get::<i32, _>("paperless_document_id")?,
+            json!({
+                "title": row.try_get::<Option<String>, _>("title")?,
+                "current_tag_ids": row.try_get::<Vec<i32>, _>("current_tag_ids")?,
+                "correspondent": row.try_get::<Option<i32>, _>("correspondent_id")?,
+                "document_type": row.try_get::<Option<i32>, _>("document_type_id")?,
+                "created": row.try_get::<Option<String>, _>("document_date")?
+            }),
+        );
+    }
+
+    let mut missing_local = Vec::new();
+    let mut mismatches = Vec::new();
+    let seen_remote = documents
+        .iter()
+        .map(|document| document.id)
+        .collect::<HashSet<_>>();
+    for document in &documents {
+        let Some(local) = inventory.get(&document.id) else {
+            missing_local.push(document.id);
+            continue;
+        };
+        let mut fields = Vec::new();
+        if local.get("title").and_then(Value::as_str) != document.title.as_deref() {
+            fields.push("title");
+        }
+        if local
+            .get("correspondent")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32)
+            != document.correspondent
+        {
+            fields.push("correspondent");
+        }
+        if local
+            .get("document_type")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32)
+            != document.document_type
+        {
+            fields.push("document_type");
+        }
+        if local.get("created").and_then(Value::as_str) != document.created.as_deref() {
+            fields.push("document_date");
+        }
+        let mut local_tags = local
+            .get("current_tag_ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_i64().map(|value| value as i32))
+            .collect::<Vec<_>>();
+        let mut remote_tags = document.tags.clone();
+        local_tags.sort_unstable();
+        remote_tags.sort_unstable();
+        if local_tags != remote_tags {
+            fields.push("tags");
+        }
+        if !fields.is_empty() {
+            mismatches.push(json!({ "paperless_document_id": document.id, "fields": fields }));
+        }
+    }
+    let stale_local = inventory
+        .keys()
+        .filter(|id| !seen_remote.contains(id))
+        .copied()
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({
+        "documents_checked": documents.len(),
+        "missing_local": missing_local,
+        "stale_local": stale_local,
+        "mismatches": mismatches,
+        "ok": missing_local.is_empty() && stale_local.is_empty() && mismatches.is_empty()
+    })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReconcileCompletionTagsRequest {
+    dry_run: Option<bool>,
+    document_ids: Option<Vec<i32>>,
+}
+
+async fn reconcile_completion_tags(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    request: Option<Json<ReconcileCompletionTagsRequest>>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteBatches)?;
+    let request = request.map(|Json(request)| request).unwrap_or_default();
+    let settings = get_runtime_settings(&state.pool).await?;
+    let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
+    let dry_run = request.dry_run.unwrap_or(true);
+    let mut tags = client.list_tags().await?;
+    let mut full_tag: Option<PaperlessTag> = None;
+    let stage_completion_tags = settings
+        .workflow
+        .enabled_stages
+        .iter()
+        .filter_map(|stage| settings.workflow.tags.completion_tag_for_stage(*stage))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let documents = client.list_documents().await?;
+    let allowed_ids = request
+        .document_ids
+        .map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    let mut planned = Vec::new();
+    let mut applied = Vec::new();
+    for document in documents {
+        if let Some(allowed_ids) = &allowed_ids
+            && !allowed_ids.contains(&document.id)
+        {
+            continue;
+        }
+        let tag_names = document
+            .tags
+            .iter()
+            .filter_map(|id| tags.iter().find(|tag| tag.id == *id))
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        if completion_tag_reconcile_needed(
+            &tag_names,
+            &stage_completion_tags,
+            &settings.workflow.tags.completion_processed,
+        ) {
+            planned.push(json!({ "paperless_document_id": document.id, "add": [settings.workflow.tags.completion_processed.clone()] }));
+            if !dry_run {
+                let tag = match &full_tag {
+                    Some(tag) => tag.clone(),
+                    None => {
+                        let tag = ensure_workflow_tag_cached(
+                            &client,
+                            &mut tags,
+                            &settings.workflow.tags.completion_processed,
+                        )
+                        .await?;
+                        full_tag = Some(tag.clone());
+                        tag
+                    }
+                };
+                client
+                    .add_and_remove_tags(document.id, &[tag.id], &[])
+                    .await?;
+                applied.push(document.id);
+            }
+        }
+    }
+    append_audit(
+        &state.pool,
+        AuditEventInput {
+            event_type: "paperless.completion_tags_reconciled".to_owned(),
+            actor_type: auth.0.actor_type,
+            actor_id: auth.0.actor_id,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(
+                json!({ "planned": planned.len(), "applied": applied.len(), "dry_run": dry_run }),
+            ),
+            metadata: None,
+            outcome: "success".to_owned(),
+            error_message: None,
+        },
+    )
+    .await?;
+    Ok(Json(
+        json!({ "dry_run": dry_run, "planned": planned, "applied": applied }),
+    ))
+}
+
+fn completion_tag_reconcile_needed(
+    tag_names: &[String],
+    stage_completion_tags: &[String],
+    full_completion_tag: &str,
+) -> bool {
+    !stage_completion_tags.is_empty()
+        && stage_completion_tags
+            .iter()
+            .all(|tag| tag_names.iter().any(|name| name.eq_ignore_ascii_case(tag)))
+        && !tag_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(full_completion_tag))
+}
+
+async fn ensure_workflow_tag_cached(
+    client: &PaperlessClient,
+    tags: &mut Vec<PaperlessTag>,
+    name: &str,
+) -> Result<PaperlessTag> {
+    if let Some(tag) = tags.iter().find(|tag| tag.name.eq_ignore_ascii_case(name)) {
+        return Ok(tag.clone());
+    }
+    let tag = client.ensure_tag(name).await?;
+    tags.push(tag.clone());
+    Ok(tag)
 }
 
 #[derive(Debug, Deserialize)]
@@ -3088,6 +3315,8 @@ async fn sync_paperless_inventory(
     client: &PaperlessClient,
     settings: &RuntimeSettings,
 ) -> Result<Value> {
+    let archive_name = settings.paperless.active_archive.clone();
+    let sync_started_at = Utc::now();
     let mut tags = client.list_tags().await?;
     for workflow_tag in settings.workflow.tags.all() {
         let tag = client.ensure_tag(workflow_tag).await?;
@@ -3098,7 +3327,24 @@ async fn sync_paperless_inventory(
     let correspondents = client.list_correspondents().await?;
     let document_types = client.list_document_types().await?;
     let custom_fields = client.list_custom_fields().await.unwrap_or_default();
-    let documents = client.list_documents().await?;
+    let cursor = paperless_sync_cursor(pool, &archive_name).await?;
+    let delta_cursor = cursor
+        .map(|cursor| cursor - Duration::minutes(settings.paperless.delta_sync_overlap_minutes));
+    let (sync_mode, documents) = if settings.paperless.delta_sync_enabled {
+        if let Some(cursor) = delta_cursor {
+            match client
+                .list_documents_modified_since(&cursor.to_rfc3339())
+                .await
+            {
+                Ok(documents) => ("delta", documents),
+                Err(_) => ("full_after_delta_error", client.list_documents().await?),
+            }
+        } else {
+            ("full_initial", client.list_documents().await?)
+        }
+    } else {
+        ("full", client.list_documents().await?)
+    };
 
     let mut tx = pool.begin().await?;
     for tag in &tags {
@@ -3143,6 +3389,7 @@ async fn sync_paperless_inventory(
                 correspondent_id: document.correspondent,
                 document_type_id: document.document_type,
                 document_date: document.created.clone(),
+                paperless_modified_at: parse_paperless_datetime(document.modified.as_deref()),
                 has_ocr_completion_tag: tag_names
                     .iter()
                     .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.completion_ocr)),
@@ -3156,15 +3403,25 @@ async fn sync_paperless_inventory(
         )
         .await?;
     }
+    update_paperless_sync_cursor(&mut tx, &archive_name, sync_mode, sync_started_at).await?;
     tx.commit().await?;
 
     Ok(json!({
+        "archive": archive_name,
+        "mode": sync_mode,
+        "delta_cursor": delta_cursor.map(|cursor| cursor.to_rfc3339()),
         "tags": tags.len(),
         "correspondents": correspondents.len(),
         "document_types": document_types.len(),
         "custom_fields": custom_fields.len(),
         "documents": documents.len()
     }))
+}
+
+fn parse_paperless_datetime(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
 }
 
 async fn paperless_client(pool: &DbPool, config: &AppConfig) -> Result<PaperlessClient> {
@@ -3177,18 +3434,23 @@ async fn paperless_client_from_settings(
     config: &AppConfig,
     settings: &RuntimeSettings,
 ) -> Result<PaperlessClient> {
-    let secret_id = settings
-        .paperless
-        .token_secret_id
+    let active_profile = settings.paperless.archive_profiles.iter().find(|profile| {
+        profile.enabled
+            && profile
+                .name
+                .eq_ignore_ascii_case(&settings.paperless.active_archive)
+    });
+    let base_url = active_profile
+        .map(|profile| profile.base_url.as_str())
+        .unwrap_or(&settings.paperless.base_url);
+    let secret_id = active_profile
+        .and_then(|profile| profile.token_secret_id)
+        .or(settings.paperless.token_secret_id)
         .ok_or_else(|| anyhow!("Paperless token is not configured"))?;
     let token = resolve_secret(pool, &config.secret_key, secret_id)
         .await?
         .ok_or_else(|| anyhow!("Paperless token secret reference does not exist"))?;
-    PaperlessClient::new(
-        &settings.paperless.base_url,
-        token,
-        settings.paperless.timeout_seconds,
-    )
+    PaperlessClient::new(base_url, token, settings.paperless.timeout_seconds)
 }
 
 async fn issue_session(state: &AppState, user_id: Uuid) -> ApiResult<(String, String)> {
@@ -3841,6 +4103,41 @@ mod tests {
         )
         .expect("optional expiry allowed");
         assert!(no_expiry.is_none());
+    }
+
+    #[test]
+    fn completion_tag_reconcile_requires_all_stage_tags_and_missing_full_tag() {
+        let stage_tags = vec!["archivist-ocr".to_owned(), "archivist-tags".to_owned()];
+        let document_tags = vec!["Archivist-OCR".to_owned(), "archivist-tags".to_owned()];
+        assert!(completion_tag_reconcile_needed(
+            &document_tags,
+            &stage_tags,
+            "ai-processed"
+        ));
+
+        let already_complete = vec![
+            "archivist-ocr".to_owned(),
+            "archivist-tags".to_owned(),
+            "AI-PROCESSED".to_owned(),
+        ];
+        assert!(!completion_tag_reconcile_needed(
+            &already_complete,
+            &stage_tags,
+            "ai-processed"
+        ));
+
+        let missing_stage = vec!["archivist-ocr".to_owned()];
+        assert!(!completion_tag_reconcile_needed(
+            &missing_stage,
+            &stage_tags,
+            "ai-processed"
+        ));
+
+        assert!(!completion_tag_reconcile_needed(
+            &document_tags,
+            &[],
+            "ai-processed"
+        ));
     }
 
     #[test]

@@ -91,6 +91,7 @@ safe enough to run repeatedly on a real archive.
 | Area | What you get |
 | --- | --- |
 | Paperless integration | REST API only, no direct database writes, document inventory sync, tag and metadata patching |
+| Deep Paperless sync | Full sync plus optional modified-since delta sync with overlap, active archive profile preparation, and metadata consistency checks |
 | OCR pipeline | Vision/OCR stage with configurable models and resumable worker jobs |
 | Tagging pipeline | Title, correspondent, document type, document date, tag, and field suggestions with Rust-side validation |
 | Language intelligence | Local language detection stores BCP-47 tags, feeds prompt context, and lets operators choose the language for newly generated tags |
@@ -103,6 +104,7 @@ safe enough to run repeatedly on a real archive.
 | Dashboard | Backlog status, completion rate, failure rate, throughput, review load, timelines, and status charts |
 | Document chat/RAG | Ask questions against retrieved Paperless document content with stored chat sessions and cited sources |
 | Runtime settings | Configure Paperless, providers, prompts, workflow mode, users, sessions, and API tokens from the UI |
+| Maintenance tools | Dry-run completion tag reconciliation, safe bulk apply, recovery tools, and Paperless inventory consistency checks |
 | Workflow rules | Include/exclude batch-processing rules by Paperless tags |
 | Security | Argon2id, sessions, CSRF, RBAC, scoped API tokens, OIDC SSO, optional Paperless login bridge, secret redaction, audit logging |
 | Deployment | Docker Compose for local use; production deployment packaging belongs outside the public source tree |
@@ -176,10 +178,29 @@ docker compose --profile ollama --env-file deploy/compose/.env -f deploy/compose
 3. Choose an AI provider.
 4. For OpenAI, Anthropic, or Ollama Cloud, enter the API key.
 5. Test the Paperless and provider connections.
-6. Run `Sync` on the dashboard.
-7. Queue one OCR job and one tagging job.
-8. Review the output.
-9. Enable autopilot only after the validation results match your archive rules.
+6. Run `Sync` on the dashboard. Enable delta sync later if full sync is stable.
+7. Check Paperless consistency and run completion-tag reconcile as a dry run.
+8. Queue one OCR job and one tagging job.
+9. Review the output.
+10. Enable autopilot only after the validation results match your archive rules.
+
+## Paperless Maintenance
+
+The dashboard includes admin maintenance tools for real archives:
+
+- `Sync` reads documents, tags, correspondents, document types, document dates,
+  modified timestamps, and custom fields through the Paperless REST API.
+- Optional delta sync uses Paperless modified timestamps with a configurable
+  overlap window, so routine refreshes can avoid scanning the full archive.
+- The consistency checker compares Paperless documents with Archivist inventory
+  and reports missing local documents, stale local documents, and metadata
+  mismatches.
+- Completion-tag reconcile is dry-run first. It plans documents that already
+  have all enabled stage completion tags but still miss the full completion tag,
+  then lets an admin apply the planned Paperless tag update deliberately.
+- Custom-field mappings let operators disable fields, add aliases, and give the
+  extraction prompt field-specific instructions without changing the database
+  schema.
 
 ## Model Providers
 

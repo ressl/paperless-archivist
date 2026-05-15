@@ -281,6 +281,8 @@ export function providerDefaults(kind: AiProviderKind): Pick<AiProvider, 'defaul
 export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
   const knownProviders = [...settings.ai.providers];
   const security = settings.security as Partial<RuntimeSettings['security']> | undefined;
+  const paperless = settings.paperless as Partial<RuntimeSettings['paperless']>;
+  const fields = settings.fields as Partial<RuntimeSettings['fields']>;
   if (!knownProviders.some((provider) => provider.name === ollamaCloudProvider.name)) {
     knownProviders.push(ollamaCloudProvider);
   }
@@ -292,6 +294,14 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
   const selectedProvider = providers.find((provider) => provider.name === settings.ai.default_provider) ?? localOllamaProvider;
   return {
     ...settings,
+    paperless: {
+      ...settings.paperless,
+      delta_sync_enabled: false,
+      delta_sync_overlap_minutes: 5,
+      active_archive: 'default',
+      archive_profiles: [],
+      ...paperless
+    },
     security: {
       audit_retention_days: 365,
       ai_artifact_retention_days: 30,
@@ -304,6 +314,11 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
     workflow: {
       ...settings.workflow,
       rules: settings.workflow.rules ?? { include_tags: [], exclude_tags: [] }
+    },
+    fields: {
+      ...settings.fields,
+      mappings: [],
+      ...fields
     },
     ai: {
       ...settings.ai,

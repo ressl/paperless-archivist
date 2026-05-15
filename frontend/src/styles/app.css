@@ -457,6 +457,7 @@ th {
 .autopilot-card,
 .service-card,
 .recovery-panel,
+.paperless-maintenance-panel,
 .live-processing-panel {
   min-width: 0;
   border: 1px solid var(--line);
@@ -576,9 +577,20 @@ th {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-top: 12px;
   padding: 14px 16px;
   background: #fff;
+}
+
+.maintenance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.paperless-maintenance-panel {
+  border-color: #c9dbe8;
+  background: #f8fbfd;
 }
 
 .recovery-panel strong {
@@ -1157,10 +1169,11 @@ th {
   }
 
   .dashboard-heading-actions,
-  .operations-strip,
-  .dashboard-ops-grid,
-  .dashboard-metrics,
-  .quality-strip {
+	  .operations-strip,
+	  .dashboard-ops-grid,
+	  .dashboard-metrics,
+	  .maintenance-grid,
+	  .quality-strip {
     grid-template-columns: 1fr;
   }
 

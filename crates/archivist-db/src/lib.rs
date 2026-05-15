@@ -1787,6 +1787,7 @@ pub struct InventoryUpsert {
     pub correspondent_id: Option<i32>,
     pub document_type_id: Option<i32>,
     pub document_date: Option<String>,
+    pub paperless_modified_at: Option<DateTime<Utc>>,
     pub has_ocr_completion_tag: bool,
     pub has_tagging_completion_tag: bool,
     pub has_full_completion_tag: bool,
@@ -1811,11 +1812,11 @@ pub async fn upsert_inventory_item(
         r#"
         insert into document_inventory (
           paperless_document_id, title, original_file_name, current_tags, current_tag_ids,
-          correspondent_id, document_type_id, document_date,
+          correspondent_id, document_type_id, document_date, paperless_modified_at,
           has_ocr_completion_tag, has_tagging_completion_tag, has_full_completion_tag,
           ocr_status, tagging_status, complete, last_seen_at, updated_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now(), now())
         on conflict (paperless_document_id)
         do update set title = excluded.title,
                       original_file_name = excluded.original_file_name,
@@ -1824,6 +1825,7 @@ pub async fn upsert_inventory_item(
                       correspondent_id = excluded.correspondent_id,
                       document_type_id = excluded.document_type_id,
                       document_date = excluded.document_date,
+                      paperless_modified_at = excluded.paperless_modified_at,
                       has_ocr_completion_tag = excluded.has_ocr_completion_tag,
                       has_tagging_completion_tag = excluded.has_tagging_completion_tag,
                       has_full_completion_tag = excluded.has_full_completion_tag,
@@ -1842,12 +1844,52 @@ pub async fn upsert_inventory_item(
     .bind(item.correspondent_id)
     .bind(item.document_type_id)
     .bind(&item.document_date)
+    .bind(item.paperless_modified_at)
     .bind(item.has_ocr_completion_tag)
     .bind(item.has_tagging_completion_tag)
     .bind(item.has_full_completion_tag)
     .bind(ocr_status)
     .bind(tagging_status)
     .bind(complete)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub async fn paperless_sync_cursor(
+    pool: &DbPool,
+    archive_name: &str,
+) -> Result<Option<DateTime<Utc>>> {
+    let row =
+        sqlx::query("select last_delta_cursor from paperless_sync_state where archive_name = $1")
+            .bind(archive_name)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row
+        .map(|row| row.try_get("last_delta_cursor"))
+        .transpose()?)
+}
+
+pub async fn update_paperless_sync_cursor(
+    tx: &mut Transaction<'_, Postgres>,
+    archive_name: &str,
+    mode: &str,
+    cursor: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into paperless_sync_state (archive_name, last_sync_at, last_delta_cursor, last_mode, updated_at)
+        values ($1, now(), $2, $3, now())
+        on conflict (archive_name)
+        do update set last_sync_at = excluded.last_sync_at,
+                      last_delta_cursor = excluded.last_delta_cursor,
+                      last_mode = excluded.last_mode,
+                      updated_at = now()
+        "#,
+    )
+    .bind(archive_name)
+    .bind(cursor)
+    .bind(mode)
     .execute(&mut **tx)
     .await?;
     Ok(())

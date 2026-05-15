@@ -32,6 +32,7 @@ import {
   ApiToken,
   AuditEvent,
   AuditIntegrityReport,
+  CompletionTagReconcileResult,
   Counts,
   DashboardLiveFailure,
   DashboardRange,
@@ -44,6 +45,7 @@ import {
   Me,
   OidcConfig,
   OllamaInstalledModel,
+  PaperlessConsistencyResult,
   ProcessingMode,
   Prompt,
   PromptTestResponse,
@@ -327,7 +329,10 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
   const [busy, setBusy] = useState(false);
   const [modeBusy, setModeBusy] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [paperlessToolsBusy, setPaperlessToolsBusy] = useState(false);
   const [recovery, setRecovery] = useState<{ older_than_seconds: number; items: RecoveryCandidate[] } | null>(null);
+  const [consistency, setConsistency] = useState<PaperlessConsistencyResult | null>(null);
+  const [reconcile, setReconcile] = useState<CompletionTagReconcileResult | null>(null);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
   const load = () =>
     api
@@ -414,6 +419,15 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
     await api.recoverStuckRuns(recovery?.older_than_seconds ?? 600);
     await Promise.all([load(), loadLive(), loadRecovery()]);
   };
+  const checkPaperlessConsistency = async () => {
+    const result = await api.paperlessConsistency();
+    setConsistency(result);
+  };
+  const reconcileCompletionTags = async (dryRun: boolean) => {
+    const result = await api.reconcileCompletionTags({ dry_run: dryRun });
+    setReconcile(result);
+    await Promise.all([load(), loadLive()]);
+  };
 
   const openBacklog = counts.total_documents - counts.complete;
   const stageData = (stats?.stage_status.length ? stats.stage_status : defaultStageStatus).map((stage) => ({
@@ -486,13 +500,23 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
       </div>
 
       {canManageSettings && (
-        <RecoveryPanel
-          recovery={recovery}
-          busy={recoveryBusy}
-          onRefresh={() => void run(setRecoveryBusy, setError, loadRecovery, t)}
-          onRecoverLeases={() => void run(setRecoveryBusy, setError, recoverStaleLeases, t)}
-          onRecoverRuns={() => void run(setRecoveryBusy, setError, recoverStuckRuns, t)}
-        />
+        <div className="maintenance-grid">
+          <RecoveryPanel
+            recovery={recovery}
+            busy={recoveryBusy}
+            onRefresh={() => void run(setRecoveryBusy, setError, loadRecovery, t)}
+            onRecoverLeases={() => void run(setRecoveryBusy, setError, recoverStaleLeases, t)}
+            onRecoverRuns={() => void run(setRecoveryBusy, setError, recoverStuckRuns, t)}
+          />
+          <PaperlessMaintenancePanel
+            consistency={consistency}
+            reconcile={reconcile}
+            busy={paperlessToolsBusy}
+            onCheckConsistency={() => void run(setPaperlessToolsBusy, setError, checkPaperlessConsistency, t)}
+            onDryRunReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(true), t)}
+            onApplyReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(false), t)}
+          />
+        </div>
       )}
 
       <div className="metric-grid dashboard-metrics">
@@ -780,6 +804,67 @@ function RecoveryPanel({
         </button>
         <button type="button" disabled={busy || stuckRuns === 0} onClick={onRecoverRuns}>
           <AlertTriangle size={16} /> {t('dashboard.recovery.recover_runs')}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function PaperlessMaintenancePanel({
+  consistency,
+  reconcile,
+  busy,
+  onCheckConsistency,
+  onDryRunReconcile,
+  onApplyReconcile
+}: {
+  consistency: PaperlessConsistencyResult | null;
+  reconcile: CompletionTagReconcileResult | null;
+  busy: boolean;
+  onCheckConsistency: () => void;
+  onDryRunReconcile: () => void;
+  onApplyReconcile: () => void;
+}) {
+  const { t, formatNumber } = useI18n();
+  const mismatchCount = consistency?.mismatches.length ?? 0;
+  const missingCount = consistency?.missing_local.length ?? 0;
+  const staleCount = consistency?.stale_local.length ?? 0;
+  const plannedCount = reconcile?.planned.length ?? 0;
+  const appliedCount = reconcile?.applied.length ?? 0;
+  return (
+    <section className="recovery-panel paperless-maintenance-panel">
+      <div>
+        <strong>{t('dashboard.paperless_tools.title')}</strong>
+        <p>{t('dashboard.paperless_tools.description')}</p>
+      </div>
+      <div className="recovery-counts">
+        {consistency ? (
+          <>
+            <span>{t('dashboard.paperless_tools.checked')}: {formatNumber(consistency.documents_checked)}</span>
+            <span>{t('dashboard.paperless_tools.missing')}: {formatNumber(missingCount)}</span>
+            <span>{t('dashboard.paperless_tools.stale')}: {formatNumber(staleCount)}</span>
+            <span>{t('dashboard.paperless_tools.mismatches')}: {formatNumber(mismatchCount)}</span>
+          </>
+        ) : (
+          <span>{t('dashboard.paperless_tools.not_checked')}</span>
+        )}
+        {reconcile && (
+          <span>
+            {reconcile.dry_run
+              ? t('dashboard.paperless_tools.planned')
+              : t('dashboard.paperless_tools.applied')}: {formatNumber(reconcile.dry_run ? plannedCount : appliedCount)}
+          </span>
+        )}
+      </div>
+      <div className="toolbar">
+        <button type="button" disabled={busy} onClick={onCheckConsistency}>
+          <GitCompare size={16} /> {t('dashboard.paperless_tools.check')}
+        </button>
+        <button type="button" disabled={busy} onClick={onDryRunReconcile}>
+          <Tags size={16} /> {t('dashboard.paperless_tools.dry_run')}
+        </button>
+        <button type="button" disabled={busy || !reconcile?.dry_run || plannedCount === 0} onClick={onApplyReconcile}>
+          <Check size={16} /> {t('dashboard.paperless_tools.apply')}
         </button>
       </div>
     </section>
@@ -1746,6 +1831,31 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
             />
             {t('settings.paperless.login_bridge')}
           </label>
+          <label className="inline">
+            <input
+              type="checkbox"
+              checked={settings.paperless.delta_sync_enabled}
+              onChange={(event) => update((s) => ({ ...s, paperless: { ...s.paperless, delta_sync_enabled: event.target.checked } }))}
+            />
+            {t('settings.paperless.delta_sync')}
+          </label>
+          <label>
+            {t('settings.paperless.delta_overlap')}
+            <input
+              type="number"
+              min="0"
+              max="1440"
+              value={settings.paperless.delta_sync_overlap_minutes}
+              onChange={(event) => update((s) => ({ ...s, paperless: { ...s.paperless, delta_sync_overlap_minutes: Number(event.target.value) } }))}
+            />
+          </label>
+          <label>
+            {t('settings.paperless.active_archive')}
+            <input
+              value={settings.paperless.active_archive}
+              onChange={(event) => update((s) => ({ ...s, paperless: { ...s.paperless, active_archive: event.target.value } }))}
+            />
+          </label>
           <button title={t('generic.test')} disabled={paperlessTest?.status === 'running'} onClick={runPaperlessTest}>
             <Database size={16} /> {paperlessTest?.status === 'running' ? t('generic.testing') : t('generic.test')}
           </button>
@@ -1869,6 +1979,16 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
           <label>
             {t('settings.workflow.field_confidence')}
             <input type="number" min="0" max="1" step="0.05" value={settings.fields.confidence_threshold} onChange={(event) => update((s) => ({ ...s, fields: { ...s.fields, confidence_threshold: Number(event.target.value) } }))} />
+          </label>
+          <label>
+            {t('settings.workflow.field_mappings')}
+            <textarea
+              rows={5}
+              value={serializeFieldMappings(settings.fields.mappings)}
+              onChange={(event) => update((s) => ({ ...s, fields: { ...s.fields, mappings: parseFieldMappings(event.target.value) } }))}
+              placeholder={t('settings.workflow.field_mappings_placeholder')}
+            />
+            <small>{t('settings.workflow.field_mappings_hint')}</small>
           </label>
           <label>
             {t('settings.workflow.metadata_confidence')}
@@ -2309,6 +2429,9 @@ function paperlessSettingsChanged(settings: RuntimeSettings, savedSettings: Runt
     (settings.paperless.public_url ?? '').trim() !== (savedSettings.paperless.public_url ?? '').trim() ||
     settings.paperless.timeout_seconds !== savedSettings.paperless.timeout_seconds ||
     settings.paperless.login_bridge_enabled !== savedSettings.paperless.login_bridge_enabled ||
+    settings.paperless.delta_sync_enabled !== savedSettings.paperless.delta_sync_enabled ||
+    settings.paperless.delta_sync_overlap_minutes !== savedSettings.paperless.delta_sync_overlap_minutes ||
+    settings.paperless.active_archive.trim() !== savedSettings.paperless.active_archive.trim() ||
     Boolean(token.trim())
   );
 }
@@ -2401,6 +2524,34 @@ function splitTags(value: string) {
     .split(',')
     .map((tag) => tag.trim())
     .filter(Boolean);
+}
+
+function serializeFieldMappings(mappings: RuntimeSettings['fields']['mappings']) {
+  return mappings
+    .map((mapping) => [
+      mapping.field_name,
+      mapping.enabled ? 'enabled' : 'disabled',
+      mapping.aliases.join('; '),
+      mapping.instructions ?? ''
+    ].join(' | '))
+    .join('\n');
+}
+
+function parseFieldMappings(value: string): RuntimeSettings['fields']['mappings'] {
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [fieldName, enabled = 'enabled', aliases = '', instructions = ''] = line.split('|').map((part) => part.trim());
+      return {
+        field_name: fieldName,
+        enabled: enabled.toLowerCase() !== 'disabled',
+        aliases: aliases.split(';').map((alias) => alias.trim()).filter(Boolean),
+        instructions: instructions || null
+      };
+    })
+    .filter((mapping) => mapping.field_name);
 }
 
 function ProviderModelSelect({

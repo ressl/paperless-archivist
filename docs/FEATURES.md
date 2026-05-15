@@ -87,6 +87,11 @@ Useful capabilities to keep:
 - Read documents, tags, correspondents, document types, and custom fields.
 - Download original document files for OCR.
 - Patch document content and metadata through Paperless API.
+- Track Paperless modified timestamps for optional delta sync.
+- Check consistency between Paperless metadata and Archivist inventory.
+- Reconcile completion tags with an explicit dry-run and apply flow.
+- Prepare active Paperless archive profiles without changing the public API
+  contract.
 - Never write directly to the Paperless database.
 
 ### 3.2 PostgreSQL 18 State Engine

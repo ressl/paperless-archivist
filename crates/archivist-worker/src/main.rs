@@ -849,8 +849,18 @@ async fn process_fields(
     let content = document.content.unwrap_or_default();
     let allowed = fields
         .iter()
+        .filter(|field| settings.fields.field_enabled(&field.name))
         .map(|field| field.name.clone())
         .collect::<Vec<_>>();
+    if allowed.is_empty() {
+        complete_job(
+            pool,
+            job,
+            json!({ "skipped": "all Paperless custom fields are disabled by field mappings" }),
+        )
+        .await?;
+        return Ok(());
+    }
     let language = language_context_for_content(pool, settings, job, &content).await?;
     let mut request = prompt_for_fields(&content, &allowed, settings.fields.max_fields, &language);
     let prompt_id = apply_active_prompt(pool, Stage::Fields, &mut request).await?;
@@ -1388,6 +1398,7 @@ async fn sync_metadata(
                 correspondent_id: document.correspondent,
                 document_type_id: document.document_type,
                 document_date: document.created.clone(),
+                paperless_modified_at: None,
                 has_ocr_completion_tag: tag_names
                     .iter()
                     .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.completion_ocr)),
@@ -1410,18 +1421,23 @@ async fn paperless_client(
     config: &AppConfig,
     settings: &RuntimeSettings,
 ) -> Result<PaperlessClient> {
-    let secret_id = settings
-        .paperless
-        .token_secret_id
+    let active_profile = settings.paperless.archive_profiles.iter().find(|profile| {
+        profile.enabled
+            && profile
+                .name
+                .eq_ignore_ascii_case(&settings.paperless.active_archive)
+    });
+    let base_url = active_profile
+        .map(|profile| profile.base_url.as_str())
+        .unwrap_or(&settings.paperless.base_url);
+    let secret_id = active_profile
+        .and_then(|profile| profile.token_secret_id)
+        .or(settings.paperless.token_secret_id)
         .ok_or_else(|| anyhow!("Paperless token is not configured"))?;
     let token = resolve_secret(pool, &config.secret_key, secret_id)
         .await?
         .ok_or_else(|| anyhow!("Paperless token secret reference does not exist"))?;
-    PaperlessClient::new(
-        &settings.paperless.base_url,
-        token,
-        settings.paperless.timeout_seconds,
-    )
+    PaperlessClient::new(base_url, token, settings.paperless.timeout_seconds)
 }
 
 #[derive(Debug, Clone)]
@@ -1611,6 +1627,7 @@ mod tests {
             id: 42,
             title: Some("Existing title".to_owned()),
             created: Some("2026-03-14".to_owned()),
+            modified: Some("2026-03-15T10:00:00Z".to_owned()),
             content: Some("private OCR text".to_owned()),
             tags: vec![1, 2],
             correspondent: Some(7),

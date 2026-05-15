@@ -796,6 +796,8 @@ impl RuntimeSettings {
         self.tagging.tag_output_language =
             normalize_language_tag(&self.tagging.tag_output_language)
                 .unwrap_or_else(default_tag_output_language);
+        self.paperless = self.paperless.normalized();
+        self.fields = self.fields.normalized();
         self
     }
 }
@@ -902,6 +904,14 @@ pub struct PaperlessSettings {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub login_bridge_enabled: bool,
+    #[serde(default)]
+    pub delta_sync_enabled: bool,
+    #[serde(default = "default_delta_sync_overlap_minutes")]
+    pub delta_sync_overlap_minutes: i64,
+    #[serde(default)]
+    pub active_archive: String,
+    #[serde(default)]
+    pub archive_profiles: Vec<PaperlessArchiveProfile>,
 }
 
 impl Default for PaperlessSettings {
@@ -912,8 +922,47 @@ impl Default for PaperlessSettings {
             token_secret_id: None,
             timeout_seconds: 30,
             login_bridge_enabled: false,
+            delta_sync_enabled: false,
+            delta_sync_overlap_minutes: default_delta_sync_overlap_minutes(),
+            active_archive: "default".to_owned(),
+            archive_profiles: Vec::new(),
         }
     }
+}
+
+impl PaperlessSettings {
+    pub fn normalized(mut self) -> Self {
+        if self.active_archive.trim().is_empty() {
+            self.active_archive = "default".to_owned();
+        }
+        self.delta_sync_overlap_minutes = self.delta_sync_overlap_minutes.clamp(0, 1440);
+        if self.archive_profiles.is_empty() {
+            self.archive_profiles.push(PaperlessArchiveProfile {
+                name: self.active_archive.clone(),
+                base_url: self.base_url.clone(),
+                token_secret_id: self.token_secret_id,
+                enabled: true,
+            });
+        }
+        self.archive_profiles
+            .sort_by_key(|profile| profile.name.to_ascii_lowercase());
+        self.archive_profiles
+            .dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperlessArchiveProfile {
+    pub name: String,
+    pub base_url: String,
+    pub token_secret_id: Option<Uuid>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_delta_sync_overlap_minutes() -> i64 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1308,6 +1357,8 @@ pub enum OldTagStrategy {
 pub struct FieldSettings {
     pub confidence_threshold: f32,
     pub max_fields: usize,
+    #[serde(default)]
+    pub mappings: Vec<CustomFieldMapping>,
 }
 
 impl Default for FieldSettings {
@@ -1315,8 +1366,42 @@ impl Default for FieldSettings {
         Self {
             confidence_threshold: 0.55,
             max_fields: 20,
+            mappings: Vec::new(),
         }
     }
+}
+
+impl FieldSettings {
+    pub fn normalized(mut self) -> Self {
+        self.max_fields = self.max_fields.clamp(1, 50);
+        self.confidence_threshold = self.confidence_threshold.clamp(0.0, 1.0);
+        self.mappings
+            .retain(|mapping| !mapping.field_name.trim().is_empty());
+        self.mappings
+            .sort_by_key(|mapping| mapping.field_name.to_ascii_lowercase());
+        self.mappings
+            .dedup_by(|left, right| left.field_name.eq_ignore_ascii_case(&right.field_name));
+        self
+    }
+
+    pub fn field_enabled(&self, field_name: &str) -> bool {
+        self.mappings
+            .iter()
+            .find(|mapping| mapping.field_name.eq_ignore_ascii_case(field_name))
+            .map(|mapping| mapping.enabled)
+            .unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomFieldMapping {
+    pub field_name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

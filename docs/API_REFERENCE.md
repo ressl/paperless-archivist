@@ -149,7 +149,9 @@ with the existing inventory/review permissions.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/paperless/sync-metadata` | Synchronize document metadata, tags, correspondents, document types, document dates, and custom fields from Paperless. |
+| `POST` | `/api/paperless/sync-metadata` | Synchronize document metadata, tags, correspondents, document types, document dates, modified timestamps, and custom fields from Paperless. Uses configured delta sync when enabled. |
+| `GET` | `/api/paperless/consistency` | Compare the Paperless document list with Archivist inventory and report missing local rows, stale local rows, and metadata mismatches. |
+| `POST` | `/api/paperless/completion-tags/reconcile` | Dry-run or apply completion-tag reconciliation for documents that have all enabled stage completion tags but miss the full completion tag. |
 | `GET` | `/api/inventory?limit=100&offset=0` | List the local document inventory and per-stage status. |
 | `POST` | `/api/documents/{paperless_document_id}/trigger` | Queue selected stages for one Paperless document. |
 | `POST` | `/api/batches/ocr` | Queue OCR for documents missing OCR. |
@@ -200,6 +202,22 @@ Inventory items include language debug fields when detection has run:
 Runtime settings include `tagging.tag_output_language`, a BCP-47 language tag
 used for newly generated business tags. Existing Paperless tags are still
 returned exactly as configured.
+
+Paperless sync returns a summary that includes `archive`, `mode`,
+`delta_cursor`, and synced object counts. `mode` is one of `full`,
+`full_initial`, `delta`, or `full_after_delta_error`. The delta cursor is based
+on the sync start time and the configured overlap window, so interrupted or slow
+syncs can be retried without skipping recently changed documents.
+
+Completion-tag reconciliation defaults to dry run:
+
+```json
+{ "dry_run": true }
+```
+
+The response contains `planned` document IDs and tag additions. Send
+`{"dry_run": false}` only after reviewing the plan. Reconciliation writes an
+audit event and updates Paperless only through the Paperless REST API.
 
 ## Dashboard
 

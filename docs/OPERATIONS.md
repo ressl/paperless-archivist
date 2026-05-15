@@ -138,6 +138,45 @@ The integration uses Paperless REST endpoints only:
 
 No direct Paperless database writes are used.
 
+## Paperless Sync And Maintenance
+
+Start with full sync until the initial inventory is complete. After that,
+operators can enable delta sync in Settings. Delta sync calls the Paperless
+documents endpoint with a modified-since filter and subtracts the configured
+overlap window from the saved cursor. Keep a small overlap, for example five
+minutes, so clock skew and slow Paperless writes do not skip recently modified
+documents.
+
+The active archive profile selects which Paperless connection the API and worker
+use. The top-level Paperless URL and token remain the default profile. Additional
+profiles are stored as runtime settings and are intended for controlled
+multi-archive preparation; keep only one profile active in production until the
+operator runbook and secrets are verified for that archive.
+
+The dashboard maintenance panel has two safe Paperless tools:
+
+- `Check consistency` compares Paperless documents with Archivist inventory and
+  reports missing local rows, stale local rows, and mismatched title, tags,
+  correspondent, document type, or document date.
+- `Plan tag reconcile` performs a dry run for completion tags. It finds
+  documents that already have all enabled stage completion tags but miss the full
+  completion tag. `Apply planned tags` must be clicked separately and writes an
+  audit event.
+
+Use consistency check after bulk changes in Paperless, after changing the active
+archive profile, after restoring backups, and before enabling full autopilot on a
+large archive.
+
+Custom-field mappings are managed in Settings as one line per field:
+
+```text
+Field name | enabled | alias one; alias two | instructions
+```
+
+Disabled fields are excluded from AI field extraction. Aliases and instructions
+help the prompt match business terminology to Paperless custom field names while
+reusing the existing settings schema.
+
 ## AI Provider Configuration
 
 Ollama is the default provider. The UI also supports OpenAI, Anthropic, and
