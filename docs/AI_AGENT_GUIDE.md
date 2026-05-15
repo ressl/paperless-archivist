@@ -76,6 +76,14 @@ Use this priority order:
 4. Architecture and implementation design docs.
 5. README and user-facing docs.
 
+For release and maintenance work, also inspect:
+
+- `docs/STABILITY.md`
+- `docs/MIGRATIONS.md`
+- `docs/PERFORMANCE.md`
+- `docs/ACCESSIBILITY.md`
+- `docs/RELEASE_CHECKLIST.md`
+
 If behavior changes, update all affected layers in the same change:
 
 - Rust handler/domain logic
@@ -204,6 +212,16 @@ Preserve these properties:
 
 When changing worker behavior, inspect both API queue creation and worker
 claim/apply logic.
+
+When changing database queries that affect dashboard, inventory, queueing, or
+the worker claim path, run or update the benchmark in
+`scripts/perf/run_postgres_inventory_benchmark.sh`.
+
+When changing frontend navigation, forms, tooltips, or feedback components, run:
+
+```bash
+npm --prefix frontend run accessibility:check
+```
 
 ## Review And Autopilot
 

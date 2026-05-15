@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "generate:client": "openapi-typescript ../openapi/openapi.yaml -o src/api/schema.ts",
+    "accessibility:check": "node ../scripts/verify/accessibility_static_check.mjs",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "dev": "vite --host 0.0.0.0"

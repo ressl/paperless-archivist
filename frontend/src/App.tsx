@@ -2774,7 +2774,11 @@ function ProviderModelSelect({
   return (
     <div className="model-select-block">
       <div className="model-select-row">
-        <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <select
+          value={value}
+          aria-label={`${provider.name} ${capability} model`}
+          onChange={(event) => onChange(event.target.value)}
+        >
           {options.map((option) => (
             <option key={option.value || option.label} value={option.value} disabled={!option.value}>
               {option.label}
@@ -2786,6 +2790,7 @@ function ProviderModelSelect({
           <button
             className="icon-button"
             title={t('settings.ollama.reload_models')}
+            aria-label={t('settings.ollama.reload_models')}
             type="button"
             disabled={ollamaState?.loading}
             onClick={onRefresh}
@@ -3556,9 +3561,9 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
           load();
         }).catch((err) => setError(localizedErrorMessage(err, t)));
       }}>
-        <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="username" />
-        <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="password" type="password" />
-        <select value={role} onChange={(event) => setRole(event.target.value as Role)}>
+        <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="username" aria-label="username" />
+        <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="password" type="password" aria-label="password" />
+        <select value={role} aria-label="new user role" onChange={(event) => setRole(event.target.value as Role)}>
           <option value="viewer">viewer</option>
           <option value="reviewer">reviewer</option>
           <option value="operator">operator</option>
@@ -3577,6 +3582,7 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
                 <td>
                   <select
                     value={user.roles[0] ?? 'viewer'}
+                    aria-label={`roles for ${user.username}`}
                     onChange={(event) => api.updateUserRoles(user.id, [event.target.value as Role]).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}
                   >
                     <option value="viewer">viewer</option>
@@ -3593,9 +3599,11 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
                     onChange={(event) => setResetPasswords((current) => ({ ...current, [user.id]: event.target.value }))}
                     type="password"
                     placeholder="new password"
+                    aria-label={`new password for ${user.username}`}
                   />
                   <button
                     title="Reset password"
+                    aria-label={`Reset password for ${user.username}`}
                     disabled={!resetPasswords[user.id]}
                     onClick={() => api.resetPassword(user.id, resetPasswords[user.id] ?? '').then(() => {
                       setResetPasswords((current) => ({ ...current, [user.id]: '' }));
@@ -3607,9 +3615,9 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
                 </td>
                 <td>
                   {user.enabled ? (
-                    <button title="Disable user" onClick={() => api.disableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><Power size={16} /> Disable</button>
+                    <button title="Disable user" aria-label={`Disable ${user.username}`} onClick={() => api.disableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><Power size={16} /> Disable</button>
                   ) : (
-                    <button title="Enable user" onClick={() => api.enableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><Power size={16} /> Enable</button>
+                    <button title="Enable user" aria-label={`Enable ${user.username}`} onClick={() => api.enableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><Power size={16} /> Enable</button>
                   )}
                 </td>
               </tr>
@@ -3630,7 +3638,7 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
                 <td>{formatDateTime(session.expires_at)}</td>
                 <td>{session.revoked_at ? 'revoked' : 'active'}</td>
                 <td>
-                  {!session.revoked_at && <button title="Revoke session" onClick={() => api.revokeSession(session.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>}
+                  {!session.revoked_at && <button title="Revoke session" aria-label={`Revoke session for ${session.username}`} onClick={() => api.revokeSession(session.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>}
                 </td>
               </tr>
             ))}
@@ -3646,8 +3654,8 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
           load();
         }).catch((err) => setError(localizedErrorMessage(err, t)));
       }}>
-        <input value={tokenName} onChange={(event) => setTokenName(event.target.value)} placeholder="token name" />
-        <input value={tokenScopes} onChange={(event) => setTokenScopes(event.target.value)} placeholder="scopes, comma separated" />
+        <input value={tokenName} onChange={(event) => setTokenName(event.target.value)} placeholder="token name" aria-label="token name" />
+        <input value={tokenScopes} onChange={(event) => setTokenScopes(event.target.value)} placeholder="scopes, comma separated" aria-label="token scopes" />
         <input
           type="number"
           min="1"
@@ -3675,6 +3683,7 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
                     <>
                       <button
                         title="Rotate token"
+                        aria-label={`Rotate token ${token.name}`}
                         onClick={() => api.rotateApiToken(token.id, { expires_in_days: tokenExpiresInDays }).then((created) => {
                           setNewToken(created.token);
                           load();
@@ -3682,7 +3691,7 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
                       >
                         <RotateCcw size={16} />
                       </button>
-                      <button title="Revoke token" onClick={() => api.revokeApiToken(token.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>
+                      <button title="Revoke token" aria-label={`Revoke token ${token.name}`} onClick={() => api.revokeApiToken(token.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>
                     </>
                   )}
                 </td>

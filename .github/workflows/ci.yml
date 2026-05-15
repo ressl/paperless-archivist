@@ -29,6 +29,8 @@ jobs:
         working-directory: frontend
       - run: pnpm generate:client
         working-directory: frontend
+      - run: pnpm accessibility:check
+        working-directory: frontend
       - run: pnpm typecheck
         working-directory: frontend
       - run: pnpm build

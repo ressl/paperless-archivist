@@ -136,6 +136,13 @@ contains API and worker Deployments, probes, resources, Service, Ingress,
 NetworkPolicy, and secret references. Patch it with Kustomize or your GitOps
 tooling; do not commit real secrets.
 
+GA support, upgrade, rollback, and large-archive sizing are documented in:
+
+- [`docs/STABILITY.md`](STABILITY.md)
+- [`docs/MIGRATIONS.md`](MIGRATIONS.md)
+- [`docs/PERFORMANCE.md`](PERFORMANCE.md)
+- [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md)
+
 ## Paperless Configuration
 
 Set in the UI:

@@ -176,8 +176,26 @@ More deployment options:
 
 - [Docker Compose profiles](deploy/compose/README.md)
 - [Generic Kubernetes package](deploy/kubernetes/README.md)
+- [Migration and rollback guide](docs/MIGRATIONS.md)
+- [Performance and sizing](docs/PERFORMANCE.md)
 - [Public demo plan](docs/DEMO.md)
 - [Screenshot workflow](docs/SCREENSHOTS.md)
+
+## Documentation
+
+| Guide | Audience |
+| --- | --- |
+| [User Guide](docs/USER_GUIDE.md) | Operators, reviewers, and admins using the UI |
+| [Operations Guide](docs/OPERATIONS.md) | Deploying, backing up, monitoring, and troubleshooting |
+| [API Reference](docs/API_REFERENCE.md) | API clients and integration authors |
+| [Security Design](docs/SECURITY_DESIGN.md) and [Security Policy](SECURITY.md) | Security review and vulnerability reporting |
+| [AI Agent Guide](docs/AI_AGENT_GUIDE.md) | AI coding agents and contributors |
+| [Stability Policy](docs/STABILITY.md) | v1.0 compatibility and support expectations |
+| [Accessibility Audit](docs/ACCESSIBILITY.md) | Keyboard, focus, tooltip, and screen-reader checks |
+| [Performance Guide](docs/PERFORMANCE.md) | Large archive sizing and benchmark workflow |
+| [Migration Guide](docs/MIGRATIONS.md) | Fresh install, upgrade, backup, and rollback |
+| [Release Checklist](docs/RELEASE_CHECKLIST.md) | GA release verification |
+| [Roadmap](docs/ROADMAP.md) | Known limitations and upcoming work |
 
 ## First Run Checklist
 

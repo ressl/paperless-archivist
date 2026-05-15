@@ -90,6 +90,14 @@ frontend:typecheck:
   script:
     - pnpm typecheck
 
+frontend:accessibility:
+  stage: test
+  extends:
+    - .frontend_base
+    - .default_retry
+  script:
+    - pnpm accessibility:check
+
 frontend:build:
   stage: build
   extends:

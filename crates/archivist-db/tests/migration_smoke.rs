@@ -1,0 +1,50 @@
+use archivist_db::{connect, migrate};
+use sqlx::Row;
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18; run scripts/verify/migration_smoke.sh"]
+async fn migrations_apply_on_fresh_postgresql_18_database() {
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must point to a PostgreSQL 18 database");
+    let pool = connect(&database_url)
+        .await
+        .expect("connect to PostgreSQL 18 test database");
+
+    migrate(&pool).await.expect("apply all migrations");
+
+    let version_num: i32 = sqlx::query("select current_setting('server_version_num')::int")
+        .fetch_one(&pool)
+        .await
+        .expect("read PostgreSQL version")
+        .try_get(0)
+        .expect("parse PostgreSQL version");
+    assert!(
+        version_num >= 180000,
+        "PostgreSQL 18 or newer is required, got {version_num}"
+    );
+
+    let tables: i64 = sqlx::query(
+        r#"
+        select count(*)::bigint
+          from information_schema.tables
+         where table_schema = 'public'
+           and table_name in (
+             'users',
+             'settings',
+             'document_inventory',
+             'pipeline_runs',
+             'jobs',
+             'review_items',
+             'audit_events',
+             'notification_state'
+           )
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect migrated tables")
+    .try_get(0)
+    .expect("read table count");
+
+    assert_eq!(tables, 8, "all GA tables should exist after migration");
+}
