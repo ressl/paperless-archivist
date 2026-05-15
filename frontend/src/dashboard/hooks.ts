@@ -134,6 +134,22 @@ export type FreshnessState = {
   pulse: boolean;
 };
 
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia(query).matches;
+  });
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mql = window.matchMedia(query);
+    const listener = (event: MediaQueryListEvent) => setMatches(event.matches);
+    setMatches(mql.matches);
+    mql.addEventListener('change', listener);
+    return () => mql.removeEventListener('change', listener);
+  }, [query]);
+  return matches;
+}
+
 export function useFreshness(intervalMs: number, lastLoadedAt: string | null): FreshnessState {
   const [now, setNow] = useState(() => Date.now());
   const lastTickRef = useRef<number>(Date.now());

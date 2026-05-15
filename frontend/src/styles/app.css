@@ -1446,6 +1446,36 @@ th {
   }
 }
 
+.dashboard-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.dashboard-tabs button {
+  min-height: 32px;
+  padding: 4px 12px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dashboard-tabs button.active {
+  border-color: var(--teal);
+  background: var(--teal);
+  color: #fff;
+}
+
+.is-hidden {
+  display: none !important;
+}
+
 @media (max-width: 900px) {
   .cost-panel-grid {
     grid-template-columns: minmax(0, 1fr);
