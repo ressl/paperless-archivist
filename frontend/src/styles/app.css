@@ -784,6 +784,49 @@ th {
   .pulse-dot.is-pulsing {
     animation: none;
   }
+  .quota-fill,
+  .cost-breakdown-fill {
+    transition: none;
+  }
+}
+
+.provider-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.provider-filter-bar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.provider-filter-bar select {
+  min-height: 28px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.provider-usage-table thead button {
+  min-height: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.provider-usage-table thead button:hover {
+  color: var(--teal);
 }
 
 .health-badge.success {
