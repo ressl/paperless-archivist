@@ -378,8 +378,8 @@ Default completion tags:
 
 ```text
 ai-processed
-ai-processed-ocr
-ai-processed-tagging
+archivist-ocr
+archivist-tags
 ai-processed-title
 ai-processed-correspondent
 ai-processed-document-type
@@ -438,8 +438,8 @@ Process:
 4. Normalize page outputs into one text.
 5. Validate minimum confidence heuristics.
 6. Store OCR artifact.
-7. In `autopilot`, patch Paperless document `content`.
-8. Set `ai-processed-ocr`.
+7. In `full_auto`, patch Paperless document `content`.
+8. Set `archivist-ocr`.
 
 MVP rendering strategy:
 
@@ -487,9 +487,11 @@ Flow:
 5. Apply job writes approved changes to Paperless.
 6. Audit event records the decision.
 
-### 10.2 Autopilot Mode
+### 10.2 Workflow Modes
 
-Autopilot applies changes without human approval if all validation rules pass.
+Archivist supports manual review, automatic document selection with review, and
+full autopilot. Full autopilot applies changes without human approval only if
+all validation rules pass.
 
 Recommended MVP validation:
 

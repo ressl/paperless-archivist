@@ -1883,7 +1883,7 @@ export interface components {
         /** @enum {string} */
         Stage: "ocr" | "ocr_fix" | "tags" | "title" | "correspondent" | "document_type" | "fields" | "apply";
         /** @enum {string} */
-        ProcessingMode: "review" | "autopilot";
+        ProcessingMode: "manual_review" | "auto_select_review" | "full_auto";
         /** @enum {string} */
         AiProviderKind: "ollama" | "openai" | "anthropic" | "openai_compatible";
         AiProviderSettings: {

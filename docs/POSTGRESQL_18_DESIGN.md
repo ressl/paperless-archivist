@@ -532,8 +532,8 @@ ai-correspondent
 ai-document-type
 ai-fields
 ai-processed
-ai-processed-ocr
-ai-processed-tagging
+archivist-ocr
+archivist-tags
 ai-processed-title
 ai-processed-correspondent
 ai-processed-document-type

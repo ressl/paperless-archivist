@@ -88,15 +88,33 @@ impl FromStr for Stage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessingMode {
-    Review,
-    Autopilot,
+    #[serde(alias = "review")]
+    ManualReview,
+    AutoSelectReview,
+    #[serde(alias = "autopilot")]
+    FullAuto,
+}
+
+impl ProcessingMode {
+    pub fn auto_select_documents(self) -> bool {
+        matches!(self, Self::AutoSelectReview | Self::FullAuto)
+    }
+
+    pub fn auto_apply_validated_suggestions(self) -> bool {
+        matches!(self, Self::FullAuto)
+    }
+
+    pub fn requires_manual_review(self) -> bool {
+        !self.auto_apply_validated_suggestions()
+    }
 }
 
 impl Display for ProcessingMode {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Review => "review",
-            Self::Autopilot => "autopilot",
+            Self::ManualReview => "manual_review",
+            Self::AutoSelectReview => "auto_select_review",
+            Self::FullAuto => "full_auto",
         })
     }
 }
@@ -106,8 +124,9 @@ impl FromStr for ProcessingMode {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "review" => Ok(Self::Review),
-            "autopilot" => Ok(Self::Autopilot),
+            "manual_review" | "review" => Ok(Self::ManualReview),
+            "auto_select_review" => Ok(Self::AutoSelectReview),
+            "full_auto" | "autopilot" => Ok(Self::FullAuto),
             _ => Err(ParseEnumError {
                 kind: "processing_mode",
                 value: value.to_owned(),
@@ -355,8 +374,8 @@ impl Default for WorkflowTags {
             trigger_document_type: "ai-document-type".to_owned(),
             trigger_fields: "ai-fields".to_owned(),
             completion_processed: "ai-processed".to_owned(),
-            completion_ocr: "ai-processed-ocr".to_owned(),
-            completion_tagging: "ai-processed-tagging".to_owned(),
+            completion_ocr: "archivist-ocr".to_owned(),
+            completion_tagging: "archivist-tags".to_owned(),
             completion_title: "ai-processed-title".to_owned(),
             completion_correspondent: "ai-processed-correspondent".to_owned(),
             completion_document_type: "ai-processed-document-type".to_owned(),
@@ -757,7 +776,7 @@ pub struct WorkflowSettings {
 impl Default for WorkflowSettings {
     fn default() -> Self {
         Self {
-            mode: ProcessingMode::Review,
+            mode: ProcessingMode::ManualReview,
             tags: WorkflowTags::default(),
             rules: WorkflowRules::default(),
             enabled_stages: Stage::all_business_stages(),
@@ -767,7 +786,7 @@ impl Default for WorkflowSettings {
 }
 
 fn default_processing_mode() -> ProcessingMode {
-    ProcessingMode::Review
+    ProcessingMode::ManualReview
 }
 
 fn default_true() -> bool {
@@ -1867,6 +1886,23 @@ mod tests {
                 .model_for_stage_provider(provider, Stage::Ocr, true),
             "ocr-special:latest"
         );
+    }
+
+    #[test]
+    fn processing_modes_parse_legacy_aliases_and_expose_behaviour() {
+        assert_eq!(
+            "review".parse::<ProcessingMode>().unwrap(),
+            ProcessingMode::ManualReview
+        );
+        assert_eq!(
+            "autopilot".parse::<ProcessingMode>().unwrap(),
+            ProcessingMode::FullAuto
+        );
+        assert!(ProcessingMode::ManualReview.requires_manual_review());
+        assert!(ProcessingMode::AutoSelectReview.auto_select_documents());
+        assert!(ProcessingMode::AutoSelectReview.requires_manual_review());
+        assert!(ProcessingMode::FullAuto.auto_select_documents());
+        assert!(ProcessingMode::FullAuto.auto_apply_validated_suggestions());
     }
 
     #[test]

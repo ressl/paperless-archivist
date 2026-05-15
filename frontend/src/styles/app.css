@@ -464,13 +464,32 @@ th {
   font-size: 13px;
 }
 
-.toggle-button {
-  flex: 0 0 auto;
-  min-width: 112px;
+.mode-button-group {
+  flex: 0 0 min(280px, 100%);
+  display: grid;
+  gap: 6px;
+}
+
+.mode-button-group button {
+  justify-content: flex-start;
+  min-height: 34px;
+  border-color: var(--line);
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.mode-button-group button.active {
   border-color: var(--teal);
   background: var(--teal);
   color: #fff;
-  font-weight: 700;
+}
+
+.mode-button-group small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .service-card {
@@ -956,6 +975,15 @@ th {
 
   .range-tabs {
     justify-content: center;
+  }
+
+  .autopilot-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mode-button-group {
+    flex-basis: auto;
   }
 
   .dashboard-grid {

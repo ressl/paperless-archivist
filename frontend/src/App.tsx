@@ -115,6 +115,29 @@ type HardwareRecommendationData = {
 };
 
 const recommendationProfile = (hardwareRecommendations as HardwareRecommendationData).profiles[0];
+const workflowModeOptions: Array<{ value: ProcessingMode; label: string; description: string }> = [
+  {
+    value: 'manual_review',
+    label: 'Manual trigger + review',
+    description: 'Documents are processed only when explicitly queued, and suggestions wait for review.'
+  },
+  {
+    value: 'auto_select_review',
+    label: 'Autopilot selector + review',
+    description: 'Archivist selects missing work automatically, but humans approve changes before Paperless is updated.'
+  },
+  {
+    value: 'full_auto',
+    label: 'Full autopilot',
+    description: 'Archivist selects documents and applies validated changes automatically.'
+  }
+];
+
+const workflowModeLabel = (mode: ProcessingMode) =>
+  workflowModeOptions.find((option) => option.value === mode)?.label ?? mode;
+
+const workflowModeDescription = (mode: ProcessingMode) =>
+  workflowModeOptions.find((option) => option.value === mode)?.description ?? '';
 
 const defaultCounts: Counts = {
   total_documents: 0,
@@ -320,15 +343,14 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
     return () => window.clearInterval(timer);
   }, []);
 
-  const toggleAutopilot = async () => {
-    const nextMode = live?.autopilot_enabled ? 'review' : 'autopilot';
+  const updateDashboardWorkflowMode = async (nextMode: ProcessingMode) => {
     const settings = await api.updateWorkflowMode(nextMode);
     setLive((current) =>
       current
         ? {
             ...current,
             workflow_mode: settings.workflow.mode,
-            autopilot_enabled: settings.workflow.mode === 'autopilot'
+            autopilot_enabled: settings.workflow.mode !== 'manual_review'
           }
         : current
     );
@@ -392,10 +414,10 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
       <div className="operations-strip">
         <AutoProcessingCard
           enabled={live?.autopilot_enabled ?? false}
-          mode={live?.workflow_mode ?? 'review'}
+          mode={live?.workflow_mode ?? 'manual_review'}
           busy={modeBusy}
           canToggle={canManageSettings}
-          onToggle={() => void run(setModeBusy, setError, toggleAutopilot)}
+          onModeChange={(mode) => void run(setModeBusy, setError, () => updateDashboardWorkflowMode(mode))}
         />
         <ServiceStatusCard label="LLM" icon={<Activity size={18} />} status={live?.llm} />
         <ServiceStatusCard label="Paperless" icon={<Database size={18} />} status={live?.paperless} />
@@ -535,25 +557,38 @@ function AutoProcessingCard({
   mode,
   busy,
   canToggle,
-  onToggle
+  onModeChange
 }: {
   enabled: boolean;
   mode: ProcessingMode;
   busy: boolean;
   canToggle: boolean;
-  onToggle: () => void;
+  onModeChange: (mode: ProcessingMode) => void;
 }) {
   return (
     <section className={`autopilot-card ${enabled ? 'enabled' : 'disabled'}`}>
       <div>
         <span>Auto Processing</span>
-        <strong>{enabled ? 'Autopilot on' : 'Review mode'}</strong>
-        <p>{enabled ? 'Validated suggestions are applied automatically.' : 'Suggestions wait in the review queue.'}</p>
+        <strong>{workflowModeLabel(mode)}</strong>
+        <p>{workflowModeDescription(mode)}</p>
       </div>
-      <button className="toggle-button" type="button" disabled={busy || !canToggle} aria-pressed={enabled} onClick={onToggle}>
-        <Power size={16} />
-        {busy ? 'Updating...' : !canToggle ? 'Admin only' : mode === 'autopilot' ? 'Turn off' : 'Turn on'}
-      </button>
+      <div className="mode-button-group" role="group" aria-label="Processing mode">
+        {workflowModeOptions.map((option) => (
+          <button
+            key={option.value}
+            className={mode === option.value ? 'active' : ''}
+            type="button"
+            disabled={busy || !canToggle || mode === option.value}
+            aria-pressed={mode === option.value}
+            onClick={() => onModeChange(option.value)}
+            title={option.description}
+          >
+            {option.value === 'manual_review' ? <Power size={16} /> : <Play size={16} />}
+            {mode === option.value && busy ? 'Updating...' : option.label}
+          </button>
+        ))}
+        {!canToggle && <small>Admin only</small>}
+      </div>
     </section>
   );
 }
@@ -825,10 +860,10 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
                 <td><Status value={item.document_type_status} /></td>
                 <td>{item.current_run_status || '-'}</td>
                 <td className="row-actions">
-                  <button title="Trigger OCR" onClick={() => api.triggerDocument(item.paperless_document_id, ['ocr'], 'review').then(load).catch((err) => setError(err.message))}>
+                  <button title="Trigger OCR" onClick={() => api.triggerDocument(item.paperless_document_id, ['ocr'], 'manual_review').then(load).catch((err) => setError(err.message))}>
                     <FileText size={16} />
                   </button>
-                  <button title="Trigger tagging" onClick={() => api.triggerDocument(item.paperless_document_id, ['tags'], 'review').then(load).catch((err) => setError(err.message))}>
+                  <button title="Trigger tagging" onClick={() => api.triggerDocument(item.paperless_document_id, ['tags'], 'manual_review').then(load).catch((err) => setError(err.message))}>
                     <Tags size={16} />
                   </button>
                 </td>
@@ -1293,9 +1328,13 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
           <label>
             Mode
             <select value={settings.workflow.mode} onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, mode: event.target.value as RuntimeSettings['workflow']['mode'] } }))}>
-              <option value="review">review</option>
-              <option value="autopilot">autopilot</option>
+              {workflowModeOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
             </select>
+            <small>{workflowModeDescription(settings.workflow.mode)}</small>
           </label>
           <label>
             OCR pages

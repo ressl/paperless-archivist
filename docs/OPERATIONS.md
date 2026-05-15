@@ -267,8 +267,8 @@ Default completion tags:
 
 ```text
 ai-processed
-ai-processed-ocr
-ai-processed-tagging
+archivist-ocr
+archivist-tags
 ai-processed-title
 ai-processed-correspondent
 ai-processed-document-type
@@ -353,22 +353,30 @@ Local passwords must be at least 12 characters. Ten failed login attempts lock
 the account for 15 minutes; a successful login or admin password reset clears
 the failed-attempt counter and lock.
 
-## Review and Autopilot
+## Review And Autopilot
 
-`review` mode:
+`manual_review` mode:
 
 - worker stores suggestions in `review_items`
 - reviewer approves, rejects, or edits in the UI
 - API applies approved patches to Paperless
 - audit events record the decision and apply
 
-`autopilot` mode:
+`auto_select_review` mode:
 
+- worker syncs Paperless inventory and queues documents with missing enabled stages
+- suggestions still wait in `review_items`
+- this is the recommended bridge between manual use and full automation
+
+`full_auto` mode:
+
+- worker syncs Paperless inventory and queues documents with missing enabled stages
 - worker validates AI output in Rust
 - valid suggestions are applied immediately
 - validation failures fall back to review where configured
 
-Autopilot never trusts model output directly.
+Autopilot never trusts model output directly. Full autopilot applies only a
+validated Rust `DocumentPatch`.
 
 ## Document Chat
 

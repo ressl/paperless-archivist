@@ -177,7 +177,8 @@ expired leases.
 
 ## Review Flow
 
-In `review` mode, AI suggestions are not applied automatically.
+In `manual_review` and `auto_select_review` modes, AI suggestions are not
+applied automatically.
 
 1. Open `Review`.
 2. Inspect the suggested patch.
@@ -227,21 +228,26 @@ activating it:
 Prompt tests call the configured model provider and write audit events, but they
 never apply changes to Paperless.
 
-## Autopilot Flow
+## Workflow Modes
 
-Autopilot applies valid suggestions automatically. Enable it only after the
-review results match your archive rules.
+Archivist has three processing modes:
 
-Autopilot still validates model output in Rust before applying changes. Invalid
-or risky output can fall back to review depending on workflow settings.
+| Mode | API value | What happens |
+| --- | --- | --- |
+| Manual trigger + review | `manual_review` | Documents run only when explicitly queued or marked with a trigger tag, and suggestions wait for review. |
+| Autopilot selector + review | `auto_select_review` | Archivist automatically queues documents with missing enabled stages, and suggestions wait for review. |
+| Full autopilot | `full_auto` | Archivist automatically queues documents and applies validated suggestions to Paperless. |
+
+Full autopilot still validates model output in Rust before applying changes.
+Invalid or risky output can fall back to review depending on workflow settings.
 
 Safe rollout pattern:
 
-1. Run several batches in `review` mode.
+1. Run several batches in `manual_review` mode.
 2. Fix prompts/settings until suggestions are consistently good.
-3. Enable autopilot for a small subset of documents.
+3. Switch to `auto_select_review` for a small subset of documents.
 4. Watch dashboard failures and audit events.
-5. Expand only when the results are stable.
+5. Switch to `full_auto` only when the results are stable.
 
 ## Completion And Trigger Tags
 
@@ -253,9 +259,9 @@ Archivist uses workflow tags to coordinate with Paperless:
 
 Default completion tags include:
 
-- `archivist:ocr-complete`
-- `archivist:tagging-complete`
-- `archivist:processed`
+- `archivist-ocr`
+- `archivist-tags`
+- `ai-processed`
 
 Workflow tag names are configurable in `Settings`.
 
@@ -315,7 +321,7 @@ Use `Export CSV` when an auditor needs the recent audit trail outside the UI.
 | Jobs stay queued | Worker process, database connectivity, worker logs |
 | Jobs fail repeatedly | Provider test, Paperless token permissions, document file type, prompt output shape |
 | Review queue grows | Switch batches to smaller scope, add reviewers, improve prompts/confidence settings |
-| Autopilot is too aggressive | Return to review mode and tighten validation/confidence thresholds |
+| Autopilot is too aggressive | Return to `manual_review` or `auto_select_review` and tighten validation/confidence thresholds |
 | Chat has weak answers | Sync inventory, narrow to document IDs, improve document OCR quality, check default text model |
 
 ## Operating Principles

@@ -347,8 +347,8 @@ Default completion tags:
 
 ```text
 ai-processed
-ai-processed-ocr
-ai-processed-tagging
+archivist-ocr
+archivist-tags
 ai-processed-title
 ai-processed-correspondent
 ai-processed-document-type
@@ -383,7 +383,7 @@ OCR features:
 - support skip-if-already-complete
 - store OCR text artifact
 - update Paperless document content
-- mark `ai-processed-ocr` when done
+- mark `archivist-ocr` when done
 - show OCR status in backlog
 
 Recommended default model setup:
@@ -425,7 +425,7 @@ Tagging features:
   - replace AI-managed tags only
   - remove all old business tags
   - preserve configured tags such as `Inbox`
-- mark `ai-processed-tagging` after success
+- mark `archivist-tags` after success
 
 Tag validation:
 
@@ -512,9 +512,11 @@ Required review metadata:
 - diff before/after
 - validation warnings
 
-### 3.21 Autopilot Mode
+### 3.21 Workflow Modes
 
-Autopilot applies changes automatically if validation passes.
+Archivist supports three workflow modes: manual trigger with manual review,
+automatic document selection with manual review, and full autopilot. Full
+autopilot applies changes automatically only if validation passes.
 
 Must support:
 
@@ -557,7 +559,7 @@ Rules decide when and how to process.
 
 Examples:
 
-- only OCR documents without `ai-processed-ocr`
+- only OCR documents without `archivist-ocr`
 - do not process documents with tag `Private`
 - use a different prompt for `Rechnung`
 - always review documents with low confidence

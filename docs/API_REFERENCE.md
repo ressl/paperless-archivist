@@ -130,12 +130,14 @@ Single-document trigger body:
 ```json
 {
   "stages": ["ocr", "tags"],
-  "mode": "review"
+  "mode": "manual_review"
 }
 ```
 
 When fields are omitted, the API uses the configured workflow stages and
-processing mode. Valid processing modes are `review` and `autopilot`.
+processing mode. Valid processing modes are `manual_review`,
+`auto_select_review`, and `full_auto`. The legacy request values `review` and
+`autopilot` are accepted for backward compatibility.
 
 ## Dashboard
 

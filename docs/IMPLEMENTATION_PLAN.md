@@ -299,7 +299,7 @@ Implement:
 - validate non-empty output
 - store OCR artifact
 - update Paperless document `content`
-- add `ai-processed-ocr`
+- add `archivist-ocr`
 - remove `ai-ocr` or matching trigger tag
 
 Acceptance:
@@ -321,7 +321,7 @@ Implement:
 - store suggestion
 - review/edit/apply flow
 - optional old tag removal/preservation strategy
-- add `ai-processed-tagging`
+- add `archivist-tags`
 - remove `ai-tags` or matching trigger tag
 
 Acceptance:

@@ -4,7 +4,7 @@ import type { paths } from './schema';
 export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
 export type Stage = 'ocr' | 'ocr_fix' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'fields';
 export type PipelineStage = Stage | 'apply';
-export type ProcessingMode = 'review' | 'autopilot';
+export type ProcessingMode = 'manual_review' | 'auto_select_review' | 'full_auto';
 export type AiProviderKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible';
 
 export type AiProvider = {

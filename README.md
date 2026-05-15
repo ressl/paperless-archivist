@@ -79,7 +79,7 @@ documents, tax records, and other sensitive paperwork.
 | Secret handling | Paperless and provider credentials are stored as encrypted secret references and redacted from responses/audit metadata |
 | Login and access control | Local login, Argon2id password hashing, server-side sessions, CSRF, OIDC SSO, RBAC roles, and scoped API tokens |
 | Review before apply | Model output can be approved, rejected, or edited before it changes Paperless metadata |
-| Validation before autopilot | Autopilot applies only validated Rust domain patches; invalid output can fall back to review |
+| Validation before autopilot | Full autopilot applies only validated Rust domain patches; invalid output can fall back to review |
 | Auditability | Settings, security, prompt, review, job, chat, and apply actions write audit events |
 | Local AI option | Ollama support lets you keep document content on your own infrastructure |
 
@@ -94,8 +94,9 @@ safe enough to run repeatedly on a real archive.
 | OCR pipeline | Vision/OCR stage with configurable models and resumable worker jobs |
 | Tagging pipeline | Title, correspondent, document type, tag, and field suggestions with Rust-side validation |
 | Review flow | Approve, reject, or edit AI suggestions before they are applied |
-| Autopilot | Automatic apply only after validation; failures can fall back to review |
-| Completion tags | Add `archivist:ocr-complete`, `archivist:tagging-complete`, or `archivist:processed` after success |
+| Workflow modes | Manual trigger + review, autopilot selector + review, or full autopilot |
+| Autopilot | Automatic document selection and optional automatic apply after validation; failures can fall back to review |
+| Completion tags | Add `archivist-ocr`, `archivist-tags`, and `ai-processed` after successful stages |
 | Trigger cleanup | Remove trigger tags after the corresponding stage succeeds |
 | Dashboard | Backlog status, completion rate, failure rate, throughput, review load, timelines, and status charts |
 | Document chat/RAG | Ask questions against retrieved Paperless document content with stored chat sessions and cited sources |
@@ -233,10 +234,23 @@ future retrieval upgrade.
 Paperless Archivist is past scaffolding: the current product path includes the
 Rust API, Rust worker, React + TypeScript UI, PostgreSQL 18 schema, Paperless
 REST integration, provider configuration, dashboard, OCR/tagging jobs, review
-flow, validation-gated autopilot, completion tags, audit events, and document
+flow, validation-gated workflow modes, completion tags, audit events, and document
 chat. Product-phase additions now include an advanced Prompt Workbench, batch
 review actions, provider usage/cost/latency reporting, audit CSV export,
 tag-based workflow rules, and an optional Paperless-ngx login bridge.
+
+## Workflow Modes
+
+| Mode | API value | Document selection | Apply behavior |
+| --- | --- | --- | --- |
+| Manual trigger + review | `manual_review` | Only explicitly queued documents or Paperless trigger tags | Suggestions wait in the review queue |
+| Autopilot selector + review | `auto_select_review` | Archivist automatically queues documents with missing enabled stages | Suggestions wait in the review queue |
+| Full autopilot | `full_auto` | Archivist automatically queues documents with missing enabled stages | Valid suggestions are applied to Paperless automatically |
+
+Successful OCR and tagging stages add `archivist-ocr` and `archivist-tags`.
+The final stage in a run also adds `ai-processed`. Trigger tags are removed
+after the corresponding stage succeeds so the worker can resume safely without
+looping over already-completed work.
 
 ## Default Prompt Pack
 

@@ -148,6 +148,7 @@ pub struct JobRecord {
     pub run_id: Uuid,
     pub paperless_document_id: i32,
     pub stage: Stage,
+    pub mode: ProcessingMode,
     pub status: String,
     pub attempts: i32,
     pub max_attempts: i32,
@@ -1985,7 +1986,7 @@ pub async fn get_dashboard_live_status(
     Ok(DashboardLiveStatus {
         generated_at: now,
         workflow_mode: settings.workflow.mode,
-        autopilot_enabled: settings.workflow.mode == ProcessingMode::Autopilot,
+        autopilot_enabled: settings.workflow.mode.auto_select_documents(),
         llm: llm_processing_status(&active_jobs, &recent_llm_events, &recent_failures),
         paperless: paperless_processing_status(
             &active_jobs,
@@ -3041,6 +3042,108 @@ pub async fn queue_missing_stage(
     Ok(created)
 }
 
+pub async fn queue_missing_pipeline(
+    pool: &DbPool,
+    enabled_stages: &[Stage],
+    mode: ProcessingMode,
+    trigger_tag: &str,
+    actor: &str,
+    rules: &WorkflowRules,
+) -> Result<i64> {
+    let include_tags = WorkflowRules::normalized_tags(&rules.include_tags);
+    let exclude_tags = WorkflowRules::normalized_tags(&rules.exclude_tags);
+    let rows = sqlx::query(
+        r#"
+        select paperless_document_id,
+               ocr_status,
+               tagging_status,
+               title_status,
+               correspondent_status,
+               document_type_status,
+               fields_status,
+               has_ocr_completion_tag,
+               has_tagging_completion_tag,
+               has_full_completion_tag
+          from document_inventory
+         where coalesce(current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
+           and ($1::text[] = '{}' or current_tags && $1::text[])
+           and not (current_tags && $2::text[])
+         order by paperless_document_id
+        "#,
+    )
+    .bind(&include_tags)
+    .bind(&exclude_tags)
+    .fetch_all(pool)
+    .await?;
+
+    let mut created = 0;
+    for row in rows {
+        let stages = missing_pipeline_stages_for_inventory(
+            enabled_stages,
+            InventoryStageState {
+                ocr_status: row.try_get("ocr_status")?,
+                tagging_status: row.try_get("tagging_status")?,
+                title_status: row.try_get("title_status")?,
+                correspondent_status: row.try_get("correspondent_status")?,
+                document_type_status: row.try_get("document_type_status")?,
+                fields_status: row.try_get("fields_status")?,
+                has_ocr_completion_tag: row.try_get("has_ocr_completion_tag")?,
+                has_tagging_completion_tag: row.try_get("has_tagging_completion_tag")?,
+                has_full_completion_tag: row.try_get("has_full_completion_tag")?,
+            },
+        );
+        if stages.is_empty() {
+            continue;
+        }
+
+        let document_id: i32 = row.try_get("paperless_document_id")?;
+        create_run_with_jobs(pool, document_id, &stages, mode, trigger_tag, actor).await?;
+        created += 1;
+    }
+    Ok(created)
+}
+
+struct InventoryStageState {
+    ocr_status: String,
+    tagging_status: String,
+    title_status: String,
+    correspondent_status: String,
+    document_type_status: String,
+    fields_status: String,
+    has_ocr_completion_tag: bool,
+    has_tagging_completion_tag: bool,
+    has_full_completion_tag: bool,
+}
+
+fn missing_pipeline_stages_for_inventory(
+    enabled_stages: &[Stage],
+    state: InventoryStageState,
+) -> Vec<Stage> {
+    if state.has_full_completion_tag {
+        return Vec::new();
+    }
+
+    enabled_stages
+        .iter()
+        .copied()
+        .filter(|stage| match stage {
+            Stage::Ocr => !state.has_ocr_completion_tag && stage_needs_work(&state.ocr_status),
+            Stage::Tags => {
+                !state.has_tagging_completion_tag && stage_needs_work(&state.tagging_status)
+            }
+            Stage::Title => stage_needs_work(&state.title_status),
+            Stage::Correspondent => stage_needs_work(&state.correspondent_status),
+            Stage::DocumentType => stage_needs_work(&state.document_type_status),
+            Stage::Fields => stage_needs_work(&state.fields_status),
+            Stage::OcrFix | Stage::Apply => false,
+        })
+        .collect()
+}
+
+fn stage_needs_work(status: &str) -> bool {
+    !matches!(status, "succeeded" | "skipped" | "not_needed")
+}
+
 pub async fn claim_jobs(
     pool: &DbPool,
     limit: i64,
@@ -3067,17 +3170,23 @@ pub async fn claim_jobs(
                     created_at
            for update skip locked
            limit $1
+        ),
+        updated as (
+          update jobs j
+             set status = 'running',
+                 lease_owner = $2,
+                 lease_until = now() + make_interval(secs => $3),
+                 attempts = attempts + 1,
+                 updated_at = now()
+            from claimed
+           where j.id = claimed.id
+          returning j.id, j.run_id, j.paperless_document_id, j.stage, j.status,
+                    j.attempts, j.max_attempts, j.payload
         )
-        update jobs j
-           set status = 'running',
-               lease_owner = $2,
-               lease_until = now() + make_interval(secs => $3),
-               attempts = attempts + 1,
-               updated_at = now()
-          from claimed
-         where j.id = claimed.id
-        returning j.id, j.run_id, j.paperless_document_id, j.stage, j.status,
-                  j.attempts, j.max_attempts, j.payload
+        select u.id, u.run_id, u.paperless_document_id, u.stage, r.mode, u.status,
+               u.attempts, u.max_attempts, u.payload
+          from updated u
+          join pipeline_runs r on r.id = u.run_id
         "#,
     )
     .bind(limit)
@@ -3089,11 +3198,13 @@ pub async fn claim_jobs(
     let mut jobs = Vec::new();
     for row in rows {
         let stage: String = row.try_get("stage")?;
+        let mode: String = row.try_get("mode")?;
         let job = JobRecord {
             id: row.try_get("id")?,
             run_id: row.try_get("run_id")?,
             paperless_document_id: row.try_get("paperless_document_id")?,
             stage: stage.parse()?,
+            mode: mode.parse()?,
             status: row.try_get("status")?,
             attempts: row.try_get("attempts")?,
             max_attempts: row.try_get("max_attempts")?,
@@ -3959,5 +4070,44 @@ mod tests {
 
         assert_eq!(status.state, "idle");
         assert_eq!(status.title, "LLM idle");
+    }
+
+    #[test]
+    fn missing_pipeline_stages_skip_completed_documents_and_stage_tags() {
+        let stages = missing_pipeline_stages_for_inventory(
+            &Stage::all_business_stages(),
+            InventoryStageState {
+                ocr_status: "unknown".to_owned(),
+                tagging_status: "unknown".to_owned(),
+                title_status: "unknown".to_owned(),
+                correspondent_status: "unknown".to_owned(),
+                document_type_status: "unknown".to_owned(),
+                fields_status: "unknown".to_owned(),
+                has_ocr_completion_tag: true,
+                has_tagging_completion_tag: true,
+                has_full_completion_tag: false,
+            },
+        );
+
+        assert!(!stages.contains(&Stage::Ocr));
+        assert!(!stages.contains(&Stage::Tags));
+        assert!(stages.contains(&Stage::Title));
+
+        let completed = missing_pipeline_stages_for_inventory(
+            &Stage::all_business_stages(),
+            InventoryStageState {
+                ocr_status: "unknown".to_owned(),
+                tagging_status: "unknown".to_owned(),
+                title_status: "unknown".to_owned(),
+                correspondent_status: "unknown".to_owned(),
+                document_type_status: "unknown".to_owned(),
+                fields_status: "unknown".to_owned(),
+                has_ocr_completion_tag: false,
+                has_tagging_completion_tag: false,
+                has_full_completion_tag: true,
+            },
+        );
+
+        assert!(completed.is_empty());
     }
 }

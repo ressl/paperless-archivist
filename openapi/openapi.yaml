@@ -25,7 +25,7 @@ components:
       enum: [ocr, ocr_fix, tags, title, correspondent, document_type, fields, apply]
     ProcessingMode:
       type: string
-      enum: [review, autopilot]
+      enum: [manual_review, auto_select_review, full_auto]
     AiProviderKind:
       type: string
       enum: [ollama, openai, anthropic, openai_compatible]

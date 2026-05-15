@@ -12,17 +12,17 @@ use archivist_ai::{
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, ChoiceSuggestion, DocumentPatch, OldTagStrategy,
-    ProcessingMode, RuntimeSettings, Stage, TagSuggestion, TitleSuggestion,
-    validate_choice_suggestion, validate_field_suggestion, validate_tag_suggestion,
-    validate_title_suggestion,
+    RuntimeSettings, Stage, TagSuggestion, TitleSuggestion, validate_choice_suggestion,
+    validate_field_suggestion, validate_tag_suggestion, validate_title_suggestion,
 };
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, complete_job, connect,
     create_review_item, create_run_with_jobs, custom_field_ids_for_names, fail_job,
     get_active_prompt, get_runtime_settings, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
-    named_entity_id_for_name, resolve_secret, tag_ids_for_names, upsert_inventory_item,
-    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+    named_entity_id_for_name, queue_missing_pipeline, resolve_secret, tag_ids_for_names,
+    upsert_inventory_item, upsert_paperless_custom_field, upsert_paperless_named_entity,
+    upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{PaperlessClient, PaperlessDocumentSummary, PaperlessTag};
@@ -601,7 +601,7 @@ async fn handle_patch_result(
     patch: DocumentPatch,
     warnings: Vec<String>,
 ) -> Result<()> {
-    if settings.workflow.mode == ProcessingMode::Review {
+    if job.mode.requires_manual_review() {
         create_review_item(pool, job, serde_json::to_value(patch)?, json!(warnings)).await?;
         return Ok(());
     }
@@ -623,22 +623,18 @@ async fn apply_patch_with_workflow_tags(
     let mut tag_ids = patch.tags.clone().unwrap_or(document.tags);
 
     if let Some(completion_name) = settings.workflow.tags.completion_tag_for_stage(job.stage) {
-        let completion = tags
-            .iter()
-            .find(|tag| tag.name.eq_ignore_ascii_case(completion_name))
-            .ok_or_else(|| anyhow!("completion tag '{completion_name}' missing from Paperless"))?;
+        let completion = paperless.ensure_tag(completion_name).await?;
         if !tag_ids.contains(&completion.id) {
             tag_ids.push(completion.id);
         }
     }
-    if final_run_stage
-        && let Some(full) = tags.iter().find(|tag| {
-            tag.name
-                .eq_ignore_ascii_case(&settings.workflow.tags.completion_processed)
-        })
-        && !tag_ids.contains(&full.id)
-    {
-        tag_ids.push(full.id);
+    if final_run_stage {
+        let full = paperless
+            .ensure_tag(&settings.workflow.tags.completion_processed)
+            .await?;
+        if !tag_ids.contains(&full.id) {
+            tag_ids.push(full.id);
+        }
     }
     for trigger_name in [
         settings.workflow.tags.trigger_tag_for_stage(job.stage),
@@ -721,6 +717,22 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
         trigger_matches,
         "trigger polling inspected Paperless documents"
     );
+    if settings.workflow.mode.auto_select_documents() {
+        let auto_selected = queue_missing_pipeline(
+            pool,
+            &settings.workflow.enabled_stages,
+            settings.workflow.mode,
+            "auto-selector",
+            "worker",
+            &settings.workflow.rules,
+        )
+        .await?;
+        info!(
+            auto_selected,
+            mode = %settings.workflow.mode,
+            "auto-selector queued missing document stages"
+        );
+    }
     Ok(())
 }
 

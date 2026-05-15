@@ -191,13 +191,18 @@ claim/apply logic.
 
 ## Review And Autopilot
 
-Review mode:
+`manual_review` mode:
 
 - AI suggestions become review items
 - users approve, reject, or edit suggestions
 - approved changes are applied through Paperless REST
 
-Autopilot mode:
+`auto_select_review` mode:
+
+- the worker automatically queues documents with missing enabled stages
+- AI suggestions still become review items
+
+`full_auto` mode:
 
 - suggestions are validated in Rust
 - valid patches can apply automatically

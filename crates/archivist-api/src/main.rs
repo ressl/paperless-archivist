@@ -2487,22 +2487,19 @@ async fn add_completion_and_remove_trigger_tags(
         .completion_tag_for_stage(review.stage);
     let trigger = settings.workflow.tags.trigger_tag_for_stage(review.stage);
     let mut ids = patch.tags.clone().unwrap_or(document.tags);
-    if let Some(completion_name) = completion
-        && let Some(tag) = all_tags
-            .iter()
-            .find(|tag| tag.name.eq_ignore_ascii_case(completion_name))
-        && !ids.contains(&tag.id)
-    {
-        ids.push(tag.id);
+    if let Some(completion_name) = completion {
+        let tag = client.ensure_tag(completion_name).await?;
+        if !ids.contains(&tag.id) {
+            ids.push(tag.id);
+        }
     }
-    if final_run_stage
-        && let Some(tag) = all_tags.iter().find(|tag| {
-            tag.name
-                .eq_ignore_ascii_case(&settings.workflow.tags.completion_processed)
-        })
-        && !ids.contains(&tag.id)
-    {
-        ids.push(tag.id);
+    if final_run_stage {
+        let tag = client
+            .ensure_tag(&settings.workflow.tags.completion_processed)
+            .await?;
+        if !ids.contains(&tag.id) {
+            ids.push(tag.id);
+        }
     }
     if let Some(trigger_name) = trigger
         && let Some(tag) = all_tags
