@@ -42,6 +42,22 @@ break-glass account or replace it with named admin accounts after first setup.
 4. Change the bootstrap password or create named admin/operator/reviewer users.
 5. Configure Paperless and the model provider before queueing jobs.
 
+## Interface Language
+
+Archivist detects the browser language on first load and stores the selected UI
+language in the browser. You can change it from the login screen, the sidebar,
+or `Settings`.
+
+English and German are complete UI catalogs. Other world languages are listed
+with native names and marked as fallback languages. They keep locale-aware
+number/date formatting but use the English UI text until a full translation
+catalog is contributed.
+
+UI language is independent from document language. Document language is detected
+from OCR/content for prompt context. The language used for newly generated
+Paperless business tags is configured separately as `Tag output language` in
+`Settings`.
+
 ## Configure Paperless
 
 Open `Settings` and configure:

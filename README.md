@@ -94,6 +94,7 @@ safe enough to run repeatedly on a real archive.
 | OCR pipeline | Vision/OCR stage with configurable models and resumable worker jobs |
 | Tagging pipeline | Title, correspondent, document type, document date, tag, and field suggestions with Rust-side validation |
 | Language intelligence | Local language detection stores BCP-47 tags, feeds prompt context, and lets operators choose the language for newly generated tags |
+| Internationalized UI | Browser-language startup, persisted UI language selector, complete English/German catalogs, and fallback entries for ISO 639-1 world languages |
 | Review flow | Approve, reject, or edit AI suggestions before they are applied |
 | Workflow modes | Manual trigger + review, autopilot selector + review, or full autopilot |
 | Autopilot | Automatic document selection and optional automatic apply after validation; failures can fall back to review |
@@ -124,6 +125,19 @@ Paperless-ngx  ->  Archivist inventory  ->  Job queue  ->  OCR/tagging
 
 The frontend only talks to Archivist. Archivist is the policy and audit
 boundary between your browser, Paperless-ngx, and model providers.
+
+## Interface Languages
+
+The frontend starts with the browser language, stores the selected UI locale in
+the browser, and exposes a language selector on the login screen, sidebar, and
+Settings page. English and German are maintained as complete catalogs. Other
+ISO 639-1 world languages appear in the selector with their native names and
+use the English fallback until a translation catalog is added.
+
+Numbers, percentages, relative times, and operational dates are formatted with
+the selected locale. Document processing language is separate from UI language:
+document language is detected from OCR/content, while `tag_output_language`
+controls the language for newly generated business tags.
 
 ## Quick Start
 

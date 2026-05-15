@@ -79,6 +79,7 @@ import hardwareRecommendations from './hardwareRecommendations.json';
 import { promptStageHelp, promptStageOrder, type PromptStageHelp } from './data/promptHelp';
 import { languageOptionLabel, languageOptions } from './data/worldLanguages';
 import { buildInfo, buildInfoLabel } from './buildInfo';
+import { localizedMessage, useI18n, type TFunction } from './i18n/I18nProvider';
 
 type Tab = 'dashboard' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users';
 
@@ -116,29 +117,33 @@ type HardwareRecommendationData = {
 };
 
 const recommendationProfile = (hardwareRecommendations as HardwareRecommendationData).profiles[0];
-const workflowModeOptions: Array<{ value: ProcessingMode; label: string; description: string }> = [
+const workflowModeOptions: Array<{ value: ProcessingMode; labelKey: Parameters<TFunction>[0]; descriptionKey: Parameters<TFunction>[0] }> = [
   {
     value: 'manual_review',
-    label: 'Manual trigger + review',
-    description: 'Documents are processed only when explicitly queued, and suggestions wait for review.'
+    labelKey: 'workflow.mode.manual.label',
+    descriptionKey: 'workflow.mode.manual.description'
   },
   {
     value: 'auto_select_review',
-    label: 'Autopilot selector + review',
-    description: 'Archivist selects missing work automatically, but humans approve changes before Paperless is updated.'
+    labelKey: 'workflow.mode.auto_select_review.label',
+    descriptionKey: 'workflow.mode.auto_select_review.description'
   },
   {
     value: 'full_auto',
-    label: 'Full autopilot',
-    description: 'Archivist selects documents and applies validated changes automatically.'
+    labelKey: 'workflow.mode.full_auto.label',
+    descriptionKey: 'workflow.mode.full_auto.description'
   }
 ];
 
-const workflowModeLabel = (mode: ProcessingMode) =>
-  workflowModeOptions.find((option) => option.value === mode)?.label ?? mode;
+const workflowModeLabel = (mode: ProcessingMode, t: TFunction) => {
+  const option = workflowModeOptions.find((entry) => entry.value === mode);
+  return option ? t(option.labelKey) : mode;
+};
 
-const workflowModeDescription = (mode: ProcessingMode) =>
-  workflowModeOptions.find((option) => option.value === mode)?.description ?? '';
+const workflowModeDescription = (mode: ProcessingMode, t: TFunction) => {
+  const option = workflowModeOptions.find((entry) => entry.value === mode);
+  return option ? t(option.descriptionKey) : '';
+};
 
 const defaultCounts: Counts = {
   total_documents: 0,
@@ -157,6 +162,7 @@ const defaultCounts: Counts = {
 };
 
 export function App() {
+  const { t } = useI18n();
   const [me, setMe] = useState<Me | null>(null);
   const [tab, setTab] = useState<Tab>('dashboard');
   const [loading, setLoading] = useState(true);
@@ -170,7 +176,7 @@ export function App() {
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <div className="boot">Paperless Archivist</div>;
+  if (loading) return <div className="boot">{t('app.loading')}</div>;
   if (!me) return <Login onLogin={setMe} />;
 
   const canUseChat = me.roles.some((role) => role === 'admin' || role === 'reviewer' || role === 'operator');
@@ -182,34 +188,35 @@ export function App() {
         <div className="brand">
           <img src="/assets/brand/paperless-archivist-logo.png" alt="" />
           <div>
-            <strong>Paperless Archivist</strong>
+            <strong>{t('app.name')}</strong>
             <span>{me.username}</span>
           </div>
         </div>
         <nav>
-          <NavButton icon={<Activity />} label="Dashboard" active={tab === 'dashboard'} onClick={() => setTab('dashboard')} />
-          <NavButton icon={<Archive />} label="Inventory" active={tab === 'inventory'} onClick={() => setTab('inventory')} />
-          {canUseChat && <NavButton icon={<MessageSquare />} label="Chat" active={tab === 'chat'} onClick={() => setTab('chat')} />}
-          <NavButton icon={<ListChecks />} label="Review" active={tab === 'reviews'} onClick={() => setTab('reviews')} />
-          <NavButton icon={<Settings />} label="Settings" active={tab === 'settings'} onClick={() => setTab('settings')} />
-          <NavButton icon={<ClipboardList />} label="Prompts" active={tab === 'prompts'} onClick={() => setTab('prompts')} />
-          <NavButton icon={<Shield />} label="Audit" active={tab === 'audit'} onClick={() => setTab('audit')} />
-          <NavButton icon={<UserPlus />} label="Users" active={tab === 'users'} onClick={() => setTab('users')} />
+          <NavButton icon={<Activity />} label={t('nav.dashboard')} active={tab === 'dashboard'} onClick={() => setTab('dashboard')} />
+          <NavButton icon={<Archive />} label={t('nav.inventory')} active={tab === 'inventory'} onClick={() => setTab('inventory')} />
+          {canUseChat && <NavButton icon={<MessageSquare />} label={t('nav.chat')} active={tab === 'chat'} onClick={() => setTab('chat')} />}
+          <NavButton icon={<ListChecks />} label={t('nav.review')} active={tab === 'reviews'} onClick={() => setTab('reviews')} />
+          <NavButton icon={<Settings />} label={t('nav.settings')} active={tab === 'settings'} onClick={() => setTab('settings')} />
+          <NavButton icon={<ClipboardList />} label={t('nav.prompts')} active={tab === 'prompts'} onClick={() => setTab('prompts')} />
+          <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => setTab('audit')} />
+          <NavButton icon={<UserPlus />} label={t('nav.users')} active={tab === 'users'} onClick={() => setTab('users')} />
         </nav>
+        <LanguageSelector />
         <div className="sidebar-version" aria-label={buildInfoLabel} title={buildInfoLabel}>
-          <span>Version</span>
+          <span>{t('nav.version')}</span>
           <strong>{buildInfo.version}</strong>
-          {buildInfo.buildNumber && <small>Build {buildInfo.buildNumber}</small>}
+          {buildInfo.buildNumber && <small>{t('nav.build', { build: buildInfo.buildNumber })}</small>}
         </div>
         <button
           className="ghost-button"
-          title="Logout"
+          title={t('nav.logout')}
           onClick={async () => {
             await api.logout();
             setMe(null);
           }}
         >
-          <LogOut size={18} /> Logout
+          <LogOut size={18} /> {t('nav.logout')}
         </button>
       </aside>
 
@@ -217,7 +224,7 @@ export function App() {
         {error && (
           <div className="banner error">
             <span>{error}</span>
-            <button title="Dismiss" onClick={() => setError(null)}>
+            <button title={t('generic.dismiss')} onClick={() => setError(null)}>
               <X size={16} />
             </button>
           </div>
@@ -236,6 +243,7 @@ export function App() {
 }
 
 function Login({ onLogin }: { onLogin: (me: Me) => void }) {
+  const { t } = useI18n();
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [oidc, setOidc] = useState<OidcConfig | null>(null);
@@ -255,7 +263,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
     try {
       onLogin(mode === 'paperless' ? await api.paperlessLogin(username, password) : await api.login(username, password));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      setError(localizedErrorMessage(err, t, t('auth.error')));
     } finally {
       setLoginBusy(false);
     }
@@ -265,10 +273,11 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
     <main className="login">
       <section className="login-panel">
         <img src="/assets/brand/paperless-archivist-logo.png" alt="" />
-        <h1>Paperless Archivist</h1>
+        <h1>{t('app.name')}</h1>
+        <LanguageSelector compact />
         {oidc?.enabled && oidc.login_url && (
           <a className="sso-button" href={oidc.login_url}>
-            <KeyRound size={18} /> Login with {oidc.provider ?? 'SSO'}
+            <KeyRound size={18} /> {t('auth.login_sso', { provider: oidc.provider ?? 'SSO' })}
           </a>
         )}
         {oidc?.enabled && <div className="login-divider" />}
@@ -279,11 +288,11 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
           }}
         >
           <label>
-            Username
+            {t('auth.username')}
             <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
           </label>
           <label>
-            Password
+            {t('auth.password')}
             <input
               value={password}
               onChange={(event) => setPassword(event.target.value)}
@@ -293,11 +302,11 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
           </label>
           {error && <p className="form-error">{error}</p>}
           <button className="primary-button" disabled={loginBusy}>
-            <KeyRound size={18} /> {loginBusy ? 'Login...' : 'Login'}
+            <KeyRound size={18} /> {loginBusy ? t('auth.login_busy') : t('auth.login')}
           </button>
           {oidc?.paperless_login_enabled && (
             <button type="button" className="secondary-button" disabled={loginBusy} onClick={() => void submitLogin('paperless')}>
-              <Archive size={18} /> Login with Paperless-ngx
+              <Archive size={18} /> {t('auth.login_paperless')}
             </button>
           )}
         </form>
@@ -307,6 +316,7 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
 }
 
 function Dashboard({ setError, canManageSettings }: { setError: (error: string | null) => void; canManageSettings: boolean }) {
+  const { t, formatNumber, formatPercent, formatRelativeTime: formatRelative } = useI18n();
   const [counts, setCounts] = useState<Counts>(defaultCounts);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [live, setLive] = useState<DashboardLiveStatus | null>(null);
@@ -322,12 +332,12 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         setStats(data.stats);
         setLastLoadedAt(new Date().toISOString());
       })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(localizedErrorMessage(err, t)));
   const loadLive = () =>
     api
       .dashboardLive()
       .then(setLive)
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(localizedErrorMessage(err, t)));
 
   useEffect(() => {
     void load();
@@ -361,38 +371,38 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
 
   const openBacklog = counts.total_documents - counts.complete;
   const stageData = (stats?.stage_status.length ? stats.stage_status : defaultStageStatus).map((stage) => ({
-    stage: stageLabel(stage.stage),
+    stage: stageLabel(stage.stage, t),
     Complete: stage.complete,
     Pending: stage.pending,
     Review: stage.waiting_review,
     Running: stage.running,
     Failed: stage.failed
   }));
-  const jobStatusData = statusChartData(stats?.job_status.length ? stats.job_status : defaultJobStatus);
-  const runStatusData = statusChartData(stats?.run_status.length ? stats.run_status : defaultRunStatus);
+  const jobStatusData = statusChartData(stats?.job_status.length ? stats.job_status : defaultJobStatus, t);
+  const runStatusData = statusChartData(stats?.run_status.length ? stats.run_status : defaultRunStatus, t);
   const comparison = stats?.comparison;
   const runningJobs = stats?.kpis.running_jobs ?? counts.running;
 
   const metrics = [
-    { label: 'Open Backlog', value: stats?.kpis.open_backlog ?? openBacklog, tone: 'warning', delta: comparison?.open_backlog_delta },
-    { label: 'Running Now', value: runningJobs, tone: 'info', delta: null },
-    { label: 'Review Queue', value: counts.waiting_review, tone: 'review', delta: null },
-    { label: 'Failed', value: counts.failed, tone: 'danger', delta: comparison?.jobs_failed_delta },
-    { label: 'Throughput', value: stats?.kpis.throughput ?? 0, tone: 'success', delta: comparison?.jobs_succeeded_delta },
-    { label: 'Completion', value: formatPercent(stats?.kpis.completion_rate ?? 0), tone: 'neutral', delta: null }
+    { label: t('dashboard.metric.open_backlog'), value: stats?.kpis.open_backlog ?? openBacklog, tone: 'warning', delta: comparison?.open_backlog_delta },
+    { label: t('dashboard.metric.running_now'), value: runningJobs, tone: 'info', delta: null },
+    { label: t('dashboard.metric.review_queue'), value: counts.waiting_review, tone: 'review', delta: null },
+    { label: t('dashboard.metric.failed'), value: counts.failed, tone: 'danger', delta: comparison?.jobs_failed_delta },
+    { label: t('dashboard.metric.throughput'), value: stats?.kpis.throughput ?? 0, tone: 'success', delta: comparison?.jobs_succeeded_delta },
+    { label: t('dashboard.metric.completion'), value: formatPercent(stats?.kpis.completion_rate ?? 0), tone: 'neutral', delta: null }
   ];
 
   return (
     <section className="page dashboard-page">
       <div className="dashboard-heading">
         <div>
-          <PageHeader title="Operations Dashboard" />
+          <PageHeader title={t('dashboard.title')} />
           <p>
-            Last refresh {lastLoadedAt ? formatRelativeTime(lastLoadedAt) : '-'}.
+            {t('dashboard.last_refresh', { time: lastLoadedAt ? formatRelative(lastLoadedAt) : '-' })}
           </p>
         </div>
         <div className="dashboard-heading-actions">
-          <div className="range-tabs" aria-label="Dashboard range">
+          <div className="range-tabs" aria-label={t('dashboard.range_label')}>
             {(stats?.available_ranges ?? defaultDashboardRanges).map((option) => (
               <button
                 key={option.key}
@@ -408,7 +418,7 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
             disabled={busy}
             onClick={() => void run(setBusy, setError, async () => Promise.all([load(), loadLive()]))}
           >
-            <RefreshCw size={16} /> {busy ? 'Refreshing...' : 'Refresh'}
+            <RefreshCw size={16} /> {busy ? t('generic.refreshing') : t('generic.refresh')}
           </button>
         </div>
       </div>
@@ -419,7 +429,7 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
           mode={live?.workflow_mode ?? 'manual_review'}
           busy={modeBusy}
           canToggle={canManageSettings}
-          onModeChange={(mode) => void run(setModeBusy, setError, () => updateDashboardWorkflowMode(mode))}
+          onModeChange={(mode) => void run(setModeBusy, setError, () => updateDashboardWorkflowMode(mode), t)}
         />
         <ServiceStatusCard label="LLM" icon={<Activity size={18} />} status={live?.llm} />
         <ServiceStatusCard label="Paperless" icon={<Database size={18} />} status={live?.paperless} />
@@ -429,15 +439,15 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         {metrics.map(({ label, value, tone, delta }) => (
           <div className={`metric ${tone}`} key={label}>
             <span>{label}</span>
-            <strong>{value}</strong>
-            {typeof delta === 'number' && <em className={deltaTone(delta)}>{formatDelta(delta)}</em>}
+            <strong>{typeof value === 'number' ? formatNumber(value) : value}</strong>
+            {typeof delta === 'number' && <em className={deltaTone(delta)}>{formatDelta(delta, t, formatNumber)}</em>}
           </div>
         ))}
       </div>
 
       <div className="dashboard-ops-grid">
         <div className="dashboard-analytics">
-          <ChartPanel title={`Throughput (${range})`} wide>
+          <ChartPanel title={t('dashboard.chart.throughput', { range })} wide>
             <ResponsiveContainer width="100%" height={280}>
               <AreaChart data={stats?.throughput_series ?? []}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -445,13 +455,13 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
                 <YAxis allowDecimals={false} />
                 <Tooltip />
                 <Legend />
-                <Area type="monotone" dataKey="jobs_created" name="Created" stroke="#28649b" fill="#dbe9f5" />
-                <Area type="monotone" dataKey="jobs_succeeded" name="Succeeded" stroke="#147f7a" fill="#d9eeee" />
-                <Area type="monotone" dataKey="jobs_failed" name="Failed" stroke="#a6403a" fill="#f5dddd" />
+                <Area type="monotone" dataKey="jobs_created" name={t('dashboard.chart.created')} stroke="#28649b" fill="#dbe9f5" />
+                <Area type="monotone" dataKey="jobs_succeeded" name={t('dashboard.chart.succeeded')} stroke="#147f7a" fill="#d9eeee" />
+                <Area type="monotone" dataKey="jobs_failed" name={t('dashboard.chart.failed')} stroke="#a6403a" fill="#f5dddd" />
               </AreaChart>
             </ResponsiveContainer>
           </ChartPanel>
-          <ChartPanel title="Stage Health" wide>
+          <ChartPanel title={t('dashboard.chart.stage_health')} wide>
             <ResponsiveContainer width="100%" height={260}>
               <BarChart data={stageData}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -468,7 +478,7 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
             </ResponsiveContainer>
           </ChartPanel>
           <div className="dashboard-grid compact">
-            <ChartPanel title="Backlog Trend">
+            <ChartPanel title={t('dashboard.chart.backlog_trend')}>
               <ResponsiveContainer width="100%" height={240}>
                 <AreaChart data={stats?.backlog_series ?? []}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -476,13 +486,13 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
                   <YAxis allowDecimals={false} />
                   <Tooltip />
                   <Legend />
-                  <Area type="monotone" dataKey="open_backlog" name="Open" stroke="#a9782b" fill="#f1e5d0" />
-                  <Area type="monotone" dataKey="complete" name="Complete" stroke="#147f7a" fill="#d9eeee" />
-                  <Area type="monotone" dataKey="failed" name="Failed" stroke="#a6403a" fill="#f5dddd" />
+                  <Area type="monotone" dataKey="open_backlog" name={t('dashboard.chart.open')} stroke="#a9782b" fill="#f1e5d0" />
+                  <Area type="monotone" dataKey="complete" name={t('dashboard.chart.complete')} stroke="#147f7a" fill="#d9eeee" />
+                  <Area type="monotone" dataKey="failed" name={t('dashboard.chart.failed')} stroke="#a6403a" fill="#f5dddd" />
                 </AreaChart>
               </ResponsiveContainer>
             </ChartPanel>
-            <ChartPanel title="Queue State">
+            <ChartPanel title={t('dashboard.chart.queue_state')}>
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={jobStatusData} layout="vertical" margin={{ left: 12 }}>
                   <CartesianGrid strokeDasharray="3 3" horizontal={false} />
@@ -498,30 +508,30 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         <LiveProcessingPanel live={live} />
       </div>
 
-      <ChartPanel title="Provider Usage, Tokens, And Latency" wide>
+      <ChartPanel title={t('dashboard.chart.provider_usage')} wide>
         <div className="table-wrap compact-table">
           <table>
             <thead>
               <tr>
-                <th>Provider</th>
-                <th>Model</th>
-                <th>Stage</th>
-                <th>Requests</th>
-                <th>Avg</th>
-                <th>P95</th>
-                <th>Tokens</th>
-                <th>Cost</th>
+                <th>{t('dashboard.provider.provider')}</th>
+                <th>{t('dashboard.provider.model')}</th>
+                <th>{t('dashboard.provider.stage')}</th>
+                <th>{t('dashboard.provider.requests')}</th>
+                <th>{t('dashboard.provider.avg')}</th>
+                <th>{t('dashboard.provider.p95')}</th>
+                <th>{t('dashboard.provider.tokens')}</th>
+                <th>{t('dashboard.provider.cost')}</th>
               </tr>
             </thead>
             <tbody>
               {(stats?.provider_usage ?? []).length === 0 && (
-                <tr><td colSpan={8}>No provider usage recorded for this range.</td></tr>
+                <tr><td colSpan={8}>{t('dashboard.provider.no_usage')}</td></tr>
               )}
               {(stats?.provider_usage ?? []).map((item) => (
                 <tr key={`${item.provider}-${item.model}-${item.stage}`}>
                   <td>{item.provider}</td>
                   <td>{item.model}</td>
-                  <td>{stageLabel(item.stage)}</td>
+                  <td>{stageLabel(item.stage, t)}</td>
                   <td>{item.request_count}</td>
                   <td>{formatMs(item.avg_duration_ms)}</td>
                   <td>{formatMs(item.p95_duration_ms)}</td>
@@ -533,7 +543,7 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
           </table>
         </div>
       </ChartPanel>
-      <ChartPanel title="Run Status" wide>
+      <ChartPanel title={t('dashboard.chart.run_status')} wide>
         <ResponsiveContainer width="100%" height={220}>
           <BarChart data={runStatusData} layout="vertical" margin={{ left: 12 }}>
             <CartesianGrid strokeDasharray="3 3" horizontal={false} />
@@ -545,10 +555,10 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         </ResponsiveContainer>
       </ChartPanel>
       <div className="toolbar dashboard-queue-actions">
-        <ActionButton icon={<RefreshCw />} label="Sync" busy={busy} onClick={() => run(setBusy, setError, api.syncPaperless).then(load)} />
-        <ActionButton icon={<FileText />} label="Queue OCR" busy={busy} onClick={() => run(setBusy, setError, api.queueOcr).then(load)} />
-        <ActionButton icon={<Tags />} label="Queue Tags" busy={busy} onClick={() => run(setBusy, setError, api.queueTags).then(load)} />
-        <ActionButton icon={<Play />} label="Queue Full" busy={busy} onClick={() => run(setBusy, setError, api.queueFull).then(load)} />
+        <ActionButton icon={<RefreshCw />} label={t('dashboard.action.sync')} busy={busy} onClick={() => run(setBusy, setError, api.syncPaperless, t).then(load)} />
+        <ActionButton icon={<FileText />} label={t('dashboard.action.queue_ocr')} busy={busy} onClick={() => run(setBusy, setError, api.queueOcr, t).then(load)} />
+        <ActionButton icon={<Tags />} label={t('dashboard.action.queue_tags')} busy={busy} onClick={() => run(setBusy, setError, api.queueTags, t).then(load)} />
+        <ActionButton icon={<Play />} label={t('dashboard.action.queue_full')} busy={busy} onClick={() => run(setBusy, setError, api.queueFull, t).then(load)} />
       </div>
     </section>
   );
@@ -567,14 +577,15 @@ function AutoProcessingCard({
   canToggle: boolean;
   onModeChange: (mode: ProcessingMode) => void;
 }) {
+  const { t } = useI18n();
   return (
     <section className={`autopilot-card ${enabled ? 'enabled' : 'disabled'}`}>
       <div>
-        <span>Auto Processing</span>
-        <strong>{workflowModeLabel(mode)}</strong>
-        <p>{workflowModeDescription(mode)}</p>
+        <span>{t('dashboard.auto.title')}</span>
+        <strong>{workflowModeLabel(mode, t)}</strong>
+        <p>{workflowModeDescription(mode, t)}</p>
       </div>
-      <div className="mode-button-group" role="group" aria-label="Processing mode">
+      <div className="mode-button-group" role="group" aria-label={t('dashboard.auto.processing_mode')}>
         {workflowModeOptions.map((option) => (
           <button
             key={option.value}
@@ -583,13 +594,13 @@ function AutoProcessingCard({
             disabled={busy || !canToggle || mode === option.value}
             aria-pressed={mode === option.value}
             onClick={() => onModeChange(option.value)}
-            title={option.description}
+            title={t(option.descriptionKey)}
           >
             {option.value === 'manual_review' ? <Power size={16} /> : <Play size={16} />}
-            {mode === option.value && busy ? 'Updating...' : option.label}
+            {mode === option.value && busy ? t('dashboard.auto.updating') : t(option.labelKey)}
           </button>
         ))}
-        {!canToggle && <small>Admin only</small>}
+        {!canToggle && <small>{t('generic.admin_only')}</small>}
       </div>
     </section>
   );
@@ -604,6 +615,7 @@ function ServiceStatusCard({
   icon: ReactNode;
   status?: DashboardLiveStatus['llm'] | null;
 }) {
+  const { t, formatRelativeTime: formatRelative } = useI18n();
   const state = status?.state ?? 'idle';
   return (
     <section className={`service-card ${state}`}>
@@ -612,14 +624,15 @@ function ServiceStatusCard({
         <strong>{label}</strong>
         <Status value={state} />
       </header>
-      <p>{status?.title ?? 'Loading status...'}</p>
-      <small>{status?.description ?? 'Waiting for the next live status refresh.'}</small>
-      <em>{status?.last_event_at ? formatRelativeTime(status.last_event_at) : 'No activity yet'}</em>
+      <p>{status?.title ?? t('dashboard.service.loading')}</p>
+      <small>{status?.description ?? t('dashboard.service.waiting')}</small>
+      <em>{status?.last_event_at ? formatRelative(status.last_event_at) : t('dashboard.service.no_activity')}</em>
     </section>
   );
 }
 
 function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
+  const { t, formatNumber, formatRelativeTime: formatRelative } = useI18n();
   const activeJobs = live?.active_jobs ?? [];
   const activeRuns = live?.active_runs ?? [];
   const recentEvents = live?.recent_llm_events ?? [];
@@ -630,65 +643,65 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
     <aside className="live-processing-panel">
       <header>
         <div>
-          <strong>Live Processing</strong>
-          <span>debugging light</span>
+          <strong>{t('dashboard.live.title')}</strong>
+          <span>{t('dashboard.live.subtitle')}</span>
         </div>
         <Status value={live?.workflow_mode ?? 'loading'} />
       </header>
       <div className="live-summary">
         <div>
-          <span>Runs</span>
-          <strong>{activeRuns.length}</strong>
+          <span>{t('dashboard.live.runs')}</span>
+          <strong>{formatNumber(activeRuns.length)}</strong>
         </div>
         <div>
-          <span>Jobs</span>
-          <strong>{activeJobs.length}</strong>
+          <span>{t('dashboard.live.jobs')}</span>
+          <strong>{formatNumber(activeJobs.length)}</strong>
         </div>
         <div>
-          <span>Issues</span>
-          <strong>{hardFailures || recentFailures.length}</strong>
+          <span>{t('dashboard.live.issues')}</span>
+          <strong>{formatNumber(hardFailures || recentFailures.length)}</strong>
         </div>
       </div>
 
       <section className="live-debug-section">
-        <h3>Active Jobs</h3>
-        {activeJobs.length === 0 && <p className="empty-state compact">No active jobs right now.</p>}
+        <h3>{t('dashboard.live.active_jobs')}</h3>
+        {activeJobs.length === 0 && <p className="empty-state compact">{t('dashboard.live.no_active_jobs')}</p>}
         {activeJobs.slice(0, 8).map((job) => (
           <article className="live-job" key={job.id}>
             <div>
-              <strong>Document {job.paperless_document_id}</strong>
-              <span>{stageLabel(job.stage)} · attempt {job.attempts}/{job.max_attempts}</span>
+              <strong>{t('review.document', { id: job.paperless_document_id })}</strong>
+              <span>{stageLabel(job.stage, t)} · {t('dashboard.live.attempt', { attempts: job.attempts, max: job.max_attempts })}</span>
             </div>
             <Status value={job.status} />
-            <small>{job.lease_owner ? `Worker ${job.lease_owner}` : formatRelativeTime(job.updated_at)}</small>
+            <small>{job.lease_owner ? t('dashboard.live.worker', { worker: job.lease_owner }) : formatRelative(job.updated_at)}</small>
           </article>
         ))}
       </section>
 
       <section className="live-debug-section">
-        <h3>Latest LLM Calls</h3>
-        {recentEvents.length === 0 && <p className="empty-state compact">No LLM calls recorded yet.</p>}
+        <h3>{t('dashboard.live.latest_llm')}</h3>
+        {recentEvents.length === 0 && <p className="empty-state compact">{t('dashboard.live.no_llm')}</p>}
         {recentEvents.slice(0, 5).map((event) => (
           <article className="live-event" key={event.id}>
             <strong>{event.provider} / {event.model}</strong>
-            <span>{stageLabel(event.stage)} · {formatMs(event.duration_ms ?? 0)} · {formatRelativeTime(event.created_at)}</span>
+            <span>{stageLabel(event.stage, t)} · {formatMs(event.duration_ms ?? 0)} · {formatRelative(event.created_at)}</span>
           </article>
         ))}
       </section>
 
       <section className="live-debug-section">
-        <h3>Recent Retries & Failures</h3>
-        {recentFailures.length === 0 && <p className="empty-state compact">No retries or failures.</p>}
+        <h3>{t('dashboard.live.recent_failures')}</h3>
+        {recentFailures.length === 0 && <p className="empty-state compact">{t('dashboard.live.no_failures')}</p>}
         {recentFailures.slice(0, 5).map((failure) => {
           const kind = liveFailureKind(failure);
           return (
             <article className={`live-failure ${kind !== 'failed' ? 'retry' : ''}`} key={failure.id}>
               <div className="failure-heading">
-                <strong>Document {failure.paperless_document_id} · {stageLabel(failure.stage)}</strong>
+                <strong>{t('dashboard.live.document_stage', { document: failure.paperless_document_id, stage: stageLabel(failure.stage, t) })}</strong>
                 <Status value={kind} />
               </div>
               <span>{failure.error_message}</span>
-              <small>{liveFailureTiming(failure, kind)}</small>
+              <small>{liveFailureTiming(failure, kind, t, formatRelative)}</small>
             </article>
           );
         })}
@@ -739,10 +752,10 @@ function ChartPanel({ title, wide, children }: { title: string; wide?: boolean; 
   );
 }
 
-function statusChartData(items: DashboardStatusCount[]) {
+function statusChartData(items: DashboardStatusCount[], t: TFunction) {
   return items.map((item) => ({
     ...item,
-    label: statusLabel(item.status)
+    label: statusLabel(item.status, t)
   }));
 }
 
@@ -750,13 +763,18 @@ function liveFailureKind(failure: DashboardLiveFailure) {
   return failure.failure_kind || (failure.status === 'failed' ? 'failed' : 'retry_scheduled');
 }
 
-function liveFailureTiming(failure: DashboardLiveFailure, kind = liveFailureKind(failure)) {
-  if (kind === 'retry_ready') return 'Retry ready now';
-  if (failure.next_attempt_at) return `Next retry ${formatRelativeTime(failure.next_attempt_at)}`;
-  return `Updated ${formatRelativeTime(failure.updated_at)}`;
+function liveFailureTiming(
+  failure: DashboardLiveFailure,
+  kind: string,
+  t: TFunction,
+  formatRelative: (value?: string | null) => string
+) {
+  if (kind === 'retry_ready') return t('dashboard.live.retry_ready');
+  if (failure.next_attempt_at) return t('dashboard.live.next_retry', { time: formatRelative(failure.next_attempt_at) });
+  return t('dashboard.live.updated', { time: formatRelative(failure.updated_at) });
 }
 
-function stageLabel(stage: string) {
+function stageLabel(stage: string, t?: TFunction) {
   const labels: Record<string, string> = {
     ocr: 'OCR',
     ocr_fix: 'OCR Fix',
@@ -768,19 +786,24 @@ function stageLabel(stage: string) {
     fields: 'Fields',
     apply: 'Apply'
   };
-  return labels[stage] ?? statusLabel(stage);
+  return t ? localizedMessage(`stage.${stage}`, t, labels[stage] ?? statusLabel(stage, t)) : labels[stage] ?? statusLabel(stage);
 }
 
-function statusLabel(value: string) {
+function statusLabel(value: string, t?: TFunction) {
+  if (t) return localizedMessage(`status.${value}`, t, titleCaseStatus(value));
+  return titleCaseStatus(value);
+}
+
+function titleCaseStatus(value: string) {
   return value
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
 }
 
-function formatDelta(value: number) {
-  if (value === 0) return '0 vs previous';
-  return `${value > 0 ? '+' : ''}${value} vs previous`;
+function formatDelta(value: number, t: TFunction, formatNumber: (value: number) => string) {
+  if (value === 0) return t('delta.zero');
+  return t('delta.value', { value: `${value > 0 ? '+' : ''}${formatNumber(value)}` });
 }
 
 function formatPercent(value: number) {
@@ -834,10 +857,11 @@ function deltaTone(value: number) {
 }
 
 function Inventory({ setError }: { setError: (error: string | null) => void }) {
+  const { t, locale } = useI18n();
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [busy, setBusy] = useState(false);
-  const languages = useMemo(() => languageOptions(), []);
-  const load = () => api.inventory().then((data) => setItems(data.items)).catch((err) => setError(err.message));
+  const languages = useMemo(() => languageOptions(locale), [locale]);
+  const load = () => api.inventory().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t)));
 
   useEffect(() => {
     void load();
@@ -845,31 +869,31 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
 
   return (
     <section className="page">
-      <PageHeader title="Document Inventory" />
+      <PageHeader title={t('inventory.title')} />
       <div className="toolbar">
-        <ActionButton icon={<RefreshCw />} label="Reload" busy={busy} onClick={() => run(setBusy, setError, load)} />
+        <ActionButton icon={<RefreshCw />} label={t('generic.reload')} busy={busy} onClick={() => run(setBusy, setError, load, t)} />
       </div>
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Title</th>
-              <th>OCR</th>
-              <th>Language</th>
-              <th>Tags</th>
-              <th>Title</th>
-              <th>Type</th>
-              <th>Date</th>
-              <th>Run</th>
-              <th>Actions</th>
+              <th>{t('inventory.id')}</th>
+              <th>{t('inventory.document_title')}</th>
+              <th>{t('inventory.ocr')}</th>
+              <th>{t('inventory.language')}</th>
+              <th>{t('inventory.tags')}</th>
+              <th>{t('stage.title')}</th>
+              <th>{t('inventory.type')}</th>
+              <th>{t('inventory.date')}</th>
+              <th>{t('inventory.run')}</th>
+              <th>{t('inventory.actions')}</th>
             </tr>
           </thead>
           <tbody>
             {items.map((item) => (
               <tr key={item.paperless_document_id}>
                 <td>{item.paperless_document_id}</td>
-                <td>{item.title || item.original_file_name || 'Untitled'}</td>
+                <td>{item.title || item.original_file_name || t('inventory.untitled')}</td>
                 <td><Status value={item.ocr_status} /></td>
                 <td>{formatLanguageDetection(item, languages)}</td>
                 <td><Status value={item.tagging_status} /></td>
@@ -878,10 +902,10 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
                 <td><Status value={item.document_date_status} /> {item.document_date ?? ''}</td>
                 <td>{item.current_run_status || '-'}</td>
                 <td className="row-actions">
-                  <button title="Trigger OCR" onClick={() => api.triggerDocument(item.paperless_document_id, ['ocr'], 'manual_review').then(load).catch((err) => setError(err.message))}>
+                  <button title={t('inventory.trigger_ocr')} onClick={() => api.triggerDocument(item.paperless_document_id, ['ocr'], 'manual_review').then(load).catch((err) => setError(localizedErrorMessage(err, t)))}>
                     <FileText size={16} />
                   </button>
-                  <button title="Trigger tagging" onClick={() => api.triggerDocument(item.paperless_document_id, ['tags'], 'manual_review').then(load).catch((err) => setError(err.message))}>
+                  <button title={t('inventory.trigger_tags')} onClick={() => api.triggerDocument(item.paperless_document_id, ['tags'], 'manual_review').then(load).catch((err) => setError(localizedErrorMessage(err, t)))}>
                     <Tags size={16} />
                   </button>
                 </td>
@@ -895,6 +919,7 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
 }
 
 function DocumentChat({ setError }: { setError: (error: string | null) => void }) {
+  const { t, formatDateTime } = useI18n();
   const [sessions, setSessions] = useState<DocumentChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<DocumentChatMessage[]>([]);
@@ -907,10 +932,10 @@ function DocumentChat({ setError }: { setError: (error: string | null) => void }
     api.chatSessions().then((data) => {
       setSessions(data.items);
       setActiveSessionId((current) => current ?? data.items[0]?.id ?? null);
-    }).catch((err) => setError(err.message));
+    }).catch((err) => setError(localizedErrorMessage(err, t)));
 
   const loadMessages = (sessionId: string) =>
-    api.chatMessages(sessionId).then((data) => setMessages(data.items)).catch((err) => setError(err.message));
+    api.chatMessages(sessionId).then((data) => setMessages(data.items)).catch((err) => setError(localizedErrorMessage(err, t)));
 
   useEffect(() => {
     void loadSessions();
@@ -979,7 +1004,7 @@ function DocumentChat({ setError }: { setError: (error: string | null) => void }
                 onClick={() => setActiveSessionId(session.id)}
               >
                 <span>{session.title}</span>
-                <small>{new Date(session.updated_at).toLocaleString()}</small>
+                <small>{formatDateTime(session.updated_at)}</small>
               </button>
             ))}
           </div>
@@ -1050,10 +1075,11 @@ function chatTitleFromQuestion(question: string) {
 }
 
 function Reviews({ setError }: { setError: (error: string | null) => void }) {
+  const { t } = useI18n();
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const load = () => api.reviews().then((data) => setItems(data.items)).catch((err) => setError(err.message));
+  const load = () => api.reviews().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t)));
 
   useEffect(() => {
     void load();
@@ -1066,25 +1092,25 @@ function Reviews({ setError }: { setError: (error: string | null) => void }) {
     await run(setBusy, setError, async () => {
       const result = await api.batchReview(selected, decision);
       if (result.failed.length > 0) {
-        setError(`${result.failed.length} review items failed. First error: ${result.failed[0].error}`);
+        setError(t('review.failed_batch', { count: result.failed.length, error: result.failed[0].error }));
       }
       setSelected([]);
       await load();
-    });
+    }, t);
   };
 
   return (
     <section className="page">
-      <PageHeader title="Review Queue" />
+      <PageHeader title={t('review.title')} />
       <div className="toolbar">
         <button disabled={items.length === 0} onClick={() => setSelected(selected.length === items.length ? [] : items.map((item) => item.id))}>
-          <ListChecks size={16} /> {selected.length === items.length ? 'Clear selection' : 'Select all'}
+          <ListChecks size={16} /> {selected.length === items.length ? t('review.clear_selection') : t('review.select_all')}
         </button>
         <button disabled={busy || selected.length === 0} onClick={() => void batch('approve')}>
-          <Check size={16} /> Approve selected
+          <Check size={16} /> {t('review.approve_selected')}
         </button>
         <button disabled={busy || selected.length === 0} onClick={() => void batch('reject')}>
-          <X size={16} /> Reject selected
+          <X size={16} /> {t('review.reject_selected')}
         </button>
       </div>
       <div className="review-list">
@@ -1096,6 +1122,7 @@ function Reviews({ setError }: { setError: (error: string | null) => void }) {
             onSelect={() => toggleSelected(item.id)}
             onReload={load}
             setError={setError}
+            t={t}
           />
         ))}
       </div>
@@ -1119,13 +1146,15 @@ function ReviewCard({
   selected,
   onSelect,
   onReload,
-  setError
+  setError,
+  t
 }: {
   item: ReviewItem;
   selected: boolean;
   onSelect: () => void;
   onReload: () => void;
   setError: (error: string | null) => void;
+  t: TFunction;
 }) {
   const patch = asReviewPatch(item.suggested_patch);
   const metadata = asReviewPatch(patch?.standard_metadata);
@@ -1138,31 +1167,31 @@ function ReviewCard({
 
   const applyEdited = async () => {
     if (!patch) {
-      setError('Review patch is not editable because it is not an object.');
+      setError(t('review.patch_not_editable'));
       return;
     }
     const editedPatch = buildEditedReviewPatch(patch, edit);
     if (editedPatch === null) {
-      setError('Edited review patch contains an invalid numeric ID.');
+      setError(t('review.invalid_numeric_id'));
       return;
     }
     await run(setBusy, setError, async () => {
       await api.editReview(item.id, editedPatch);
       onReload();
-    });
+    }, t);
   };
 
   const warnings = reviewWarnings(item.validation_warnings);
-  const rows = standardMetadataRows(item.stage, patch, metadata);
+  const rows = standardMetadataRows(item.stage, patch, metadata, t);
 
   return (
     <article className="review-item">
       <header>
         <label className="inline">
           <input type="checkbox" checked={selected} onChange={onSelect} />
-          <strong>Document {item.paperless_document_id}</strong>
+          <strong>{t('review.document', { id: item.paperless_document_id })}</strong>
         </label>
-        <span>{stageLabel(item.stage as Stage) ?? item.stage}</span>
+        <span>{stageLabel(item.stage as Stage, t) ?? item.stage}</span>
       </header>
 
       {rows.length > 0 && (
@@ -1171,16 +1200,16 @@ function ReviewCard({
             <div className={`metadata-review-row ${row.lowConfidence ? 'low-confidence' : ''}`} key={row.field}>
               <div>
                 <strong>{row.label}</strong>
-                <small>Current: {row.current ?? 'empty'}</small>
+                <small>{t('review.current', { value: row.current ?? t('generic.empty') })}</small>
               </div>
               <div>
-                <span>Suggestion: {row.suggested ?? 'empty'}</span>
-                {row.confidence !== null && <small>Confidence: {(row.confidence * 100).toFixed(0)}%</small>}
-                {row.evidence && <small>Evidence: {row.evidence}</small>}
+                <span>{t('review.suggestion', { value: row.suggested ?? t('generic.empty') })}</span>
+                {row.confidence !== null && <small>{t('review.confidence', { value: `${(row.confidence * 100).toFixed(0)}%` })}</small>}
+                {row.evidence && <small>{t('review.evidence', { value: row.evidence })}</small>}
               </div>
               {row.editableKey && (
                 <label>
-                  Edit
+                  {t('review.edit')}
                   <input
                     type={row.editableKey === 'created' ? 'date' : 'text'}
                     value={edit[row.editableKey] ?? ''}
@@ -1203,21 +1232,21 @@ function ReviewCard({
       )}
 
       <details>
-        <summary>Raw patch</summary>
+        <summary>{t('review.raw_patch')}</summary>
         <pre>{JSON.stringify(item.suggested_patch, null, 2)}</pre>
       </details>
 
       <footer>
-        <button title="Approve" disabled={busy} onClick={() => api.approveReview(item.id).then(onReload).catch((err) => setError(err.message))}>
-          <Check size={16} /> Approve
+        <button title={t('review.approve')} disabled={busy} onClick={() => api.approveReview(item.id).then(onReload).catch((err) => setError(localizedErrorMessage(err, t)))}>
+          <Check size={16} /> {t('review.approve')}
         </button>
         {patch && Object.keys(edit).length > 0 && (
-          <button title="Apply edited patch" disabled={busy} onClick={() => void applyEdited()}>
-            <Save size={16} /> Apply edited
+          <button title={t('review.apply_edited')} disabled={busy} onClick={() => void applyEdited()}>
+            <Save size={16} /> {t('review.apply_edited')}
           </button>
         )}
-        <button title="Reject" disabled={busy} onClick={() => api.rejectReview(item.id).then(onReload).catch((err) => setError(err.message))}>
-          <X size={16} /> Reject
+        <button title={t('review.reject')} disabled={busy} onClick={() => api.rejectReview(item.id).then(onReload).catch((err) => setError(localizedErrorMessage(err, t)))}>
+          <X size={16} /> {t('review.reject')}
         </button>
       </footer>
     </article>
@@ -1265,7 +1294,7 @@ function reviewWarnings(value: unknown): string[] {
   return value.map((warning) => typeof warning === 'string' ? warning : JSON.stringify(warning)).slice(0, 10);
 }
 
-function standardMetadataRows(stage: string, patch: ReviewPatchRecord | null, metadata: ReviewPatchRecord | null) {
+function standardMetadataRows(stage: string, patch: ReviewPatchRecord | null, metadata: ReviewPatchRecord | null, t: TFunction) {
   if (!patch) return [];
   const rows: Array<{
     field: string;
@@ -1282,40 +1311,40 @@ function standardMetadataRows(stage: string, patch: ReviewPatchRecord | null, me
   if (stage === 'correspondent' && Object.prototype.hasOwnProperty.call(patch, 'correspondent')) {
     rows.push({
       field: 'correspondent',
-      label: 'Correspondent',
+      label: t('stage.correspondent'),
       current: metadataValue(metadata?.current_correspondent),
       suggested: metadataValue(metadata?.suggested_name) ?? metadataValue(patch.correspondent),
       confidence,
       evidence: metadataValue(metadata?.evidence),
       lowConfidence: confidence !== null && confidence < 0.7,
       editableKey: 'correspondent',
-      placeholder: 'Paperless correspondent ID'
+      placeholder: t('review.placeholder.correspondent')
     });
   }
   if (stage === 'document_type' && Object.prototype.hasOwnProperty.call(patch, 'document_type')) {
     rows.push({
       field: 'document_type',
-      label: 'Document type',
+      label: t('stage.document_type'),
       current: metadataValue(metadata?.current_document_type),
       suggested: metadataValue(metadata?.suggested_name) ?? metadataValue(patch.document_type),
       confidence,
       evidence: metadataValue(metadata?.evidence),
       lowConfidence: confidence !== null && confidence < 0.7,
       editableKey: 'document_type',
-      placeholder: 'Paperless document type ID'
+      placeholder: t('review.placeholder.document_type')
     });
   }
   if (stage === 'document_date' && Object.prototype.hasOwnProperty.call(patch, 'created')) {
     rows.push({
       field: 'document_date',
-      label: 'Document date',
+      label: t('stage.document_date'),
       current: metadataValue(metadata?.current_date),
       suggested: metadataValue(metadata?.suggested_date) ?? metadataValue(patch.created),
       confidence,
       evidence: metadataValue(metadata?.evidence),
       lowConfidence: confidence !== null && confidence < 0.7,
       editableKey: 'created',
-      placeholder: 'YYYY-MM-DD'
+      placeholder: t('review.placeholder.document_date')
     });
   }
   return rows;
@@ -1332,6 +1361,7 @@ function metadataValue(value: unknown): string | undefined {
 }
 
 function SettingsPage({ setError }: { setError: (error: string | null) => void }) {
+  const { t, locale } = useI18n();
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
   const [savedSettings, setSavedSettings] = useState<RuntimeSettings | null>(null);
   const [token, setToken] = useState('');
@@ -1341,7 +1371,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
   const [providerTest, setProviderTest] = useState<ConnectionTestState | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  const worldLanguages = useMemo(() => languageOptions(), []);
+  const worldLanguages = useMemo(() => languageOptions(locale), [locale]);
 
   const loadOllamaModels = (providerName: string) => {
     setOllamaModels((current) => ({
@@ -1373,7 +1403,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
             loading: false,
             loaded: true,
             models: current[providerName]?.models ?? [],
-            error: 'Ollama-Modelle konnten nicht geladen werden. Prüfe, ob Ollama erreichbar ist, und lade erneut.'
+            error: t('settings.ollama.load_error')
           }
         }));
       });
@@ -1400,10 +1430,10 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
         setSavedSettings(nextSettings);
         refreshInstalledOllamaModels(nextSettings);
       })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(localizedErrorMessage(err, t)));
   }, [setError]);
 
-  if (!settings) return <section className="page"><PageHeader title="Settings" /></section>;
+  if (!settings) return <section className="page"><PageHeader title={t('settings.loading_title')} /></section>;
 
   const update = (updater: (settings: RuntimeSettings) => RuntimeSettings) => setSettings((current) => (current ? updater(current) : current));
   const updateProvider = (index: number, patch: Partial<RuntimeSettings['ai']['providers'][number]>) =>
@@ -1449,62 +1479,65 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
   const selectedDefaultProvider = defaultProvider(settings);
   const runPaperlessTest = () => {
     if (savedSettings && paperlessSettingsChanged(settings, savedSettings, token)) {
-      setPaperlessTest(paperlessUnsavedSettingsFeedback(settings, savedSettings, token));
+      setPaperlessTest(paperlessUnsavedSettingsFeedback(settings, savedSettings, token, t));
       return;
     }
     const baseUrlProblem = paperlessBaseUrlProblem(settings.paperless.base_url);
     if (baseUrlProblem) {
-      setPaperlessTest(paperlessBaseUrlProblemFeedback(baseUrlProblem));
+      setPaperlessTest(paperlessBaseUrlProblemFeedback(baseUrlProblem, t));
       return;
     }
     setPaperlessTest({
       status: 'running',
-      title: 'Paperless-Test läuft',
-      description: 'Archivist prüft gerade die gespeicherte Paperless REST-Verbindung.',
-      hints: ['Der Test nutzt die gespeicherte Base URL und den gespeicherten API-Token.']
+      title: t('settings.paperless.test_running.title'),
+      description: t('settings.paperless.test_running.description'),
+      hints: [t('settings.paperless.test_running.hint')]
     });
     api
       .testPaperless()
       .then((data) => {
-        setPaperlessTest(data.ok ? paperlessTestSuccess() : paperlessTestFailure(data.error));
+        setPaperlessTest(data.ok ? paperlessTestSuccess(t) : paperlessTestFailure(data.error, t));
       })
       .catch((err) => {
-        setPaperlessTest(paperlessTestFailure(err.message));
+        setPaperlessTest(paperlessTestFailure(errorToString(err), t));
       });
   };
   const runProviderTest = () => {
     setProviderTest({
       status: 'running',
-      title: 'Provider-Test läuft',
-      description: `Archivist prüft gerade Provider '${selectedDefaultProvider.name}' mit dem gespeicherten Textmodell.`,
-      hints: ['Der Test nutzt gespeicherte Provider-Settings und gespeicherte API-Key-Referenzen.']
+      title: t('settings.provider.test_running.title'),
+      description: t('settings.provider.test_running.description', { provider: selectedDefaultProvider.name }),
+      hints: [t('settings.provider.test_running.hint')]
     });
     api
       .testProvider()
       .then((data) => {
-        setProviderTest(data.ok ? providerTestSuccess(selectedDefaultProvider) : providerTestFailure(selectedDefaultProvider, data.error));
+        setProviderTest(data.ok ? providerTestSuccess(selectedDefaultProvider, t) : providerTestFailure(selectedDefaultProvider, data.error, t));
       })
       .catch((err) => {
-        setProviderTest(providerTestFailure(selectedDefaultProvider, err.message));
+        setProviderTest(providerTestFailure(selectedDefaultProvider, errorToString(err), t));
       });
   };
 
   return (
     <section className="page">
-      <PageHeader title="Runtime Settings" />
+      <PageHeader title={t('settings.title')} />
+      <div className="settings-language-row">
+        <LanguageSelector compact />
+      </div>
       <div className="settings-grid">
         <fieldset>
-          <legend>Paperless</legend>
+          <legend>{t('settings.paperless')}</legend>
           <label>
-            Base URL
+            {t('settings.paperless.base_url')}
             <input value={settings.paperless.base_url} onChange={(event) => update((s) => ({ ...s, paperless: { ...s.paperless, base_url: event.target.value } }))} />
           </label>
           <p className="field-hint">
-            Use the URL the Archivist backend can reach. Do not enter this Archivist UI URL here.
+            {t('settings.paperless.base_url_hint')}
           </p>
           <label>
-            API token
-            <input value={token} type="password" onChange={(event) => setToken(event.target.value)} placeholder={settings.paperless.token_secret_id ? 'Configured' : ''} />
+            {t('settings.paperless.api_token')}
+            <input value={token} type="password" onChange={(event) => setToken(event.target.value)} placeholder={settings.paperless.token_secret_id ? t('settings.paperless.configured') : ''} />
           </label>
           <label className="inline">
             <input
@@ -1512,17 +1545,17 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
               checked={settings.paperless.login_bridge_enabled}
               onChange={(event) => update((s) => ({ ...s, paperless: { ...s.paperless, login_bridge_enabled: event.target.checked } }))}
             />
-            Allow Paperless-ngx login bridge
+            {t('settings.paperless.login_bridge')}
           </label>
-          <button title="Test Paperless" disabled={paperlessTest?.status === 'running'} onClick={runPaperlessTest}>
-            <Database size={16} /> {paperlessTest?.status === 'running' ? 'Test läuft...' : 'Test'}
+          <button title={t('generic.test')} disabled={paperlessTest?.status === 'running'} onClick={runPaperlessTest}>
+            <Database size={16} /> {paperlessTest?.status === 'running' ? t('generic.testing') : t('generic.test')}
           </button>
           <ConnectionTestFeedback state={paperlessTest} />
         </fieldset>
         <fieldset>
-          <legend>AI Defaults</legend>
+          <legend>{t('settings.ai_defaults')}</legend>
           <label>
-            Default provider
+            {t('settings.ai.default_provider')}
             <select value={settings.ai.default_provider} onChange={(event) => selectDefaultProvider(event.target.value)}>
               {settings.ai.providers.map((provider) => (
                 <option key={provider.name} value={provider.name}>{provider.name}</option>
@@ -1530,11 +1563,11 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
             </select>
           </label>
           <label>
-            Legacy Ollama URL
+            {t('settings.ai.legacy_ollama_url')}
             <input value={settings.ai.ollama_base_url} onChange={(event) => update((s) => ({ ...s, ai: { ...s.ai, ollama_base_url: event.target.value } }))} />
           </label>
           <div className="settings-field">
-            Fallback text model
+            {t('settings.ai.fallback_text_model')}
             <ProviderModelSelect
               capability="text"
               provider={selectedDefaultProvider}
@@ -1545,7 +1578,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
             />
           </div>
           <div className="settings-field">
-            Fallback vision model
+            {t('settings.ai.fallback_vision_model')}
             <ProviderModelSelect
               capability="vision"
               provider={selectedDefaultProvider}
@@ -1555,43 +1588,43 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
               onRefresh={() => loadOllamaModels(selectedDefaultProvider.name)}
             />
           </div>
-          <button title="Test provider" disabled={providerTest?.status === 'running'} onClick={runProviderTest}>
-            <Activity size={16} /> {providerTest?.status === 'running' ? 'Test läuft...' : 'Test'}
+          <button title={t('generic.test')} disabled={providerTest?.status === 'running'} onClick={runProviderTest}>
+            <Activity size={16} /> {providerTest?.status === 'running' ? t('generic.testing') : t('generic.test')}
           </button>
           <ConnectionTestFeedback state={providerTest} />
         </fieldset>
         <fieldset>
-          <legend>Workflow</legend>
+          <legend>{t('settings.workflow')}</legend>
           <label>
-            Mode
+            {t('settings.workflow.mode')}
             <select value={settings.workflow.mode} onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, mode: event.target.value as RuntimeSettings['workflow']['mode'] } }))}>
               {workflowModeOptions.map((option) => (
                 <option key={option.value} value={option.value}>
-                  {option.label}
+                  {t(option.labelKey)}
                 </option>
               ))}
             </select>
-            <small>{workflowModeDescription(settings.workflow.mode)}</small>
+            <small>{workflowModeDescription(settings.workflow.mode, t)}</small>
           </label>
           <label>
-            OCR pages
+            {t('settings.workflow.ocr_pages')}
             <input type="number" min="1" max="20" value={settings.ocr.page_limit} onChange={(event) => update((s) => ({ ...s, ocr: { ...s.ocr, page_limit: Number(event.target.value) } }))} />
           </label>
           <label>
-            Max tags
+            {t('settings.workflow.max_tags')}
             <input type="number" min="1" max="20" value={settings.tagging.max_tags} onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, max_tags: Number(event.target.value) } }))} />
           </label>
           <label>
-            Tag confidence
+            {t('settings.workflow.tag_confidence')}
             <input type="number" min="0" max="1" step="0.05" value={settings.tagging.confidence_threshold} onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, confidence_threshold: Number(event.target.value) } }))} />
           </label>
           <label>
-            Tag output language
+            {t('settings.workflow.tag_output_language')}
             <input
               list="tag-output-language-options"
               value={settings.tagging.tag_output_language}
               onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, tag_output_language: event.target.value } }))}
-              placeholder="BCP-47 language tag, e.g. de"
+              placeholder={t('settings.workflow.tag_output_placeholder')}
             />
             <datalist id="tag-output-language-options">
               {worldLanguages.map((language) => (
@@ -1600,77 +1633,77 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
                 </option>
               ))}
             </datalist>
-            <small>Used only for newly generated business tags; existing Paperless tags stay exact.</small>
+            <small>{t('settings.workflow.tag_output_hint')}</small>
           </label>
           <label>
-            Max fields
+            {t('settings.workflow.max_fields')}
             <input type="number" min="1" max="50" value={settings.fields.max_fields} onChange={(event) => update((s) => ({ ...s, fields: { ...s.fields, max_fields: Number(event.target.value) } }))} />
           </label>
           <label>
-            Field confidence
+            {t('settings.workflow.field_confidence')}
             <input type="number" min="0" max="1" step="0.05" value={settings.fields.confidence_threshold} onChange={(event) => update((s) => ({ ...s, fields: { ...s.fields, confidence_threshold: Number(event.target.value) } }))} />
           </label>
           <label>
-            Metadata confidence
+            {t('settings.workflow.metadata_confidence')}
             <input type="number" min="0" max="1" step="0.05" value={settings.metadata.confidence_threshold} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, confidence_threshold: Number(event.target.value) } }))} />
           </label>
           <label>
-            Date confidence
+            {t('settings.workflow.date_confidence')}
             <input type="number" min="0" max="1" step="0.05" value={settings.metadata.document_date_confidence_threshold} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, document_date_confidence_threshold: Number(event.target.value) } }))} />
           </label>
           <label className="inline">
             <input type="checkbox" checked={settings.metadata.overwrite_existing_correspondent} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, overwrite_existing_correspondent: event.target.checked } }))} />
-            Overwrite existing correspondent
+            {t('settings.workflow.overwrite_correspondent')}
           </label>
           <label className="inline">
             <input type="checkbox" checked={settings.metadata.overwrite_existing_document_type} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, overwrite_existing_document_type: event.target.checked } }))} />
-            Overwrite existing document type
+            {t('settings.workflow.overwrite_document_type')}
           </label>
           <label className="inline">
             <input type="checkbox" checked={settings.metadata.overwrite_existing_document_date} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, overwrite_existing_document_date: event.target.checked } }))} />
-            Overwrite existing document date
+            {t('settings.workflow.overwrite_document_date')}
           </label>
           <label className="inline">
             <input type="checkbox" checked={settings.metadata.allow_new_correspondents} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, allow_new_correspondents: event.target.checked } }))} />
-            Allow new correspondents to be proposed
+            {t('settings.workflow.allow_new_correspondents')}
           </label>
           <label className="inline">
             <input type="checkbox" checked={settings.metadata.allow_new_document_types} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, allow_new_document_types: event.target.checked } }))} />
-            Allow new document types to be proposed
+            {t('settings.workflow.allow_new_document_types')}
           </label>
           <label className="inline">
             <input type="checkbox" checked={settings.tagging.allow_new_tags} onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, allow_new_tags: event.target.checked } }))} />
-            Allow new tags
+            {t('settings.workflow.allow_new_tags')}
           </label>
           <label>
-            Include tags
+            {t('settings.workflow.include_tags')}
             <input
               value={settings.workflow.rules.include_tags.join(', ')}
               onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, rules: { ...s.workflow.rules, include_tags: splitTags(event.target.value) } } }))}
-              placeholder="optional, comma separated"
+              placeholder={t('settings.workflow.optional_tags')}
             />
           </label>
           <label>
-            Exclude tags
+            {t('settings.workflow.exclude_tags')}
             <input
               value={settings.workflow.rules.exclude_tags.join(', ')}
               onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, rules: { ...s.workflow.rules, exclude_tags: splitTags(event.target.value) } } }))}
-              placeholder="optional, comma separated"
+              placeholder={t('settings.workflow.optional_tags')}
             />
           </label>
         </fieldset>
       </div>
-      <PageHeader title="Model Providers" />
+      <PageHeader title={t('settings.providers')} />
       <div className="provider-list">
         {settings.ai.providers.map((provider, index) => (
           <fieldset key={`${provider.name}-${index}`}>
-            <legend>{provider.name || 'Provider'}</legend>
+            <legend>{provider.name || t('settings.provider.provider')}</legend>
             <label>
-              Name
+              {t('settings.provider.name')}
               <input value={provider.name} onChange={(event) => updateProvider(index, { name: event.target.value })} />
             </label>
             <label>
-              Kind
+              {t('settings.provider.kind')}
               <select
                 value={provider.kind}
                 onChange={(event) => {
@@ -1690,11 +1723,11 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
               </select>
             </label>
             <label>
-              Base URL
+              {t('settings.provider.base_url')}
               <input value={provider.base_url} onChange={(event) => updateProvider(index, { base_url: event.target.value })} />
             </label>
             <label>
-              Input $/1M tokens
+              {t('settings.provider.input_cost')}
               <input
                 type="number"
                 min="0"
@@ -1704,7 +1737,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
               />
             </label>
             <label>
-              Output $/1M tokens
+              {t('settings.provider.output_cost')}
               <input
                 type="number"
                 min="0"
@@ -1714,7 +1747,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
               />
             </label>
             <div className="settings-field">
-              Text model
+              {t('settings.provider.text_model')}
               <ProviderModelSelect
                 capability="text"
                 provider={provider}
@@ -1725,7 +1758,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
               />
             </div>
             <div className="settings-field">
-              Vision model
+              {t('settings.provider.vision_model')}
               <ProviderModelSelect
                 capability="vision"
                 provider={provider}
@@ -1736,28 +1769,28 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
               />
             </div>
             <label>
-              API key
+              {t('settings.provider.api_key')}
               <input
                 type="password"
                 value={providerSecrets[provider.name] ?? ''}
-                placeholder={provider.secret_id ? 'Configured' : ''}
+                placeholder={provider.secret_id ? t('settings.paperless.configured') : ''}
                 onChange={(event) => setProviderSecrets((current) => ({ ...current, [provider.name]: event.target.value }))}
               />
             </label>
             <label className="inline">
               <input type="checkbox" checked={provider.enabled} onChange={(event) => updateProvider(index, { enabled: event.target.checked })} />
-              Enabled
+              {t('settings.provider.enabled')}
             </label>
           </fieldset>
         ))}
       </div>
       <div className="toolbar">
-        <button title="Add provider" onClick={addProvider}>
-          <UserPlus size={16} /> Add Provider
+        <button title={t('settings.provider.add')} onClick={addProvider}>
+          <UserPlus size={16} /> {t('settings.provider.add')}
         </button>
         <ActionButton
           icon={<Save />}
-          label="Save"
+          label={t('generic.save')}
           busy={busy}
           onClick={() => run(setBusy, setError, () => api.saveSettings(settings, token, providerSecrets).then((saved) => {
             const nextSettings = withModelDefaults(saved);
@@ -1765,9 +1798,9 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
             setSavedSettings(nextSettings);
             setToken('');
             setProviderSecrets({});
-            setResult('Saved');
+            setResult(t('generic.saved'));
             refreshInstalledOllamaModels(nextSettings);
-          }))}
+          }), t)}
         />
         {result && <span className="result">{result}</span>}
       </div>
@@ -1776,6 +1809,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
 }
 
 function ConnectionTestFeedback({ state }: { state: ConnectionTestState | null }) {
+  const { t } = useI18n();
   if (!state) return null;
   return (
     <div className={`connection-feedback ${state.status}`} role={state.status === 'running' ? 'status' : 'alert'} aria-live="polite">
@@ -1795,7 +1829,7 @@ function ConnectionTestFeedback({ state }: { state: ConnectionTestState | null }
       )}
       {state.details && (
         <details>
-          <summary>Technische Details</summary>
+          <summary>{t('settings.details')}</summary>
           <code>{state.details}</code>
         </details>
       )}
@@ -1803,22 +1837,22 @@ function ConnectionTestFeedback({ state }: { state: ConnectionTestState | null }
   );
 }
 
-function paperlessTestSuccess(): ConnectionTestState {
+function paperlessTestSuccess(t: TFunction): ConnectionTestState {
   return {
     status: 'success',
-    title: 'Paperless-Verbindung funktioniert',
-    description: 'Archivist konnte die Paperless REST API mit den gespeicherten Einstellungen erreichen.',
-    hints: ['Du kannst jetzt die Inventar-Synchronisierung starten oder Jobs queueen.']
+    title: t('settings.paperless.success.title'),
+    description: t('settings.paperless.success.description'),
+    hints: [t('settings.paperless.success.hint')]
   };
 }
 
-function paperlessTestFailure(error?: string): ConnectionTestState {
+function paperlessTestFailure(error: string | undefined, t: TFunction): ConnectionTestState {
   const details = sanitizeConnectionDetail(error || 'Paperless test failed');
   return {
     status: 'error',
-    title: 'Paperless-Verbindung fehlgeschlagen',
-    description: paperlessProblemDescription(details),
-    hints: paperlessProblemHints(details),
+    title: t('settings.paperless.failure.title'),
+    description: paperlessProblemDescription(details, t),
+    hints: paperlessProblemHints(details, t),
     details
   };
 }
@@ -1826,7 +1860,8 @@ function paperlessTestFailure(error?: string): ConnectionTestState {
 function paperlessUnsavedSettingsFeedback(
   settings: RuntimeSettings,
   savedSettings: RuntimeSettings,
-  token: string
+  token: string,
+  t: TFunction
 ): ConnectionTestState {
   const changedFields = [
     settings.paperless.base_url.trim() !== savedSettings.paperless.base_url.trim() ? 'Base URL' : null,
@@ -1836,12 +1871,12 @@ function paperlessUnsavedSettingsFeedback(
   ].filter(Boolean);
   return {
     status: 'error',
-    title: 'Paperless-Settings noch nicht gespeichert',
-    description: 'Der Verbindungstest nutzt gespeicherte Settings. Deine aktuellen Eingaben sind noch nicht aktiv.',
+    title: t('settings.paperless.unsaved.title'),
+    description: t('settings.paperless.unsaved.description'),
     hints: [
-      `Geändert: ${changedFields.join(', ')}.`,
-      'Klicke zuerst auf Save und starte danach den Paperless-Test erneut.',
-      `Aktuell gespeichert ist: ${savedSettings.paperless.base_url || '(leer)'}`
+      t('settings.paperless.unsaved.changed', { fields: changedFields.join(', ') }),
+      t('settings.paperless.unsaved.save_first'),
+      t('settings.paperless.unsaved.saved_url', { url: savedSettings.paperless.base_url || t('generic.empty') })
     ],
     details: `Unsaved Paperless settings. Current Base URL: ${settings.paperless.base_url || '(empty)'}; saved Base URL: ${savedSettings.paperless.base_url || '(empty)'}`
   };
@@ -1861,117 +1896,120 @@ function paperlessBaseUrlProblem(baseUrl: string): { reason: 'invalid' | 'self';
   return null;
 }
 
-function paperlessBaseUrlProblemFeedback(problem: { reason: 'invalid' | 'self'; baseUrl: string; appOrigin?: string }): ConnectionTestState {
+function paperlessBaseUrlProblemFeedback(
+  problem: { reason: 'invalid' | 'self'; baseUrl: string; appOrigin?: string },
+  t: TFunction
+): ConnectionTestState {
   if (problem.reason === 'invalid') {
     return {
       status: 'error',
-      title: 'Paperless Base URL ist ungültig',
-      description: 'Die Paperless Base URL muss eine vollständige http- oder https-URL sein.',
+      title: t('settings.paperless.invalid_url.title'),
+      description: t('settings.paperless.invalid_url.description'),
       hints: [
-        'Trage die URL ein, die der Archivist-Backend-Pod oder Container erreichen kann.',
-        'Beispiel in Docker Compose: http://paperless:8000',
-        'Speichere die Settings und starte den Test erneut.'
+        t('settings.paperless.hint.backend_url'),
+        t('settings.paperless.hint.compose_example'),
+        t('settings.paperless.hint.save_retry')
       ],
       details: `Invalid Paperless Base URL: ${problem.baseUrl || '(empty)'}`
     };
   }
   return {
     status: 'error',
-    title: 'Paperless Base URL zeigt auf Archivist',
-    description: 'Die eingetragene Paperless Base URL ist die Archivist-App selbst. Dadurch testet Archivist gegen seine eigene API und nicht gegen Paperless-ngx.',
+    title: t('settings.paperless.self_url.title'),
+    description: t('settings.paperless.self_url.description'),
     hints: [
-      'Trage die Paperless-ngx URL ein, nicht die Archivist-URL.',
-      'In Kubernetes ist meist der interne Paperless-Service-DNS-Name richtig, nicht die Archivist-Ingress-URL.',
-      'Speichere die Settings und starte den Test erneut.'
+      t('settings.paperless.hint.not_archivist'),
+      t('settings.paperless.hint.kubernetes_internal'),
+      t('settings.paperless.hint.save_retry')
     ],
     details: `Paperless Base URL points to Archivist itself: ${problem.baseUrl}. App origin: ${problem.appOrigin ?? 'unknown'}`
   };
 }
 
-function providerTestSuccess(provider: ModelProviderDescriptor): ConnectionTestState {
+function providerTestSuccess(provider: ModelProviderDescriptor, t: TFunction): ConnectionTestState {
   const providerName = provider.name || provider.kind;
   const isOllama = provider.kind === 'ollama';
   return {
     status: 'success',
-    title: 'Provider-Verbindung funktioniert',
+    title: t('settings.provider.success.title'),
     description: isOllama
-      ? `Archivist konnte '${providerName}' erreichen und das konfigurierte Textmodell prüfen.`
-      : `Archivist konnte '${providerName}' erreichen und eine kurze Testanfrage ausführen.`,
+      ? t('settings.provider.success.ollama', { provider: providerName })
+      : t('settings.provider.success.generic', { provider: providerName }),
     hints: isOllama
-      ? ['Wenn du das OCR/Vision-Modell separat geändert hast, prüfe zusätzlich die installierte Ollama-Modellliste.']
-      : ['Der Provider ist einsatzbereit. Prüfe Review-Ergebnisse trotzdem zuerst im Review-Modus.']
+      ? [t('settings.provider.success.ollama_hint')]
+      : [t('settings.provider.success.generic_hint')]
   };
 }
 
-function providerTestFailure(provider: ModelProviderDescriptor, error?: string): ConnectionTestState {
+function providerTestFailure(provider: ModelProviderDescriptor, error: string | undefined, t: TFunction): ConnectionTestState {
   const details = sanitizeConnectionDetail(error || 'Provider test failed');
   return {
     status: 'error',
-    title: 'Provider-Verbindung fehlgeschlagen',
-    description: providerProblemDescription(provider, details),
-    hints: providerProblemHints(provider, details),
+    title: t('settings.provider.failure.title'),
+    description: providerProblemDescription(provider, details, t),
+    hints: providerProblemHints(provider, details, t),
     details
   };
 }
 
-function paperlessProblemDescription(details: string) {
+function paperlessProblemDescription(details: string, t: TFunction) {
   const lower = details.toLowerCase();
   if (lower.includes('points to the paperless-ngx service') || lower.includes('406') || lower.includes('not acceptable')) {
-    return 'Archivist erreicht zwar einen Server, aber dieser akzeptiert die Paperless REST-Anfrage nicht.';
+    return t('settings.paperless.failure.not_acceptable');
   }
   if (lower.includes('api token') || lower.includes('secret') || lower.includes('token')) {
-    return 'Archivist konnte keinen gültigen Paperless API-Token verwenden.';
+    return t('settings.paperless.failure.token');
   }
   if (lower.includes('401') || lower.includes('403') || lower.includes('unauthorized') || lower.includes('forbidden')) {
-    return 'Paperless hat die Anfrage abgelehnt. Der API-Token ist wahrscheinlich ungültig oder hat zu wenig Rechte.';
+    return t('settings.paperless.failure.auth');
   }
   if (lower.includes('404')) {
-    return 'Die Paperless API wurde unter der konfigurierten Base URL nicht gefunden.';
+    return t('settings.paperless.failure.not_found');
   }
   if (lower.includes('timeout') || lower.includes('timed out')) {
-    return 'Paperless hat nicht rechtzeitig geantwortet.';
+    return t('settings.paperless.failure.timeout');
   }
   if (lower.includes('connect') || lower.includes('dns') || lower.includes('resolve') || lower.includes('refused')) {
-    return 'Archivist konnte Paperless über das Netzwerk nicht erreichen.';
+    return t('settings.paperless.failure.network');
   }
-  return 'Der Paperless-Test ist fehlgeschlagen. Die technischen Details enthalten die Rückmeldung des Backends.';
+  return t('settings.paperless.failure.default');
 }
 
-function paperlessProblemHints(details: string) {
+function paperlessProblemHints(details: string, t: TFunction) {
   const lower = details.toLowerCase();
   if (lower.includes('points to the paperless-ngx service') || lower.includes('406') || lower.includes('not acceptable')) {
     return [
-      'Prüfe, ob die Base URL wirklich die Paperless-ngx REST API erreicht.',
-      'Falls die Browser-URL über SSO, Proxy-Regeln oder Content-Negotiation läuft, nutze stattdessen die interne Paperless-Service-URL.',
-      'Für Kubernetes ist meist eine interne Service-URL besser als die externe Browser-URL.',
-      'Speichere die Settings vor dem erneuten Test.'
+      t('settings.paperless.hint.real_api'),
+      t('settings.paperless.hint.internal_service'),
+      t('settings.paperless.hint.kubernetes_internal'),
+      t('settings.paperless.hint.save_retry')
     ];
   }
   if (lower.includes('api token') || lower.includes('secret') || lower.includes('token') || lower.includes('401') || lower.includes('403')) {
     return [
-      'Erzeuge in Paperless einen neuen API-Token für einen berechtigten User.',
-      'Trage den Token in Settings ein und speichere die Settings vor dem erneuten Test.',
-      'Prüfe, ob der User Dokumente lesen und Metadaten aktualisieren darf.'
+      t('settings.paperless.hint.new_token'),
+      t('settings.paperless.hint.save_token'),
+      t('settings.paperless.hint.permissions')
     ];
   }
   if (lower.includes('404')) {
     return [
-      'Prüfe die Paperless Base URL. Sie muss auf die Paperless-Instanz zeigen, nicht auf eine Unterseite.',
-      'Teste die URL aus Sicht des Archivist-Containers oder API-Prozesses.',
-      'Beispiel in Docker Compose: http://paperless:8000'
+      t('settings.paperless.hint.url_root'),
+      t('settings.paperless.hint.backend_reachability'),
+      t('settings.paperless.hint.compose_example')
     ];
   }
   if (lower.includes('timeout') || lower.includes('timed out')) {
     return [
-      'Prüfe, ob Paperless läuft und nicht überlastet ist.',
-      'Prüfe Netzwerk, DNS und Reverse Proxy zwischen Archivist und Paperless.',
-      'Erhöhe den Paperless Timeout in den Settings, wenn die Instanz langsam antwortet.'
+      t('settings.paperless.hint.running'),
+      t('settings.paperless.hint.network'),
+      t('settings.paperless.hint.timeout')
     ];
   }
   return [
-    'Prüfe, ob die Paperless Base URL aus Sicht des Archivist-Backends erreichbar ist.',
-    'Prüfe Container-Netzwerk, DNS-Namen, Protokoll http/https und Proxy-Konfiguration.',
-    'Speichere geänderte Settings vor dem nächsten Test.'
+    t('settings.paperless.hint.backend_reachability'),
+    t('settings.paperless.hint.network'),
+    t('settings.paperless.hint.save_retry')
   ];
 }
 
@@ -1985,66 +2023,66 @@ function paperlessSettingsChanged(settings: RuntimeSettings, savedSettings: Runt
   );
 }
 
-function providerProblemDescription(provider: ModelProviderDescriptor, details: string) {
+function providerProblemDescription(provider: ModelProviderDescriptor, details: string, t: TFunction) {
   const lower = details.toLowerCase();
   if (provider.kind === 'ollama') {
     if (lower.includes('model') && lower.includes('not listed')) {
-      return 'Ollama ist erreichbar, aber das konfigurierte Textmodell ist nicht installiert.';
+      return t('settings.provider.failure.ollama_missing_model');
     }
     if (lower.includes('timeout') || lower.includes('timed out')) {
-      return 'Ollama hat nicht rechtzeitig geantwortet.';
+      return t('settings.provider.failure.ollama_timeout');
     }
     if (lower.includes('connect') || lower.includes('dns') || lower.includes('resolve') || lower.includes('refused')) {
-      return 'Archivist konnte den Ollama-Service nicht erreichen.';
+      return t('settings.provider.failure.ollama_network');
     }
-    return 'Der Ollama-Test ist fehlgeschlagen.';
+    return t('settings.provider.failure.ollama_default');
   }
   if (lower.includes('401') || lower.includes('403') || lower.includes('unauthorized') || lower.includes('forbidden')) {
-    return 'Der Provider hat die Anfrage abgelehnt. API-Key, Berechtigungen oder Modellzugriff stimmen wahrscheinlich nicht.';
+    return t('settings.provider.failure.auth');
   }
   if (lower.includes('model')) {
-    return 'Der Provider konnte das konfigurierte Modell nicht verwenden.';
+    return t('settings.provider.failure.model');
   }
   if (lower.includes('timeout') || lower.includes('timed out')) {
-    return 'Der Provider hat nicht rechtzeitig geantwortet.';
+    return t('settings.provider.failure.timeout');
   }
-  return 'Der Provider-Test ist fehlgeschlagen.';
+  return t('settings.provider.failure.default');
 }
 
-function providerProblemHints(provider: ModelProviderDescriptor, details: string) {
+function providerProblemHints(provider: ModelProviderDescriptor, details: string, t: TFunction) {
   const lower = details.toLowerCase();
   if (provider.kind === 'ollama') {
     if (lower.includes('model') && lower.includes('not listed')) {
       return [
-        'Installiere das Modell mit ollama pull oder wähle ein installiertes Modell aus dem Dropdown.',
-        'Klicke danach auf Refresh in der Modellliste und speichere die Settings.',
-        'Prüfe, ob Textmodell und Vision/OCR-Modell getrennt korrekt gesetzt sind.'
+        t('settings.provider.hint.install_model'),
+        t('settings.provider.hint.refresh_save'),
+        t('settings.provider.hint.text_vision')
       ];
     }
     return [
-      'Prüfe, ob der Ollama-Service läuft.',
-      'Prüfe die Provider Base URL aus Sicht des Archivist-Backends, z.B. http://ollama:11434 in Docker Compose.',
-      'Prüfe Firewall, DNS und ob der Ollama-Endpunkt /api/tags erreichbar ist.'
+      t('settings.provider.hint.ollama_running'),
+      t('settings.provider.hint.ollama_url'),
+      t('settings.provider.hint.ollama_tags')
     ];
   }
   if (lower.includes('401') || lower.includes('403') || lower.includes('unauthorized') || lower.includes('forbidden')) {
     return [
-      'Prüfe den API-Key und speichere ihn erneut in Settings.',
-      'Prüfe beim Anbieter, ob der Key Zugriff auf das ausgewählte Modell hat.',
-      'Prüfe, ob die Provider Base URL zum Anbieter passt.'
+      t('settings.provider.hint.api_key'),
+      t('settings.provider.hint.model_access'),
+      t('settings.provider.hint.base_url')
     ];
   }
   if (lower.includes('model')) {
     return [
-      'Wähle ein vom Provider unterstütztes Textmodell aus dem Dropdown.',
-      'Prüfe, ob das Modell für deinen API-Key freigeschaltet ist.',
-      'Speichere die Settings und starte den Test erneut.'
+      t('settings.provider.hint.supported_model'),
+      t('settings.provider.hint.model_access'),
+      t('settings.paperless.hint.save_retry')
     ];
   }
   return [
-    'Prüfe Provider Base URL, API-Key und Netzwerkverbindung.',
-    'Prüfe, ob der Provider erreichbar ist und keine Rate Limits greifen.',
-    'Speichere geänderte Settings vor dem nächsten Test.'
+    t('settings.provider.hint.base_url'),
+    t('settings.provider.hint.rate_limits'),
+    t('settings.paperless.hint.save_retry')
   ];
 }
 
@@ -2084,6 +2122,7 @@ function ProviderModelSelect({
   onChange: (value: string) => void;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   const usesInstalledModels = provider.kind === 'ollama' && !isOllamaCloudProvider(provider);
   const hasReliableInstalledList = Boolean(ollamaState?.loaded && !ollamaState.error);
   const options = usesInstalledModels
@@ -2091,7 +2130,8 @@ function ProviderModelSelect({
       ollamaState?.models ?? [],
       value,
       hasReliableInstalledList,
-      ollamaSelectPlaceholder(ollamaState)
+      ollamaSelectPlaceholder(ollamaState, t),
+      t
     )
     : modelOptions(provider, capability, value).map((option) => ({
       value: option.value,
@@ -2117,7 +2157,7 @@ function ProviderModelSelect({
         {usesInstalledModels && (
           <button
             className="icon-button"
-            title="Reload installed Ollama models"
+            title={t('settings.ollama.reload_models')}
             type="button"
             disabled={ollamaState?.loading}
             onClick={onRefresh}
@@ -2140,21 +2180,22 @@ function installedOllamaModelOptions(
   models: OllamaInstalledModel[],
   current: string,
   loaded: boolean,
-  placeholder: string
+  placeholder: string,
+  t: TFunction
 ) {
   const options = models.map((model) => ({
     value: model.name,
-    label: installedOllamaModelLabel(model)
+    label: installedOllamaModelLabel(model, t)
   }));
   const hasCurrent = models.some((model) => model.name === current);
   if (current && !loaded && !hasCurrent) {
     return [{ value: current, label: current }, ...options];
   }
   if (current && loaded && !hasCurrent) {
-    return [{ value: current, label: `⚠ ${current} · nicht installiert` }, ...options];
+    return [{ value: current, label: `⚠ ${current} · ${t('settings.ollama.not_installed')}` }, ...options];
   }
   if (!current && loaded && options.length === 0) {
-    return [{ value: '', label: 'Keine installierten Modelle' }];
+    return [{ value: '', label: t('settings.ollama.none_installed') }];
   }
   if (!current && !loaded) {
     return [{ value: '', label: placeholder }];
@@ -2162,23 +2203,23 @@ function installedOllamaModelOptions(
   return options;
 }
 
-function ollamaSelectPlaceholder(state?: OllamaModelLoadState) {
-  if (state?.error) return 'Keine Modellliste verfügbar';
-  if (state?.loading) return 'Installierte Modelle werden geladen';
-  return 'Installierte Modelle laden';
+function ollamaSelectPlaceholder(state: OllamaModelLoadState | undefined, t: TFunction) {
+  if (state?.error) return t('settings.ollama.unavailable');
+  if (state?.loading) return t('settings.ollama.loading_select');
+  return t('settings.ollama.load_select');
 }
 
-function installedOllamaModelLabel(model: OllamaInstalledModel) {
+function installedOllamaModelLabel(model: OllamaInstalledModel, t: TFunction) {
   return [
     model.name,
-    model.parameter_size || 'unbekannte Parameter',
-    model.quantization_level || 'unbekannte Quantisierung',
-    formatModelSize(model.size_bytes)
+    model.parameter_size || t('settings.ollama.unknown_parameters'),
+    model.quantization_level || t('settings.ollama.unknown_quantization'),
+    formatModelSize(model.size_bytes, t)
   ].join(' · ');
 }
 
-function formatModelSize(sizeBytes?: number | null) {
-  if (!sizeBytes || sizeBytes <= 0) return 'unbekannte Größe';
+function formatModelSize(sizeBytes: number | null | undefined, t?: TFunction) {
+  if (!sizeBytes || sizeBytes <= 0) return t ? t('settings.ollama.unknown_size') : 'unknown size';
   return `${(sizeBytes / 1024 ** 3).toFixed(sizeBytes >= 10 * 1024 ** 3 ? 1 : 2)} GB`;
 }
 
@@ -2189,17 +2230,18 @@ function OllamaModelStatus({
   state?: OllamaModelLoadState;
   currentIsMissing: boolean;
 }) {
+  const { t } = useI18n();
   if (state?.loading) {
-    return <p className="field-hint">Installierte Ollama-Modelle werden geladen...</p>;
+    return <p className="field-hint">{t('settings.ollama.loading')}</p>;
   }
   if (state?.error) {
     return <p className="field-hint error">{state.error}</p>;
   }
   if (state?.loaded && state.models.length === 0) {
-    return <p className="field-hint warning">Keine installierten Ollama-Modelle gefunden.</p>;
+    return <p className="field-hint warning">{t('settings.ollama.no_models')}</p>;
   }
   if (currentIsMissing) {
-    return <p className="field-hint warning">Gespeichertes Modell ist aktuell nicht installiert.</p>;
+    return <p className="field-hint warning">{t('settings.ollama.model_missing')}</p>;
   }
   return null;
 }
@@ -2265,6 +2307,7 @@ function HardwareRecommendationInfo() {
 }
 
 function Prompts({ setError }: { setError: (error: string | null) => void }) {
+  const { t, formatDateTime } = useI18n();
   const [items, setItems] = useState<Prompt[]>([]);
   const [usage, setUsage] = useState<PromptUsage[]>([]);
   const [selectedStage, setSelectedStage] = useState<Stage>('tags');
@@ -2323,7 +2366,7 @@ function Prompts({ setError }: { setError: (error: string | null) => void }) {
       setItems(promptData.items);
       setUsage(usageData.items);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load prompts');
+      setError(localizedErrorMessage(err, t, 'Could not load prompts'));
     } finally {
       setLoading(false);
     }
@@ -2523,7 +2566,7 @@ function Prompts({ setError }: { setError: (error: string | null) => void }) {
               <dl className="prompt-usage">
                 <div><dt>Runs</dt><dd>{selectedUsage.run_count}</dd></div>
                 <div><dt>Jobs</dt><dd>{selectedUsage.job_count}</dd></div>
-                <div><dt>Last used</dt><dd>{selectedUsage.last_used_at ? new Date(selectedUsage.last_used_at).toLocaleString() : '-'}</dd></div>
+                <div><dt>Last used</dt><dd>{selectedUsage.last_used_at ? formatDateTime(selectedUsage.last_used_at) : '-'}</dd></div>
                 <div><dt>Model</dt><dd>{[selectedUsage.last_provider, selectedUsage.last_model].filter(Boolean).join(' / ') || '-'}</dd></div>
                 <div><dt>Avg duration</dt><dd>{formatMs(selectedUsage.avg_duration_ms)}</dd></div>
               </dl>
@@ -2545,7 +2588,7 @@ function Prompts({ setError }: { setError: (error: string | null) => void }) {
                   onClick={() => setSelectedPromptId(prompt.id)}
                 >
                   <span>{prompt.name} v{prompt.version}</span>
-                  <small>{prompt.active ? 'active' : new Date(prompt.created_at).toLocaleDateString()}</small>
+                  <small>{prompt.active ? 'active' : formatDateTime(prompt.created_at)}</small>
                 </button>
               ))}
               {stagePrompts.length === 0 && <p className="field-hint">No prompt exists for this stage yet.</p>}
@@ -2765,10 +2808,11 @@ function PromptInfoTooltip({
 }
 
 function Audit({ setError }: { setError: (error: string | null) => void }) {
+  const { t, formatDateTime } = useI18n();
   const [items, setItems] = useState<AuditEvent[]>([]);
   useEffect(() => {
-    api.audit().then((data) => setItems(data.items)).catch((err) => setError(err.message));
-  }, [setError]);
+    api.audit().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t)));
+  }, [setError, t]);
   return (
     <section className="page">
       <PageHeader title="Audit Log" />
@@ -2785,7 +2829,7 @@ function Audit({ setError }: { setError: (error: string | null) => void }) {
           <tbody>
             {items.map((item) => (
               <tr key={item.id}>
-                <td>{new Date(item.created_at).toLocaleString()}</td>
+                <td>{formatDateTime(item.created_at)}</td>
                 <td>{item.event_type}</td>
                 <td>{item.actor_type}</td>
                 <td>{item.paperless_document_id || '-'}</td>
@@ -2800,6 +2844,7 @@ function Audit({ setError }: { setError: (error: string | null) => void }) {
 }
 
 function Users({ setError }: { setError: (error: string | null) => void }) {
+  const { t, formatDateTime } = useI18n();
   const [users, setUsers] = useState<UserItem[]>([]);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [tokens, setTokens] = useState<ApiToken[]>([]);
@@ -2816,7 +2861,7 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
         setSessions(sessionData.items);
         setTokens(tokenData.items);
       })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(localizedErrorMessage(err, t)));
 
   useEffect(() => {
     void load();
@@ -2831,7 +2876,7 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
           setUsername('');
           setPassword('');
           load();
-        }).catch((err) => setError(err.message));
+        }).catch((err) => setError(localizedErrorMessage(err, t)));
       }}>
         <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="username" />
         <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="password" type="password" />
@@ -2854,7 +2899,7 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
                 <td>
                   <select
                     value={user.roles[0] ?? 'viewer'}
-                    onChange={(event) => api.updateUserRoles(user.id, [event.target.value as Role]).then(load).catch((err) => setError(err.message))}
+                    onChange={(event) => api.updateUserRoles(user.id, [event.target.value as Role]).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}
                   >
                     <option value="viewer">viewer</option>
                     <option value="reviewer">reviewer</option>
@@ -2877,16 +2922,16 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
                     onClick={() => api.resetPassword(user.id, resetPasswords[user.id] ?? '').then(() => {
                       setResetPasswords((current) => ({ ...current, [user.id]: '' }));
                       load();
-                    }).catch((err) => setError(err.message))}
+                    }).catch((err) => setError(localizedErrorMessage(err, t)))}
                   >
                     <RotateCcw size={16} />
                   </button>
                 </td>
                 <td>
                   {user.enabled ? (
-                    <button title="Disable user" onClick={() => api.disableUser(user.id).then(load).catch((err) => setError(err.message))}><Power size={16} /> Disable</button>
+                    <button title="Disable user" onClick={() => api.disableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><Power size={16} /> Disable</button>
                   ) : (
-                    <button title="Enable user" onClick={() => api.enableUser(user.id).then(load).catch((err) => setError(err.message))}><Power size={16} /> Enable</button>
+                    <button title="Enable user" onClick={() => api.enableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><Power size={16} /> Enable</button>
                   )}
                 </td>
               </tr>
@@ -2902,12 +2947,12 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
             {sessions.map((session) => (
               <tr key={session.id}>
                 <td>{session.username}</td>
-                <td>{new Date(session.created_at).toLocaleString()}</td>
-                <td>{session.last_seen_at ? new Date(session.last_seen_at).toLocaleString() : '-'}</td>
-                <td>{new Date(session.expires_at).toLocaleString()}</td>
+                <td>{formatDateTime(session.created_at)}</td>
+                <td>{session.last_seen_at ? formatDateTime(session.last_seen_at) : '-'}</td>
+                <td>{formatDateTime(session.expires_at)}</td>
                 <td>{session.revoked_at ? 'revoked' : 'active'}</td>
                 <td>
-                  {!session.revoked_at && <button title="Revoke session" onClick={() => api.revokeSession(session.id).then(load).catch((err) => setError(err.message))}><X size={16} /></button>}
+                  {!session.revoked_at && <button title="Revoke session" onClick={() => api.revokeSession(session.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>}
                 </td>
               </tr>
             ))}
@@ -2921,7 +2966,7 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
           setNewToken(created.token);
           setTokenName('');
           load();
-        }).catch((err) => setError(err.message));
+        }).catch((err) => setError(localizedErrorMessage(err, t)));
       }}>
         <input value={tokenName} onChange={(event) => setTokenName(event.target.value)} placeholder="token name" />
         <button><KeyRound size={16} /> Create Token</button>
@@ -2935,10 +2980,10 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
               <tr key={token.id}>
                 <td>{token.name}</td>
                 <td>{token.scopes.join(', ')}</td>
-                <td>{token.last_used_at ? new Date(token.last_used_at).toLocaleString() : '-'}</td>
+                <td>{token.last_used_at ? formatDateTime(token.last_used_at) : '-'}</td>
                 <td>{token.revoked_at ? 'revoked' : 'active'}</td>
                 <td>
-                  {!token.revoked_at && <button title="Revoke token" onClick={() => api.revokeApiToken(token.id).then(load).catch((err) => setError(err.message))}><X size={16} /></button>}
+                  {!token.revoked_at && <button title="Revoke token" onClick={() => api.revokeApiToken(token.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>}
                 </td>
               </tr>
             ))}
@@ -2946,6 +2991,31 @@ function Users({ setError }: { setError: (error: string | null) => void }) {
         </table>
       </div>
     </section>
+  );
+}
+
+function LanguageSelector({ compact }: { compact?: boolean }) {
+  const { locale, setLocale, localeOptions, t } = useI18n();
+  const selectedBase = locale.toLowerCase().split('-')[0] || 'en';
+  const selectedOption = localeOptions.find((option) => option.tag === selectedBase);
+  return (
+    <label className={`language-selector${compact ? ' compact' : ''}`}>
+      <span>{t('language.selector.label')}</span>
+      <select
+        value={selectedOption?.tag ?? selectedBase}
+        aria-label={t('language.selector.label')}
+        onChange={(event) => setLocale(event.target.value)}
+      >
+        {localeOptions.map((option) => (
+          <option key={option.tag} value={option.tag}>
+            {option.uiName === option.nativeName
+              ? `${option.uiName} · ${t(`language.status.${option.status}`)}`
+              : `${option.uiName} · ${option.nativeName} · ${t(`language.status.${option.status}`)}`}
+          </option>
+        ))}
+      </select>
+      {selectedOption?.status === 'fallback' && <small>{t('language.fallback.hint')}</small>}
+    </label>
   );
 }
 
@@ -2958,6 +3028,7 @@ function PageHeader({ title }: { title: string }) {
 }
 
 function Status({ value }: { value: string }) {
+  const { t } = useI18n();
   const tone = useMemo(() => {
     if (['succeeded', 'success', 'complete'].includes(value)) return 'success';
     if (['failed', 'error'].includes(value)) return 'danger';
@@ -2965,21 +3036,46 @@ function Status({ value }: { value: string }) {
     if (['waiting_review', 'review'].includes(value)) return 'review';
     return 'neutral';
   }, [value]);
-  return <span className={`status ${tone}`}>{statusLabel(value)}</span>;
+  return <span className={`status ${tone}`}>{statusLabel(value, t)}</span>;
 }
 
 function ActionButton({ icon, label, busy, onClick }: { icon: ReactNode; label: string; busy: boolean; onClick: () => void | Promise<void> }) {
   return <button className="primary-button" title={label} disabled={busy} onClick={onClick}>{icon}{label}</button>;
 }
 
-async function run(setBusy: (value: boolean) => void, setError: (value: string | null) => void, action: () => Promise<unknown> | unknown) {
+async function run(
+  setBusy: (value: boolean) => void,
+  setError: (value: string | null) => void,
+  action: () => Promise<unknown> | unknown,
+  t?: TFunction
+) {
   setBusy(true);
   setError(null);
   try {
     await action();
   } catch (err) {
-    setError(err instanceof Error ? err.message : 'Request failed');
+    setError(t ? localizedErrorMessage(err, t) : errorToString(err));
   } finally {
     setBusy(false);
   }
+}
+
+function localizedErrorMessage(err: unknown, t: TFunction, fallback = t('generic.request_failed')) {
+  const message = errorToString(err);
+  const lower = message.toLowerCase();
+  if (lower.includes('401') || lower.includes('403') || lower.includes('unauthorized') || lower.includes('forbidden')) {
+    return `${t('generic.unauthorized')} ${message}`;
+  }
+  if (lower.includes('timeout') || lower.includes('timed out')) {
+    return `${t('generic.timeout')} ${message}`;
+  }
+  if (lower.includes('failed to fetch') || lower.includes('network') || lower.includes('connect')) {
+    return `${t('generic.network_error')} ${message}`;
+  }
+  if (!message || message === 'Request failed') return fallback;
+  return message;
+}
+
+function errorToString(err: unknown) {
+  return err instanceof Error ? err.message : typeof err === 'string' ? err : 'Request failed';
 }

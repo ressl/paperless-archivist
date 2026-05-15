@@ -260,6 +260,45 @@ th {
   font-size: 11px;
 }
 
+.language-selector {
+  display: grid;
+  gap: 6px;
+  color: #b7c5cc;
+  font-size: 12px;
+}
+
+.language-selector select {
+  min-height: 34px;
+  border-color: rgb(255 255 255 / 18%);
+  background: rgb(255 255 255 / 8%);
+  color: #eef3f3;
+}
+
+.language-selector select option {
+  color: var(--ink);
+}
+
+.language-selector small {
+  color: #b7c5cc;
+  line-height: 1.35;
+}
+
+.language-selector.compact {
+  margin: 0 0 18px;
+  color: var(--muted);
+}
+
+.language-selector.compact select {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--ink);
+}
+
+.settings-language-row {
+  max-width: 360px;
+  margin: 0 0 18px;
+}
+
 .workspace {
   min-width: 0;
   padding: 24px;

@@ -230,6 +230,14 @@ correspondent, document type, document date, and field prompts. Existing
 Paperless metadata values must remain exact; only newly generated business tags
 use the configured `tag_output_language`.
 
+Frontend UI language is handled in `frontend/src/i18n/`. `messages.ts` is the
+typed message catalog: adding a key to English requires every complete locale to
+define it before `npm --prefix frontend run typecheck` can pass. The
+`I18nProvider` chooses the browser language on first load, persists the selected
+locale in local storage, formats numbers/dates with `Intl`, and falls back to a
+complete catalog for untranslated languages. Keep document-language logic and UI
+translation logic separate.
+
 When extending language detection, add representative samples to
 `crates/archivist-core/tests/fixtures/language_samples.json` and cover prompt
 rendering without requiring a live provider.
