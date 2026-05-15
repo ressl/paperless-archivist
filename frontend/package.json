@@ -6,6 +6,7 @@
   "scripts": {
     "generate:client": "openapi-typescript ../openapi/openapi.yaml -o src/api/schema.ts",
     "accessibility:check": "node ../scripts/verify/accessibility_static_check.mjs",
+    "test:a11y": "vitest run --reporter=verbose",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "dev": "vite --host 0.0.0.0"
@@ -21,8 +22,15 @@
     "vite": "^7.2.0"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/jest-axe": "^3.5.9",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "openapi-typescript": "^7.10.0"
+    "jest-axe": "^9.0.0",
+    "jsdom": "^25.0.1",
+    "openapi-typescript": "^7.10.0",
+    "vitest": "^2.1.9"
   }
 }

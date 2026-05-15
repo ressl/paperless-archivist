@@ -98,6 +98,14 @@ frontend:accessibility:
   script:
     - pnpm accessibility:check
 
+frontend:a11y-runtime:
+  stage: test
+  extends:
+    - .frontend_base
+    - .default_retry
+  script:
+    - pnpm test:a11y
+
 frontend:build:
   stage: build
   extends:
