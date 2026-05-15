@@ -4,6 +4,8 @@ use anyhow::{Context, Result, anyhow};
 use tokio::process::Command;
 use tracing::debug;
 
+const PDF_RENDER_DPI: u16 = 120;
+
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
     pub path: PathBuf,
@@ -59,6 +61,8 @@ async fn render_pdf_with_pdftoppm(
 
     let status = Command::new("pdftoppm")
         .arg("-png")
+        .arg("-r")
+        .arg(PDF_RENDER_DPI.to_string())
         .arg("-f")
         .arg("1")
         .arg("-l")
@@ -89,7 +93,11 @@ async fn render_pdf_with_pdftoppm(
         }
     }
     pages.sort_by(|a, b| a.path.cmp(&b.path));
-    debug!(pages = pages.len(), "rendered PDF pages for OCR");
+    debug!(
+        pages = pages.len(),
+        dpi = PDF_RENDER_DPI,
+        "rendered PDF pages for OCR"
+    );
     Ok(pages)
 }
 

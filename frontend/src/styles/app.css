@@ -651,6 +651,22 @@ th {
   background: var(--danger-soft);
 }
 
+.live-failure.retry {
+  border-color: #9bb7d4;
+  background: var(--info-soft);
+}
+
+.failure-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.failure-heading .status {
+  flex: 0 0 auto;
+}
+
 .empty-state.compact {
   min-height: auto;
   padding: 10px;

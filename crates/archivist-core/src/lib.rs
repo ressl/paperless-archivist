@@ -1471,8 +1471,10 @@ pub struct DashboardLiveFailure {
     pub paperless_document_id: i32,
     pub stage: Stage,
     pub status: String,
+    pub failure_kind: String,
     pub attempts: i32,
     pub error_message: String,
+    pub next_attempt_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
 }
 

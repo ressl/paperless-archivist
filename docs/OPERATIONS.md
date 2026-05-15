@@ -335,6 +335,13 @@ migration `0004_dashboard_snapshots.sql`.
 The frontend refreshes dashboard data every 30 seconds while the dashboard tab is
 open.
 
+The live processing panel separates hard failures from retryable transient
+errors. A queued job with a previous `error_message` is shown as
+`Retry Scheduled` or `Retry Ready` instead of marking the LLM or Paperless
+service as failed. This is useful for Ollama runner crashes and temporary
+Paperless timeouts: the operator can see the old error, the next retry time,
+and whether the worker has resumed processing.
+
 ## User and Session Operations
 
 Admins manage local users, roles, password resets, sessions, and API tokens from
@@ -384,6 +391,10 @@ OCR PDF rendering uses `pdftoppm` from Poppler in the container. The runtime
 image installs `poppler-utils`. Image inputs (`png`, `jpg`, `jpeg`, `webp`) are
 sent directly to the vision model.
 
+PDF pages are rendered at a bounded 120 DPI before they are sent to a vision
+model. This keeps local Ollama runners from receiving unnecessarily large page
+images and makes GPU memory usage more predictable.
+
 Rendered page images live in temporary directories and are deleted after each
 job.
 
@@ -429,6 +440,10 @@ Common failures:
 
 - `Paperless token is not configured`: save Paperless settings in the UI.
 - `Ollama is reachable but model was not listed`: pull or configure the model.
+- `Ollama vision returned 500`: inspect the live processing panel. If the job
+  is `Retry Scheduled` or `Retry Ready`, the worker will retry it after backoff;
+  repeated hard failures usually indicate a model/runtime issue or an input page
+  the selected vision model cannot handle.
 - `pdftoppm exited`: verify Poppler is installed and the PDF is readable.
 - repeated `validation` failures: use review mode and inspect AI output.
 - empty dashboard history: query the dashboard after migration `0004`; snapshot

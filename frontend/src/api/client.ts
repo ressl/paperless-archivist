@@ -247,8 +247,10 @@ export type DashboardLiveFailure = {
   paperless_document_id: number;
   stage: PipelineStage;
   status: string;
+  failure_kind: string;
   attempts: number;
   error_message: string;
+  next_attempt_at?: string | null;
   updated_at: string;
 };
 

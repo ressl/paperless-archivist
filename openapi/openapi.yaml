@@ -317,15 +317,17 @@ components:
         created_at: { type: string, format: date-time }
     DashboardLiveFailure:
       type: object
-      required: [id, run_id, paperless_document_id, stage, status, attempts, error_message, updated_at]
+      required: [id, run_id, paperless_document_id, stage, status, failure_kind, attempts, error_message, updated_at]
       properties:
         id: { type: string, format: uuid }
         run_id: { type: string, format: uuid }
         paperless_document_id: { type: integer }
         stage: { $ref: "#/components/schemas/Stage" }
         status: { type: string }
+        failure_kind: { type: string, enum: [failed, retry_scheduled, retry_ready] }
         attempts: { type: integer }
         error_message: { type: string }
+        next_attempt_at: { type: [string, "null"], format: date-time }
         updated_at: { type: string, format: date-time }
     DashboardLiveStatus:
       type: object

@@ -37,12 +37,30 @@ pub async fn connect(database_url: &str) -> Result<DbPool> {
 pub async fn migrate(pool: &DbPool) -> Result<()> {
     let migrations_dir =
         std::env::var("ARCHIVIST_MIGRATIONS_DIR").unwrap_or_else(|_| "migrations".to_owned());
-    sqlx::migrate::Migrator::new(Path::new(&migrations_dir))
+    let migrator = sqlx::migrate::Migrator::new(Path::new(&migrations_dir))
         .await
-        .with_context(|| format!("load database migrations from {migrations_dir}"))?
-        .run(pool)
+        .with_context(|| format!("load database migrations from {migrations_dir}"))?;
+
+    let mut connection = pool
+        .acquire()
         .await
-        .context("run database migrations")
+        .context("acquire migration connection")?;
+    const MIGRATION_ADVISORY_LOCK: i64 = 6_122_020_251_700_301;
+    sqlx::query("select pg_advisory_lock($1)")
+        .bind(MIGRATION_ADVISORY_LOCK)
+        .execute(&mut *connection)
+        .await
+        .context("acquire database migration lock")?;
+
+    let migration_result = migrator.run(&mut *connection).await;
+    let unlock_result = sqlx::query("select pg_advisory_unlock($1)")
+        .bind(MIGRATION_ADVISORY_LOCK)
+        .execute(&mut *connection)
+        .await;
+
+    migration_result.context("run database migrations")?;
+    unlock_result.context("release database migration lock")?;
+    Ok(())
 }
 
 pub fn hash_token(token: &str) -> String {
@@ -2100,10 +2118,16 @@ async fn dashboard_live_failures(pool: &DbPool) -> Result<Vec<DashboardLiveFailu
     let rows = sqlx::query(
         r#"
         select id, run_id, paperless_document_id, stage, status, attempts,
+               case
+                 when status = 'queued' and run_after > now() then 'retry_scheduled'
+                 when status = 'queued' then 'retry_ready'
+                 else 'failed'
+               end as failure_kind,
                coalesce(error_message, 'Job failed without details') as error_message,
+               case when status = 'queued' then run_after else null end as next_attempt_at,
                updated_at
           from jobs
-         where status = 'failed' or error_message is not null
+         where status = 'failed' or (status = 'queued' and error_message is not null)
          order by updated_at desc
          limit 8
         "#,
@@ -2120,8 +2144,10 @@ async fn dashboard_live_failures(pool: &DbPool) -> Result<Vec<DashboardLiveFailu
                 paperless_document_id: row.try_get("paperless_document_id")?,
                 stage: stage.parse()?,
                 status: row.try_get("status")?,
+                failure_kind: row.try_get("failure_kind")?,
                 attempts: row.try_get("attempts")?,
                 error_message: row.try_get("error_message")?,
+                next_attempt_at: row.try_get("next_attempt_at")?,
                 updated_at: row.try_get("updated_at")?,
             })
         })
@@ -2177,7 +2203,7 @@ fn llm_processing_status(
         };
     }
 
-    if let Some(failure) = recent_failures.first() {
+    if let Some(failure) = latest_hard_failure(recent_failures) {
         return ServiceProcessingStatus {
             state: "error".to_owned(),
             title: "Recent processing failure".to_owned(),
@@ -2237,7 +2263,7 @@ fn paperless_processing_status(
         };
     }
 
-    if let Some(failure) = recent_failures.first() {
+    if let Some(failure) = latest_hard_failure(recent_failures) {
         return ServiceProcessingStatus {
             state: "error".to_owned(),
             title: "Recent document processing failure".to_owned(),
@@ -2261,6 +2287,12 @@ fn paperless_processing_status(
         description: "No Paperless sync or patch activity recorded yet.".to_owned(),
         last_event_at: None,
     }
+}
+
+fn latest_hard_failure(recent_failures: &[DashboardLiveFailure]) -> Option<&DashboardLiveFailure> {
+    recent_failures
+        .iter()
+        .find(|failure| failure.status == "failed" || failure.failure_kind == "failed")
 }
 
 async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<ProviderUsageStats>> {
@@ -3047,7 +3079,10 @@ pub async fn claim_jobs(
                   and prev.priority < jobs.priority
                   and prev.status in ('queued', 'running', 'waiting_review', 'failed')
              )
-           order by run_after, priority, created_at
+           order by case when error_message is not null and attempts > 0 then 0 else 1 end,
+                    run_after,
+                    priority,
+                    created_at
            for update skip locked
            limit $1
         )
@@ -3920,5 +3955,27 @@ mod tests {
 
         assert_eq!(status.state, "error");
         assert_eq!(status.description, "Paperless timeout");
+    }
+
+    #[test]
+    fn live_status_ignores_retry_scheduled_failures_as_hard_errors() {
+        let now = Utc::now();
+        let retry = DashboardLiveFailure {
+            id: Uuid::now_v7(),
+            run_id: Uuid::now_v7(),
+            paperless_document_id: 135,
+            stage: Stage::Ocr,
+            status: "queued".to_owned(),
+            failure_kind: "retry_scheduled".to_owned(),
+            attempts: 1,
+            error_message: "temporary model runner failure".to_owned(),
+            next_attempt_at: Some(now),
+            updated_at: now,
+        };
+
+        let status = llm_processing_status(&[], &[], &[retry]);
+
+        assert_eq!(status.state, "idle");
+        assert_eq!(status.title, "LLM idle");
     }
 }

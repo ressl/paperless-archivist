@@ -32,6 +32,7 @@ import {
   ApiToken,
   AuditEvent,
   Counts,
+  DashboardLiveFailure,
   DashboardRange,
   DashboardLiveStatus,
   DashboardStats,
@@ -586,6 +587,7 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
   const activeRuns = live?.active_runs ?? [];
   const recentEvents = live?.recent_llm_events ?? [];
   const recentFailures = live?.recent_failures ?? [];
+  const hardFailures = recentFailures.filter((failure) => liveFailureKind(failure) === 'failed').length;
 
   return (
     <aside className="live-processing-panel">
@@ -606,8 +608,8 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
           <strong>{activeJobs.length}</strong>
         </div>
         <div>
-          <span>Failures</span>
-          <strong>{recentFailures.length}</strong>
+          <span>Issues</span>
+          <strong>{hardFailures || recentFailures.length}</strong>
         </div>
       </div>
 
@@ -638,15 +640,21 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
       </section>
 
       <section className="live-debug-section">
-        <h3>Recent Failures</h3>
-        {recentFailures.length === 0 && <p className="empty-state compact">No recent failures.</p>}
-        {recentFailures.slice(0, 5).map((failure) => (
-          <article className="live-failure" key={failure.id}>
-            <strong>Document {failure.paperless_document_id} · {stageLabel(failure.stage)}</strong>
-            <span>{failure.error_message}</span>
-            <small>{formatRelativeTime(failure.updated_at)}</small>
-          </article>
-        ))}
+        <h3>Recent Retries & Failures</h3>
+        {recentFailures.length === 0 && <p className="empty-state compact">No retries or failures.</p>}
+        {recentFailures.slice(0, 5).map((failure) => {
+          const kind = liveFailureKind(failure);
+          return (
+            <article className={`live-failure ${kind !== 'failed' ? 'retry' : ''}`} key={failure.id}>
+              <div className="failure-heading">
+                <strong>Document {failure.paperless_document_id} · {stageLabel(failure.stage)}</strong>
+                <Status value={kind} />
+              </div>
+              <span>{failure.error_message}</span>
+              <small>{liveFailureTiming(failure, kind)}</small>
+            </article>
+          );
+        })}
       </section>
     </aside>
   );
@@ -701,6 +709,16 @@ function statusChartData(items: DashboardStatusCount[]) {
   }));
 }
 
+function liveFailureKind(failure: DashboardLiveFailure) {
+  return failure.failure_kind || (failure.status === 'failed' ? 'failed' : 'retry_scheduled');
+}
+
+function liveFailureTiming(failure: DashboardLiveFailure, kind = liveFailureKind(failure)) {
+  if (kind === 'retry_ready') return 'Retry ready now';
+  if (failure.next_attempt_at) return `Next retry ${formatRelativeTime(failure.next_attempt_at)}`;
+  return `Updated ${formatRelativeTime(failure.updated_at)}`;
+}
+
 function stageLabel(stage: string) {
   const labels: Record<string, string> = {
     ocr: 'OCR',
@@ -736,13 +754,15 @@ function formatRelativeTime(value?: string | null) {
   if (!value) return '-';
   const timestamp = new Date(value).getTime();
   if (!Number.isFinite(timestamp)) return '-';
-  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
-  if (seconds < 10) return 'just now';
-  if (seconds < 60) return `${seconds}s ago`;
+  const deltaSeconds = Math.round((Date.now() - timestamp) / 1000);
+  const future = deltaSeconds < 0;
+  const seconds = Math.abs(deltaSeconds);
+  if (seconds < 10) return future ? 'in a few seconds' : 'just now';
+  if (seconds < 60) return future ? `in ${seconds}s` : `${seconds}s ago`;
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return future ? `in ${minutes}m` : `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return future ? `in ${hours}h` : `${hours}h ago`;
   return new Date(value).toLocaleString();
 }
 
@@ -2620,11 +2640,11 @@ function Status({ value }: { value: string }) {
   const tone = useMemo(() => {
     if (['succeeded', 'success', 'complete'].includes(value)) return 'success';
     if (['failed', 'error'].includes(value)) return 'danger';
-    if (['running', 'queued', 'applying'].includes(value)) return 'info';
+    if (['running', 'queued', 'applying', 'retry_scheduled', 'retry_ready'].includes(value)) return 'info';
     if (['waiting_review', 'review'].includes(value)) return 'review';
     return 'neutral';
   }, [value]);
-  return <span className={`status ${tone}`}>{value}</span>;
+  return <span className={`status ${tone}`}>{statusLabel(value)}</span>;
 }
 
 function ActionButton({ icon, label, busy, onClick }: { icon: ReactNode; label: string; busy: boolean; onClick: () => void | Promise<void> }) {

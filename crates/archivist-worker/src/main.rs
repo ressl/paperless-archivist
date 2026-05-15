@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -24,13 +25,13 @@ use archivist_db::{
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
-use archivist_paperless::PaperlessClient;
+use archivist_paperless::{PaperlessClient, PaperlessDocumentSummary, PaperlessTag};
 use futures::stream::{FuturesUnordered, StreamExt};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::signal;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -58,6 +59,7 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
     info!(%worker_id, "paperless archivist worker started");
     let mut tick: u64 = 0;
+    let trigger_poll_running = Arc::new(AtomicBool::new(false));
 
     loop {
         tokio::select! {
@@ -67,13 +69,38 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
             }
             _ = sleep(Duration::from_secs(5)) => {
                 tick += 1;
-                if tick % 12 == 1
-                    && let Err(error) = poll_paperless_triggers(&pool, &config).await
-                {
-                    warn!(error = %error, "trigger polling failed");
-                }
                 if let Err(error) = process_available_jobs(&pool, &config, &worker_id).await {
                     error!(error = %error, "job processing tick failed");
+                }
+                if tick % 12 == 1
+                    && trigger_poll_running
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    let pool = pool.clone();
+                    let config = Arc::clone(&config);
+                    let trigger_poll_running = Arc::clone(&trigger_poll_running);
+                    tokio::spawn(async move {
+                        let started = std::time::Instant::now();
+                        info!("trigger polling started");
+                        let result = timeout(
+                            Duration::from_secs(300),
+                            poll_paperless_triggers(&pool, &config),
+                        )
+                        .await;
+                        match result {
+                            Ok(Ok(())) => {
+                                info!(duration_ms = started.elapsed().as_millis() as u64, "trigger polling completed");
+                            }
+                            Ok(Err(error)) => {
+                                warn!(error = %error, duration_ms = started.elapsed().as_millis() as u64, "trigger polling failed");
+                            }
+                            Err(_) => {
+                                warn!(duration_ms = started.elapsed().as_millis() as u64, "trigger polling timed out");
+                            }
+                        }
+                        trigger_poll_running.store(false, Ordering::Release);
+                    });
                 }
             }
         }
@@ -89,6 +116,7 @@ async fn process_available_jobs(
     if jobs.is_empty() {
         return Ok(());
     }
+    info!(claimed_jobs = jobs.len(), %worker_id, "claimed jobs for processing");
 
     let mut pending = FuturesUnordered::new();
     for job in jobs {
@@ -172,6 +200,14 @@ async fn process_ocr(
     if pages.is_empty() {
         return Err(anyhow!("document rendered zero OCR pages"));
     }
+    let page_bytes: usize = pages.iter().map(|page| page.bytes.len()).sum();
+    info!(
+        job_id = %job.id,
+        document_id = job.paperless_document_id,
+        pages = pages.len(),
+        page_bytes,
+        "rendered OCR input pages"
+    );
 
     let provider = provider_for_stage(settings, Stage::Ocr, true)?;
     let prompt = get_active_prompt(pool, Stage::Ocr).await?;
@@ -635,19 +671,19 @@ async fn apply_patch_with_workflow_tags(
 async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()> {
     let settings = get_runtime_settings(pool).await?;
     let paperless = paperless_client(pool, config, &settings).await?;
-    sync_metadata(pool, &paperless, &settings).await?;
+    let snapshot = sync_metadata(pool, &paperless, &settings).await?;
 
-    let tags = paperless.list_tags().await?;
-    let documents = paperless.list_documents().await?;
-    for document in documents {
+    let mut trigger_matches = 0_u64;
+    for document in snapshot.documents {
         let tag_names = document
             .tags
             .iter()
-            .filter_map(|id| tags.iter().find(|tag| tag.id == *id))
+            .filter_map(|id| snapshot.tags.iter().find(|tag| tag.id == *id))
             .map(|tag| tag.name.clone())
             .collect::<Vec<_>>();
         let stages = settings.workflow.tags.stages_requested_by_tags(&tag_names);
         if !stages.is_empty() {
+            trigger_matches += 1;
             let trigger = if tag_names
                 .iter()
                 .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.trigger_process))
@@ -667,14 +703,23 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
             .await?;
         }
     }
+    info!(
+        trigger_matches,
+        "trigger polling inspected Paperless documents"
+    );
     Ok(())
+}
+
+struct PaperlessSyncSnapshot {
+    tags: Vec<PaperlessTag>,
+    documents: Vec<PaperlessDocumentSummary>,
 }
 
 async fn sync_metadata(
     pool: &DbPool,
     paperless: &PaperlessClient,
     settings: &RuntimeSettings,
-) -> Result<()> {
+) -> Result<PaperlessSyncSnapshot> {
     let mut tags = paperless.list_tags().await?;
     for workflow_tag in settings.workflow.tags.all() {
         let tag = paperless.ensure_tag(workflow_tag).await?;
@@ -742,7 +787,7 @@ async fn sync_metadata(
         .await?;
     }
     tx.commit().await?;
-    Ok(())
+    Ok(PaperlessSyncSnapshot { tags, documents })
 }
 
 async fn paperless_client(

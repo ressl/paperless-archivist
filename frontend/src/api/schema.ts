@@ -2143,8 +2143,12 @@ export interface components {
             paperless_document_id: number;
             stage: components["schemas"]["Stage"];
             status: string;
+            /** @enum {string} */
+            failure_kind: "failed" | "retry_scheduled" | "retry_ready";
             attempts: number;
             error_message: string;
+            /** Format: date-time */
+            next_attempt_at?: string | null;
             /** Format: date-time */
             updated_at: string;
         };

@@ -150,6 +150,11 @@ Use the range selector to inspect recent or long-term trends. Backlog history
 starts when dashboard snapshots are first recorded; older history is not
 reconstructed.
 
+The live processing panel shows currently running jobs, recent model calls, and
+recent retries or failures. `Retry Scheduled` means the worker already captured
+the error and will try the job again after backoff; it is not the same as a hard
+failed job.
+
 The provider usage table shows provider/model/stage request counts, average and
 P95 latency, token totals when the provider returns usage data, and estimated
 cost when per-provider token pricing is configured in Settings.
