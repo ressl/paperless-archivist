@@ -43,6 +43,7 @@ import {
   DocumentChatSession,
   InventoryItem,
   Me,
+  NeedsAttentionItem,
   OidcConfig,
   OllamaInstalledModel,
   PaperlessConsistencyResult,
@@ -57,7 +58,8 @@ import {
   RuntimeSettings,
   SessionItem,
   Stage,
-  UserItem
+  UserItem,
+  WorkflowSafetyStatus
 } from './api/client';
 import {
   Area,
@@ -320,6 +322,99 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   );
 }
 
+function AlertsBar({
+  items,
+  onAction
+}: {
+  items: NeedsAttentionItem[];
+  onAction: (item: NeedsAttentionItem) => void;
+}) {
+  const { t, formatNumber } = useI18n();
+  if (items.length === 0) return null;
+  return (
+    <section className="alerts-bar" role="region" aria-label={t('dashboard.alerts.title')}>
+      <header>
+        <AlertTriangle size={16} />
+        <strong>{t('dashboard.alerts.title')}</strong>
+      </header>
+      <ul>
+        {items.map((item, idx) => (
+          <li key={`${item.kind}-${idx}`} className={`alert-item severity-${item.severity}`}>
+            <div className="alert-text">
+              <strong>{item.title}</strong>
+              <span>{item.description}</span>
+            </div>
+            {item.count != null && (
+              <span className="alert-count" aria-label="count">{formatNumber(item.count)}</span>
+            )}
+            {item.action_key && (
+              <button type="button" onClick={() => onAction(item)} className="alert-action">
+                {localizedMessage(item.action_key, t, item.action_key)}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function HealthBadge({ score, generatedAt }: { score: number | null; generatedAt: string | null }) {
+  const { t, formatRelativeTime } = useI18n();
+  const tone = healthTone(score);
+  const label = score == null
+    ? t('dashboard.health.score_label')
+    : tone === 'success'
+      ? t('dashboard.health.healthy')
+      : tone === 'warning'
+        ? t('dashboard.health.degraded')
+        : t('dashboard.health.unhealthy');
+  return (
+    <div className={`health-badge ${tone}`} role="status">
+      <span className="health-score">{score ?? '-'}</span>
+      <div>
+        <strong>{label}</strong>
+        <em>{generatedAt ? formatRelativeTime(generatedAt) : '-'}</em>
+      </div>
+    </div>
+  );
+}
+
+function QuotaBar({
+  label,
+  remaining,
+  limit
+}: {
+  label: string;
+  remaining: number | null | undefined;
+  limit: number | null | undefined;
+}) {
+  const { t, formatNumber } = useI18n();
+  if (!limit || limit <= 0) {
+    return (
+      <div className="quota-bar unlimited">
+        <span>{label}</span>
+        <em>{t('dashboard.workflow.quota_unlimited')}</em>
+      </div>
+    );
+  }
+  const safeRemaining = remaining ?? limit;
+  const used = Math.max(0, limit - safeRemaining);
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  const tone = pct >= 90 ? 'danger' : pct >= 70 ? 'warning' : 'success';
+  return (
+    <div className={`quota-bar ${tone}`}>
+      <header>
+        <span>{label}</span>
+        <em>{t('dashboard.workflow.quota_used', { used: formatNumber(used), limit: formatNumber(limit) })}</em>
+      </header>
+      <div className="quota-track" role="progressbar" aria-valuenow={used} aria-valuemin={0} aria-valuemax={limit}>
+        <div className="quota-fill" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({ setError, canManageSettings }: { setError: (error: string | null) => void; canManageSettings: boolean }) {
   const { t, formatNumber, formatPercent, formatRelativeTime: formatRelative } = useI18n();
   const [counts, setCounts] = useState<Counts>(defaultCounts);
@@ -443,23 +538,49 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
   const comparison = stats?.comparison;
   const runningJobs = stats?.kpis.running_jobs ?? counts.running;
 
-  const metrics = [
-    { label: t('dashboard.metric.open_backlog'), value: stats?.kpis.open_backlog ?? openBacklog, tone: 'warning', delta: comparison?.open_backlog_delta },
+  const healthScore = computeHealthScore(stats, live);
+  const heroMetric = {
+    label: t('dashboard.metric.open_backlog'),
+    value: stats?.kpis.open_backlog ?? openBacklog,
+    tone: 'warning' as const,
+    delta: comparison?.open_backlog_delta
+  };
+  const secondaryMetrics = [
+    { label: t('dashboard.metric.throughput'), value: stats?.kpis.throughput ?? 0, tone: 'success', delta: comparison?.jobs_succeeded_delta },
+    { label: t('dashboard.metric.completion'), value: formatPercent(stats?.kpis.completion_rate ?? 0), tone: 'neutral', delta: null },
+    { label: t('dashboard.metric.mttc'), value: formatMttc(stats?.kpis.mttc_seconds), tone: 'neutral', delta: null },
+    { label: t('dashboard.metric.cost', { range }), value: formatCost(stats?.kpis.cost_in_range_usd), tone: 'neutral', delta: null }
+  ];
+  const tertiaryMetrics = [
     { label: t('dashboard.metric.running_now'), value: runningJobs, tone: 'info', delta: null },
     { label: t('dashboard.metric.review_queue'), value: counts.waiting_review, tone: 'review', delta: null },
     { label: t('dashboard.metric.failed'), value: counts.failed, tone: 'danger', delta: comparison?.jobs_failed_delta },
-    { label: t('dashboard.metric.throughput'), value: stats?.kpis.throughput ?? 0, tone: 'success', delta: comparison?.jobs_succeeded_delta },
-    { label: t('dashboard.metric.completion'), value: formatPercent(stats?.kpis.completion_rate ?? 0), tone: 'neutral', delta: null }
+    { label: t('dashboard.metric.p95_latency'), value: formatMs(stats?.kpis.p95_stage_duration_ms ?? 0), tone: 'neutral', delta: null }
   ];
+
+  const onAlertAction = (item: NeedsAttentionItem) => {
+    if (!canManageSettings) return;
+    switch (item.kind) {
+      case 'stuck_runs':
+        void run(setRecoveryBusy, setError, recoverStuckRuns, t);
+        break;
+      case 'stale_leases':
+        void run(setRecoveryBusy, setError, recoverStaleLeases, t);
+        break;
+      default:
+        break;
+    }
+  };
 
   return (
     <section className="page dashboard-page">
       <div className="dashboard-heading">
-        <div>
+        <div className="dashboard-heading-main">
           <PageHeader title={t('dashboard.title')} />
           <p>
             {t('dashboard.last_refresh', { time: lastLoadedAt ? formatRelative(lastLoadedAt) : '-' })}
           </p>
+          <HealthBadge score={healthScore} generatedAt={stats?.generated_at ?? null} />
         </div>
         <div className="dashboard-heading-actions">
           <div className="range-tabs" aria-label={t('dashboard.range_label')}>
@@ -482,6 +603,8 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
           </button>
         </div>
       </div>
+
+      <AlertsBar items={live?.needs_attention ?? []} onAction={onAlertAction} />
 
       <div className="operations-strip">
         <AutoProcessingCard
@@ -519,14 +642,32 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         </div>
       )}
 
-      <div className="metric-grid dashboard-metrics">
-        {metrics.map(({ label, value, tone, delta }) => (
-          <div className={`metric ${tone}`} key={label}>
-            <span>{label}</span>
-            <strong>{typeof value === 'number' ? formatNumber(value) : value}</strong>
-            {typeof delta === 'number' && <em className={deltaTone(delta)}>{formatDelta(delta, t, formatNumber)}</em>}
-          </div>
-        ))}
+      <div className="kpi-grid">
+        <div className={`metric hero ${heroMetric.tone}`}>
+          <span>{heroMetric.label}</span>
+          <strong>{typeof heroMetric.value === 'number' ? formatNumber(heroMetric.value) : heroMetric.value}</strong>
+          {typeof heroMetric.delta === 'number' && (
+            <em className={deltaTone(heroMetric.delta)}>{formatDelta(heroMetric.delta, t, formatNumber)}</em>
+          )}
+        </div>
+        <div className="kpi-secondary">
+          {secondaryMetrics.map(({ label, value, tone, delta }) => (
+            <div className={`metric ${tone}`} key={label}>
+              <span>{label}</span>
+              <strong>{typeof value === 'number' ? formatNumber(value) : value}</strong>
+              {typeof delta === 'number' && <em className={deltaTone(delta)}>{formatDelta(delta, t, formatNumber)}</em>}
+            </div>
+          ))}
+        </div>
+        <div className="kpi-tertiary">
+          {tertiaryMetrics.map(({ label, value, tone, delta }) => (
+            <div className={`metric ${tone}`} key={label}>
+              <span>{label}</span>
+              <strong>{typeof value === 'number' ? formatNumber(value) : value}</strong>
+              {typeof delta === 'number' && <em className={deltaTone(delta)}>{formatDelta(delta, t, formatNumber)}</em>}
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="dashboard-ops-grid">
@@ -696,23 +837,40 @@ function AutoProcessingCard({
 }) {
   const { t, formatRelativeTime: formatRelative } = useI18n();
   const paused = safety?.paused ?? false;
-  const details = [
-    safety?.dry_run ? t('dashboard.auto.dry_run') : null,
-    (safety?.hourly_document_limit || safety?.daily_document_limit)
-      ? `${t('dashboard.auto.limits')}: ${[
-          safety.hourly_remaining != null ? `${safety.hourly_remaining}/h ${t('dashboard.auto.remaining')}` : null,
-          safety.daily_remaining != null ? `${safety.daily_remaining}/d ${t('dashboard.auto.remaining')}` : null
-        ].filter(Boolean).join(', ')}`
-      : null,
-    nextSelectorScanAt ? t('dashboard.auto.next_scan', { time: formatRelative(nextSelectorScanAt) }) : null
-  ].filter(Boolean);
+  const dryRun = safety?.dry_run ?? false;
+  const hasQuota = !!(safety?.hourly_document_limit || safety?.daily_document_limit);
   return (
     <section className={`autopilot-card ${enabled ? 'enabled' : 'disabled'}`}>
-      <div>
-        <span>{t('dashboard.auto.title')}</span>
+      <div className="autopilot-body">
+        <span>{t('dashboard.workflow.title')}</span>
         <strong>{workflowModeLabel(mode, t)}</strong>
         <p>{workflowModeDescription(mode, t)}</p>
-        {details.length > 0 && <small>{details.join(' · ')}</small>}
+        {dryRun && (
+          <div className="dry-run-banner" role="alert">
+            <AlertTriangle size={16} />
+            <div>
+              <strong>{t('dashboard.workflow.dry_run_banner_title')}</strong>
+              <span>{t('dashboard.workflow.dry_run_banner_body')}</span>
+            </div>
+          </div>
+        )}
+        {hasQuota && (
+          <div className="quota-bars">
+            <QuotaBar
+              label={t('dashboard.workflow.hourly_quota')}
+              remaining={safety?.hourly_remaining}
+              limit={safety?.hourly_document_limit}
+            />
+            <QuotaBar
+              label={t('dashboard.workflow.daily_quota')}
+              remaining={safety?.daily_remaining}
+              limit={safety?.daily_document_limit}
+            />
+          </div>
+        )}
+        {nextSelectorScanAt && (
+          <small>{t('dashboard.auto.next_scan', { time: formatRelative(nextSelectorScanAt) })}</small>
+        )}
       </div>
       <div className="mode-button-group" role="group" aria-label={t('dashboard.auto.processing_mode')}>
         <button
@@ -1085,7 +1243,42 @@ function formatCost(value?: number | null) {
   if (value == null) return '-';
   if (value === 0) return '$0.00';
   if (value < 0.01) return `<$0.01`;
+  if (value >= 100) return `$${Math.round(value)}`;
   return `$${value.toFixed(2)}`;
+}
+
+function formatMttc(value?: number | null) {
+  if (value == null || !Number.isFinite(value) || value <= 0) return '-';
+  if (value < 60) return `${Math.round(value)}s`;
+  if (value < 3600) {
+    const minutes = Math.floor(value / 60);
+    const seconds = Math.round(value % 60);
+    return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.round((value % 3600) / 60);
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function computeHealthScore(stats: DashboardStats | null, live: DashboardLiveStatus | null) {
+  if (!stats) return null;
+  let score = 100;
+  score -= Math.min(50, stats.kpis.failure_rate * 100);
+  const backlogDelta = stats.comparison?.open_backlog_delta ?? 0;
+  if (backlogDelta > 0 && stats.kpis.open_backlog > 0) {
+    const pct = (backlogDelta / stats.kpis.open_backlog) * 100;
+    score -= Math.min(25, pct * 0.5);
+  }
+  const critical = live?.needs_attention?.filter((item) => item.severity === 'critical').length ?? 0;
+  score -= critical * 15;
+  return Math.max(0, Math.round(score));
+}
+
+function healthTone(score: number | null): 'success' | 'warning' | 'danger' | 'neutral' {
+  if (score == null) return 'neutral';
+  if (score >= 90) return 'success';
+  if (score >= 70) return 'warning';
+  return 'danger';
 }
 
 function formatLanguageDetection(item: InventoryItem, languages: ReturnType<typeof languageOptions>) {
