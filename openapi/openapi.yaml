@@ -289,6 +289,7 @@ components:
         - positive_feedback
         - negative_feedback
         - acceptance_rate
+        - latency_history
       properties:
         provider: { type: string }
         model: { type: string }
@@ -303,6 +304,9 @@ components:
         positive_feedback: { type: integer, format: int64 }
         negative_feedback: { type: integer, format: int64 }
         acceptance_rate: { type: [number, "null"], format: double }
+        latency_history:
+          type: array
+          items: { type: [number, "null"], format: double }
     QualityStats:
       type: object
       required:

@@ -829,6 +829,50 @@ th {
   color: var(--teal);
 }
 
+.sparkline {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1px;
+  width: 72px;
+  height: 20px;
+  padding: 1px;
+  border-radius: 3px;
+  background: var(--paper);
+  vertical-align: middle;
+}
+
+.sparkline.empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12px;
+  background: transparent;
+}
+
+.sparkline-bar {
+  flex: 1;
+  min-width: 1px;
+  background: var(--teal);
+  border-radius: 1px 1px 0 0;
+}
+
+.sparkline-bar.empty {
+  background: transparent;
+}
+
+.cost-breakdown-row {
+  display: grid;
+  grid-template-columns: 1fr 88px auto;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.cost-breakdown-row .sparkline {
+  width: 100%;
+  height: 18px;
+}
+
 .health-badge.success {
   border-color: #b7d8cf;
   background: var(--teal-soft);

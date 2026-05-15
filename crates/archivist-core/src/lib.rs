@@ -2338,6 +2338,7 @@ pub struct ProviderUsageStats {
     pub positive_feedback: i64,
     pub negative_feedback: i64,
     pub acceptance_rate: Option<f64>,
+    pub latency_history: Vec<Option<f64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

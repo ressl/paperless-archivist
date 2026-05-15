@@ -2489,6 +2489,7 @@ export interface components {
             negative_feedback: number;
             /** Format: double */
             acceptance_rate: number | null;
+            latency_history: (number | null)[];
         };
         QualityStats: {
             /** Format: int64 */

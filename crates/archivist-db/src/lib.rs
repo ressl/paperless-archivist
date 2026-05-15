@@ -15,7 +15,7 @@ use archivist_core::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Timelike, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -2726,9 +2726,136 @@ async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<Provi
                     row.try_get("positive_feedback")?,
                     row.try_get("negative_feedback")?,
                 ),
+                latency_history: Vec::new(),
             })
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderBucketEntry {
+    pub bucket: DateTime<Utc>,
+    pub provider: String,
+    pub model: String,
+    pub stage: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub avg_duration_ms: Option<f64>,
+    pub request_count: i64,
+}
+
+pub async fn provider_bucket_entries(
+    pool: &DbPool,
+    start: DateTime<Utc>,
+    now: DateTime<Utc>,
+    range: DashboardRange,
+) -> Result<Vec<ProviderBucketEntry>> {
+    let granularity = range.granularity();
+    let rows = sqlx::query(
+        r#"
+        select
+          date_trunc($4, ai.created_at) as bucket,
+          ai.provider,
+          ai.model,
+          ai.stage,
+          coalesce(sum(
+            coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
+            coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0)
+          ), 0)::bigint as input_tokens,
+          coalesce(sum(
+            coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
+            coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0)
+          ), 0)::bigint as output_tokens,
+          avg(duration_ms)::double precision as avg_duration_ms,
+          count(*)::bigint as request_count
+        from ai_artifacts ai
+        where ai.created_at >= $1
+          and ai.created_at < $2
+        group by 1, 2, 3, 4
+        order by 1, 2, 3, 4
+        "#,
+    )
+    .bind(start)
+    .bind(now)
+    .bind(granularity.interval())
+    .bind(granularity.date_trunc())
+    .fetch_all(pool)
+    .await
+    .context("query provider bucket entries")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ProviderBucketEntry {
+                bucket: row.try_get("bucket")?,
+                provider: row.try_get("provider")?,
+                model: row.try_get("model")?,
+                stage: row.try_get("stage")?,
+                input_tokens: row.try_get("input_tokens")?,
+                output_tokens: row.try_get("output_tokens")?,
+                avg_duration_ms: row.try_get("avg_duration_ms")?,
+                request_count: row.try_get("request_count")?,
+            })
+        })
+        .collect()
+}
+
+pub fn dashboard_bucket_labels(
+    start: DateTime<Utc>,
+    now: DateTime<Utc>,
+    range: DashboardRange,
+) -> Vec<(DateTime<Utc>, String)> {
+    use chrono::TimeZone;
+    let granularity = range.granularity();
+    let start_trunc = truncate_to_granularity(start, granularity);
+    let mut buckets = Vec::new();
+    let mut cursor = start_trunc;
+    while cursor < now {
+        buckets.push((cursor, bucket_label(cursor, granularity)));
+        cursor = match granularity {
+            archivist_core::DashboardGranularity::Hour => cursor + ChronoDuration::hours(1),
+            archivist_core::DashboardGranularity::Day => cursor + ChronoDuration::days(1),
+            archivist_core::DashboardGranularity::Month => {
+                let next_month = if cursor.month() == 12 {
+                    Utc.with_ymd_and_hms(cursor.year() + 1, 1, 1, 0, 0, 0).single()
+                } else {
+                    Utc.with_ymd_and_hms(cursor.year(), cursor.month() + 1, 1, 0, 0, 0).single()
+                };
+                match next_month {
+                    Some(value) => value,
+                    None => break,
+                }
+            }
+        };
+    }
+    buckets
+}
+
+fn truncate_to_granularity(
+    timestamp: DateTime<Utc>,
+    granularity: archivist_core::DashboardGranularity,
+) -> DateTime<Utc> {
+    use chrono::TimeZone;
+    match granularity {
+        archivist_core::DashboardGranularity::Hour => Utc
+            .with_ymd_and_hms(
+                timestamp.year(),
+                timestamp.month(),
+                timestamp.day(),
+                timestamp.hour(),
+                0,
+                0,
+            )
+            .single()
+            .unwrap_or(timestamp),
+        archivist_core::DashboardGranularity::Day => Utc
+            .with_ymd_and_hms(timestamp.year(), timestamp.month(), timestamp.day(), 0, 0, 0)
+            .single()
+            .unwrap_or(timestamp),
+        archivist_core::DashboardGranularity::Month => Utc
+            .with_ymd_and_hms(timestamp.year(), timestamp.month(), 1, 0, 0, 0)
+            .single()
+            .unwrap_or(timestamp),
+    }
 }
 
 fn feedback_rate(positive: i64, negative: i64) -> Option<f64> {
@@ -2784,7 +2911,7 @@ async fn quality_stats(pool: &DbPool, start: DateTime<Utc>) -> Result<QualitySta
     })
 }
 
-async fn dashboard_range_start(
+pub async fn dashboard_range_start(
     pool: &DbPool,
     range: DashboardRange,
     now: DateTime<Utc>,

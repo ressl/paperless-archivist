@@ -269,6 +269,7 @@ export type ProviderUsageStats = {
   positive_feedback: number;
   negative_feedback: number;
   acceptance_rate?: number | null;
+  latency_history: Array<number | null>;
 };
 
 export type QualityStats = {

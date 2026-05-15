@@ -180,6 +180,43 @@ type TimelineEntry = {
   secondary?: string;
 };
 
+function Sparkline({
+  data,
+  label,
+  format
+}: {
+  data: Array<number | null>;
+  label: string;
+  format?: (value: number) => string;
+}) {
+  if (data.length === 0) {
+    return <span className="sparkline empty" aria-label={label}>—</span>;
+  }
+  const max = data.reduce<number>((acc, value) => (value != null && value > acc ? value : acc), 0);
+  const total = data.reduce<number>((acc, value) => acc + (value ?? 0), 0);
+  const description = format ? format(total) : `${total.toFixed(2)}`;
+  return (
+    <span
+      className="sparkline"
+      role="img"
+      aria-label={`${label}: ${description}`}
+      title={`${label}: ${description}`}
+    >
+      {data.map((value, idx) => {
+        const heightPct = max > 0 && value != null ? Math.max(2, (value / max) * 100) : 0;
+        const empty = value == null;
+        return (
+          <span
+            key={idx}
+            className={empty ? 'sparkline-bar empty' : 'sparkline-bar'}
+            style={{ height: `${heightPct}%` }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
 function ChartPanel({ title, wide, children }: { title: string; wide?: boolean; children: ReactNode }) {
   return (
     <section className={`chart-panel${wide ? ' wide' : ''}`} role="region" aria-label={title}>
@@ -822,6 +859,7 @@ function ProviderTable({ usage }: { usage: DashboardStats['provider_usage'] }) {
               <th><button type="button" onClick={() => handleSort('request_count')}>{t('dashboard.provider.requests')}{arrow('request_count')}</button></th>
               <th><button type="button" onClick={() => handleSort('avg_duration_ms')}>{t('dashboard.provider.avg')}{arrow('avg_duration_ms')}</button></th>
               <th><button type="button" onClick={() => handleSort('p95_duration_ms')}>{t('dashboard.provider.p95')}{arrow('p95_duration_ms')}</button></th>
+              <th>{t('dashboard.provider.latency_trend')}</th>
               <th><button type="button" onClick={() => handleSort('tokens')}>{t('dashboard.provider.tokens')}{arrow('tokens')}</button></th>
               <th><button type="button" onClick={() => handleSort('cost')}>{t('dashboard.provider.cost')}{arrow('cost')}</button></th>
               <th><button type="button" onClick={() => handleSort('feedback')}>{t('dashboard.provider.feedback')}{arrow('feedback')}</button></th>
@@ -830,7 +868,7 @@ function ProviderTable({ usage }: { usage: DashboardStats['provider_usage'] }) {
           </thead>
           <tbody>
             {sorted.length === 0 && (
-              <tr><td colSpan={10}>{t('dashboard.provider.no_usage')}</td></tr>
+              <tr><td colSpan={11}>{t('dashboard.provider.no_usage')}</td></tr>
             )}
             {sorted.map((item) => (
               <tr key={`${item.provider}-${item.model}-${item.stage}`}>
@@ -840,6 +878,13 @@ function ProviderTable({ usage }: { usage: DashboardStats['provider_usage'] }) {
                 <td>{item.request_count}</td>
                 <td>{formatMs(item.avg_duration_ms)}</td>
                 <td>{formatMs(item.p95_duration_ms)}</td>
+                <td>
+                  <Sparkline
+                    data={item.latency_history ?? []}
+                    label={t('dashboard.provider.latency_trend')}
+                    format={(value) => formatMs(value)}
+                  />
+                </td>
                 <td>{item.input_tokens + item.output_tokens}</td>
                 <td>{formatCost(item.estimated_cost_usd)}</td>
                 <td>{item.positive_feedback}/{item.negative_feedback}</td>
@@ -894,6 +939,7 @@ function CostPanel({ stats, range }: { stats: DashboardStats | null; range: Dash
                   <li key={`${item.provider}-${item.model}`}>
                     <div className="cost-breakdown-row">
                       <span className="cost-breakdown-label">{item.provider} / {item.model}</span>
+                      <Sparkline data={item.sparkline} label={`${item.provider} / ${item.model}`} format={formatCost} />
                       <strong>{formatCost(item.cost_usd)}</strong>
                     </div>
                     <div className="cost-breakdown-track">

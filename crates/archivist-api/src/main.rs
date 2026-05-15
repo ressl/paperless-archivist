@@ -20,11 +20,13 @@ use archivist_core::{
     validate_tag_suggestion, validate_title_suggestion,
 };
 use archivist_db::{
-    AuthUser, DbPool, DocumentChatCandidate, OidcUserInput, ReviewItemRecord, append_audit,
-    apply_security_retention, connect, consume_oidc_login_state, create_document_chat_session,
-    create_oidc_login_state, create_run_with_jobs, create_session, create_user_with_roles,
+    AuthUser, DbPool, DocumentChatCandidate, OidcUserInput, ProviderBucketEntry, ReviewItemRecord,
+    append_audit, apply_security_retention, connect, consume_oidc_login_state,
+    create_document_chat_session, create_oidc_login_state, create_run_with_jobs, create_session,
+    create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
     document_chat_session_visible, find_api_token, find_session, find_user_for_login,
     get_backlog_counts, get_dashboard_live_status, get_dashboard_stats, get_runtime_settings,
+    provider_bucket_entries,
     has_any_user, hash_token, insert_document_chat_message, insert_document_chat_sources,
     list_allowed_named_entities, list_allowed_tag_names, list_audit_events, list_custom_fields,
     list_document_chat_messages, list_document_chat_sessions, list_inventory, list_prompt_usage,
@@ -2143,6 +2145,13 @@ async fn dashboard(
     let mut stats = get_dashboard_stats(&state.pool, range, &counts).await?;
     let settings = get_runtime_settings(&state.pool).await?;
     enrich_dashboard_costs(&mut stats, &settings);
+
+    let now = Utc::now();
+    let start = dashboard_range_start(&state.pool, range, now).await?;
+    let bucket_entries = provider_bucket_entries(&state.pool, start, now, range).await?;
+    let bucket_labels = dashboard_bucket_labels(start, now, range);
+    enrich_provider_sparklines(&mut stats, &bucket_entries, &bucket_labels, &settings);
+
     Ok(Json(json!({ "counts": counts, "stats": stats })))
 }
 
@@ -2341,6 +2350,68 @@ fn enrich_dashboard_costs(stats: &mut DashboardStats, settings: &RuntimeSettings
             sparkline: Vec::new(),
         })
         .collect();
+}
+
+fn enrich_provider_sparklines(
+    stats: &mut archivist_core::DashboardStats,
+    entries: &[ProviderBucketEntry],
+    labels: &[(DateTime<Utc>, String)],
+    settings: &RuntimeSettings,
+) {
+    let bucket_count = labels.len();
+    if bucket_count == 0 {
+        return;
+    }
+    let bucket_index_of = |bucket: DateTime<Utc>| -> Option<usize> {
+        labels.iter().position(|(b, _)| *b == bucket)
+    };
+    let rate_for = |provider_name: &str| -> Option<(f64, f64)> {
+        let provider = settings
+            .ai
+            .providers
+            .iter()
+            .find(|p| p.name == provider_name)?;
+        match (
+            provider.cost_per_1m_input_tokens_usd,
+            provider.cost_per_1m_output_tokens_usd,
+        ) {
+            (Some(input), Some(output)) => Some((input, output)),
+            _ => None,
+        }
+    };
+
+    for summary in stats.cost_breakdown_by_provider.iter_mut() {
+        let mut buckets: Vec<Option<f64>> = vec![None; bucket_count];
+        let rate = rate_for(&summary.provider);
+        for entry in entries
+            .iter()
+            .filter(|e| e.provider == summary.provider && e.model == summary.model)
+        {
+            let Some(idx) = bucket_index_of(entry.bucket) else {
+                continue;
+            };
+            if let Some((input_rate, output_rate)) = rate {
+                let cost = entry.input_tokens as f64 / 1_000_000.0 * input_rate
+                    + entry.output_tokens as f64 / 1_000_000.0 * output_rate;
+                let slot = &mut buckets[idx];
+                *slot = Some(slot.unwrap_or(0.0) + cost);
+            }
+        }
+        summary.sparkline = buckets;
+    }
+
+    for usage in stats.provider_usage.iter_mut() {
+        let mut buckets: Vec<Option<f64>> = vec![None; bucket_count];
+        for entry in entries.iter().filter(|e| {
+            e.provider == usage.provider && e.model == usage.model && e.stage == usage.stage
+        }) {
+            let Some(idx) = bucket_index_of(entry.bucket) else {
+                continue;
+            };
+            buckets[idx] = entry.avg_duration_ms;
+        }
+        usage.latency_history = buckets;
+    }
 }
 
 #[derive(Debug, Deserialize)]
