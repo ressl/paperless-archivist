@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
     AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT, ImageInput, OllamaClient,
     OpenAiCompatibleClient, TextProvider, VisionProvider, VisionRequest, parse_choice_suggestion,
@@ -20,7 +20,7 @@ use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, complete_job, connect,
     create_review_item, create_run_with_jobs, custom_field_ids_for_names, fail_job,
     get_active_prompt, get_runtime_settings, insert_ai_artifact, is_last_active_job,
-    list_allowed_named_entities, list_allowed_tag_names, list_custom_fields, migrate,
+    list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     named_entity_id_for_name, resolve_secret, tag_ids_for_names, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     init_tracing(&config.log_level);
 
     let pool = connect(config.database_url.expose_secret()).await?;
-    migrate(&pool).await?;
+    wait_for_schema(&pool).await?;
     run_worker(pool, Arc::new(config)).await
 }
 
@@ -105,6 +105,20 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
             }
         }
     }
+}
+
+async fn wait_for_schema(pool: &DbPool) -> Result<()> {
+    for attempt in 1..=60 {
+        match get_runtime_settings(pool).await {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt < 60 => {
+                warn!(attempt, error = %error, "waiting for API database migrations");
+                sleep(Duration::from_secs(2)).await;
+            }
+            Err(error) => return Err(error).context("wait for API database migrations"),
+        }
+    }
+    Ok(())
 }
 
 async fn process_available_jobs(

@@ -37,30 +37,12 @@ pub async fn connect(database_url: &str) -> Result<DbPool> {
 pub async fn migrate(pool: &DbPool) -> Result<()> {
     let migrations_dir =
         std::env::var("ARCHIVIST_MIGRATIONS_DIR").unwrap_or_else(|_| "migrations".to_owned());
-    let migrator = sqlx::migrate::Migrator::new(Path::new(&migrations_dir))
+    sqlx::migrate::Migrator::new(Path::new(&migrations_dir))
         .await
-        .with_context(|| format!("load database migrations from {migrations_dir}"))?;
-
-    let mut connection = pool
-        .acquire()
+        .with_context(|| format!("load database migrations from {migrations_dir}"))?
+        .run(pool)
         .await
-        .context("acquire migration connection")?;
-    const MIGRATION_ADVISORY_LOCK: i64 = 6_122_020_251_700_301;
-    sqlx::query("select pg_advisory_lock($1)")
-        .bind(MIGRATION_ADVISORY_LOCK)
-        .execute(&mut *connection)
-        .await
-        .context("acquire database migration lock")?;
-
-    let migration_result = migrator.run(&mut *connection).await;
-    let unlock_result = sqlx::query("select pg_advisory_unlock($1)")
-        .bind(MIGRATION_ADVISORY_LOCK)
-        .execute(&mut *connection)
-        .await;
-
-    migration_result.context("run database migrations")?;
-    unlock_result.context("release database migration lock")?;
-    Ok(())
+        .context("run database migrations")
 }
 
 pub fn hash_token(token: &str) -> String {

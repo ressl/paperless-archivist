@@ -97,7 +97,8 @@ belong in a private deployment repository or equivalent platform automation.
 
 Use a managed PostgreSQL 18 instance or a separately operated PostgreSQL 18
 cluster for production. The application schema is migrated by the API on
-startup.
+startup. Workers do not run migrations; they wait for the API-migrated schema
+before claiming jobs.
 
 For OIDC, configure `ARCHIVIST_OIDC_ENABLED`,
 `ARCHIVIST_OIDC_ISSUER_URL`, `ARCHIVIST_OIDC_CLIENT_ID`,

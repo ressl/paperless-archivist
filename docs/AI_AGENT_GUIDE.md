@@ -178,6 +178,8 @@ Preserve these properties:
 - expired leases can be retried
 - workers can restart without losing the queue
 - trigger-tag polling must not block normal job processing
+- workers must wait for the API-migrated schema instead of running migrations
+  themselves
 - retryable jobs with elapsed backoff should be visible and eligible for prompt
   reprocessing instead of being hidden behind a large fresh backlog
 - apply operations avoid duplicate writes where practical
