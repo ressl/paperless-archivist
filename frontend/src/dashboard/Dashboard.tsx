@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useDashboardLive, useDashboardStats, useFreshness } from './hooks';
 import {
   Activity,
   AlertTriangle,
@@ -32,7 +33,6 @@ import {
 import {
   api,
   CompletionTagReconcileResult,
-  Counts,
   DashboardLiveFailure,
   DashboardLiveStatus,
   DashboardRange,
@@ -57,22 +57,6 @@ import {
   statusLabel
 } from '../lib/format';
 import { workflowModeDescription, workflowModeLabel, workflowModeOptions } from '../App';
-
-const defaultCounts: Counts = {
-  total_documents: 0,
-  complete: 0,
-  missing_ocr: 0,
-  missing_tagging: 0,
-  missing_title: 0,
-  missing_correspondent: 0,
-  missing_document_type: 0,
-  missing_document_date: 0,
-  missing_fields: 0,
-  waiting_review: 0,
-  failed: 0,
-  running: 0,
-  never_processed: 0
-};
 
 const defaultDashboardRanges: Array<{ key: DashboardRange; label: string }> = [
   { key: '24h', label: '24h' },
@@ -242,7 +226,17 @@ function AlertsBar({
   );
 }
 
-function HealthBadge({ score, generatedAt }: { score: number | null; generatedAt: string | null }) {
+function HealthBadge({
+  score,
+  generatedAt,
+  nextRefreshIn,
+  pulse
+}: {
+  score: number | null;
+  generatedAt: string | null;
+  nextRefreshIn: number;
+  pulse: boolean;
+}) {
   const { t, formatRelativeTime } = useI18n();
   const tone = healthTone(score);
   const label = score == null
@@ -258,6 +252,10 @@ function HealthBadge({ score, generatedAt }: { score: number | null; generatedAt
       <div>
         <strong>{label}</strong>
         <em>{generatedAt ? formatRelativeTime(generatedAt) : '-'}</em>
+      </div>
+      <div className="freshness-indicator" aria-live="polite">
+        <span className={`pulse-dot ${pulse ? 'is-pulsing' : ''}`} aria-hidden="true" />
+        <em>{t('dashboard.freshness.next', { seconds: nextRefreshIn })}</em>
       </div>
     </div>
   );
@@ -876,9 +874,6 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
 
 export function Dashboard({ setError, canManageSettings }: { setError: (error: string | null) => void; canManageSettings: boolean }) {
   const { t, formatNumber, formatPercent, formatRelativeTime: formatRelative } = useI18n();
-  const [counts, setCounts] = useState<Counts>(defaultCounts);
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [live, setLive] = useState<DashboardLiveStatus | null>(null);
   const [range, setRange] = useState<DashboardRange>(() => {
     if (typeof window === 'undefined') return '24h';
     const stored = window.localStorage.getItem('dashboard.range');
@@ -894,10 +889,8 @@ export function Dashboard({ setError, canManageSettings }: { setError: (error: s
   const [modeBusy, setModeBusy] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [paperlessToolsBusy, setPaperlessToolsBusy] = useState(false);
-  const [recovery, setRecovery] = useState<{ older_than_seconds: number; items: RecoveryCandidate[] } | null>(null);
   const [consistency, setConsistency] = useState<PaperlessConsistencyResult | null>(null);
   const [reconcile, setReconcile] = useState<CompletionTagReconcileResult | null>(null);
-  const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(() => {
     if (typeof window === 'undefined') return false;
     return window.localStorage.getItem('dashboard.drawer_open') === 'true';
@@ -906,43 +899,10 @@ export function Dashboard({ setError, canManageSettings }: { setError: (error: s
     if (typeof window === 'undefined') return;
     window.localStorage.setItem('dashboard.drawer_open', String(drawerOpen));
   }, [drawerOpen]);
-  const load = () =>
-    api
-      .dashboard(range)
-      .then((data) => {
-        setCounts(data.counts);
-        setStats(data.stats);
-        setLastLoadedAt(new Date().toISOString());
-      })
-      .catch((err) => setError(localizedErrorMessage(err, t)));
-  const loadLive = () =>
-    api
-      .dashboardLive()
-      .then(setLive)
-      .catch((err) => setError(localizedErrorMessage(err, t)));
-  const loadRecovery = () =>
-    api
-      .recoveryStatus()
-      .then(setRecovery)
-      .catch((err) => setError(localizedErrorMessage(err, t)));
 
-  useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => {
-      void load();
-    }, 30000);
-    return () => window.clearInterval(timer);
-  }, [range]);
-
-  useEffect(() => {
-    void loadLive();
-    if (canManageSettings) void loadRecovery();
-    const timer = window.setInterval(() => {
-      void loadLive();
-      if (canManageSettings) void loadRecovery();
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [canManageSettings]);
+  const { stats, counts, lastLoadedAt, reload: load } = useDashboardStats(range, setError);
+  const { live, recovery, reload: loadLive, reloadRecovery: loadRecovery, setLive } = useDashboardLive(canManageSettings, setError);
+  const { nextRefreshIn, pulse } = useFreshness(30_000, lastLoadedAt);
 
   const updateDashboardWorkflowMode = async (nextMode: ProcessingMode) => {
     const settings = await api.updateWorkflowMode(nextMode);
@@ -1068,7 +1028,12 @@ export function Dashboard({ setError, canManageSettings }: { setError: (error: s
           <p>
             {t('dashboard.last_refresh', { time: lastLoadedAt ? formatRelative(lastLoadedAt) : '-' })}
           </p>
-          <HealthBadge score={healthScore} generatedAt={stats?.generated_at ?? null} />
+          <HealthBadge
+            score={healthScore}
+            generatedAt={stats?.generated_at ?? null}
+            nextRefreshIn={nextRefreshIn}
+            pulse={pulse}
+          />
         </div>
         <div className="dashboard-heading-actions">
           <div className="range-tabs" aria-label={t('dashboard.range_label')}>
