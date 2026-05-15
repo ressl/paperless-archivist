@@ -179,6 +179,37 @@ export type DashboardKpis = {
   review_load: number;
   running_jobs: number;
   throughput: number;
+  cost_in_range_usd?: number | null;
+  mttc_seconds?: number | null;
+  p95_stage_duration_ms?: number | null;
+};
+
+export type DashboardCostBucket = {
+  bucket: string;
+  label: string;
+  cost_usd?: number | null;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+};
+
+export type DashboardProviderCostSummary = {
+  provider: string;
+  model: string;
+  cost_usd?: number | null;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  sparkline: Array<number | null>;
+};
+
+export type NeedsAttentionItem = {
+  kind: string;
+  severity: 'info' | 'warning' | 'critical' | string;
+  title: string;
+  description: string;
+  action_key?: string | null;
+  count?: number | null;
 };
 
 export type DashboardComparison = {
@@ -264,6 +295,8 @@ export type DashboardStats = {
   review_status: DashboardStatusCount[];
   provider_usage: ProviderUsageStats[];
   quality: QualityStats;
+  cost_series: DashboardCostBucket[];
+  cost_breakdown_by_provider: DashboardProviderCostSummary[];
 };
 
 export type DashboardResponse = {
@@ -352,6 +385,7 @@ export type DashboardLiveStatus = {
   active_jobs: DashboardLiveJob[];
   recent_llm_events: DashboardLiveLlmEvent[];
   recent_failures: DashboardLiveFailure[];
+  needs_attention: NeedsAttentionItem[];
 };
 
 export type InventoryItem = {

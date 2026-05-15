@@ -206,7 +206,16 @@ components:
         label: { type: string }
     DashboardKpis:
       type: object
-      required: [completion_rate, open_backlog, failure_rate, review_load, running_jobs, throughput]
+      required:
+        - completion_rate
+        - open_backlog
+        - failure_rate
+        - review_load
+        - running_jobs
+        - throughput
+        - cost_in_range_usd
+        - mttc_seconds
+        - p95_stage_duration_ms
       properties:
         completion_rate: { type: number, format: double }
         open_backlog: { type: integer, format: int64 }
@@ -214,6 +223,9 @@ components:
         review_load: { type: integer, format: int64 }
         running_jobs: { type: integer, format: int64 }
         throughput: { type: integer, format: int64 }
+        cost_in_range_usd: { type: [number, "null"], format: double }
+        mttc_seconds: { type: [number, "null"], format: double }
+        p95_stage_duration_ms: { type: [integer, "null"], format: int64 }
     DashboardComparison:
       type: object
       required: [jobs_created_delta, jobs_succeeded_delta, jobs_failed_delta, open_backlog_delta]
@@ -309,6 +321,36 @@ components:
         acceptance_rate: { type: [number, "null"], format: double }
         uncertainty_reviews: { type: integer, format: int64 }
         validation_warning_reviews: { type: integer, format: int64 }
+    DashboardCostBucket:
+      type: object
+      required: [bucket, label, cost_usd, request_count, input_tokens, output_tokens]
+      properties:
+        bucket: { type: string, format: date-time }
+        label: { type: string }
+        cost_usd: { type: [number, "null"], format: double }
+        request_count: { type: integer, format: int64 }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+    DashboardProviderCostSummary:
+      type: object
+      required:
+        - provider
+        - model
+        - cost_usd
+        - request_count
+        - input_tokens
+        - output_tokens
+        - sparkline
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        cost_usd: { type: [number, "null"], format: double }
+        request_count: { type: integer, format: int64 }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        sparkline:
+          type: array
+          items: { type: [number, "null"], format: double }
     DashboardStats:
       type: object
       required:
@@ -325,6 +367,8 @@ components:
         - review_status
         - provider_usage
         - quality
+        - cost_series
+        - cost_breakdown_by_provider
       properties:
         generated_at: { type: string, format: date-time }
         selected_range: { type: string, enum: ["24h", "7d", "30d", "90d", "12m", "all"] }
@@ -355,6 +399,12 @@ components:
           type: array
           items: { $ref: "#/components/schemas/ProviderUsageStats" }
         quality: { $ref: "#/components/schemas/QualityStats" }
+        cost_series:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardCostBucket" }
+        cost_breakdown_by_provider:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardProviderCostSummary" }
     ServiceProcessingStatus:
       type: object
       required: [state, title, description]
@@ -421,6 +471,16 @@ components:
         error_message: { type: string }
         next_attempt_at: { type: [string, "null"], format: date-time }
         updated_at: { type: string, format: date-time }
+    NeedsAttentionItem:
+      type: object
+      required: [kind, severity, title, description]
+      properties:
+        kind: { type: string }
+        severity: { type: string, enum: [info, warning, critical] }
+        title: { type: string }
+        description: { type: string }
+        action_key: { type: [string, "null"] }
+        count: { type: [integer, "null"], format: int64 }
     DashboardLiveStatus:
       type: object
       required:
@@ -435,6 +495,7 @@ components:
         - active_jobs
         - recent_llm_events
         - recent_failures
+        - needs_attention
       properties:
         generated_at: { type: string, format: date-time }
         workflow_mode: { $ref: "#/components/schemas/ProcessingMode" }
@@ -458,6 +519,9 @@ components:
         recent_failures:
           type: array
           items: { $ref: "#/components/schemas/DashboardLiveFailure" }
+        needs_attention:
+          type: array
+          items: { $ref: "#/components/schemas/NeedsAttentionItem" }
     UpdateWorkflowModeRequest:
       type: object
       required: [mode]

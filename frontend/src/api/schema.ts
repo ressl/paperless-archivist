@@ -2396,6 +2396,12 @@ export interface components {
             running_jobs: number;
             /** Format: int64 */
             throughput: number;
+            /** Format: double */
+            cost_in_range_usd: number | null;
+            /** Format: double */
+            mttc_seconds: number | null;
+            /** Format: int64 */
+            p95_stage_duration_ms: number | null;
         };
         DashboardComparison: {
             /** Format: int64 */
@@ -2500,6 +2506,32 @@ export interface components {
             /** Format: int64 */
             validation_warning_reviews: number;
         };
+        DashboardCostBucket: {
+            /** Format: date-time */
+            bucket: string;
+            label: string;
+            /** Format: double */
+            cost_usd: number | null;
+            /** Format: int64 */
+            request_count: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+        };
+        DashboardProviderCostSummary: {
+            provider: string;
+            model: string;
+            /** Format: double */
+            cost_usd: number | null;
+            /** Format: int64 */
+            request_count: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            sparkline: (number | null)[];
+        };
         DashboardStats: {
             /** Format: date-time */
             generated_at: string;
@@ -2516,6 +2548,8 @@ export interface components {
             review_status: components["schemas"]["DashboardStatusCount"][];
             provider_usage: components["schemas"]["ProviderUsageStats"][];
             quality: components["schemas"]["QualityStats"];
+            cost_series: components["schemas"]["DashboardCostBucket"][];
+            cost_breakdown_by_provider: components["schemas"]["DashboardProviderCostSummary"][];
         };
         ServiceProcessingStatus: {
             /** @enum {string} */
@@ -2592,6 +2626,16 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        NeedsAttentionItem: {
+            kind: string;
+            /** @enum {string} */
+            severity: "info" | "warning" | "critical";
+            title: string;
+            description: string;
+            action_key?: string | null;
+            /** Format: int64 */
+            count?: number | null;
+        };
         DashboardLiveStatus: {
             /** Format: date-time */
             generated_at: string;
@@ -2607,6 +2651,7 @@ export interface components {
             active_jobs: components["schemas"]["DashboardLiveJob"][];
             recent_llm_events: components["schemas"]["DashboardLiveLlmEvent"][];
             recent_failures: components["schemas"]["DashboardLiveFailure"][];
+            needs_attention: components["schemas"]["NeedsAttentionItem"][];
         };
         UpdateWorkflowModeRequest: {
             mode: components["schemas"]["ProcessingMode"];

@@ -2230,6 +2230,9 @@ pub struct DashboardKpis {
     pub review_load: i64,
     pub running_jobs: i64,
     pub throughput: i64,
+    pub cost_in_range_usd: Option<f64>,
+    pub mttc_seconds: Option<f64>,
+    pub p95_stage_duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2281,6 +2284,27 @@ pub struct DashboardStatusCount {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardCostBucket {
+    pub bucket: DateTime<Utc>,
+    pub label: String,
+    pub cost_usd: Option<f64>,
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardProviderCostSummary {
+    pub provider: String,
+    pub model: String,
+    pub cost_usd: Option<f64>,
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub sparkline: Vec<Option<f64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardStats {
     pub generated_at: DateTime<Utc>,
     pub selected_range: String,
@@ -2295,6 +2319,8 @@ pub struct DashboardStats {
     pub review_status: Vec<DashboardStatusCount>,
     pub provider_usage: Vec<ProviderUsageStats>,
     pub quality: QualityStats,
+    pub cost_series: Vec<DashboardCostBucket>,
+    pub cost_breakdown_by_provider: Vec<DashboardProviderCostSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2326,6 +2352,16 @@ pub struct QualityStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeedsAttentionItem {
+    pub kind: String,
+    pub severity: String,
+    pub title: String,
+    pub description: String,
+    pub action_key: Option<String>,
+    pub count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardLiveStatus {
     pub generated_at: DateTime<Utc>,
     pub workflow_mode: ProcessingMode,
@@ -2339,6 +2375,7 @@ pub struct DashboardLiveStatus {
     pub active_jobs: Vec<DashboardLiveJob>,
     pub recent_llm_events: Vec<DashboardLiveLlmEvent>,
     pub recent_failures: Vec<DashboardLiveFailure>,
+    pub needs_attention: Vec<NeedsAttentionItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

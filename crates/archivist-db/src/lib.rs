@@ -6,10 +6,11 @@ use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use anyhow::{Context, Result, anyhow};
 use archivist_core::{
     AiArtifactStorageMode, AuditEventInput, BacklogCounts, DashboardBacklogPoint,
-    DashboardComparison, DashboardLiveFailure, DashboardLiveJob, DashboardLiveLlmEvent,
-    DashboardLiveRun, DashboardLiveStatus, DashboardRange, DashboardStageStatus, DashboardStats,
-    DashboardStatusCount, DashboardTimeBucket, DocumentChatSource, DocumentInventoryItem,
-    LanguageDetection, ProcessingMode, ProviderUsageStats, QualityStats, Role, RuntimeSettings,
+    DashboardComparison, DashboardCostBucket, DashboardLiveFailure, DashboardLiveJob,
+    DashboardLiveLlmEvent, DashboardLiveRun, DashboardLiveStatus, DashboardRange,
+    DashboardStageStatus, DashboardStats, DashboardStatusCount, DashboardTimeBucket,
+    DocumentChatSource, DocumentInventoryItem, LanguageDetection, NeedsAttentionItem,
+    ProcessingMode, ProviderUsageStats, QualityStats, Role, RuntimeSettings,
     ServiceProcessingStatus, Stage, WorkflowRules, WorkflowSafetyStatus, redact_sensitive_json,
 };
 use base64::Engine;
@@ -2219,6 +2220,9 @@ pub async fn get_dashboard_stats(
     } else {
         counts.complete as f64 / counts.total_documents as f64
     };
+    let mttc_seconds = mttc_seconds_value(pool, start, now).await?;
+    let p95_stage_duration_ms = p95_stage_duration_value(pool, start, now).await?;
+    let cost_series = cost_series_tokens(pool, start, now, range).await?;
 
     Ok(DashboardStats {
         generated_at: now,
@@ -2231,6 +2235,9 @@ pub async fn get_dashboard_stats(
             review_load: counts.waiting_review,
             running_jobs,
             throughput: activity.jobs_succeeded,
+            cost_in_range_usd: None,
+            mttc_seconds,
+            p95_stage_duration_ms,
         },
         comparison,
         stage_status: stage_status(pool).await?,
@@ -2241,6 +2248,8 @@ pub async fn get_dashboard_stats(
         review_status: status_counts(pool, "review_items").await?,
         provider_usage: provider_usage(pool, start).await?,
         quality: quality_stats(pool, start).await?,
+        cost_series,
+        cost_breakdown_by_provider: Vec::new(),
     })
 }
 
@@ -2263,6 +2272,7 @@ pub async fn get_dashboard_live_status(
         && workflow_safety
             .daily_remaining
             .is_none_or(|remaining| remaining > 0);
+    let needs_attention = needs_attention_items(pool, &workflow_safety, &recent_failures).await?;
 
     Ok(DashboardLiveStatus {
         generated_at: now,
@@ -2281,6 +2291,7 @@ pub async fn get_dashboard_live_status(
         active_jobs,
         recent_llm_events,
         recent_failures,
+        needs_attention,
     })
 }
 
@@ -3048,6 +3059,238 @@ async fn status_counts(pool: &DbPool, table: &str) -> Result<Vec<DashboardStatus
             })
         })
         .collect()
+}
+
+async fn mttc_seconds_value(
+    pool: &DbPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Option<f64>> {
+    let row = sqlx::query(
+        r#"
+        select extract(epoch from avg(finished_at - started_at))::double precision as mttc
+          from pipeline_runs
+         where status = 'succeeded'
+           and started_at is not null
+           and finished_at is not null
+           and finished_at >= $1
+           and finished_at < $2
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(pool)
+    .await
+    .context("query mttc")?;
+    Ok(row.try_get::<Option<f64>, _>("mttc")?)
+}
+
+async fn p95_stage_duration_value(
+    pool: &DbPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Option<i64>> {
+    let row = sqlx::query(
+        r#"
+        select percentile_cont(0.95) within group (order by duration_ms)::bigint as p95
+          from ai_artifacts
+         where duration_ms is not null
+           and created_at >= $1
+           and created_at < $2
+        "#,
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(pool)
+    .await
+    .context("query p95 stage duration")?;
+    Ok(row.try_get::<Option<i64>, _>("p95")?)
+}
+
+async fn cost_series_tokens(
+    pool: &DbPool,
+    start: DateTime<Utc>,
+    now: DateTime<Utc>,
+    range: DashboardRange,
+) -> Result<Vec<DashboardCostBucket>> {
+    let granularity = range.granularity();
+    let rows = sqlx::query(
+        r#"
+        with buckets as (
+          select generate_series(date_trunc($4, $1), $2, $3::interval) as bucket
+        )
+        select
+          b.bucket,
+          coalesce((
+            select sum(
+              coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
+              coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0)
+            )::bigint
+              from ai_artifacts
+             where created_at >= b.bucket and created_at < b.bucket + $3::interval
+          ), 0)::bigint as input_tokens,
+          coalesce((
+            select sum(
+              coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
+              coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0)
+            )::bigint
+              from ai_artifacts
+             where created_at >= b.bucket and created_at < b.bucket + $3::interval
+          ), 0)::bigint as output_tokens,
+          coalesce((
+            select count(*)::bigint
+              from ai_artifacts
+             where created_at >= b.bucket and created_at < b.bucket + $3::interval
+          ), 0)::bigint as request_count
+        from buckets b
+        order by b.bucket
+        "#,
+    )
+    .bind(start)
+    .bind(now)
+    .bind(granularity.interval())
+    .bind(granularity.date_trunc())
+    .fetch_all(pool)
+    .await
+    .context("query cost series")?;
+
+    rows.into_iter()
+        .map(|row| {
+            let bucket: DateTime<Utc> = row.try_get("bucket")?;
+            Ok(DashboardCostBucket {
+                label: bucket_label(bucket, granularity),
+                bucket,
+                cost_usd: None,
+                request_count: row.try_get("request_count")?,
+                input_tokens: row.try_get("input_tokens")?,
+                output_tokens: row.try_get("output_tokens")?,
+            })
+        })
+        .collect()
+}
+
+async fn needs_attention_items(
+    pool: &DbPool,
+    safety: &WorkflowSafetyStatus,
+    recent_failures: &[DashboardLiveFailure],
+) -> Result<Vec<NeedsAttentionItem>> {
+    let mut items = Vec::new();
+
+    let stuck_runs: i64 = sqlx::query_scalar(
+        r#"
+        select count(*)::bigint
+          from pipeline_runs
+         where status = 'running'
+           and updated_at < now() - interval '10 minutes'
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("count stuck runs")?;
+    if stuck_runs > 0 {
+        items.push(NeedsAttentionItem {
+            kind: "stuck_runs".to_owned(),
+            severity: "critical".to_owned(),
+            title: format!("{stuck_runs} stuck run(s)"),
+            description: "Pipeline runs have not progressed in the last 10 minutes.".to_owned(),
+            action_key: Some("dashboard.alerts.action.recover_runs".to_owned()),
+            count: Some(stuck_runs),
+        });
+    }
+
+    let stale_leases: i64 = sqlx::query_scalar(
+        r#"
+        select count(*)::bigint
+          from jobs
+         where status = 'running'
+           and lease_until is not null
+           and lease_until < now()
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("count stale leases")?;
+    if stale_leases > 0 {
+        items.push(NeedsAttentionItem {
+            kind: "stale_leases".to_owned(),
+            severity: "warning".to_owned(),
+            title: format!("{stale_leases} stale lease(s)"),
+            description: "Workers hold expired leases. Requeue to let healthy workers pick them up."
+                .to_owned(),
+            action_key: Some("dashboard.alerts.action.requeue_leases".to_owned()),
+            count: Some(stale_leases),
+        });
+    }
+
+    if quota_below_threshold(safety.hourly_remaining, safety.hourly_document_limit) {
+        items.push(NeedsAttentionItem {
+            kind: "quota_low".to_owned(),
+            severity: "warning".to_owned(),
+            title: "Hourly quota almost exhausted".to_owned(),
+            description: "Automatic selection will pause when the hourly limit is reached."
+                .to_owned(),
+            action_key: Some("dashboard.alerts.action.adjust_limits".to_owned()),
+            count: safety.hourly_remaining,
+        });
+    }
+    if quota_below_threshold(safety.daily_remaining, safety.daily_document_limit) {
+        items.push(NeedsAttentionItem {
+            kind: "quota_low".to_owned(),
+            severity: "warning".to_owned(),
+            title: "Daily quota almost exhausted".to_owned(),
+            description: "Automatic selection will pause when the daily limit is reached."
+                .to_owned(),
+            action_key: Some("dashboard.alerts.action.adjust_limits".to_owned()),
+            count: safety.daily_remaining,
+        });
+    }
+
+    let hard_failure_count = recent_failures
+        .iter()
+        .filter(|item| item.failure_kind == "failed")
+        .count() as i64;
+    if hard_failure_count >= 3 {
+        items.push(NeedsAttentionItem {
+            kind: "provider_error".to_owned(),
+            severity: "warning".to_owned(),
+            title: format!("{hard_failure_count} recent failure(s)"),
+            description: "Multiple jobs failed recently. Inspect logs or provider availability."
+                .to_owned(),
+            action_key: Some("dashboard.alerts.action.inspect_failures".to_owned()),
+            count: Some(hard_failure_count),
+        });
+    }
+
+    if safety.dry_run {
+        items.push(NeedsAttentionItem {
+            kind: "dry_run_active".to_owned(),
+            severity: "info".to_owned(),
+            title: "Dry-run mode is active".to_owned(),
+            description: "Validated patches will not be applied to Paperless until dry-run is disabled."
+                .to_owned(),
+            action_key: Some("dashboard.alerts.action.disable_dry_run".to_owned()),
+            count: None,
+        });
+    }
+
+    items.sort_by_key(|item| match item.severity.as_str() {
+        "critical" => 0,
+        "warning" => 1,
+        "info" => 2,
+        _ => 3,
+    });
+
+    Ok(items)
+}
+
+fn quota_below_threshold(remaining: Option<i64>, limit: Option<i64>) -> bool {
+    match (remaining, limit) {
+        (Some(remaining), Some(limit)) if limit > 0 => {
+            let threshold = (limit as f64 * 0.1).ceil() as i64;
+            remaining <= threshold.max(1)
+        }
+        _ => false,
+    }
 }
 
 fn bucket_label(

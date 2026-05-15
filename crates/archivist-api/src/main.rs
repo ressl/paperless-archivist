@@ -11,12 +11,13 @@ use archivist_ai::{
 };
 use archivist_config::AppConfig;
 use archivist_core::{
-    AiProviderKind, AuditEventInput, DashboardRange, DocumentChatSource, DocumentInventoryItem,
-    DocumentPatch, Permission, ProcessingMode, ProviderUsageStats, Role, RuntimeSettings, Stage,
-    WorkflowRules, build_document_chat_prompt, detect_document_language, document_chat_snippet,
-    document_chat_terms, extract_issue_date_suggestion, roles_have_permission,
-    score_document_chat_source, validate_choice_suggestion, validate_document_date_suggestion,
-    validate_field_suggestion, validate_tag_suggestion, validate_title_suggestion,
+    AiProviderKind, AuditEventInput, DashboardProviderCostSummary, DashboardRange, DashboardStats,
+    DocumentChatSource, DocumentInventoryItem, DocumentPatch, Permission, ProcessingMode,
+    ProviderUsageStats, Role, RuntimeSettings, Stage, WorkflowRules, build_document_chat_prompt,
+    detect_document_language, document_chat_snippet, document_chat_terms,
+    extract_issue_date_suggestion, roles_have_permission, score_document_chat_source,
+    validate_choice_suggestion, validate_document_date_suggestion, validate_field_suggestion,
+    validate_tag_suggestion, validate_title_suggestion,
 };
 use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, OidcUserInput, ReviewItemRecord, append_audit,
@@ -2141,7 +2142,7 @@ async fn dashboard(
     let counts = get_backlog_counts(&state.pool).await?;
     let mut stats = get_dashboard_stats(&state.pool, range, &counts).await?;
     let settings = get_runtime_settings(&state.pool).await?;
-    enrich_provider_usage_costs(&mut stats.provider_usage, &settings);
+    enrich_dashboard_costs(&mut stats, &settings);
     Ok(Json(json!({ "counts": counts, "stats": stats })))
 }
 
@@ -2263,6 +2264,83 @@ fn enrich_provider_usage_costs(usage: &mut [ProviderUsageStats], settings: &Runt
             _ => None,
         };
     }
+}
+
+fn enrich_dashboard_costs(stats: &mut DashboardStats, settings: &RuntimeSettings) {
+    enrich_provider_usage_costs(&mut stats.provider_usage, settings);
+
+    let total_cost: f64 = stats
+        .provider_usage
+        .iter()
+        .filter_map(|item| item.estimated_cost_usd)
+        .sum();
+    stats.kpis.cost_in_range_usd = if stats.provider_usage.iter().any(|p| p.estimated_cost_usd.is_some()) {
+        Some(total_cost)
+    } else {
+        None
+    };
+
+    let mut weighted_input_cost = 0.0_f64;
+    let mut weighted_input_tokens = 0_i64;
+    let mut weighted_output_cost = 0.0_f64;
+    let mut weighted_output_tokens = 0_i64;
+    for item in &stats.provider_usage {
+        let Some(provider) = settings
+            .ai
+            .providers
+            .iter()
+            .find(|provider| provider.name == item.provider)
+        else {
+            continue;
+        };
+        if let Some(rate) = provider.cost_per_1m_input_tokens_usd {
+            weighted_input_cost += item.input_tokens as f64 / 1_000_000.0 * rate;
+            weighted_input_tokens += item.input_tokens;
+        }
+        if let Some(rate) = provider.cost_per_1m_output_tokens_usd {
+            weighted_output_cost += item.output_tokens as f64 / 1_000_000.0 * rate;
+            weighted_output_tokens += item.output_tokens;
+        }
+    }
+    let input_rate_per_token = if weighted_input_tokens > 0 {
+        weighted_input_cost / weighted_input_tokens as f64
+    } else {
+        0.0
+    };
+    let output_rate_per_token = if weighted_output_tokens > 0 {
+        weighted_output_cost / weighted_output_tokens as f64
+    } else {
+        0.0
+    };
+    let cost_known = weighted_input_tokens > 0 || weighted_output_tokens > 0;
+    for bucket in &mut stats.cost_series {
+        if !cost_known {
+            bucket.cost_usd = None;
+            continue;
+        }
+        if bucket.input_tokens + bucket.output_tokens == 0 {
+            bucket.cost_usd = Some(0.0);
+            continue;
+        }
+        bucket.cost_usd = Some(
+            bucket.input_tokens as f64 * input_rate_per_token
+                + bucket.output_tokens as f64 * output_rate_per_token,
+        );
+    }
+
+    stats.cost_breakdown_by_provider = stats
+        .provider_usage
+        .iter()
+        .map(|item| DashboardProviderCostSummary {
+            provider: item.provider.clone(),
+            model: item.model.clone(),
+            cost_usd: item.estimated_cost_usd,
+            request_count: item.request_count,
+            input_tokens: item.input_tokens,
+            output_tokens: item.output_tokens,
+            sparkline: Vec::new(),
+        })
+        .collect();
 }
 
 #[derive(Debug, Deserialize)]
