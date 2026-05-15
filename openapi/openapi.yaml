@@ -211,6 +211,10 @@ components:
         - p95_duration_ms
         - input_tokens
         - output_tokens
+        - feedback_count
+        - positive_feedback
+        - negative_feedback
+        - acceptance_rate
       properties:
         provider: { type: string }
         model: { type: string }
@@ -221,6 +225,28 @@ components:
         input_tokens: { type: integer, format: int64 }
         output_tokens: { type: integer, format: int64 }
         estimated_cost_usd: { type: [number, "null"], format: double }
+        feedback_count: { type: integer, format: int64 }
+        positive_feedback: { type: integer, format: int64 }
+        negative_feedback: { type: integer, format: int64 }
+        acceptance_rate: { type: [number, "null"], format: double }
+    QualityStats:
+      type: object
+      required:
+        - review_decisions
+        - review_approved
+        - review_edited
+        - review_rejected
+        - acceptance_rate
+        - uncertainty_reviews
+        - validation_warning_reviews
+      properties:
+        review_decisions: { type: integer, format: int64 }
+        review_approved: { type: integer, format: int64 }
+        review_edited: { type: integer, format: int64 }
+        review_rejected: { type: integer, format: int64 }
+        acceptance_rate: { type: [number, "null"], format: double }
+        uncertainty_reviews: { type: integer, format: int64 }
+        validation_warning_reviews: { type: integer, format: int64 }
     DashboardStats:
       type: object
       required:
@@ -236,6 +262,7 @@ components:
         - run_status
         - review_status
         - provider_usage
+        - quality
       properties:
         generated_at: { type: string, format: date-time }
         selected_range: { type: string, enum: ["24h", "7d", "30d", "90d", "12m", "all"] }
@@ -265,6 +292,7 @@ components:
         provider_usage:
           type: array
           items: { $ref: "#/components/schemas/ProviderUsageStats" }
+        quality: { $ref: "#/components/schemas/QualityStats" }
     ServiceProcessingStatus:
       type: object
       required: [state, title, description]

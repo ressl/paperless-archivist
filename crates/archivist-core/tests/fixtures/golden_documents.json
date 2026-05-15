@@ -1,0 +1,20 @@
+[
+  {
+    "id": "de_invoice",
+    "text": "Rechnung Nr. R-2026-014\nRechnungsdatum: 03.04.2026\nAcme Beratung GmbH\nDer Betrag ist bis 30.04.2026 faellig.",
+    "language": "de",
+    "issue_date": "2026-04-03"
+  },
+  {
+    "id": "en_invoice",
+    "text": "Invoice INV-2026-081\nInvoice date: May 2, 2026\nExample Consulting Ltd\nPayment due June 1, 2026.",
+    "language": "en",
+    "issue_date": "2026-05-02"
+  },
+  {
+    "id": "fr_invoice",
+    "text": "Facture F-2026-09\nDate de facture: 12.05.2026\nMontant et paiement indiques dans le document.",
+    "language": "fr",
+    "issue_date": "2026-05-12"
+  }
+]

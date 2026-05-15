@@ -356,6 +356,10 @@ The response contains:
 - throughput time series from job/run history
 - backlog history from `dashboard_snapshots`
 - job, run, and review status distributions
+- quality metrics for review decisions, acceptance rate, edits, rejections,
+  validation warnings, and uncertainty-routed reviews
+- provider/model feedback counts and acceptance rates derived from review
+  decisions
 
 Dashboard snapshots are written opportunistically when the dashboard is queried
 and the latest snapshot is older than five minutes. Fresh deployments therefore
@@ -371,6 +375,27 @@ errors. A queued job with a previous `error_message` is shown as
 service as failed. This is useful for Ollama runner crashes and temporary
 Paperless timeouts: the operator can see the old error, the next retry time,
 and whether the worker has resumed processing.
+
+### Quality Evaluation
+
+Use the quality strip and provider usage table to decide whether a model,
+prompt, or workflow rule is improving production outcomes:
+
+- a high approval rate with low edit/reject counts means suggestions are likely
+  ready for broader automation
+- rising uncertainty or validation-warning counts usually means the selected
+  model, prompt, language profile, or confidence threshold needs attention
+- provider/model feedback compares acceptance by model without exposing
+  document content
+
+Before rolling out prompt changes, run:
+
+```bash
+cargo test
+```
+
+The test suite includes golden document fixtures and prompt regression guards.
+Update `docs/PROMPT_RELEASE_NOTES.md` whenever default prompt behavior changes.
 
 ## User and Session Operations
 

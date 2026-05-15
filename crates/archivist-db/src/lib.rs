@@ -9,7 +9,7 @@ use archivist_core::{
     DashboardLiveFailure, DashboardLiveJob, DashboardLiveLlmEvent, DashboardLiveRun,
     DashboardLiveStatus, DashboardRange, DashboardStageStatus, DashboardStats,
     DashboardStatusCount, DashboardTimeBucket, DocumentChatSource, DocumentInventoryItem,
-    LanguageDetection, ProcessingMode, ProviderUsageStats, Role, RuntimeSettings,
+    LanguageDetection, ProcessingMode, ProviderUsageStats, QualityStats, Role, RuntimeSettings,
     ServiceProcessingStatus, Stage, WorkflowRules, WorkflowSafetyStatus, redact_sensitive_json,
 };
 use base64::Engine;
@@ -2093,6 +2093,7 @@ pub async fn get_dashboard_stats(
         run_status: status_counts(pool, "pipeline_runs").await?,
         review_status: status_counts(pool, "review_items").await?,
         provider_usage: provider_usage(pool, start).await?,
+        quality: quality_stats(pool, start).await?,
     })
 }
 
@@ -2526,9 +2527,19 @@ async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<Provi
                coalesce(sum(
                  coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
                  coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0)
-               ), 0)::bigint as output_tokens
-          from ai_artifacts
-         where created_at >= $1
+               ), 0)::bigint as output_tokens,
+               count(distinct feedback.id)::bigint as feedback_count,
+               count(distinct feedback.id) filter (
+                 where feedback.event_type in ('review.approved', 'review.edited')
+               )::bigint as positive_feedback,
+               count(distinct feedback.id) filter (
+                 where feedback.event_type = 'review.rejected'
+               )::bigint as negative_feedback
+          from ai_artifacts ai
+          left join audit_events feedback
+            on feedback.job_id = ai.job_id
+           and feedback.event_type in ('review.approved', 'review.edited', 'review.rejected')
+         where ai.created_at >= $1
          group by provider, model, stage
          order by request_count desc, provider, model, stage
          limit 50
@@ -2550,9 +2561,69 @@ async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<Provi
                 input_tokens: row.try_get("input_tokens")?,
                 output_tokens: row.try_get("output_tokens")?,
                 estimated_cost_usd: None,
+                feedback_count: row.try_get("feedback_count")?,
+                positive_feedback: row.try_get("positive_feedback")?,
+                negative_feedback: row.try_get("negative_feedback")?,
+                acceptance_rate: feedback_rate(
+                    row.try_get("positive_feedback")?,
+                    row.try_get("negative_feedback")?,
+                ),
             })
         })
         .collect()
+}
+
+fn feedback_rate(positive: i64, negative: i64) -> Option<f64> {
+    let total = positive + negative;
+    (total > 0).then_some(positive as f64 / total as f64)
+}
+
+async fn quality_stats(pool: &DbPool, start: DateTime<Utc>) -> Result<QualityStats> {
+    let row = sqlx::query(
+        r#"
+        select
+          count(*) filter (where event_type in ('review.approved', 'review.edited', 'review.rejected'))::bigint as review_decisions,
+          count(*) filter (where event_type = 'review.approved')::bigint as review_approved,
+          count(*) filter (where event_type = 'review.edited')::bigint as review_edited,
+          count(*) filter (where event_type = 'review.rejected')::bigint as review_rejected
+          from audit_events
+         where created_at >= $1
+        "#,
+    )
+    .bind(start)
+    .fetch_one(pool)
+    .await?;
+    let review_approved: i64 = row.try_get("review_approved")?;
+    let review_edited: i64 = row.try_get("review_edited")?;
+    let review_rejected: i64 = row.try_get("review_rejected")?;
+    let warning_row = sqlx::query(
+        r#"
+        select
+          count(*) filter (
+            where validation_warnings::text ilike '%LowConfidence%'
+               or validation_warnings::text ilike '%low confidence%'
+               or validation_warnings::text ilike '%below threshold%'
+          )::bigint as uncertainty_reviews,
+          count(*) filter (
+            where validation_warnings is not null
+              and validation_warnings <> '[]'::jsonb
+          )::bigint as validation_warning_reviews
+          from review_items
+         where created_at >= $1
+        "#,
+    )
+    .bind(start)
+    .fetch_one(pool)
+    .await?;
+    Ok(QualityStats {
+        review_decisions: row.try_get("review_decisions")?,
+        review_approved,
+        review_edited,
+        review_rejected,
+        acceptance_rate: feedback_rate(review_approved + review_edited, review_rejected),
+        uncertainty_reviews: warning_row.try_get("uncertainty_reviews")?,
+        validation_warning_reviews: warning_row.try_get("validation_warning_reviews")?,
+    })
 }
 
 async fn dashboard_range_start(

@@ -566,6 +566,29 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         <LiveProcessingPanel live={live} />
       </div>
 
+      <div className="quality-strip">
+        <div>
+          <span>{t('dashboard.quality.review_decisions')}</span>
+          <strong>{formatNumber(stats?.quality.review_decisions ?? 0)}</strong>
+        </div>
+        <div>
+          <span>{t('dashboard.quality.acceptance')}</span>
+          <strong>{stats?.quality.acceptance_rate == null ? '-' : formatPercent(stats.quality.acceptance_rate)}</strong>
+        </div>
+        <div>
+          <span>{t('dashboard.quality.edited')}</span>
+          <strong>{formatNumber(stats?.quality.review_edited ?? 0)}</strong>
+        </div>
+        <div>
+          <span>{t('dashboard.quality.rejected')}</span>
+          <strong>{formatNumber(stats?.quality.review_rejected ?? 0)}</strong>
+        </div>
+        <div>
+          <span>{t('dashboard.quality.uncertainty')}</span>
+          <strong>{formatNumber(stats?.quality.uncertainty_reviews ?? 0)}</strong>
+        </div>
+      </div>
+
       <ChartPanel title={t('dashboard.chart.provider_usage')} wide>
         <div className="table-wrap compact-table">
           <table>
@@ -579,11 +602,13 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
                 <th>{t('dashboard.provider.p95')}</th>
                 <th>{t('dashboard.provider.tokens')}</th>
                 <th>{t('dashboard.provider.cost')}</th>
+                <th>{t('dashboard.provider.feedback')}</th>
+                <th>{t('dashboard.provider.acceptance')}</th>
               </tr>
             </thead>
             <tbody>
               {(stats?.provider_usage ?? []).length === 0 && (
-                <tr><td colSpan={8}>{t('dashboard.provider.no_usage')}</td></tr>
+                <tr><td colSpan={10}>{t('dashboard.provider.no_usage')}</td></tr>
               )}
               {(stats?.provider_usage ?? []).map((item) => (
                 <tr key={`${item.provider}-${item.model}-${item.stage}`}>
@@ -595,6 +620,8 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
                   <td>{formatMs(item.p95_duration_ms)}</td>
                   <td>{item.input_tokens + item.output_tokens}</td>
                   <td>{formatCost(item.estimated_cost_usd)}</td>
+                  <td>{item.positive_feedback}/{item.negative_feedback}</td>
+                  <td>{item.acceptance_rate == null ? '-' : formatPercent(item.acceptance_rate)}</td>
                 </tr>
               ))}
             </tbody>

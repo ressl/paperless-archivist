@@ -612,6 +612,34 @@ th {
   grid-template-columns: repeat(6, minmax(130px, 1fr));
 }
 
+.quality-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.quality-strip div {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.quality-strip span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.quality-strip strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--ink);
+  font-size: 20px;
+}
+
 .dashboard-ops-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 390px);
@@ -1131,7 +1159,8 @@ th {
   .dashboard-heading-actions,
   .operations-strip,
   .dashboard-ops-grid,
-  .dashboard-metrics {
+  .dashboard-metrics,
+  .quality-strip {
     grid-template-columns: 1fr;
   }
 

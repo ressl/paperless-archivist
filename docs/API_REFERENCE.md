@@ -258,15 +258,26 @@ Response shape:
     "backlog_series": [],
     "job_status": [],
     "run_status": [],
-    "review_status": []
+    "review_status": [],
+    "provider_usage": [],
+    "quality": {
+      "review_decisions": 0,
+      "review_approved": 0,
+      "review_edited": 0,
+      "review_rejected": 0,
+      "acceptance_rate": null,
+      "uncertainty_reviews": 0,
+      "validation_warning_reviews": 0
+    }
   }
 }
 ```
 
 The frontend renders these values as KPI tiles, stacked stage status, throughput
 series, backlog history, status distribution charts, and provider
-usage/token/cost/latency tables. Cost estimates use optional per-provider
-pricing fields in runtime settings.
+usage/token/cost/latency/feedback tables. The quality object summarizes review
+acceptance, edits, rejections, and uncertainty routing for the selected range.
+Cost estimates use optional per-provider pricing fields in runtime settings.
 
 ## Document Chat
 

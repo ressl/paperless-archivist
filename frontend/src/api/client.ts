@@ -190,6 +190,20 @@ export type ProviderUsageStats = {
   input_tokens: number;
   output_tokens: number;
   estimated_cost_usd?: number | null;
+  feedback_count: number;
+  positive_feedback: number;
+  negative_feedback: number;
+  acceptance_rate?: number | null;
+};
+
+export type QualityStats = {
+  review_decisions: number;
+  review_approved: number;
+  review_edited: number;
+  review_rejected: number;
+  acceptance_rate?: number | null;
+  uncertainty_reviews: number;
+  validation_warning_reviews: number;
 };
 
 export type DashboardStats = {
@@ -205,6 +219,7 @@ export type DashboardStats = {
   run_status: DashboardStatusCount[];
   review_status: DashboardStatusCount[];
   provider_usage: ProviderUsageStats[];
+  quality: QualityStats;
 };
 
 export type DashboardResponse = {

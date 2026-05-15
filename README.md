@@ -352,6 +352,21 @@ The core safety rules are already product rules: no direct Paperless database
 writes, no frontend-to-provider calls, no unreviewed autopilot apply without
 validation, and audit events for privileged actions.
 
+## AI Quality And Evaluation
+
+Paperless Archivist treats model output as measured workflow evidence, not as a
+black box. The dashboard includes quality telemetry for review decisions,
+acceptance rate, edits, rejections, uncertainty-routed reviews, provider/model
+feedback, token volume, latency, and optional cost estimates. Operators can use
+these signals to compare models, spot prompt regressions, and decide when a
+workflow is safe enough for more automation.
+
+The repository also contains a public-safe golden document harness and prompt
+regression tests. Golden fixtures cover language and issue-date extraction, and
+prompt regression tests verify security wording, language context, strict JSON
+output, and deterministic temperature settings. Prompt changes should update
+the fixture coverage and [Prompt Release Notes](docs/PROMPT_RELEASE_NOTES.md).
+
 ## Comparison With Other Paperless AI Projects
 
 This matrix is based on public project documentation checked on 2026-05-14.

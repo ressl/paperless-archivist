@@ -41,6 +41,9 @@ existing allowed tags exactly as listed; only `new_tags` use the configured tag
 output language. This keeps the existing Paperless taxonomy stable and avoids
 silent mass translation.
 
+Prompt changes should update `docs/PROMPT_RELEASE_NOTES.md` and extend the
+golden-document or prompt-regression fixtures when behavior changes.
+
 ## Upgrade Behavior
 
 Migration `0008_default_prompt_pack.sql` inserts prompt version `2` for every

@@ -761,7 +761,10 @@ Implemented product path:
 - document inventory
 - backlog dashboard API and UI
 - provider usage/cost/latency dashboard
+- quality dashboard for review acceptance, edits, rejections, uncertainty, and
+  provider/model feedback
 - prompt test runner
+- golden document and prompt regression test coverage
 - batch review actions
 - audit CSV export
 - optional Paperless-ngx login bridge

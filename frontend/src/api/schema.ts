@@ -2218,6 +2218,30 @@ export interface components {
             output_tokens: number;
             /** Format: double */
             estimated_cost_usd?: number | null;
+            /** Format: int64 */
+            feedback_count: number;
+            /** Format: int64 */
+            positive_feedback: number;
+            /** Format: int64 */
+            negative_feedback: number;
+            /** Format: double */
+            acceptance_rate: number | null;
+        };
+        QualityStats: {
+            /** Format: int64 */
+            review_decisions: number;
+            /** Format: int64 */
+            review_approved: number;
+            /** Format: int64 */
+            review_edited: number;
+            /** Format: int64 */
+            review_rejected: number;
+            /** Format: double */
+            acceptance_rate: number | null;
+            /** Format: int64 */
+            uncertainty_reviews: number;
+            /** Format: int64 */
+            validation_warning_reviews: number;
         };
         DashboardStats: {
             /** Format: date-time */
@@ -2234,6 +2258,7 @@ export interface components {
             run_status: components["schemas"]["DashboardStatusCount"][];
             review_status: components["schemas"]["DashboardStatusCount"][];
             provider_usage: components["schemas"]["ProviderUsageStats"][];
+            quality: components["schemas"]["QualityStats"];
         };
         ServiceProcessingStatus: {
             /** @enum {string} */

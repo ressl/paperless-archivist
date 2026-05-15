@@ -2075,6 +2075,7 @@ pub struct DashboardStats {
     pub run_status: Vec<DashboardStatusCount>,
     pub review_status: Vec<DashboardStatusCount>,
     pub provider_usage: Vec<ProviderUsageStats>,
+    pub quality: QualityStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2088,6 +2089,21 @@ pub struct ProviderUsageStats {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub estimated_cost_usd: Option<f64>,
+    pub feedback_count: i64,
+    pub positive_feedback: i64,
+    pub negative_feedback: i64,
+    pub acceptance_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualityStats {
+    pub review_decisions: i64,
+    pub review_approved: i64,
+    pub review_edited: i64,
+    pub review_rejected: i64,
+    pub acceptance_rate: Option<f64>,
+    pub uncertainty_reviews: i64,
+    pub validation_warning_reviews: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
