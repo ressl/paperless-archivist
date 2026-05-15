@@ -380,6 +380,276 @@ function HealthBadge({ score, generatedAt }: { score: number | null; generatedAt
   );
 }
 
+type StageMatrixRow = {
+  stage: string;
+  queued: number;
+  running: number;
+  failed: number;
+  complete: number;
+  avg_ms: number;
+  p95_ms: number;
+  throughput_per_hour: number;
+  bottleneck_score: number;
+};
+
+type StageMatrixSortKey = 'stage' | 'queued' | 'running' | 'failed' | 'avg_ms' | 'p95_ms' | 'throughput_per_hour';
+
+function buildStageMatrix(stats: DashboardStats | null): StageMatrixRow[] {
+  const stages = stats?.stage_status?.length ? stats.stage_status : defaultStageStatus;
+  const usageByStage = new Map<string, { total_avg: number; count: number; max_p95: number }>();
+  for (const usage of stats?.provider_usage ?? []) {
+    const slot = usageByStage.get(usage.stage) ?? { total_avg: 0, count: 0, max_p95: 0 };
+    slot.total_avg += usage.avg_duration_ms * usage.request_count;
+    slot.count += usage.request_count;
+    slot.max_p95 = Math.max(slot.max_p95, usage.p95_duration_ms);
+    usageByStage.set(usage.stage, slot);
+  }
+  return stages.map((stage) => {
+    const usage = usageByStage.get(stage.stage);
+    const avg_ms = usage && usage.count > 0 ? usage.total_avg / usage.count : 0;
+    const p95_ms = usage?.max_p95 ?? 0;
+    const throughput_per_hour = avg_ms > 0 ? 3_600_000 / avg_ms : 0;
+    const queued = stage.pending;
+    const bottleneck_score = throughput_per_hour > 0 ? queued / throughput_per_hour : queued > 0 ? Number.POSITIVE_INFINITY : 0;
+    return {
+      stage: stage.stage,
+      queued,
+      running: stage.running,
+      failed: stage.failed,
+      complete: stage.complete,
+      avg_ms,
+      p95_ms,
+      throughput_per_hour,
+      bottleneck_score
+    };
+  });
+}
+
+function StageMatrix({ stats, onStageSelect }: { stats: DashboardStats | null; onStageSelect: (stage: string) => void }) {
+  const { t, formatNumber } = useI18n();
+  const [sortKey, setSortKey] = useState<StageMatrixSortKey>('queued');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const rows = useMemo(() => buildStageMatrix(stats), [stats]);
+  const sorted = useMemo(() => {
+    const arr = [...rows];
+    arr.sort((a, b) => {
+      const va = a[sortKey];
+      const vb = b[sortKey];
+      if (typeof va === 'string' && typeof vb === 'string') {
+        return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+      }
+      const diff = (va as number) - (vb as number);
+      return sortDir === 'asc' ? diff : -diff;
+    });
+    return arr;
+  }, [rows, sortKey, sortDir]);
+  const bottleneckStage = useMemo(() => {
+    let pick: StageMatrixRow | null = null;
+    for (const row of rows) {
+      if (row.bottleneck_score > 0 && (!pick || row.bottleneck_score > pick.bottleneck_score)) {
+        pick = row;
+      }
+    }
+    return pick?.queued && pick.bottleneck_score > 1 ? pick.stage : null;
+  }, [rows]);
+
+  const handleSort = (key: StageMatrixSortKey) => {
+    if (sortKey === key) {
+      setSortDir((dir) => (dir === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('desc');
+    }
+  };
+
+  const arrow = (key: StageMatrixSortKey) => (sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '');
+
+  return (
+    <ChartPanel title={t('dashboard.stage_matrix.title')} wide>
+      <p className="chart-panel-subtitle">{t('dashboard.stage_matrix.subtitle')}</p>
+      <div className="table-wrap compact-table stage-matrix-table">
+        <table>
+          <thead>
+            <tr>
+              <th><button type="button" onClick={() => handleSort('stage')}>{t('dashboard.stage_matrix.stage')}{arrow('stage')}</button></th>
+              <th><button type="button" onClick={() => handleSort('queued')}>{t('dashboard.stage_matrix.queued')}{arrow('queued')}</button></th>
+              <th><button type="button" onClick={() => handleSort('running')}>{t('dashboard.stage_matrix.running')}{arrow('running')}</button></th>
+              <th><button type="button" onClick={() => handleSort('failed')}>{t('dashboard.stage_matrix.failed')}{arrow('failed')}</button></th>
+              <th><button type="button" onClick={() => handleSort('avg_ms')}>{t('dashboard.stage_matrix.avg')}{arrow('avg_ms')}</button></th>
+              <th><button type="button" onClick={() => handleSort('p95_ms')}>{t('dashboard.stage_matrix.p95')}{arrow('p95_ms')}</button></th>
+              <th><button type="button" onClick={() => handleSort('throughput_per_hour')}>{t('dashboard.stage_matrix.throughput_per_hour')}{arrow('throughput_per_hour')}</button></th>
+              <th>{t('dashboard.stage_matrix.complete')}</th>
+              <th>{' '}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((row) => (
+              <tr key={row.stage} className={bottleneckStage === row.stage ? 'is-bottleneck' : ''}>
+                <td>
+                  <button className="link-button" type="button" onClick={() => onStageSelect(row.stage)}>
+                    {stageLabel(row.stage, t)}
+                  </button>
+                </td>
+                <td>{formatNumber(row.queued)}</td>
+                <td>{formatNumber(row.running)}</td>
+                <td className={row.failed > 0 ? 'cell-danger' : ''}>{formatNumber(row.failed)}</td>
+                <td>{formatMs(row.avg_ms)}</td>
+                <td>{formatMs(row.p95_ms)}</td>
+                <td>{row.throughput_per_hour > 0 ? formatNumber(Math.round(row.throughput_per_hour)) : '-'}</td>
+                <td>{formatNumber(row.complete)}</td>
+                <td>{bottleneckStage === row.stage && <span className="bottleneck-badge">{t('dashboard.stage_matrix.bottleneck')}</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ChartPanel>
+  );
+}
+
+type TimelineEntry = {
+  id: string;
+  at: string;
+  kind: 'llm' | 'failure';
+  stage: string;
+  primary: string;
+  secondary?: string;
+};
+
+function ActivityTimeline({ live }: { live: DashboardLiveStatus | null }) {
+  const { t, formatRelativeTime } = useI18n();
+  const entries = useMemo<TimelineEntry[]>(() => {
+    const llm = (live?.recent_llm_events ?? []).map<TimelineEntry>((event) => ({
+      id: `llm-${event.id}`,
+      at: event.created_at,
+      kind: 'llm',
+      stage: event.stage,
+      primary: t('dashboard.timeline.llm_event', { provider: event.provider, model: event.model, stage: stageLabel(event.stage, t) }),
+      secondary: event.duration_ms ? formatMs(event.duration_ms) : undefined
+    }));
+    const failures = (live?.recent_failures ?? []).map<TimelineEntry>((failure) => ({
+      id: `failure-${failure.id}`,
+      at: failure.updated_at,
+      kind: 'failure',
+      stage: failure.stage,
+      primary: t('dashboard.timeline.failure', { document: failure.paperless_document_id, stage: stageLabel(failure.stage, t) }),
+      secondary: failure.error_message
+    }));
+    return [...llm, ...failures].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()).slice(0, 30);
+  }, [live, t]);
+  return (
+    <section className="activity-timeline">
+      <header>
+        <History size={16} />
+        <strong>{t('dashboard.timeline.title')}</strong>
+      </header>
+      {entries.length === 0 ? (
+        <p className="empty-state compact">{t('dashboard.timeline.empty')}</p>
+      ) : (
+        <ol>
+          {entries.map((entry) => (
+            <li key={entry.id} className={`timeline-entry kind-${entry.kind}`}>
+              <time>{formatRelativeTime(entry.at)}</time>
+              <div>
+                <strong>{entry.primary}</strong>
+                {entry.secondary && <span>{entry.secondary}</span>}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function MaintenanceDrawer({
+  open,
+  onClose,
+  recovery,
+  consistency,
+  reconcile,
+  recoveryBusy,
+  maintenanceBusy,
+  onRefreshRecovery,
+  onRecoverLeases,
+  onRecoverRuns,
+  onCheckConsistency,
+  onDryRunReconcile,
+  onApplyReconcile,
+  queueBusy,
+  onQueueSync,
+  onQueueOcr,
+  onQueueTags,
+  onQueueFull
+}: {
+  open: boolean;
+  onClose: () => void;
+  recovery: { older_than_seconds: number; items: RecoveryCandidate[] } | null;
+  consistency: PaperlessConsistencyResult | null;
+  reconcile: CompletionTagReconcileResult | null;
+  recoveryBusy: boolean;
+  maintenanceBusy: boolean;
+  onRefreshRecovery: () => void;
+  onRecoverLeases: () => void;
+  onRecoverRuns: () => void;
+  onCheckConsistency: () => void;
+  onDryRunReconcile: () => void;
+  onApplyReconcile: () => void;
+  queueBusy: boolean;
+  onQueueSync: () => void;
+  onQueueOcr: () => void;
+  onQueueTags: () => void;
+  onQueueFull: () => void;
+}) {
+  const { t } = useI18n();
+  useEffect(() => {
+    if (!open) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div className="drawer-root" role="dialog" aria-modal="true" aria-label={t('dashboard.maintenance.title')}>
+      <div className="drawer-backdrop" onClick={onClose} />
+      <aside className="drawer">
+        <header>
+          <strong>{t('dashboard.maintenance.title')}</strong>
+          <button type="button" className="drawer-close" onClick={onClose} aria-label={t('dashboard.maintenance.close')}>
+            <X size={18} />
+          </button>
+        </header>
+        <RecoveryPanel
+          recovery={recovery}
+          busy={recoveryBusy}
+          onRefresh={onRefreshRecovery}
+          onRecoverLeases={onRecoverLeases}
+          onRecoverRuns={onRecoverRuns}
+        />
+        <PaperlessMaintenancePanel
+          consistency={consistency}
+          reconcile={reconcile}
+          busy={maintenanceBusy}
+          onCheckConsistency={onCheckConsistency}
+          onDryRunReconcile={onDryRunReconcile}
+          onApplyReconcile={onApplyReconcile}
+        />
+        <section className="drawer-section">
+          <strong>{t('dashboard.maintenance.queue_section')}</strong>
+          <div className="toolbar">
+            <ActionButton icon={<RefreshCw />} label={t('dashboard.action.sync')} busy={queueBusy} onClick={onQueueSync} />
+            <ActionButton icon={<FileText />} label={t('dashboard.action.queue_ocr')} busy={queueBusy} onClick={onQueueOcr} />
+            <ActionButton icon={<Tags />} label={t('dashboard.action.queue_tags')} busy={queueBusy} onClick={onQueueTags} />
+            <ActionButton icon={<Play />} label={t('dashboard.action.queue_full')} busy={queueBusy} onClick={onQueueFull} />
+          </div>
+        </section>
+      </aside>
+    </div>
+  );
+}
+
 function QuotaBar({
   label,
   remaining,
@@ -429,6 +699,14 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
   const [consistency, setConsistency] = useState<PaperlessConsistencyResult | null>(null);
   const [reconcile, setReconcile] = useState<CompletionTagReconcileResult | null>(null);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem('dashboard.drawer_open') === 'true';
+  });
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dashboard.drawer_open', String(drawerOpen));
+  }, [drawerOpen]);
   const load = () =>
     api
       .dashboard(range)
@@ -601,6 +879,16 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
           >
             <RefreshCw size={16} /> {busy ? t('generic.refreshing') : t('generic.refresh')}
           </button>
+          {canManageSettings && (
+            <button
+              type="button"
+              className="secondary-button drawer-toggle"
+              onClick={() => setDrawerOpen((open) => !open)}
+              aria-expanded={drawerOpen}
+            >
+              <Settings size={16} /> {t('dashboard.maintenance.toggle')}
+            </button>
+          )}
         </div>
       </div>
 
@@ -623,23 +911,26 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
       </div>
 
       {canManageSettings && (
-        <div className="maintenance-grid">
-          <RecoveryPanel
-            recovery={recovery}
-            busy={recoveryBusy}
-            onRefresh={() => void run(setRecoveryBusy, setError, loadRecovery, t)}
-            onRecoverLeases={() => void run(setRecoveryBusy, setError, recoverStaleLeases, t)}
-            onRecoverRuns={() => void run(setRecoveryBusy, setError, recoverStuckRuns, t)}
-          />
-          <PaperlessMaintenancePanel
-            consistency={consistency}
-            reconcile={reconcile}
-            busy={paperlessToolsBusy}
-            onCheckConsistency={() => void run(setPaperlessToolsBusy, setError, checkPaperlessConsistency, t)}
-            onDryRunReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(true), t)}
-            onApplyReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(false), t)}
-          />
-        </div>
+        <MaintenanceDrawer
+          open={drawerOpen}
+          onClose={() => setDrawerOpen(false)}
+          recovery={recovery}
+          consistency={consistency}
+          reconcile={reconcile}
+          recoveryBusy={recoveryBusy}
+          maintenanceBusy={paperlessToolsBusy}
+          onRefreshRecovery={() => void run(setRecoveryBusy, setError, loadRecovery, t)}
+          onRecoverLeases={() => void run(setRecoveryBusy, setError, recoverStaleLeases, t)}
+          onRecoverRuns={() => void run(setRecoveryBusy, setError, recoverStuckRuns, t)}
+          onCheckConsistency={() => void run(setPaperlessToolsBusy, setError, checkPaperlessConsistency, t)}
+          onDryRunReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(true), t)}
+          onApplyReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(false), t)}
+          queueBusy={busy}
+          onQueueSync={() => void run(setBusy, setError, api.syncPaperless, t).then(load)}
+          onQueueOcr={() => void run(setBusy, setError, api.queueOcr, t).then(load)}
+          onQueueTags={() => void run(setBusy, setError, api.queueTags, t).then(load)}
+          onQueueFull={() => void run(setBusy, setError, api.queueFull, t).then(load)}
+        />
       )}
 
       <div className="kpi-grid">
@@ -686,22 +977,7 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
               </AreaChart>
             </ResponsiveContainer>
           </ChartPanel>
-          <ChartPanel title={t('dashboard.chart.stage_health')} wide>
-            <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={stageData}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="stage" />
-                <YAxis allowDecimals={false} />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="Complete" stackId="stage" fill="#147f7a" />
-                <Bar dataKey="Pending" stackId="stage" fill="#a9782b" />
-                <Bar dataKey="Review" stackId="stage" fill="#28649b" />
-                <Bar dataKey="Running" stackId="stage" fill="#5b8fb9" />
-                <Bar dataKey="Failed" stackId="stage" fill="#a6403a" />
-              </BarChart>
-            </ResponsiveContainer>
-          </ChartPanel>
+          <StageMatrix stats={stats} onStageSelect={() => undefined} />
           <div className="dashboard-grid compact">
             <ChartPanel title={t('dashboard.chart.backlog_trend')}>
               <ResponsiveContainer width="100%" height={240}>
@@ -732,6 +1008,8 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
         </div>
         <LiveProcessingPanel live={live} />
       </div>
+
+      <ActivityTimeline live={live} />
 
       <div className="quality-strip">
         <div>
@@ -795,23 +1073,6 @@ function Dashboard({ setError, canManageSettings }: { setError: (error: string |
           </table>
         </div>
       </ChartPanel>
-      <ChartPanel title={t('dashboard.chart.run_status')} wide>
-        <ResponsiveContainer width="100%" height={220}>
-          <BarChart data={runStatusData} layout="vertical" margin={{ left: 12 }}>
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-            <XAxis type="number" allowDecimals={false} />
-            <YAxis type="category" dataKey="label" width={110} />
-            <Tooltip />
-            <Bar dataKey="count" fill="#147f7a" radius={[0, 4, 4, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </ChartPanel>
-      <div className="toolbar dashboard-queue-actions">
-        <ActionButton icon={<RefreshCw />} label={t('dashboard.action.sync')} busy={busy} onClick={() => run(setBusy, setError, api.syncPaperless, t).then(load)} />
-        <ActionButton icon={<FileText />} label={t('dashboard.action.queue_ocr')} busy={busy} onClick={() => run(setBusy, setError, api.queueOcr, t).then(load)} />
-        <ActionButton icon={<Tags />} label={t('dashboard.action.queue_tags')} busy={busy} onClick={() => run(setBusy, setError, api.queueTags, t).then(load)} />
-        <ActionButton icon={<Play />} label={t('dashboard.action.queue_full')} busy={busy} onClick={() => run(setBusy, setError, api.queueFull, t).then(load)} />
-      </div>
     </section>
   );
 }
@@ -1064,20 +1325,27 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
       <section className="live-debug-section">
         <h3>{t('dashboard.live.active_jobs')}</h3>
         {activeJobs.length === 0 && <p className="empty-state compact">{t('dashboard.live.no_active_jobs')}</p>}
-        {activeJobs.slice(0, 8).map((job) => (
-          <article className="live-job" key={job.id}>
-            <div>
-              <strong>{t('review.document', { id: job.paperless_document_id })}</strong>
-              <span>{stageLabel(job.stage, t)} · {t('dashboard.live.attempt', { attempts: job.attempts, max: job.max_attempts })}</span>
-            </div>
-            <Status value={job.status} />
-            <small>
-              {job.lease_owner ? t('dashboard.live.worker', { worker: job.lease_owner }) : formatRelative(job.updated_at)}
-              {' · '}
-              {t('dashboard.live.trace', { trace: shortId(job.trace_id) })}
-            </small>
-          </article>
-        ))}
+        {activeJobs.slice(0, 8).map((job) => {
+          const elapsedMs = Math.max(0, Date.now() - new Date(job.updated_at).getTime());
+          return (
+            <article className="live-job" key={job.id}>
+              <div>
+                <strong>{t('review.document', { id: job.paperless_document_id })}</strong>
+                <span>
+                  {stageLabel(job.stage, t)} · {t('dashboard.live.attempt', { attempts: job.attempts, max: job.max_attempts })}
+                  {' · '}
+                  {t('dashboard.live.elapsed', { time: formatMs(elapsedMs) })}
+                </span>
+              </div>
+              <Status value={job.status} />
+              <small>
+                {job.lease_owner ? t('dashboard.live.worker', { worker: job.lease_owner }) : formatRelative(job.updated_at)}
+                {' · '}
+                {t('dashboard.live.trace', { trace: shortId(job.trace_id) })}
+              </small>
+            </article>
+          );
+        })}
       </section>
 
       <section className="live-debug-section">
