@@ -9,6 +9,265 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LanguageDetection {
+    pub language: String,
+    pub confidence: f32,
+    pub source: String,
+}
+
+impl LanguageDetection {
+    pub fn unknown(source: &str) -> Self {
+        Self {
+            language: "und".to_owned(),
+            confidence: 0.0,
+            source: source.to_owned(),
+        }
+    }
+}
+
+pub fn detect_document_language(text: &str) -> LanguageDetection {
+    let sample = text.chars().take(12_000).collect::<String>();
+    if sample.trim().is_empty() {
+        return LanguageDetection::unknown("heuristic");
+    }
+
+    if let Some((language, confidence)) = detect_by_script(&sample) {
+        return LanguageDetection {
+            language: language.to_owned(),
+            confidence,
+            source: "heuristic".to_owned(),
+        };
+    }
+
+    let tokens = language_tokens(&sample);
+    if tokens.len() < 3 {
+        return LanguageDetection {
+            language: "und".to_owned(),
+            confidence: 0.1,
+            source: "heuristic".to_owned(),
+        };
+    }
+
+    let mut scores = LATIN_LANGUAGE_PROFILES
+        .iter()
+        .map(|profile| {
+            let stopword_score = tokens
+                .iter()
+                .filter(|token| profile.stopwords.contains(&token.as_str()))
+                .count() as f32;
+            let cue_score = profile
+                .cues
+                .iter()
+                .filter(|cue| sample.contains(**cue))
+                .count() as f32
+                * 1.5;
+            (profile.language, stopword_score + cue_score)
+        })
+        .collect::<Vec<_>>();
+    scores.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let (best_language, best_score) = scores[0];
+    let second_score = scores.get(1).map(|(_, score)| *score).unwrap_or(0.0);
+    if best_score <= 0.0 {
+        return LanguageDetection {
+            language: "und".to_owned(),
+            confidence: 0.1,
+            source: "heuristic".to_owned(),
+        };
+    }
+    if best_score >= 3.0 && second_score >= 3.0 && (best_score - second_score).abs() <= 1.0 {
+        return LanguageDetection {
+            language: "mul".to_owned(),
+            confidence: 0.45,
+            source: "heuristic".to_owned(),
+        };
+    }
+
+    let confidence = ((best_score - second_score + 2.0) / (best_score + 3.0)).clamp(0.35, 0.96);
+    LanguageDetection {
+        language: best_language.to_owned(),
+        confidence,
+        source: "heuristic".to_owned(),
+    }
+}
+
+fn detect_by_script(text: &str) -> Option<(&'static str, f32)> {
+    let mut letters = 0_u32;
+    let mut arabic = 0_u32;
+    let mut hebrew = 0_u32;
+    let mut devanagari = 0_u32;
+    let mut han = 0_u32;
+    let mut kana = 0_u32;
+
+    for ch in text.chars() {
+        if !ch.is_alphabetic() {
+            continue;
+        }
+        letters += 1;
+        match ch as u32 {
+            0x0590..=0x05ff => hebrew += 1,
+            0x0600..=0x06ff | 0x0750..=0x077f | 0x08a0..=0x08ff => arabic += 1,
+            0x0900..=0x097f => devanagari += 1,
+            0x3040..=0x30ff => kana += 1,
+            0x4e00..=0x9fff => han += 1,
+            _ => {}
+        }
+    }
+    if letters == 0 {
+        return None;
+    }
+
+    let ratio = |count: u32| (count as f32 / letters as f32).clamp(0.0, 1.0);
+    if ratio(kana) > 0.05 {
+        return Some(("ja", (0.72 + ratio(kana)).min(0.98)));
+    }
+    if ratio(han) > 0.25 {
+        return Some(("zh", (0.65 + ratio(han)).min(0.98)));
+    }
+    if ratio(arabic) > 0.25 {
+        return Some(("ar", (0.65 + ratio(arabic)).min(0.98)));
+    }
+    if ratio(hebrew) > 0.25 {
+        return Some(("he", (0.65 + ratio(hebrew)).min(0.98)));
+    }
+    if ratio(devanagari) > 0.25 {
+        return Some(("hi", (0.65 + ratio(devanagari)).min(0.98)));
+    }
+    None
+}
+
+fn language_tokens(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_alphabetic())
+        .map(|token| token.trim().to_lowercase())
+        .filter(|token| token.len() > 1)
+        .take(500)
+        .collect()
+}
+
+struct LatinLanguageProfile {
+    language: &'static str,
+    stopwords: &'static [&'static str],
+    cues: &'static [&'static str],
+}
+
+const LATIN_LANGUAGE_PROFILES: &[LatinLanguageProfile] = &[
+    LatinLanguageProfile {
+        language: "de",
+        stopwords: &[
+            "der", "die", "das", "und", "ist", "nicht", "mit", "für", "den", "dem", "eine",
+            "einer", "von", "zu", "im", "auf", "rechnung", "datum",
+        ],
+        cues: &["ä", "ö", "ü", "ß"],
+    },
+    LatinLanguageProfile {
+        language: "en",
+        stopwords: &[
+            "the", "and", "of", "to", "in", "for", "is", "with", "this", "that", "from", "invoice",
+            "date", "amount", "payment",
+        ],
+        cues: &[],
+    },
+    LatinLanguageProfile {
+        language: "fr",
+        stopwords: &[
+            "le", "la", "les", "des", "et", "est", "pour", "dans", "avec", "une", "du", "de",
+            "facture", "montant", "paiement",
+        ],
+        cues: &["é", "è", "ê", "à", "ç", "œ"],
+    },
+    LatinLanguageProfile {
+        language: "it",
+        stopwords: &[
+            "il",
+            "lo",
+            "la",
+            "gli",
+            "le",
+            "di",
+            "e",
+            "che",
+            "per",
+            "con",
+            "una",
+            "del",
+            "fattura",
+            "pagamento",
+            "importo",
+        ],
+        cues: &["à", "è", "ì", "ò", "ù"],
+    },
+    LatinLanguageProfile {
+        language: "es",
+        stopwords: &[
+            "el", "la", "los", "las", "de", "y", "que", "para", "con", "una", "del", "factura",
+            "importe", "pago", "fecha",
+        ],
+        cues: &["ñ", "¿", "¡"],
+    },
+    LatinLanguageProfile {
+        language: "pt",
+        stopwords: &[
+            "o",
+            "a",
+            "os",
+            "as",
+            "de",
+            "e",
+            "que",
+            "para",
+            "com",
+            "uma",
+            "não",
+            "fatura",
+            "pagamento",
+            "valor",
+        ],
+        cues: &["ã", "õ", "ç"],
+    },
+    LatinLanguageProfile {
+        language: "nl",
+        stopwords: &[
+            "de", "het", "en", "van", "een", "voor", "met", "niet", "op", "factuur", "bedrag",
+            "betaling", "datum",
+        ],
+        cues: &[],
+    },
+    LatinLanguageProfile {
+        language: "pl",
+        stopwords: &[
+            "i",
+            "w",
+            "z",
+            "na",
+            "nie",
+            "do",
+            "że",
+            "się",
+            "jest",
+            "oraz",
+            "faktura",
+            "płatność",
+            "kwota",
+            "data",
+        ],
+        cues: &["ł", "ą", "ę", "ś", "ć", "ż", "ź", "ń", "ó"],
+    },
+    LatinLanguageProfile {
+        language: "tr",
+        stopwords: &[
+            "ve", "bir", "bu", "için", "ile", "değil", "olarak", "fatura", "ödeme", "tutar",
+            "tarih",
+        ],
+        cues: &["ğ", "ı", "İ", "ş", "ç", "ö", "ü"],
+    },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
@@ -502,8 +761,24 @@ impl RuntimeSettings {
             WorkflowRules::normalized_tags(&self.workflow.rules.include_tags);
         self.workflow.rules.exclude_tags =
             WorkflowRules::normalized_tags(&self.workflow.rules.exclude_tags);
+        self.tagging.tag_output_language =
+            normalize_language_tag(&self.tagging.tag_output_language)
+                .unwrap_or_else(default_tag_output_language);
         self
     }
+}
+
+pub fn normalize_language_tag(value: &str) -> Option<String> {
+    let normalized = value.trim().replace('_', "-").to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized.len() > 35
+        || !normalized
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    {
+        return None;
+    }
+    Some(normalized)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -839,6 +1114,8 @@ pub struct TaggingSettings {
     pub allow_new_tags: bool,
     pub confidence_threshold: f32,
     pub old_tag_strategy: OldTagStrategy,
+    #[serde(default = "default_tag_output_language")]
+    pub tag_output_language: String,
 }
 
 impl Default for TaggingSettings {
@@ -848,8 +1125,13 @@ impl Default for TaggingSettings {
             allow_new_tags: false,
             confidence_threshold: 0.55,
             old_tag_strategy: OldTagStrategy::KeepExisting,
+            tag_output_language: default_tag_output_language(),
         }
     }
+}
+
+fn default_tag_output_language() -> String {
+    "de".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1595,6 +1877,9 @@ pub struct DocumentInventoryItem {
     pub next_required_stage: Option<String>,
     pub needs_review: bool,
     pub complete: bool,
+    pub detected_language: Option<String>,
+    pub detected_language_confidence: Option<f32>,
+    pub detected_language_source: Option<String>,
     pub last_seen_at: DateTime<Utc>,
 }
 
@@ -1903,6 +2188,80 @@ mod tests {
         assert!(ProcessingMode::AutoSelectReview.requires_manual_review());
         assert!(ProcessingMode::FullAuto.auto_select_documents());
         assert!(ProcessingMode::FullAuto.auto_apply_validated_suggestions());
+    }
+
+    #[test]
+    fn detects_major_document_languages() {
+        let samples = [
+            (
+                "de",
+                "Rechnung für Beratung und Entwicklung. Der Betrag ist mit Datum fällig.",
+            ),
+            (
+                "en",
+                "Invoice for consulting and development. The amount is due with the payment date.",
+            ),
+            (
+                "fr",
+                "Facture pour conseil et développement. Le montant est dû avec la date de paiement.",
+            ),
+            (
+                "it",
+                "Fattura per consulenza e sviluppo. Il pagamento con importo e data è dovuto.",
+            ),
+            (
+                "es",
+                "Factura por consultoría y desarrollo. El importe y la fecha de pago están indicados.",
+            ),
+            (
+                "pt",
+                "Fatura de consultoria e desenvolvimento. O valor e a data de pagamento estão indicados.",
+            ),
+            (
+                "nl",
+                "Factuur voor advies en ontwikkeling. Het bedrag en de datum voor betaling zijn vermeld.",
+            ),
+            (
+                "pl",
+                "Faktura za doradztwo i rozwój. Kwota oraz data płatność jest wskazana.",
+            ),
+            (
+                "tr",
+                "Danışmanlık ve geliştirme için fatura. Ödeme tutar ve tarih bilgisi belirtilmiştir.",
+            ),
+            (
+                "ar",
+                "فاتورة لخدمات الاستشارة والتطوير مع تاريخ الدفع والمبلغ المستحق",
+            ),
+            (
+                "he",
+                "חשבונית עבור שירותי ייעוץ ופיתוח עם תאריך תשלום וסכום לתשלום",
+            ),
+            (
+                "hi",
+                "परामर्श और विकास सेवाओं के लिए चालान भुगतान तिथि और राशि के साथ",
+            ),
+            ("zh", "咨询和开发服务发票，包含付款日期和应付金额"),
+            (
+                "ja",
+                "コンサルティングと開発サービスの請求書、支払日と金額を含みます",
+            ),
+        ];
+
+        for (expected, text) in samples {
+            let detected = detect_document_language(text);
+            assert_eq!(detected.language, expected, "{text}");
+            assert!(detected.confidence >= 0.35, "{expected}");
+        }
+    }
+
+    #[test]
+    fn detects_mixed_language_as_low_confidence() {
+        let detected = detect_document_language(
+            "Invoice total and payment date. Rechnung Betrag und Zahlungsdatum.",
+        );
+
+        assert!(detected.language == "mul" || detected.confidence < 0.7);
     }
 
     #[test]

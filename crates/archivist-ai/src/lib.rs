@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use archivist_core::{
-    ChoiceSuggestion, FieldSuggestion, TagSuggestion, TitleSuggestion, normalize_model_json,
+    ChoiceSuggestion, FieldSuggestion, LanguageDetection, TagSuggestion, TitleSuggestion,
+    normalize_model_json,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -638,33 +639,72 @@ pub const DEFAULT_FIELDS_SYSTEM_PROMPT: &str = concat!(
     "Return strict JSON only in this shape: {\"fields\":[{\"name\":\"exact allowed field\",\"value\":\"value\",\"confidence\":0.0}],\"confidence\":0.0}."
 );
 
-pub fn prompt_for_tags(content: &str, allowed_tags: &[String], max_tags: usize) -> ChatRequest {
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptLanguageContext {
+    pub document_language: String,
+    pub document_language_confidence: f32,
+    pub tag_output_language: String,
+}
+
+impl PromptLanguageContext {
+    pub fn new(detection: &LanguageDetection, tag_output_language: &str) -> Self {
+        Self {
+            document_language: detection.language.clone(),
+            document_language_confidence: detection.confidence,
+            tag_output_language: tag_output_language.to_owned(),
+        }
+    }
+}
+
+fn language_context_block(context: &PromptLanguageContext) -> String {
+    format!(
+        "Language context:\n- Detected document language: {} (confidence {:.2}).\n- Desired language for newly generated business tags: {}.\n- Preserve names, identifiers, dates, amounts, legal text, titles, correspondents, document types, and existing allowed metadata values exactly as evidence shows them.\n- Do not translate document content or allowed Paperless values unless this instruction explicitly asks for newly generated tags.\n",
+        context.document_language,
+        context.document_language_confidence,
+        context.tag_output_language
+    )
+}
+
+pub fn prompt_for_tags(
+    content: &str,
+    allowed_tags: &[String],
+    max_tags: usize,
+    language: &PromptLanguageContext,
+) -> ChatRequest {
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
         system_prompt: DEFAULT_TAGS_SYSTEM_PROMPT.to_owned(),
         user_prompt: format!(
-            "Allowed tags, one per line:\n{}\n\nDocument text:\n{}\n\nSelect at most {} existing tags. Return JSON: {{\"tags\":[\"exact allowed tag\"],\"new_tags\":[],\"confidence\":0.0}}.",
+            "{}\nAllowed tags, one per line:\n{}\n\nDocument text:\n{}\n\nSelect at most {} existing tags. Existing tags must be returned exactly as listed. If new_tags are explicitly needed and allowed by runtime settings, write new tag names in {}. Return JSON: {{\"tags\":[\"exact allowed tag\"],\"new_tags\":[],\"confidence\":0.0}}.",
+            language_context_block(language),
             allowed_tags.join("\n"),
             bounded_text(content, 16000),
-            max_tags
+            max_tags,
+            language.tag_output_language
         ),
     }
 }
 
-pub fn prompt_for_title(content: &str) -> ChatRequest {
+pub fn prompt_for_title(content: &str, language: &PromptLanguageContext) -> ChatRequest {
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
         system_prompt: DEFAULT_TITLE_SYSTEM_PROMPT.to_owned(),
         user_prompt: format!(
-            "Document text:\n{}\n\nReturn JSON: {{\"title\":\"concise human-readable title\",\"confidence\":0.0}}.",
+            "{}\nDocument text:\n{}\n\nReturn JSON: {{\"title\":\"concise human-readable title\",\"confidence\":0.0}}.",
+            language_context_block(language),
             bounded_text(content, 12000)
         ),
     }
 }
 
-pub fn prompt_for_choice(content: &str, choice_kind: &str, allowed: &[String]) -> ChatRequest {
+pub fn prompt_for_choice(
+    content: &str,
+    choice_kind: &str,
+    allowed: &[String],
+    language: &PromptLanguageContext,
+) -> ChatRequest {
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
@@ -676,7 +716,8 @@ pub fn prompt_for_choice(content: &str, choice_kind: &str, allowed: &[String]) -
             ),
         },
         user_prompt: format!(
-            "Allowed {choice_kind} values, one per line:\n{}\n\nDocument text:\n{}\n\nReturn JSON: {{\"name\":\"one exact allowed value or empty string\",\"confidence\":0.0}}.",
+            "{}\nAllowed {choice_kind} values, one per line:\n{}\n\nDocument text:\n{}\n\nReturn JSON: {{\"name\":\"one exact allowed value or empty string\",\"confidence\":0.0}}.",
+            language_context_block(language),
             allowed.join("\n"),
             bounded_text(content, 12000)
         ),
@@ -687,13 +728,15 @@ pub fn prompt_for_fields(
     content: &str,
     allowed_fields: &[String],
     max_fields: usize,
+    language: &PromptLanguageContext,
 ) -> ChatRequest {
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
         system_prompt: DEFAULT_FIELDS_SYSTEM_PROMPT.to_owned(),
         user_prompt: format!(
-            "Allowed custom fields, one per line:\n{}\n\nDocument text:\n{}\n\nUse at most {} fields and only fields with explicit evidence. Return JSON: {{\"fields\":[{{\"name\":\"exact allowed field\",\"value\":\"value\",\"confidence\":0.0}}],\"confidence\":0.0}}.",
+            "{}\nAllowed custom fields, one per line:\n{}\n\nDocument text:\n{}\n\nUse at most {} fields and only fields with explicit evidence. Return JSON: {{\"fields\":[{{\"name\":\"exact allowed field\",\"value\":\"value\",\"confidence\":0.0}}],\"confidence\":0.0}}.",
+            language_context_block(language),
             allowed_fields.join("\n"),
             bounded_text(content, 14000),
             max_fields
@@ -728,17 +771,31 @@ mod tests {
 
     #[test]
     fn default_prompt_builders_use_machine_readable_outputs() {
-        let tags = prompt_for_tags("Invoice text", &["Finance".to_owned()], 3);
+        let language = PromptLanguageContext {
+            document_language: "de".to_owned(),
+            document_language_confidence: 0.88,
+            tag_output_language: "de".to_owned(),
+        };
+        let tags = prompt_for_tags("Invoice text", &["Finance".to_owned()], 3, &language);
         assert!(tags.system_prompt.contains("strict JSON"));
         assert!(tags.system_prompt.contains("untrusted evidence"));
         assert!(tags.user_prompt.contains("\"tags\""));
+        assert!(tags.user_prompt.contains("Detected document language: de"));
+        assert!(
+            tags.user_prompt
+                .contains("newly generated business tags: de")
+        );
 
-        let title = prompt_for_title("Letter text");
+        let title = prompt_for_title("Letter text", &language);
         assert!(title.system_prompt.contains("\"title\""));
         assert!(title.system_prompt.contains("120 characters"));
 
-        let correspondent =
-            prompt_for_choice("Bank statement", "correspondent", &["Bank".to_owned()]);
+        let correspondent = prompt_for_choice(
+            "Bank statement",
+            "correspondent",
+            &["Bank".to_owned()],
+            &language,
+        );
         assert!(correspondent.system_prompt.contains("exact name"));
         assert!(
             correspondent
@@ -746,7 +803,7 @@ mod tests {
                 .contains("Allowed correspondent values")
         );
 
-        let fields = prompt_for_fields("Total EUR 59.98", &["Amount".to_owned()], 5);
+        let fields = prompt_for_fields("Total EUR 59.98", &["Amount".to_owned()], 5, &language);
         assert!(fields.system_prompt.contains("\"fields\""));
         assert!(fields.system_prompt.contains("EUR59.98"));
     }

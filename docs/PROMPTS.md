@@ -28,6 +28,15 @@ can be replaced from the UI without rebuilding the application.
 - The worker stores the prompt ID, model, provider, input hash, normalized
   output, raw response, and duration in AI artifacts for auditability.
 
+## Language Context
+
+Worker-generated prompts include the detected document language as a BCP-47 tag,
+the detection confidence, and the configured tag output language. OCR cleanup
+and title prompts preserve source-language content. Tagging prompts must return
+existing allowed tags exactly as listed; only `new_tags` use the configured tag
+output language. This keeps the existing Paperless taxonomy stable and avoids
+silent mass translation.
+
 ## Upgrade Behavior
 
 Migration `0008_default_prompt_pack.sql` inserts prompt version `2` for every

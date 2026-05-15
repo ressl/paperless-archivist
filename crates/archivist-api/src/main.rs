@@ -5,17 +5,17 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
     AiResponse, AnthropicClient, ChatRequest, OllamaClient, OllamaModel, OpenAiCompatibleClient,
-    TextProvider, parse_choice_suggestion, parse_field_suggestion, parse_tag_suggestion,
-    parse_title_suggestion, prompt_for_choice, prompt_for_fields, prompt_for_tags,
-    prompt_for_title,
+    PromptLanguageContext, TextProvider, parse_choice_suggestion, parse_field_suggestion,
+    parse_tag_suggestion, parse_title_suggestion, prompt_for_choice, prompt_for_fields,
+    prompt_for_tags, prompt_for_title,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, DashboardRange, DocumentChatSource, DocumentPatch, Permission,
     ProcessingMode, ProviderUsageStats, Role, RuntimeSettings, Stage, build_document_chat_prompt,
-    document_chat_snippet, document_chat_terms, roles_have_permission, score_document_chat_source,
-    validate_choice_suggestion, validate_field_suggestion, validate_tag_suggestion,
-    validate_title_suggestion,
+    detect_document_language, document_chat_snippet, document_chat_terms, roles_have_permission,
+    score_document_chat_source, validate_choice_suggestion, validate_field_suggestion,
+    validate_tag_suggestion, validate_title_suggestion,
 };
 use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, OidcUserInput, ReviewItemRecord, append_audit,
@@ -1107,6 +1107,10 @@ async fn build_prompt_test_chat_request(
     request: &TestPromptRequest,
     sample_text: &str,
 ) -> Result<ChatRequest> {
+    let language = PromptLanguageContext::new(
+        &detect_document_language(sample_text),
+        &settings.tagging.tag_output_language,
+    );
     match request.stage {
         Stage::Tags => {
             let allowed = list_allowed_tag_names(&state.pool).await?;
@@ -1114,18 +1118,29 @@ async fn build_prompt_test_chat_request(
                 sample_text,
                 &allowed,
                 settings.tagging.max_tags,
+                &language,
             ))
         }
-        Stage::Title => Ok(prompt_for_title(sample_text)),
+        Stage::Title => Ok(prompt_for_title(sample_text, &language)),
         Stage::Correspondent => {
             let allowed =
                 list_allowed_named_entities(&state.pool, "paperless_correspondents").await?;
-            Ok(prompt_for_choice(sample_text, "correspondent", &allowed))
+            Ok(prompt_for_choice(
+                sample_text,
+                "correspondent",
+                &allowed,
+                &language,
+            ))
         }
         Stage::DocumentType => {
             let allowed =
                 list_allowed_named_entities(&state.pool, "paperless_document_types").await?;
-            Ok(prompt_for_choice(sample_text, "document type", &allowed))
+            Ok(prompt_for_choice(
+                sample_text,
+                "document type",
+                &allowed,
+                &language,
+            ))
         }
         Stage::Fields => {
             let allowed = list_custom_fields(&state.pool)
@@ -1137,6 +1152,7 @@ async fn build_prompt_test_chat_request(
                 sample_text,
                 &allowed,
                 settings.fields.max_fields,
+                &language,
             ))
         }
         Stage::Ocr => Ok(ChatRequest {

@@ -378,6 +378,16 @@ the failed-attempt counter and lock.
 Autopilot never trusts model output directly. Full autopilot applies only a
 validated Rust `DocumentPatch`.
 
+## Language Operations
+
+The worker records detected document language on `document_inventory` with a
+confidence score and `document.language_detected` audit events when the stored
+decision changes. Low-confidence or mixed-language documents remain usable but
+should be reviewed before enabling `full_auto` broadly. `Tag output language` in
+Settings affects only newly generated business tags; existing tags,
+correspondents, document types, names, dates, and identifiers are not translated
+automatically.
+
 ## Document Chat
 
 Document chat uses the same backend policy boundary as the rest of Archivist:

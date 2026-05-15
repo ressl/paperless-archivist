@@ -210,6 +210,19 @@ claim/apply logic.
 
 Never let raw model output directly mutate Paperless.
 
+## Language Intelligence
+
+Document language is detected locally in `archivist-core` and persisted on
+`document_inventory` as a BCP-47 tag, confidence, and source. Worker prompt
+builders must pass a `PromptLanguageContext` into tagging, title,
+correspondent, document type, and field prompts. Existing Paperless metadata
+values must remain exact; only newly generated business tags use the configured
+`tag_output_language`.
+
+When extending language detection, add representative samples to
+`crates/archivist-core/tests/fixtures/language_samples.json` and cover prompt
+rendering without requiring a live provider.
+
 ## Document Chat/RAG
 
 Document Chat is a browser-session feature for reviewers, operators, and admins.

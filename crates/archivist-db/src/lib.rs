@@ -9,8 +9,8 @@ use archivist_core::{
     DashboardLiveFailure, DashboardLiveJob, DashboardLiveLlmEvent, DashboardLiveRun,
     DashboardLiveStatus, DashboardRange, DashboardStageStatus, DashboardStats,
     DashboardStatusCount, DashboardTimeBucket, DocumentChatSource, DocumentInventoryItem,
-    ProcessingMode, ProviderUsageStats, Role, RuntimeSettings, ServiceProcessingStatus, Stage,
-    WorkflowRules, redact_sensitive_json,
+    LanguageDetection, ProcessingMode, ProviderUsageStats, Role, RuntimeSettings,
+    ServiceProcessingStatus, Stage, WorkflowRules, redact_sensitive_json,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -1738,6 +1738,94 @@ pub async fn upsert_inventory_item(
     Ok(())
 }
 
+pub async fn record_document_language(
+    pool: &DbPool,
+    paperless_document_id: i32,
+    detection: &LanguageDetection,
+    run_id: Option<Uuid>,
+    job_id: Option<Uuid>,
+    actor: &str,
+) -> Result<()> {
+    let existing = sqlx::query(
+        r#"
+        select detected_language, detected_language_confidence, detected_language_source
+          from document_inventory
+         where paperless_document_id = $1
+        "#,
+    )
+    .bind(paperless_document_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let existing_language = existing
+        .as_ref()
+        .and_then(|row| row.try_get::<Option<String>, _>("detected_language").ok())
+        .flatten();
+    let existing_confidence = existing
+        .as_ref()
+        .and_then(|row| {
+            row.try_get::<Option<f32>, _>("detected_language_confidence")
+                .ok()
+        })
+        .flatten();
+    let should_update = match (&existing_language, existing_confidence) {
+        (Some(language), Some(confidence))
+            if language == &detection.language && confidence + 0.01 >= detection.confidence =>
+        {
+            false
+        }
+        _ => detection.confidence > 0.0 || existing_language.is_none(),
+    };
+    if !should_update {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        update document_inventory
+           set detected_language = $2,
+               detected_language_confidence = $3,
+               detected_language_source = $4,
+               detected_language_updated_at = now(),
+               updated_at = now()
+         where paperless_document_id = $1
+        "#,
+    )
+    .bind(paperless_document_id)
+    .bind(&detection.language)
+    .bind(detection.confidence)
+    .bind(&detection.source)
+    .execute(&mut *tx)
+    .await?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "document.language_detected".to_owned(),
+            actor_type: actor.to_owned(),
+            actor_id: None,
+            run_id,
+            job_id,
+            paperless_document_id: Some(paperless_document_id),
+            before: Some(json!({
+                "language": existing_language,
+                "confidence": existing_confidence
+            })),
+            after: Some(json!({
+                "language": detection.language,
+                "confidence": detection.confidence,
+                "source": detection.source
+            })),
+            metadata: None,
+            outcome: "success".to_owned(),
+            error_message: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn list_allowed_tag_names(pool: &DbPool) -> Result<Vec<String>> {
     let rows =
         sqlx::query("select name from paperless_tags where is_workflow = false order by name")
@@ -2620,7 +2708,8 @@ pub async fn list_inventory(
         select paperless_document_id, title, original_file_name, current_tags, ocr_status,
                tagging_status, title_status, correspondent_status, document_type_status,
                fields_status, current_run_status, last_run_id, last_error,
-               next_required_stage, needs_review, complete, last_seen_at
+               next_required_stage, needs_review, complete, detected_language,
+               detected_language_confidence, detected_language_source, last_seen_at
           from document_inventory
          order by paperless_document_id desc
          limit $1 offset $2
@@ -2650,6 +2739,9 @@ pub async fn list_inventory(
                 next_required_stage: row.try_get("next_required_stage")?,
                 needs_review: row.try_get("needs_review")?,
                 complete: row.try_get("complete")?,
+                detected_language: row.try_get("detected_language")?,
+                detected_language_confidence: row.try_get("detected_language_confidence")?,
+                detected_language_source: row.try_get("detected_language_source")?,
                 last_seen_at: row.try_get("last_seen_at")?,
             })
         })

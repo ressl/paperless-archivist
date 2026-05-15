@@ -75,6 +75,7 @@ Useful capabilities to keep:
 - dashboard for processing state
 - provider usage, token, cost, and latency reporting
 - configurable prompts and model behavior
+- document language detection and configurable tag output language
 
 ## 3. Implemented Core Features
 

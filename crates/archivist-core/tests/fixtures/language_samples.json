@@ -1,0 +1,58 @@
+[
+  {
+    "language": "de",
+    "text": "Rechnung fuer Beratung und Entwicklung. Der Betrag ist mit Datum faellig."
+  },
+  {
+    "language": "en",
+    "text": "Invoice for consulting and development. The amount is due with the payment date."
+  },
+  {
+    "language": "fr",
+    "text": "Facture pour conseil et developpement. Le montant est du avec la date de paiement."
+  },
+  {
+    "language": "it",
+    "text": "Fattura per consulenza e sviluppo. Il pagamento con importo e data e dovuto."
+  },
+  {
+    "language": "es",
+    "text": "Factura por consultoria y desarrollo. El importe y la fecha de pago estan indicados."
+  },
+  {
+    "language": "pt",
+    "text": "Fatura de consultoria e desenvolvimento. O valor e a data de pagamento estao indicados."
+  },
+  {
+    "language": "nl",
+    "text": "Factuur voor advies en ontwikkeling. Het bedrag en de datum voor betaling zijn vermeld."
+  },
+  {
+    "language": "pl",
+    "text": "Faktura za doradztwo i rozwoj. Kwota oraz data platnosc jest wskazana."
+  },
+  {
+    "language": "tr",
+    "text": "Danismanlik ve gelistirme icin fatura. Odeme tutar ve tarih bilgisi belirtilmistir."
+  },
+  {
+    "language": "ar",
+    "text": "فاتورة لخدمات الاستشارة والتطوير مع تاريخ الدفع والمبلغ المستحق"
+  },
+  {
+    "language": "he",
+    "text": "חשבונית עבור שירותי ייעוץ ופיתוח עם תאריך תשלום וסכום לתשלום"
+  },
+  {
+    "language": "hi",
+    "text": "परामर्श और विकास सेवाओं के लिए चालान भुगतान तिथि और राशि के साथ"
+  },
+  {
+    "language": "zh",
+    "text": "咨询和开发服务发票，包含付款日期和应付金额"
+  },
+  {
+    "language": "ja",
+    "text": "コンサルティングと開発サービスの請求書、支払日と金額を含みます"
+  }
+]

@@ -249,6 +249,19 @@ Safe rollout pattern:
 4. Watch dashboard failures and audit events.
 5. Switch to `full_auto` only when the results are stable.
 
+## Language And Tag Output
+
+Archivist detects the document language from OCR or existing Paperless content
+and stores the result as a BCP-47 language tag with confidence. The inventory
+table shows the current language decision so low-confidence or mixed-language
+documents are visible during review/debug work.
+
+In `Settings` -> `Workflow`, `Tag output language` controls the language used
+for newly generated business tags. The selector uses standard ISO language tags
+and browser-native language names. Existing Paperless tags are not translated or
+renamed automatically; the model must return existing allowed tags exactly as
+listed.
+
 ## Completion And Trigger Tags
 
 Archivist uses workflow tags to coordinate with Paperless:

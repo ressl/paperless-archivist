@@ -77,6 +77,7 @@ import {
 } from './modelCatalog';
 import hardwareRecommendations from './hardwareRecommendations.json';
 import { promptStageHelp, promptStageOrder, type PromptStageHelp } from './data/promptHelp';
+import { languageOptionLabel, languageOptions } from './data/worldLanguages';
 import { buildInfo, buildInfoLabel } from './buildInfo';
 
 type Tab = 'dashboard' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users';
@@ -814,6 +815,16 @@ function formatCost(value?: number | null) {
   return `$${value.toFixed(2)}`;
 }
 
+function formatLanguageDetection(item: InventoryItem, languages: ReturnType<typeof languageOptions>) {
+  const tag = item.detected_language;
+  if (!tag) return '-';
+  const option = languages.find((language) => language.tag === tag);
+  const label = option ? option.uiName : tag;
+  const confidence = item.detected_language_confidence;
+  if (confidence == null) return label;
+  return `${label} ${Math.round(confidence * 100)}%`;
+}
+
 function deltaTone(value: number) {
   if (value > 0) return 'delta up';
   if (value < 0) return 'delta down';
@@ -823,6 +834,7 @@ function deltaTone(value: number) {
 function Inventory({ setError }: { setError: (error: string | null) => void }) {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [busy, setBusy] = useState(false);
+  const languages = useMemo(() => languageOptions(), []);
   const load = () => api.inventory().then((data) => setItems(data.items)).catch((err) => setError(err.message));
 
   useEffect(() => {
@@ -842,6 +854,7 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
               <th>ID</th>
               <th>Title</th>
               <th>OCR</th>
+              <th>Language</th>
               <th>Tags</th>
               <th>Title</th>
               <th>Type</th>
@@ -855,6 +868,7 @@ function Inventory({ setError }: { setError: (error: string | null) => void }) {
                 <td>{item.paperless_document_id}</td>
                 <td>{item.title || item.original_file_name || 'Untitled'}</td>
                 <td><Status value={item.ocr_status} /></td>
+                <td>{formatLanguageDetection(item, languages)}</td>
                 <td><Status value={item.tagging_status} /></td>
                 <td><Status value={item.title_status} /></td>
                 <td><Status value={item.document_type_status} /></td>
@@ -1105,6 +1119,7 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
   const [providerTest, setProviderTest] = useState<ConnectionTestState | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const worldLanguages = useMemo(() => languageOptions(), []);
 
   const loadOllamaModels = (providerName: string) => {
     setOllamaModels((current) => ({
@@ -1347,6 +1362,23 @@ function SettingsPage({ setError }: { setError: (error: string | null) => void }
           <label>
             Tag confidence
             <input type="number" min="0" max="1" step="0.05" value={settings.tagging.confidence_threshold} onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, confidence_threshold: Number(event.target.value) } }))} />
+          </label>
+          <label>
+            Tag output language
+            <input
+              list="tag-output-language-options"
+              value={settings.tagging.tag_output_language}
+              onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, tag_output_language: event.target.value } }))}
+              placeholder="BCP-47 language tag, e.g. de"
+            />
+            <datalist id="tag-output-language-options">
+              {worldLanguages.map((language) => (
+                <option key={language.tag} value={language.tag}>
+                  {languageOptionLabel(language)}
+                </option>
+              ))}
+            </datalist>
+            <small>Used only for newly generated business tags; existing Paperless tags stay exact.</small>
           </label>
           <label>
             Max fields

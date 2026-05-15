@@ -33,6 +33,7 @@ events.
 - Paperless metadata and document inventory sync.
 - OCR and vision processing through model providers.
 - Tagging, title, correspondent, document type, and custom field suggestions.
+- Local document language detection with BCP-47 tags and language-aware prompts.
 - Review queue for approve/reject/edit workflows.
 - Document chat/RAG over Paperless document content with stored sources.
 - Three workflow modes: manual review, auto-select with review, and full autopilot after validation.

@@ -93,6 +93,7 @@ safe enough to run repeatedly on a real archive.
 | Paperless integration | REST API only, no direct database writes, document inventory sync, tag and metadata patching |
 | OCR pipeline | Vision/OCR stage with configurable models and resumable worker jobs |
 | Tagging pipeline | Title, correspondent, document type, tag, and field suggestions with Rust-side validation |
+| Language intelligence | Local language detection stores BCP-47 tags, feeds prompt context, and lets operators choose the language for newly generated tags |
 | Review flow | Approve, reject, or edit AI suggestions before they are applied |
 | Workflow modes | Manual trigger + review, autopilot selector + review, or full autopilot |
 | Autopilot | Automatic document selection and optional automatic apply after validation; failures can fall back to review |
@@ -251,6 +252,16 @@ Successful OCR and tagging stages add `archivist-ocr` and `archivist-tags`.
 The final stage in a run also adds `ai-processed`. Trigger tags are removed
 after the corresponding stage succeeds so the worker can resume safely without
 looping over already-completed work.
+
+## Language Intelligence
+
+Archivist detects document language locally from OCR/document text and stores a
+BCP-47 language tag with confidence in the inventory. Prompt requests include
+the detected document language, confidence, and the configured tag output
+language so models preserve source-language content while writing newly
+generated business tags in the operator-selected language. Existing Paperless
+tags, correspondents, document types, dates, names, and identifiers are kept
+exact unless a reviewer explicitly changes them.
 
 ## Default Prompt Pack
 

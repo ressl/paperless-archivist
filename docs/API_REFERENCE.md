@@ -139,6 +139,20 @@ processing mode. Valid processing modes are `manual_review`,
 `auto_select_review`, and `full_auto`. The legacy request values `review` and
 `autopilot` are accepted for backward compatibility.
 
+Inventory items include language debug fields when detection has run:
+
+```json
+{
+  "detected_language": "de",
+  "detected_language_confidence": 0.92,
+  "detected_language_source": "heuristic"
+}
+```
+
+Runtime settings include `tagging.tag_output_language`, a BCP-47 language tag
+used for newly generated business tags. Existing Paperless tags are still
+returned exactly as configured.
+
 ## Dashboard
 
 | Method | Path | Purpose |

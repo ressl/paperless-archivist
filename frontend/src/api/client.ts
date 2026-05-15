@@ -67,6 +67,7 @@ export type RuntimeSettings = {
     allow_new_tags: boolean;
     confidence_threshold: number;
     old_tag_strategy: string;
+    tag_output_language: string;
   };
   fields: {
     max_fields: number;
@@ -281,6 +282,9 @@ export type InventoryItem = {
   last_error?: string | null;
   needs_review: boolean;
   complete: boolean;
+  detected_language?: string | null;
+  detected_language_confidence?: number | null;
+  detected_language_source?: string | null;
 };
 
 export type ReviewItem = {

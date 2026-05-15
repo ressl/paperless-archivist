@@ -5,24 +5,25 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
     AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT, ImageInput, OllamaClient,
-    OpenAiCompatibleClient, TextProvider, VisionProvider, VisionRequest, parse_choice_suggestion,
-    parse_field_suggestion, parse_tag_suggestion, parse_title_suggestion, prompt_for_choice,
-    prompt_for_fields, prompt_for_tags, prompt_for_title,
+    OpenAiCompatibleClient, PromptLanguageContext, TextProvider, VisionProvider, VisionRequest,
+    parse_choice_suggestion, parse_field_suggestion, parse_tag_suggestion, parse_title_suggestion,
+    prompt_for_choice, prompt_for_fields, prompt_for_tags, prompt_for_title,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
-    AiProviderKind, AuditEventInput, ChoiceSuggestion, DocumentPatch, OldTagStrategy,
-    RuntimeSettings, Stage, TagSuggestion, TitleSuggestion, validate_choice_suggestion,
-    validate_field_suggestion, validate_tag_suggestion, validate_title_suggestion,
+    AiProviderKind, AuditEventInput, ChoiceSuggestion, DocumentPatch, LanguageDetection,
+    OldTagStrategy, RuntimeSettings, Stage, TagSuggestion, TitleSuggestion,
+    detect_document_language, validate_choice_suggestion, validate_field_suggestion,
+    validate_tag_suggestion, validate_title_suggestion,
 };
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, complete_job, connect,
     create_review_item, create_run_with_jobs, custom_field_ids_for_names, fail_job,
     get_active_prompt, get_runtime_settings, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
-    named_entity_id_for_name, queue_missing_pipeline, resolve_secret, tag_ids_for_names,
-    upsert_inventory_item, upsert_paperless_custom_field, upsert_paperless_named_entity,
-    upsert_paperless_tag,
+    named_entity_id_for_name, queue_missing_pipeline, record_document_language, resolve_secret,
+    tag_ids_for_names, upsert_inventory_item, upsert_paperless_custom_field,
+    upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{PaperlessClient, PaperlessDocumentSummary, PaperlessTag};
@@ -265,6 +266,16 @@ async fn process_ocr(
     }
     let text = normalize_ocr_pages(&texts);
     validate_ocr_text(&text, settings.ocr.min_chars)?;
+    let language_detection = detect_document_language(&text);
+    record_document_language(
+        pool,
+        job.paperless_document_id,
+        &language_detection,
+        Some(job.run_id),
+        Some(job.id),
+        "worker",
+    )
+    .await?;
 
     insert_ai_artifact(
         pool,
@@ -278,7 +289,12 @@ async fn process_ocr(
             input_hash: &hash_bytes(&original),
             request: None,
             response: Some(json!({ "pages": raw_responses })),
-            normalized_output: Some(json!({ "content_chars": text.chars().count() })),
+            normalized_output: Some(json!({
+                "content_chars": text.chars().count(),
+                "language": language_detection.language,
+                "language_confidence": language_detection.confidence,
+                "language_source": language_detection.source
+            })),
             duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
         },
     )
@@ -295,6 +311,32 @@ async fn process_ocr(
     handle_patch_result(pool, paperless, settings, job, patch, Vec::new()).await
 }
 
+async fn language_context_for_content(
+    pool: &DbPool,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    content: &str,
+) -> Result<PromptLanguageContext> {
+    let detection = if content.trim().is_empty() {
+        LanguageDetection::unknown("heuristic")
+    } else {
+        detect_document_language(content)
+    };
+    record_document_language(
+        pool,
+        job.paperless_document_id,
+        &detection,
+        Some(job.run_id),
+        Some(job.id),
+        "worker",
+    )
+    .await?;
+    Ok(PromptLanguageContext::new(
+        &detection,
+        &settings.tagging.tag_output_language,
+    ))
+}
+
 async fn process_tags(
     pool: &DbPool,
     config: &AppConfig,
@@ -305,7 +347,8 @@ async fn process_tags(
     let document = paperless.get_document(job.paperless_document_id).await?;
     let content = document.content.unwrap_or_default();
     let allowed = list_allowed_tag_names(pool).await?;
-    let mut request = prompt_for_tags(&content, &allowed, settings.tagging.max_tags);
+    let language = language_context_for_content(pool, settings, job, &content).await?;
+    let mut request = prompt_for_tags(&content, &allowed, settings.tagging.max_tags, &language);
     let prompt_id = apply_active_prompt(pool, Stage::Tags, &mut request).await?;
     let response = chat_for_stage(pool, config, settings, Stage::Tags, request.clone()).await?;
     let suggestion = parse_tag_suggestion(&response.text).unwrap_or(TagSuggestion {
@@ -382,7 +425,8 @@ async fn process_title(
 ) -> Result<()> {
     let document = paperless.get_document(job.paperless_document_id).await?;
     let content = document.content.unwrap_or_default();
-    let mut request = prompt_for_title(&content);
+    let language = language_context_for_content(pool, settings, job, &content).await?;
+    let mut request = prompt_for_title(&content, &language);
     let prompt_id = apply_active_prompt(pool, Stage::Title, &mut request).await?;
     let response = chat_for_stage(pool, config, settings, Stage::Title, request.clone()).await?;
     let suggestion = parse_title_suggestion(&response.text).unwrap_or(TitleSuggestion {
@@ -441,7 +485,8 @@ async fn process_choice(
     }
     let document = paperless.get_document(job.paperless_document_id).await?;
     let content = document.content.unwrap_or_default();
-    let mut request = prompt_for_choice(&content, choice_kind, &allowed);
+    let language = language_context_for_content(pool, settings, job, &content).await?;
+    let mut request = prompt_for_choice(&content, choice_kind, &allowed, &language);
     let prompt_id = apply_active_prompt(pool, job.stage, &mut request).await?;
     let response = chat_for_stage(pool, config, settings, job.stage, request.clone()).await?;
     let suggestion = parse_choice_suggestion(&response.text).unwrap_or(ChoiceSuggestion {
@@ -521,7 +566,8 @@ async fn process_fields(
         .iter()
         .map(|field| field.name.clone())
         .collect::<Vec<_>>();
-    let mut request = prompt_for_fields(&content, &allowed, settings.fields.max_fields);
+    let language = language_context_for_content(pool, settings, job, &content).await?;
+    let mut request = prompt_for_fields(&content, &allowed, settings.fields.max_fields, &language);
     let prompt_id = apply_active_prompt(pool, Stage::Fields, &mut request).await?;
     let response = chat_for_stage(pool, config, settings, Stage::Fields, request.clone()).await?;
     let suggestion =
