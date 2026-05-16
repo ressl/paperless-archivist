@@ -2141,6 +2141,29 @@ pub async fn tag_ids_for_names(pool: &DbPool, names: &[String]) -> Result<Vec<i3
         .collect()
 }
 
+/// Like `tag_ids_for_names` but also returns the matched name alongside each id, so callers
+/// can diff a requested name list against what was actually known in the local mirror
+/// (e.g. to decide whether to create unknown tags in Paperless or drop them).
+pub async fn tag_id_pairs_for_names(pool: &DbPool, names: &[String]) -> Result<Vec<(String, i32)>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "select name, id from paperless_tags where lower(name) = any($1) order by name",
+    )
+    .bind(
+        names
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.try_get("name")?, row.try_get("id")?)))
+        .collect()
+}
+
 pub async fn named_entity_id_for_name(
     pool: &DbPool,
     table: &str,

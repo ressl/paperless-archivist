@@ -5,7 +5,10 @@
 //! `DATABASE_URL=postgres://... cargo test -p archivist-db -- --ignored`.
 
 use archivist_core::{ProcessingMode, Stage, WorkflowRules};
-use archivist_db::{DbPool, connect, migrate, queue_missing_pipeline, queue_missing_stage};
+use archivist_db::{
+    DbPool, connect, custom_field_ids_for_names, migrate, queue_missing_pipeline,
+    queue_missing_stage, tag_id_pairs_for_names,
+};
 use sqlx::Executor;
 
 async fn fresh_pool() -> Option<DbPool> {
@@ -138,4 +141,74 @@ async fn queue_missing_pipeline_emits_combined_stage_runs() {
             "expected combined ocr+metadata stages, got {names:?}"
         );
     }
+}
+
+/// Regression test for v1.5.2 Bug 2: review_items created during the consolidated metadata
+/// stage's validation-fallback branch used to contain raw LLM tag NAMES like
+/// `["Hardware", "Rechnung"]` where the apply path expects `Vec<i32>`. The worker now uses
+/// `tag_id_pairs_for_names` to resolve names → ids BEFORE building the review_item; this
+/// test pins the SQL contract (case-insensitive match, name+id pair returned, unknown
+/// names omitted) so the worker behavior stays correct.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn tag_id_pairs_for_names_is_case_insensitive_and_skips_unknown() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    sqlx::query(
+        r#"
+        insert into paperless_tags (id, name) values
+            (7, 'Hardware'),
+            (12, 'Rechnung')
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("seed paperless_tags");
+
+    let requested = vec![
+        "hardware".to_owned(),  // different case
+        "RECHNUNG".to_owned(),  // different case
+        "NoSuchTag".to_owned(), // unknown
+    ];
+    let pairs = tag_id_pairs_for_names(&pool, &requested)
+        .await
+        .expect("tag_id_pairs_for_names");
+    let ids: Vec<i32> = pairs.iter().map(|(_, id)| *id).collect();
+    assert!(
+        ids.contains(&7),
+        "Hardware id should match case-insensitively"
+    );
+    assert!(
+        ids.contains(&12),
+        "Rechnung id should match case-insensitively"
+    );
+    assert_eq!(pairs.len(), 2, "unknown tags are NOT returned");
+}
+
+/// Companion to the tag pairs test: same contract for custom_field_ids_for_names, since the
+/// worker's resolve_custom_field_values_to_ids uses it for the same name-to-id shape fix.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn custom_field_ids_for_names_is_case_insensitive_and_skips_unknown() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    sqlx::query(
+        r#"
+        insert into paperless_custom_fields (id, name, data_type) values
+            (1, 'Invoice Number', 'string'),
+            (2, 'Total', 'monetary')
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("seed paperless_custom_fields");
+
+    let requested = vec!["INVOICE NUMBER".to_owned(), "ghost_field".to_owned()];
+    let pairs = custom_field_ids_for_names(&pool, &requested)
+        .await
+        .expect("custom_field_ids_for_names");
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].1, 1);
 }

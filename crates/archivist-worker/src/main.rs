@@ -29,9 +29,9 @@ use archivist_db::{
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
     named_entity_id_for_name, queue_missing_pipeline, record_dashboard_snapshot,
     record_document_language, requeue_vision_crashed_jobs, resolve_secret,
-    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_ids_for_names,
-    upsert_inventory_item, upsert_paperless_custom_field, upsert_paperless_named_entity,
-    upsert_paperless_tag,
+    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_id_pairs_for_names,
+    tag_ids_for_names, upsert_inventory_item, upsert_paperless_custom_field,
+    upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{
@@ -1504,6 +1504,129 @@ async fn process_fields(
     }
 }
 
+/// Pure split of `resolve_tag_names_to_ids`: given the requested names and the
+/// (name, id) pairs that the local Paperless mirror already knows about, return
+/// the set of known ids plus the list of names that were NOT found (and therefore
+/// need creation-or-drop downstream depending on `allow_new_tags`).
+///
+/// Extracted so the diff/dedup/case-fold logic is unit-testable without a real
+/// `DbPool` or `PaperlessClient`.
+fn diff_known_tag_names(
+    requested: &[String],
+    known_pairs: &[(String, i32)],
+) -> (Vec<i32>, Vec<String>) {
+    let known_lower: std::collections::HashSet<String> = known_pairs
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let mut ids: Vec<i32> = known_pairs.iter().map(|(_, id)| *id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let unknown: Vec<String> = requested
+        .iter()
+        .filter(|name| !known_lower.contains(&name.to_ascii_lowercase()))
+        .cloned()
+        .collect();
+    (ids, unknown)
+}
+
+/// Resolve LLM-supplied tag NAMES to Paperless tag IDs so review_items always carry the
+/// `Vec<i32>` shape that the approve → patch path expects (the apply path deserializes the
+/// review_item's `suggested_patch.tags` as `Vec<i32>`; raw names cause a 500 there and the
+/// autopilot drain then reverts the review forever).
+///
+/// Resolution policy:
+/// * Look up known names case-insensitively in the local `paperless_tags` mirror.
+/// * For unknown names: if `allow_new_tags` is true, create them in Paperless and use the
+///   returned ID. Otherwise drop the name with a warn log — the review_item still ships,
+///   just with fewer tags, rather than blocking the whole document.
+async fn resolve_tag_names_to_ids(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    names: &[String],
+    allow_new_tags: bool,
+) -> Result<Vec<i32>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Get (name, id) pairs for known tags so we can both build the initial id list and tell
+    // which names are unknown (need creation or dropping).
+    let known_pairs = tag_id_pairs_for_names(pool, names).await?;
+    let (mut ids, unknown) = diff_known_tag_names(names, &known_pairs);
+    for name in unknown {
+        if allow_new_tags {
+            match paperless.ensure_tag(&name).await {
+                Ok(tag) => {
+                    if !ids.contains(&tag.id) {
+                        ids.push(tag.id);
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        unknown_tag = %name,
+                        %error,
+                        "failed to create new Paperless tag for review_item; dropping"
+                    );
+                }
+            }
+        } else {
+            warn!(
+                unknown_tag = %name,
+                "dropping unknown tag from review_item suggested_patch (allow_new_tags is false)"
+            );
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// Pure split of `resolve_custom_field_values_to_ids`: build the
+/// `[{ "field": id, "value": ... }]` JSON array Paperless expects from the input
+/// FieldValueSuggestion list and the locally-known (name, id) pairs. Names not in
+/// the pairs list are dropped. Extracted for unit testability.
+fn build_custom_field_value_patch(
+    fields: &[archivist_core::FieldValueSuggestion],
+    id_pairs: &[(String, i32)],
+) -> Vec<serde_json::Value> {
+    fields
+        .iter()
+        .filter_map(|field| {
+            id_pairs
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&field.name))
+                .map(|(_, id)| json!({ "field": id, "value": field.value }))
+        })
+        .collect()
+}
+
+/// Resolve LLM-supplied custom-field NAMES to Paperless custom-field IDs. Same contract as
+/// `resolve_tag_names_to_ids` but for custom fields. Unknown names are dropped with a warn
+/// log — custom fields cannot be safely auto-created here because they require a `data_type`
+/// the LLM doesn't reliably supply.
+async fn resolve_custom_field_values_to_ids(
+    pool: &DbPool,
+    fields: &[archivist_core::FieldValueSuggestion],
+) -> Result<Vec<serde_json::Value>> {
+    if fields.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
+    let id_pairs = custom_field_ids_for_names(pool, &names).await?;
+    for field in fields {
+        if !id_pairs
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(&field.name))
+        {
+            warn!(
+                unknown_custom_field = %field.name,
+                "dropping unknown custom field from review_item suggested_patch"
+            );
+        }
+    }
+    Ok(build_custom_field_value_patch(fields, &id_pairs))
+}
+
 /// Consolidated metadata stage (v1.4.0). One LLM call replaces six per-field
 /// round-trips. The response is fanned out into up to six review items (or one
 /// composite Paperless patch in full_auto mode) so existing reviewer UX, audit
@@ -1796,10 +1919,25 @@ async fn process_metadata(
                 applied_fields.push("tags");
             }
             Err(errors) => {
+                // Validation failed (e.g. low confidence, count over max_tags). Resolve the raw
+                // LLM names to integer IDs BEFORE creating the review_item so the apply path can
+                // deserialize `suggested_patch.tags` as `Vec<i32>` without 500-ing. Unknown names
+                // are either created in Paperless (allow_new_tags == true) or dropped.
+                let tag_ids = resolve_tag_names_to_ids(
+                    pool,
+                    paperless,
+                    &tags.tags,
+                    settings.tagging.allow_new_tags,
+                )
+                .await?;
                 review_items.push((
                     json!({
-                        "tags": tags.tags.clone(),
-                        "standard_metadata": { "field": "tags", "confidence": tags.confidence }
+                        "tags": tag_ids,
+                        "standard_metadata": {
+                            "field": "tags",
+                            "confidence": tags.confidence,
+                            "suggested_names": tags.tags,
+                        }
                     }),
                     json!(errors),
                 ));
@@ -1838,7 +1976,24 @@ async fn process_metadata(
                 applied_fields.push("fields");
             }
             Err(errors) => {
-                review_items.push((json!({ "custom_fields": fields.fields }), json!(errors)));
+                // Same shape-correctness fix as tags: resolve field NAMES to numeric IDs and
+                // wrap as `[{ "field": id, "value": ... }]` so the approve → patch path can
+                // deserialize `suggested_patch.custom_fields` against Paperless without 500.
+                let values = resolve_custom_field_values_to_ids(pool, &fields.fields).await?;
+                review_items.push((
+                    json!({
+                        "custom_fields": values,
+                        "standard_metadata": {
+                            "field": "fields",
+                            "suggested_names": fields
+                                .fields
+                                .iter()
+                                .map(|f| f.name.clone())
+                                .collect::<Vec<_>>(),
+                        }
+                    }),
+                    json!(errors),
+                ));
             }
         }
     }
@@ -3322,5 +3477,96 @@ mod tests {
         settings.ai.fallback_vision_model = Some("   ".to_owned());
         // Whitespace-only explicit is treated as unset.
         assert!(pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &[]).is_none());
+    }
+
+    // ---- v1.5.2 Bug 2 regression: name-to-id resolution for review_items ----
+
+    #[test]
+    fn diff_known_tag_names_case_insensitive_and_unique() {
+        let requested = vec![
+            "Hardware".to_owned(),
+            "Rechnung".to_owned(),
+            "hardware".to_owned(), // duplicate, different case
+            "NoSuchTag".to_owned(),
+        ];
+        // The local mirror returns lowercased matches like the real SQL helper does.
+        let known = vec![("hardware".to_owned(), 7), ("rechnung".to_owned(), 12)];
+        let (ids, unknown) = diff_known_tag_names(&requested, &known);
+        assert_eq!(ids, vec![7, 12], "known ids returned sorted-deduped");
+        assert_eq!(
+            unknown,
+            vec!["NoSuchTag".to_owned()],
+            "only the unmatched name needs creation-or-drop downstream"
+        );
+    }
+
+    #[test]
+    fn diff_known_tag_names_empty_inputs() {
+        let (ids, unknown) = diff_known_tag_names(&[], &[]);
+        assert!(ids.is_empty());
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn diff_known_tag_names_all_unknown() {
+        let requested = vec!["A".to_owned(), "B".to_owned()];
+        let (ids, unknown) = diff_known_tag_names(&requested, &[]);
+        assert!(ids.is_empty());
+        assert_eq!(unknown, requested);
+    }
+
+    #[test]
+    fn build_custom_field_value_patch_drops_unknown_names() {
+        use archivist_core::FieldValueSuggestion;
+        use serde_json::Value;
+        let fields = vec![
+            FieldValueSuggestion {
+                name: "Invoice Number".to_owned(),
+                value: Value::String("INV-001".to_owned()),
+                confidence: Some(0.9),
+            },
+            FieldValueSuggestion {
+                name: "ghost_field".to_owned(),
+                value: Value::String("nope".to_owned()),
+                confidence: Some(0.9),
+            },
+        ];
+        let id_pairs = vec![("invoice number".to_owned(), 42)];
+        let patch = build_custom_field_value_patch(&fields, &id_pairs);
+        assert_eq!(patch.len(), 1, "ghost_field should be dropped");
+        // Shape must be { "field": <i32>, "value": ... } — what Paperless / DocumentPatch expects.
+        let entry = &patch[0];
+        assert_eq!(entry.get("field").and_then(Value::as_i64), Some(42));
+        assert_eq!(
+            entry.get("value").and_then(Value::as_str),
+            Some("INV-001"),
+            "value passes through unchanged"
+        );
+    }
+
+    #[test]
+    fn build_custom_field_value_patch_preserves_input_order() {
+        use archivist_core::FieldValueSuggestion;
+        use serde_json::Value;
+        let fields = vec![
+            FieldValueSuggestion {
+                name: "B".to_owned(),
+                value: Value::Null,
+                confidence: None,
+            },
+            FieldValueSuggestion {
+                name: "A".to_owned(),
+                value: Value::Null,
+                confidence: None,
+            },
+        ];
+        let id_pairs = vec![("a".to_owned(), 1), ("b".to_owned(), 2)];
+        let patch = build_custom_field_value_patch(&fields, &id_pairs);
+        assert_eq!(
+            patch[0].get("field").and_then(Value::as_i64),
+            Some(2),
+            "input order preserved (B then A), not pair order"
+        );
+        assert_eq!(patch[1].get("field").and_then(Value::as_i64), Some(1));
     }
 }
