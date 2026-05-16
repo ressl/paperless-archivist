@@ -1280,8 +1280,8 @@ async fn process_metadata(
     //                                         failure, or operator policy says "don't overwrite").
     //   * `Skip(reason)`                     — model omitted the field or the document already had
     //                                         a value we are not allowed to overwrite.
-    let auto_apply = settings.workflow.mode.auto_apply_validated_suggestions()
-        && !settings.workflow.dry_run;
+    let auto_apply =
+        settings.workflow.mode.auto_apply_validated_suggestions() && !settings.workflow.dry_run;
     let mut composite_patch = DocumentPatch {
         content: None,
         title: None,
@@ -1321,9 +1321,7 @@ async fn process_metadata(
     if enabled.document_type
         && let Some(choice) = suggestion.document_type.clone()
     {
-        if document.document_type.is_some()
-            && !settings.metadata.overwrite_existing_document_type
-        {
+        if document.document_type.is_some() && !settings.metadata.overwrite_existing_document_type {
             skipped_fields.push("document_type");
         } else {
             match validate_choice_suggestion(
@@ -1332,8 +1330,9 @@ async fn process_metadata(
                 settings.metadata.confidence_threshold,
             ) {
                 Ok(valid) => {
-                    let id = named_entity_id_for_name(pool, "paperless_document_types", &valid.name)
-                        .await?;
+                    let id =
+                        named_entity_id_for_name(pool, "paperless_document_types", &valid.name)
+                            .await?;
                     if let Some(id) = id {
                         composite_patch.document_type = Some(Some(id));
                         applied_fields.push("document_type");
@@ -1364,9 +1363,7 @@ async fn process_metadata(
     if enabled.correspondent
         && let Some(choice) = suggestion.correspondent.clone()
     {
-        if document.correspondent.is_some()
-            && !settings.metadata.overwrite_existing_correspondent
-        {
+        if document.correspondent.is_some() && !settings.metadata.overwrite_existing_correspondent {
             skipped_fields.push("correspondent");
         } else {
             match validate_choice_suggestion(
@@ -1516,10 +1513,7 @@ async fn process_metadata(
                 applied_fields.push("fields");
             }
             Err(errors) => {
-                review_items.push((
-                    json!({ "custom_fields": fields.fields }),
-                    json!(errors),
-                ));
+                review_items.push((json!({ "custom_fields": fields.fields }), json!(errors)));
             }
         }
     }

@@ -3949,7 +3949,8 @@ pub async fn create_run_with_jobs_with_priority(
         return Ok(row.try_get("id")?);
     }
 
-    let cross_run_priority = priority.unwrap_or_else(|| age_derived_priority(paperless_document_id));
+    let cross_run_priority =
+        priority.unwrap_or_else(|| age_derived_priority(paperless_document_id));
 
     let stages_json = serde_json::to_value(stages)?;
     let run_id: Uuid = sqlx::query(

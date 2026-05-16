@@ -2928,11 +2928,8 @@ mod tests {
     #[test]
     fn metadata_field_flags_from_enabled_stages_understands_consolidated_and_legacy() {
         // Legacy enabled_stages list resolves to the matching per-field flags.
-        let flags = MetadataFieldFlags::from_enabled_stages(&[
-            Stage::Title,
-            Stage::Tags,
-            Stage::Fields,
-        ]);
+        let flags =
+            MetadataFieldFlags::from_enabled_stages(&[Stage::Title, Stage::Tags, Stage::Fields]);
         assert!(flags.title && flags.tags && flags.fields);
         assert!(!flags.correspondent && !flags.document_type && !flags.document_date);
 

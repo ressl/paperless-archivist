@@ -1154,7 +1154,10 @@ mod tests {
             "document_date": {"date": "2026-04-12", "confidence": 0.81, "evidence": "Rechnung vom 12. April 2026"}
         }"#;
         let parsed = parse_metadata_suggestion(response).expect("parse ok");
-        assert_eq!(parsed.title.as_ref().unwrap().title, "Invoice Beispiel GmbH 2026");
+        assert_eq!(
+            parsed.title.as_ref().unwrap().title,
+            "Invoice Beispiel GmbH 2026"
+        );
         assert!(parsed.tags.is_none());
         assert_eq!(parsed.document_date.as_ref().unwrap().date, "2026-04-12");
         assert!(parsed.correspondent.is_none());
@@ -1174,7 +1177,10 @@ mod tests {
         // A bare array or string is a contract violation — the caller should not get
         // a silent default. The error keeps the worker from creating empty review items.
         let err = parse_metadata_suggestion("[1, 2, 3]").unwrap_err();
-        assert!(err.to_string().contains("metadata response must be a JSON object"));
+        assert!(
+            err.to_string()
+                .contains("metadata response must be a JSON object")
+        );
     }
 
     #[test]
