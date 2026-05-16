@@ -4157,13 +4157,53 @@ pub async fn claim_jobs(
             max_attempts: row.try_get("max_attempts")?,
             payload: row.try_get("payload")?,
         };
-        mark_run_running(pool, job.run_id, job.paperless_document_id).await?;
         jobs.push(job);
+    }
+
+    if !jobs.is_empty() {
+        // Coalesce the per-job mark_run_running follow-up into a pair of bulk UPDATEs so the
+        // claim path issues O(1) queries per batch instead of O(N).
+        let mut run_ids: Vec<Uuid> = jobs.iter().map(|job| job.run_id).collect();
+        run_ids.sort_unstable();
+        run_ids.dedup();
+        let mut document_ids: Vec<i32> = jobs.iter().map(|job| job.paperless_document_id).collect();
+        document_ids.sort_unstable();
+        document_ids.dedup();
+
+        sqlx::query(
+            r#"
+            update pipeline_runs
+               set status = 'running',
+                   started_at = coalesce(started_at, now()),
+                   updated_at = now()
+             where id = any($1::uuid[])
+               and status in ('queued', 'running', 'waiting_review')
+            "#,
+        )
+        .bind(&run_ids)
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'running',
+                   updated_at = now()
+             where paperless_document_id = any($1::int[])
+            "#,
+        )
+        .bind(&document_ids)
+        .execute(pool)
+        .await?;
     }
     Ok(jobs)
 }
 
-async fn mark_run_running(pool: &DbPool, run_id: Uuid, document_id: i32) -> Result<()> {
+/// Mark a single run + inventory row as running. `claim_jobs` issues equivalent updates in bulk;
+/// this helper exists for callers outside the claim path that legitimately need to flip exactly
+/// one run.
+#[allow(dead_code)]
+pub async fn mark_run_running(pool: &DbPool, run_id: Uuid, document_id: i32) -> Result<()> {
     sqlx::query(
         r#"
         update pipeline_runs
