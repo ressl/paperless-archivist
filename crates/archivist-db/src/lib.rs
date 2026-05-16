@@ -2694,9 +2694,13 @@ async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<Provi
                  where feedback.event_type = 'review.rejected'
                )::bigint as negative_feedback
           from ai_artifacts ai
+          -- Bound the join to the same range as ai_artifacts. Reviews that
+          -- arrive after the window has closed will not be counted; we trade
+          -- that off for not scanning the entire audit history each render.
           left join audit_events feedback
             on feedback.job_id = ai.job_id
            and feedback.event_type in ('review.approved', 'review.edited', 'review.rejected')
+           and feedback.created_at >= $1
          where ai.created_at >= $1
          group by provider, model, stage
          order by request_count desc, provider, model, stage
