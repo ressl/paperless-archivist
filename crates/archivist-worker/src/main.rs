@@ -1146,7 +1146,14 @@ async fn handle_patch_result(
     warnings: Vec<String>,
     review_metadata: Option<serde_json::Value>,
 ) -> Result<()> {
-    if job.mode.requires_manual_review() || settings.workflow.dry_run {
+    // Effective routing policy is the live runtime workflow mode, not the per-run mode that was
+    // stamped onto pipeline_runs at queue time. Per-run mode is captured at queue time from the
+    // runtime default, so once a batch is queued it cannot follow later operator policy changes
+    // (e.g. operator flips runtime from manual_review to full_auto). Honoring runtime mode here
+    // matches the operator's live intent and the dashboard mode badge. Per-run mode is still
+    // recorded for audit/UX context. dry_run always forces review regardless of mode.
+    let auto_apply = settings.workflow.mode.auto_apply_validated_suggestions();
+    if !auto_apply || settings.workflow.dry_run {
         let mut review_patch = serde_json::to_value(patch)?;
         if let Some(metadata) = review_metadata
             && let Some(object) = review_patch.as_object_mut()
@@ -1154,14 +1161,14 @@ async fn handle_patch_result(
             object.insert("standard_metadata".to_owned(), metadata);
         }
         let mut review_warnings = warnings;
-        if settings.workflow.dry_run && !job.mode.requires_manual_review() {
+        if settings.workflow.dry_run && auto_apply {
             review_warnings.push(
                 "Dry-run is enabled: validated patch was evaluated but not auto-applied."
                     .to_owned(),
             );
         }
         let review_id = create_review_item(pool, job, review_patch, json!(review_warnings)).await?;
-        if settings.workflow.dry_run && !job.mode.requires_manual_review() {
+        if settings.workflow.dry_run && auto_apply {
             append_audit(
                 pool,
                 AuditEventInput {
