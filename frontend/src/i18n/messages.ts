@@ -448,7 +448,10 @@ export const enMessages = {
   'time.hours_ago': '{value}h ago',
   'time.in_hours': 'in {value}h',
   'delta.zero': '0 vs previous',
-  'delta.value': '{value} vs previous'
+  'delta.value': '{value} vs previous',
+  'error_boundary.title': 'Something went wrong',
+  'error_boundary.description': 'This section ran into an unexpected error. Try reloading the page; if it keeps happening, check the audit log.',
+  'error_boundary.reload': 'Reload page'
 } as const;
 
 export type MessageKey = keyof typeof enMessages;
@@ -903,7 +906,10 @@ export const deMessages: Record<MessageKey, string> = {
   'time.hours_ago': 'vor {value}h',
   'time.in_hours': 'in {value}h',
   'delta.zero': '0 vs vorher',
-  'delta.value': '{value} vs vorher'
+  'delta.value': '{value} vs vorher',
+  'error_boundary.title': 'Etwas ist schiefgelaufen',
+  'error_boundary.description': 'In diesem Bereich ist ein unerwarteter Fehler aufgetreten. Bitte die Seite neu laden; falls es erneut passiert, im Audit-Log nachsehen.',
+  'error_boundary.reload': 'Seite neu laden'
 };
 
 export const completeLocales = ['en', 'de'] as const;

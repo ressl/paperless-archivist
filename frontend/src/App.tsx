@@ -90,6 +90,7 @@ import { languageOptionLabel, languageOptions } from './data/worldLanguages';
 import { buildInfo, buildInfoLabel } from './buildInfo';
 import { localizedMessage, useI18n, type TFunction } from './i18n/I18nProvider';
 import { Dashboard } from './dashboard/Dashboard';
+import { ErrorBoundary } from './lib/ErrorBoundary';
 import { ActionButton, PageHeader, Status, errorToString, localizedErrorMessage, run } from './lib/ui';
 import {
   deltaTone,
@@ -191,6 +192,7 @@ export function App() {
   const canManageSettings = me.roles.some((role) => role === 'admin');
 
   return (
+    <ErrorBoundary>
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
@@ -237,16 +239,49 @@ export function App() {
             </button>
           </div>
         )}
-        {tab === 'dashboard' && <Dashboard setError={setError} canManageSettings={canManageSettings} />}
-        {tab === 'inventory' && <Inventory setError={setError} />}
-        {tab === 'chat' && canUseChat && <DocumentChat setError={setError} />}
-        {tab === 'reviews' && <Reviews setError={setError} />}
-        {tab === 'settings' && <SettingsPage setError={setError} />}
-        {tab === 'prompts' && <Prompts setError={setError} />}
-        {tab === 'audit' && <Audit setError={setError} />}
-        {tab === 'users' && <Users setError={setError} />}
+        {tab === 'dashboard' && (
+          <ErrorBoundary>
+            <Dashboard setError={setError} canManageSettings={canManageSettings} />
+          </ErrorBoundary>
+        )}
+        {tab === 'inventory' && (
+          <ErrorBoundary>
+            <Inventory setError={setError} />
+          </ErrorBoundary>
+        )}
+        {tab === 'chat' && canUseChat && (
+          <ErrorBoundary>
+            <DocumentChat setError={setError} />
+          </ErrorBoundary>
+        )}
+        {tab === 'reviews' && (
+          <ErrorBoundary>
+            <Reviews setError={setError} />
+          </ErrorBoundary>
+        )}
+        {tab === 'settings' && (
+          <ErrorBoundary>
+            <SettingsPage setError={setError} />
+          </ErrorBoundary>
+        )}
+        {tab === 'prompts' && (
+          <ErrorBoundary>
+            <Prompts setError={setError} />
+          </ErrorBoundary>
+        )}
+        {tab === 'audit' && (
+          <ErrorBoundary>
+            <Audit setError={setError} />
+          </ErrorBoundary>
+        )}
+        {tab === 'users' && (
+          <ErrorBoundary>
+            <Users setError={setError} />
+          </ErrorBoundary>
+        )}
       </main>
     </div>
+    </ErrorBoundary>
   );
 }
 

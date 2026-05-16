@@ -410,6 +410,27 @@ th {
   color: var(--danger);
 }
 
+.error-boundary {
+  display: grid;
+  gap: 12px;
+  padding: 24px;
+  margin: 16px;
+  border: 1px solid #e0a09b;
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  max-width: 640px;
+}
+
+.error-boundary h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.error-boundary p {
+  margin: 0;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

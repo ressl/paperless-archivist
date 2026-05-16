@@ -45,6 +45,7 @@ import {
 } from '../api/client';
 import { localizedMessage, useI18n, type TFunction } from '../i18n/I18nProvider';
 import { ActionButton, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { ErrorBoundary } from '../lib/ErrorBoundary';
 import {
   deltaTone,
   formatCost,
@@ -1344,6 +1345,7 @@ export function Dashboard({ setError, canManageSettings }: { setError: (error: s
         </div>
       )}
 
+      <ErrorBoundary>
       <div className={`dashboard-ops-grid${compactLayout ? ' is-compact' : ''}`}>
         <div className={`dashboard-analytics${compactLayout && activeTab !== 'analytics' ? ' is-hidden' : ''}`} role={compactLayout ? 'tabpanel' : undefined}>
           <ChartPanel title={t('dashboard.chart.throughput', { range })} wide>
@@ -1415,6 +1417,7 @@ export function Dashboard({ setError, canManageSettings }: { setError: (error: s
           <LiveProcessingPanel live={live} />
         </div>
       </div>
+      </ErrorBoundary>
 
       <div className={compactLayout && activeTab !== 'activity' ? 'is-hidden' : ''} role={compactLayout ? 'tabpanel' : undefined}>
         <ActivityTimeline live={live} />
