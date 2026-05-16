@@ -80,6 +80,21 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         warn!(error = %error, "initial dashboard snapshot failed");
     }
 
+    // Log the configured Ollama num_ctx values so operators can confirm the
+    // GGML_ASSERT fix (ollama/ollama#14401) is in effect after deploy. If the
+    // values are below the historical 4096-token default, that's a deliberate
+    // operator override on a memory-constrained host — we still log so it is
+    // visible. The actual wire-up happens per-call in `chat_for_stage` /
+    // OCR vision construction.
+    match get_runtime_settings(&pool).await {
+        Ok(settings) => info!(
+            ollama_vision_num_ctx = settings.ai.ollama_vision_num_ctx,
+            ollama_text_num_ctx = settings.ai.ollama_text_num_ctx,
+            "setting vision options.num_ctx and text options.num_ctx for Ollama calls"
+        ),
+        Err(error) => warn!(error = %error, "failed to read Ollama num_ctx settings at startup"),
+    }
+
     // One-shot: lift failed OCR jobs killed by the GGML vision-runtime crash signature back
     // into the queue so they get a second chance under the new fallback machinery.
     // Idempotent — finding no matching rows is a no-op. Gated by the runtime setting so
@@ -881,9 +896,19 @@ async fn process_ocr(
                     index + 1
                 )
             });
+        // Wire the runtime-configured Ollama context window into the vision
+        // payload. This is the GGML_ASSERT crash fix (ollama/ollama#14401):
+        // glm-ocr and similar vision models expand a single page into more
+        // tokens than Ollama's 4096-token default holds, which kills the
+        // runner with `GGML_ASSERT(a->ne[2] * 4 == b->ne[0])`. The default of
+        // 16384 covers realistic single-page renders; operators can raise it
+        // for huge multi-page documents or lower it on small Ollama hosts.
+        // Remote providers (OpenAI / Anthropic / OpenAI-compatible) ignore
+        // this field — see `build_ollama_vision_payload`.
         let request = VisionRequest {
             model: provider.model.clone(),
             temperature: 0.0,
+            num_ctx: ollama_num_ctx_for_provider(&provider, settings.ai.ollama_vision_num_ctx),
             prompt: page_prompt,
             images: vec![ImageInput {
                 mime_type: page.mime_type.clone(),
@@ -2860,7 +2885,23 @@ async fn chat_for_stage(
 ) -> Result<AiResponse> {
     let provider = provider_for_stage(settings, stage, false)?;
     request.model = provider.model.clone();
+    // Local-runner context window: only applies to Ollama. Remote providers
+    // (OpenAI / Anthropic / OpenAI-compatible) ignore the field — see
+    // `build_ollama_chat_payload`. 8k covers the 16k-char metadata prompts
+    // with comfortable headroom over Ollama's 4096-token default.
+    request.num_ctx = ollama_num_ctx_for_provider(&provider, settings.ai.ollama_text_num_ctx);
     chat_with_provider(pool, config, &provider, request).await
+}
+
+/// Returns `Some(num_ctx)` when the provider is the local Ollama runner, else
+/// `None`. Wrapping the lookup keeps the call sites symmetrical between the
+/// vision and chat paths and ensures we never push the override onto remote
+/// providers (which would either ignore it or reject the field).
+fn ollama_num_ctx_for_provider(provider: &StageProvider, configured: i64) -> Option<i64> {
+    match provider.kind {
+        AiProviderKind::Ollama => Some(configured),
+        _ => None,
+    }
 }
 
 async fn chat_with_provider(
