@@ -90,3 +90,52 @@ async fn queue_missing_pipeline_respects_budget() {
     .expect("queue_missing_pipeline");
     assert_eq!(created, 3, "exactly three runs should be created");
 }
+
+/// Regression test for v1.5.2 Bug 1: the API endpoint `/api/batches/full` used to call
+/// `queue_missing_stage` once per enabled stage, producing two SEPARATE single-stage runs
+/// (one with `stages = ["ocr"]`, one with `stages = ["metadata"]`) per document. After the
+/// fix the handler delegates to `queue_missing_pipeline`, which emits ONE run per document
+/// carrying the full enabled-stages array so the pipeline drains in a single run.
+///
+/// This test seeds 5 unknown-OCR documents and asserts that, with enabled_stages
+/// `[Ocr, Metadata]`, each resulting `pipeline_runs` row contains both stages.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn queue_missing_pipeline_emits_combined_stage_runs() {
+    use sqlx::Row;
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    seed_inventory(&pool, 5, "unknown").await;
+
+    let rules = WorkflowRules::default();
+    let enabled = vec![Stage::Ocr, Stage::Metadata];
+    let created = queue_missing_pipeline(
+        &pool,
+        &enabled,
+        ProcessingMode::ManualReview,
+        "manual-batch",
+        "operator",
+        &rules,
+        None,
+    )
+    .await
+    .expect("queue_missing_pipeline");
+    assert_eq!(created, 5, "one run per eligible document");
+
+    // Every run row should carry both stages, NOT a single-stage array.
+    let rows = sqlx::query("select stages from pipeline_runs order by created_at")
+        .fetch_all(&pool)
+        .await
+        .expect("fetch pipeline_runs");
+    assert_eq!(rows.len(), 5, "exactly one run per document, not per-stage");
+    for row in rows {
+        let stages: serde_json::Value = row.try_get("stages").expect("stages column");
+        let arr = stages.as_array().expect("stages is jsonb array");
+        let names: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            names.contains(&"ocr") && names.contains(&"metadata"),
+            "expected combined ocr+metadata stages, got {names:?}"
+        );
+    }
+}

@@ -69,20 +69,12 @@ api PUT /api/workflow/mode '{"mode":"manual_review"}' >/dev/null
 log "POST /api/paperless/sync-metadata"
 api POST /api/paperless/sync-metadata '{}' | jq -c '.' || true
 
-# NOTE — known v1.4.x bug in archivist-api/src/main.rs::queue_full_batch():
-#
-#   for stage in settings.workflow.enabled_stages {
-#       queue_missing_stage(..., stage, ...);   // creates single-stage runs
-#   }
-#
-# It iterates the enabled stages and creates one single-stage run per (doc,
-# stage), so a single /api/batches/full call only queues OCR-only runs first.
-# The fix is to call queue_missing_pipeline(enabled_stages, ...) instead, which
-# creates ONE multi-stage run per doc. Tracked separately — for the e2e drive
-# we work around it by calling /api/batches/full TWICE: once seeds OCR-only
-# runs, after OCR drains the second call picks up the docs missing metadata
-# and seeds metadata-only runs.
-log "POST /api/batches/full (OCR pass)"
+# queue_full_batch (v1.5.2+) calls queue_missing_pipeline(enabled_stages, ...)
+# so a single POST /api/batches/full now creates ONE multi-stage run per doc
+# (e.g. ["ocr","metadata"]) and the worker drains both stages without an extra
+# button press. The historical workaround (two passes) is kept as a no-op
+# safety net for any straggler that the worker missed in pass 1.
+log "POST /api/batches/full (full pipeline pass)"
 api POST /api/batches/full '{}' | jq -c '.' || true
 
 log "polling dashboard until OCR pass drains (30 min budget — vision OCR is slow on Ollama) ..."
@@ -116,9 +108,10 @@ while [[ $(date +%s) -lt ${DEADLINE} ]]; do
   sleep 10
 done
 
-# Workaround for the queue_full_batch bug — second pass picks up docs that
-# completed OCR but are still missing the Metadata stage.
-log "POST /api/batches/full (Metadata pass)"
+# Safety-net second pass — with v1.5.2's combined-stage runs this should be a
+# no-op for most cases, but it still picks up any doc whose metadata stage was
+# deferred (e.g. because OCR landed in waiting_review and was only just approved).
+log "POST /api/batches/full (safety-net second pass)"
 api POST /api/batches/full '{}' | jq -c '.' || true
 
 log "polling dashboard until Metadata pass drains ..."

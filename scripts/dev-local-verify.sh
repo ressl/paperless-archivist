@@ -62,7 +62,20 @@ LEGACY_REVIEWS=$("${PSQL[@]}" -c "
 ")
 check "no legacy per-field review_items" "0" "${LEGACY_REVIEWS}"
 
-# 4. document_inventory.metadata_status was set by the consolidated stage
+# 4. v1.5.2 Bug 1 regression: manual-batch runs created by /api/batches/full must
+#    carry the full enabled-stages array, NOT single-stage runs.
+#    enabled_stages defaults to ["ocr","metadata"], so a run with stages = ["ocr"]
+#    or ["metadata"] (and no other stage) is the symptom of the per-stage loop
+#    that was replaced by queue_missing_pipeline in v1.5.2.
+SINGLE_STAGE_FULL_RUNS=$("${PSQL[@]}" -c "
+  select count(*) from pipeline_runs
+   where trigger_tag = 'manual-batch'
+     and jsonb_array_length(stages) = 1
+     and (stages @> '[\"ocr\"]'::jsonb or stages @> '[\"metadata\"]'::jsonb);
+")
+check "no single-stage manual-batch runs (Bug 1 v1.5.2)" "0" "${SINGLE_STAGE_FULL_RUNS}"
+
+# 5. document_inventory.metadata_status was set by the consolidated stage
 NEEDED=$("${PSQL[@]}" -c "
   select count(*) from document_inventory
    where metadata_status in ('succeeded','waiting_review','skipped','not_needed');
