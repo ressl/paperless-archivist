@@ -2141,12 +2141,12 @@ async fn dashboard(
         .parse::<DashboardRange>()
         .unwrap_or_default();
     let counts = get_backlog_counts(&state.pool).await?;
-    let mut stats = get_dashboard_stats(&state.pool, range, &counts).await?;
     let settings = get_runtime_settings(&state.pool).await?;
-    enrich_dashboard_costs(&mut stats, &settings);
-
     let now = Utc::now();
     let start = dashboard_range_start(&state.pool, range, now).await?;
+    let mut stats = get_dashboard_stats(&state.pool, range, &counts, now, start).await?;
+    enrich_dashboard_costs(&mut stats, &settings);
+
     let bucket_entries = provider_bucket_entries(&state.pool, start, now, range).await?;
     let bucket_labels = dashboard_bucket_labels(start, now, range);
     enrich_provider_sparklines(&mut stats, &bucket_entries, &bucket_labels, &settings);

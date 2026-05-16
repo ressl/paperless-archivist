@@ -2192,10 +2192,10 @@ pub async fn get_dashboard_stats(
     pool: &DbPool,
     range: DashboardRange,
     counts: &BacklogCounts,
+    now: DateTime<Utc>,
+    start: DateTime<Utc>,
 ) -> Result<DashboardStats> {
     record_dashboard_snapshot(pool, counts).await?;
-    let now = Utc::now();
-    let start = dashboard_range_start(pool, range, now).await?;
     let activity = activity_summary(pool, start, now).await?;
     let previous = if let Some(duration) = range.duration() {
         Some(activity_summary(pool, start - duration, start).await?)
