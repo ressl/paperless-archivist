@@ -22,7 +22,7 @@ use archivist_core::{
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit, claim_jobs,
     claim_notification_delivery, claim_pending_review_for_autopilot_drain, complete_job, connect,
-    create_review_item, create_run_with_jobs, custom_field_ids_for_names, fail_job,
+    create_review_item, create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job,
     get_active_prompt, get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
     get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
@@ -2281,13 +2281,17 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
             } else {
                 "paperless-trigger"
             };
-            create_run_with_jobs(
+            // Tag-driven trigger from Paperless = operator added the trigger tag, so this is
+            // treated as a manual trigger (priority 0) — newer arrivals stay ahead of the
+            // older auto-selector backlog.
+            create_run_with_jobs_with_priority(
                 pool,
                 document.id,
                 &stages,
                 settings.workflow.mode,
                 trigger,
                 "worker",
+                Some(0),
             )
             .await?;
         }

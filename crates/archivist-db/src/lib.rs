@@ -3877,6 +3877,17 @@ pub async fn search_document_chat_candidates(
         .collect()
 }
 
+/// Computes the cross-run job priority for an auto-selected document.
+///
+/// Newer Paperless document ids win (smaller priority value). Saturating math keeps the
+/// result in `[1, 1_000_000]` so even synthetic doc ids beyond a million never collide with
+/// the manual-trigger priority of 0.
+pub fn age_derived_priority(paperless_document_id: i32) -> i64 {
+    1_000_000_i64
+        .saturating_sub(paperless_document_id as i64)
+        .max(1)
+}
+
 pub async fn create_run_with_jobs(
     pool: &DbPool,
     paperless_document_id: i32,
@@ -3884,6 +3895,38 @@ pub async fn create_run_with_jobs(
     mode: ProcessingMode,
     trigger_tag: &str,
     actor: &str,
+) -> Result<Uuid> {
+    create_run_with_jobs_with_priority(
+        pool,
+        paperless_document_id,
+        stages,
+        mode,
+        trigger_tag,
+        actor,
+        None,
+    )
+    .await
+}
+
+/// Variant of [`create_run_with_jobs`] that lets callers stamp an explicit cross-run priority on
+/// every job. `None` falls back to the age-derived priority (newer doc -> claimed first).
+///
+/// Manual triggers should pass `Some(0)`; auto-selector / delta-sync paths should pass `None`
+/// (or [`age_derived_priority`]). Job payload carries TWO priority values:
+///
+///   * `priority`        — cross-run ordering (smaller wins)
+///   * `stage_priority`  — within-run stage ordering (smaller wins)
+///
+/// Splitting them in v1.4.0 lets the age-derived value live in `priority` without breaking the
+/// existing claim_jobs subquery that enforces stage ordering via the second column.
+pub async fn create_run_with_jobs_with_priority(
+    pool: &DbPool,
+    paperless_document_id: i32,
+    stages: &[Stage],
+    mode: ProcessingMode,
+    trigger_tag: &str,
+    actor: &str,
+    priority: Option<i64>,
 ) -> Result<Uuid> {
     if stages.is_empty() {
         return Err(anyhow!("cannot create a run without stages"));
@@ -3905,6 +3948,8 @@ pub async fn create_run_with_jobs(
     {
         return Ok(row.try_get("id")?);
     }
+
+    let cross_run_priority = priority.unwrap_or_else(|| age_derived_priority(paperless_document_id));
 
     let stages_json = serde_json::to_value(stages)?;
     let run_id: Uuid = sqlx::query(
@@ -3932,7 +3977,10 @@ pub async fn create_run_with_jobs(
         .bind(run_id)
         .bind(paperless_document_id)
         .bind(stage.to_string())
-        .bind(json!({ "priority": ((index as i32) + 1) * 10 }))
+        .bind(json!({
+            "priority": cross_run_priority,
+            "stage_priority": ((index as i32) + 1) * 10,
+        }))
         .execute(&mut *tx)
         .await?;
     }
@@ -4014,7 +4062,19 @@ pub async fn queue_missing_stage(
     let mut created = 0;
     for row in rows {
         let document_id: i32 = row.try_get("paperless_document_id")?;
-        create_run_with_jobs(pool, document_id, &[stage], mode, "manual-batch", actor).await?;
+        // Age-derived priority — newer documents jump ahead of older ones in claim_jobs.
+        // "manual-batch" is the operator-initiated bulk path, but we still rank by age so
+        // a fresh scan doesn't get blocked behind a backfill triggered minutes earlier.
+        create_run_with_jobs_with_priority(
+            pool,
+            document_id,
+            &[stage],
+            mode,
+            "manual-batch",
+            actor,
+            Some(age_derived_priority(document_id)),
+        )
+        .await?;
         created += 1;
     }
     Ok(created)
@@ -4107,7 +4167,18 @@ pub async fn queue_missing_pipeline(
                 continue;
             }
 
-            create_run_with_jobs(pool, document_id, &stages, mode, trigger_tag, actor).await?;
+            // Age-derived priority — newer Paperless documents drain through the full
+            // pipeline (OCR -> Metadata) before older queued documents.
+            create_run_with_jobs_with_priority(
+                pool,
+                document_id,
+                &stages,
+                mode,
+                trigger_tag,
+                actor,
+                Some(age_derived_priority(document_id)),
+            )
+            .await?;
             created += 1;
         }
         // No budget set means we already fetched everything once.
@@ -4187,6 +4258,12 @@ pub async fn claim_jobs(
     lease_owner: &str,
     lease_seconds: i64,
 ) -> Result<Vec<JobRecord>> {
+    // v1.4.0: `priority` now carries the cross-run (age-derived) value while `stage_priority`
+    // enforces within-run stage ordering. The inner subquery uses stage_priority so all jobs
+    // of one run share the same `priority` value without losing OCR -> Metadata ordering. The
+    // outer ORDER BY claims newer documents first (smaller priority), then earlier stages
+    // (smaller stage_priority), then FIFO as a tiebreaker. The retry bias (failed jobs first)
+    // stays first in the order so a stuck retry never starves out.
     let rows = sqlx::query(
         r#"
         with claimed as (
@@ -4198,12 +4275,13 @@ pub async fn claim_jobs(
                select 1
                  from jobs prev
                 where prev.run_id = jobs.run_id
-                  and prev.priority < jobs.priority
+                  and prev.stage_priority < jobs.stage_priority
                   and prev.status in ('queued', 'running', 'waiting_review', 'failed')
              )
            order by case when error_message is not null and attempts > 0 then 0 else 1 end,
-                    run_after,
                     priority,
+                    stage_priority,
+                    run_after,
                     created_at
            for update skip locked
            limit $1

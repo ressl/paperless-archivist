@@ -24,7 +24,8 @@ use archivist_core::{
 use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, OidcUserInput, ProviderBucketEntry, ReviewItemRecord,
     append_audit, apply_security_retention, connect, consume_oidc_login_state,
-    create_document_chat_session, create_oidc_login_state, create_run_with_jobs, create_session,
+    create_document_chat_session, create_oidc_login_state, create_run_with_jobs_with_priority,
+    create_session,
     create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
     document_chat_session_visible, find_api_token, find_session, find_user_for_login,
     get_backlog_counts, get_dashboard_live_status, get_dashboard_stats, get_runtime_settings,
@@ -3258,13 +3259,16 @@ async fn trigger_document(
         .stages
         .unwrap_or_else(|| settings.workflow.enabled_stages.clone());
     let mode = request.mode.unwrap_or(settings.workflow.mode);
-    let run_id = create_run_with_jobs(
+    // v1.4.0 priority scheduling: manual triggers carry priority 0 so an operator-initiated
+    // run jumps ahead of every queued auto-selected run regardless of document age.
+    let run_id = create_run_with_jobs_with_priority(
         &state.pool,
         document_id,
         &stages,
         mode,
         "manual",
         &auth.0.actor_type,
+        Some(0),
     )
     .await?;
     Span::current().record("run_id", tracing::field::display(run_id));
