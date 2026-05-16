@@ -3080,39 +3080,68 @@ fn compute_dashboard_comparison(
     }
 }
 
+/// Per-stage rollup for the dashboard Stage-Matrix.
+///
+/// v1.4.0 replaced the six per-field stages (title/document_type/correspondent/document_date/
+/// tags/fields) with the consolidated `metadata` stage. To keep the matrix readable on both
+/// fresh v1.4 installs and instances still draining v1.3 in-flight runs, we:
+///
+/// * Always emit `ocr` and `metadata` rows. `metadata_status` is read from the column added
+///   in migration 0019. A fresh install with no documents yet still gets both rows with zero
+///   counts — the dashboard never disappears.
+/// * Emit a legacy per-field row only when at least one document has a non-`unknown` value in
+///   that field column. Once the metadata-stage migration backfills the inventory (and new runs
+///   stop writing the legacy columns), those rows collapse to zero and the `HAVING` clause
+///   suppresses them. This lets v1.3 in-flight runs finish visibly without leaving permanent
+///   ghost rows on the dashboard.
 async fn stage_status(pool: &DbPool) -> Result<Vec<DashboardStageStatus>> {
     let rows = sqlx::query(
         r#"
         with stage_rows as (
-          select 'ocr' as stage, ocr_status as status, current_run_status from document_inventory
-          union all select 'title', title_status, current_run_status from document_inventory
-          union all select 'document_type', document_type_status, current_run_status from document_inventory
-          union all select 'correspondent', correspondent_status, current_run_status from document_inventory
-          union all select 'document_date', document_date_status, current_run_status from document_inventory
-          union all select 'tags', tagging_status, current_run_status from document_inventory
-          union all select 'fields', fields_status, current_run_status from document_inventory
+          select 'ocr' as stage, ocr_status as status, current_run_status, true as always_show
+            from document_inventory
+          union all select 'metadata', metadata_status, current_run_status, true
+            from document_inventory
+          union all select 'title', title_status, current_run_status, false
+            from document_inventory
+          union all select 'document_type', document_type_status, current_run_status, false
+            from document_inventory
+          union all select 'correspondent', correspondent_status, current_run_status, false
+            from document_inventory
+          union all select 'document_date', document_date_status, current_run_status, false
+            from document_inventory
+          union all select 'tags', tagging_status, current_run_status, false
+            from document_inventory
+          union all select 'fields', fields_status, current_run_status, false
+            from document_inventory
         ),
         counted as (
           select
             stage,
+            bool_or(always_show) as always_show,
             count(*)::bigint as total,
             count(*) filter (where status in ('succeeded', 'skipped', 'not_needed'))::bigint as complete,
             count(*) filter (where status = 'failed')::bigint as failed,
             count(*) filter (where status = 'waiting_review' or current_run_status = 'waiting_review')::bigint as waiting_review,
-            count(*) filter (where current_run_status in ('queued', 'running', 'applying') and status not in ('succeeded', 'skipped', 'not_needed', 'failed'))::bigint as running
+            count(*) filter (where current_run_status in ('queued', 'running', 'applying') and status not in ('succeeded', 'skipped', 'not_needed', 'failed'))::bigint as running,
+            count(*) filter (where status <> 'unknown')::bigint as touched
           from stage_rows
           group by stage
         )
         select stage, complete, failed, waiting_review, running,
                greatest(total - complete - failed - waiting_review - running, 0)::bigint as pending
           from counted
+         where always_show
+            or touched > 0
          order by case stage
            when 'ocr' then 1
-           when 'title' then 2
-           when 'document_type' then 3
-           when 'correspondent' then 4
-           when 'tags' then 5
-           else 6
+           when 'metadata' then 2
+           when 'title' then 3
+           when 'document_type' then 4
+           when 'correspondent' then 5
+           when 'document_date' then 6
+           when 'tags' then 7
+           else 8
          end
         "#,
     )
