@@ -395,6 +395,40 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             />
             {t('settings.ai.requeue_vision_crashes_on_startup')}
           </label>
+          <label>
+            {t('settings.ai.ollama_vision_num_ctx')}
+            <input
+              type="number"
+              min="2048"
+              max="131072"
+              step="1024"
+              value={settings.ai.ollama_vision_num_ctx ?? 16384}
+              onChange={(event) =>
+                update((s) => ({
+                  ...s,
+                  ai: { ...s.ai, ollama_vision_num_ctx: Number(event.target.value) }
+                }))
+              }
+            />
+            <small>{t('settings.ai.ollama_vision_num_ctx_hint')}</small>
+          </label>
+          <label>
+            {t('settings.ai.ollama_text_num_ctx')}
+            <input
+              type="number"
+              min="2048"
+              max="131072"
+              step="1024"
+              value={settings.ai.ollama_text_num_ctx ?? 8192}
+              onChange={(event) =>
+                update((s) => ({
+                  ...s,
+                  ai: { ...s.ai, ollama_text_num_ctx: Number(event.target.value) }
+                }))
+              }
+            />
+            <small>{t('settings.ai.ollama_text_num_ctx_hint')}</small>
+          </label>
           <button title={t('generic.test')} disabled={providerTest?.status === 'running'} onClick={runProviderTest}>
             <Activity size={16} /> {providerTest?.status === 'running' ? t('generic.testing') : t('generic.test')}
           </button>
