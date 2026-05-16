@@ -259,12 +259,29 @@ async fn process_available_jobs(
                     process_job(&pool, &config, settings.as_ref(), paperless.as_ref(), &job).await;
                 if let Err(error) = &result {
                     let failure_class = classify_processing_failure(error);
-                    warn!(
-                        error = %error,
-                        failure_class = failure_class.as_str(),
-                        duration_ms = started.elapsed().as_millis() as u64,
-                        "job processing failed"
-                    );
+                    let vision_model_crash = is_vision_model_runtime_crash(error);
+                    if vision_model_crash {
+                        // GGML_ASSERT / "llama runner process no longer running" come from the
+                        // Ollama runtime aborting on specific input shapes — retrying with the
+                        // same model usually crashes again. Flag the log line so operators can
+                        // pivot to model swap (e.g. qwen2-vl:7b, llava-llama3:8b) rather than
+                        // chasing transient infra causes.
+                        warn!(
+                            error = %error,
+                            failure_class = failure_class.as_str(),
+                            duration_ms = started.elapsed().as_millis() as u64,
+                            vision_model_crash = true,
+                            hint = "ollama vision model aborted (GGML_ASSERT / runner crash); consider switching the configured vision model in Settings -> Provider",
+                            "job processing failed"
+                        );
+                    } else {
+                        warn!(
+                            error = %error,
+                            failure_class = failure_class.as_str(),
+                            duration_ms = started.elapsed().as_millis() as u64,
+                            "job processing failed"
+                        );
+                    }
                     let _ = fail_job(
                         &pool,
                         &job,
@@ -482,6 +499,21 @@ fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass 
     } else {
         ProcessingFailureClass::Permanent
     }
+}
+
+/// Detect Ollama vision runtime crashes (GGML_ASSERT, llama runner aborts). These keep their
+/// `Transient` classification — a different page input might still succeed — but we surface
+/// the signal in worker logs so operators can swap the configured vision model rather than
+/// burning attempts on a misconfigured runtime.
+fn is_vision_model_runtime_crash(error: &anyhow::Error) -> bool {
+    let message = error
+        .chain()
+        .map(|cause| cause.to_string().to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    message.contains("ggml_assert")
+        || message.contains("runner process no longer running")
+        || message.contains("signal arrived during cgo execution")
 }
 
 async fn process_job(
@@ -2776,6 +2808,47 @@ mod tests {
                 classify_processing_failure(&error),
                 ProcessingFailureClass::Transient
             );
+        }
+    }
+
+    #[test]
+    fn detects_ollama_vision_runtime_crashes() {
+        // Real-world payloads observed from Ollama when the llama runner aborts on a vision
+        // input. All three should trip the operator hint, even though the classifier still
+        // marks them transient (retry on a different page may still succeed).
+        // Real-world Ollama crash payloads always come wrapped in a 500-internal-server-error
+        // envelope, which the classifier reads as Transient. We assert the combined detect +
+        // retry behaviour on the wrapped form, plus the bare "signal arrived during cgo
+        // execution" string for the detector alone (used in stack traces that bypass the HTTP
+        // envelope, e.g. in tests that feed the runtime crash directly).
+        let crash_cases = [
+            anyhow!(
+                "Ollama vision returned 500 Internal Server Error: GGML_ASSERT(a->ne[2] * 4 == b->ne[0]) failed"
+            ),
+            anyhow!(
+                "Ollama vision returned 500 Internal Server Error: llama runner process no longer running: 2"
+            ),
+        ];
+        for error in crash_cases {
+            assert!(is_vision_model_runtime_crash(&error), "case: {error:?}");
+            assert_eq!(
+                classify_processing_failure(&error),
+                ProcessingFailureClass::Transient,
+                "crash should still retry: {error:?}"
+            );
+        }
+        assert!(is_vision_model_runtime_crash(&anyhow!(
+            "signal arrived during cgo execution"
+        )));
+
+        // Regular transient errors must NOT trip the vision-crash hint — that would mislead
+        // operators into swapping a healthy model when the actual cause is networking.
+        let non_crash_cases = [
+            anyhow!("Paperless request timed out while downloading original"),
+            anyhow!("PostgreSQL database pool timed out while claiming jobs"),
+        ];
+        for error in non_crash_cases {
+            assert!(!is_vision_model_runtime_crash(&error), "case: {error:?}");
         }
     }
 
