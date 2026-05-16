@@ -3633,10 +3633,11 @@ pub async fn list_inventory(
     let rows = sqlx::query(
         r#"
         select paperless_document_id, title, original_file_name, current_tags, ocr_status,
-               tagging_status, title_status, correspondent_status, document_type_status,
-               document_date_status, fields_status, current_run_status, last_run_id, last_error,
-               next_required_stage, needs_review, complete, document_date, detected_language,
-               detected_language_confidence, detected_language_source, last_seen_at
+               metadata_status, tagging_status, title_status, correspondent_status,
+               document_type_status, document_date_status, fields_status, current_run_status,
+               last_run_id, last_error, next_required_stage, needs_review, complete,
+               document_date, detected_language, detected_language_confidence,
+               detected_language_source, last_seen_at
           from document_inventory
          order by paperless_document_id desc
          limit $1 offset $2
@@ -3655,6 +3656,7 @@ pub async fn list_inventory(
                 original_file_name: row.try_get("original_file_name")?,
                 current_tags: row.try_get("current_tags")?,
                 ocr_status: row.try_get("ocr_status")?,
+                metadata_status: row.try_get("metadata_status")?,
                 tagging_status: row.try_get("tagging_status")?,
                 title_status: row.try_get("title_status")?,
                 correspondent_status: row.try_get("correspondent_status")?,

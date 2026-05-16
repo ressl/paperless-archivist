@@ -415,6 +415,9 @@ export type InventoryItem = {
   original_file_name?: string | null;
   current_tags: string[];
   ocr_status: string;
+  /** Consolidated v1.4+ metadata stage status. */
+  metadata_status: string;
+  /** Legacy pre-v1.4 per-field statuses; no longer written by the worker. */
   tagging_status: string;
   title_status: string;
   correspondent_status: string;

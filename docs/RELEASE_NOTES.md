@@ -2,8 +2,41 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.4`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.5`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.5 — Inventory page reflects the v1.4 stage model
+
+The Inventory table still rendered four columns (`Tags`, `Titel`, `Typ`,
+`Datum-Status`) backed by the legacy per-field inventory status columns
+(`tagging_status`, `title_status`, `document_type_status`,
+`document_date_status`). The v1.4.0 consolidation replaced those six
+stages with a single `Stage::Metadata`, and the worker stopped writing to
+the legacy columns. The columns therefore showed `unknown` for every one
+of the production deployment's 5957 documents — five years of legacy UI
+dead weight.
+
+This release:
+
+* Exposes the consolidated `metadata_status` field on
+  `DocumentInventoryItem` (`crates/archivist-core/src/lib.rs`) and on
+  `list_inventory` (`crates/archivist-db/src/lib.rs`) so the API actually
+  surfaces it.
+* Rebuilds the Inventory table: drops the four dead per-field stage
+  columns, adds one `Metadata` column backed by `metadata_status`, and
+  changes the `Tags` column from showing a dead stage status pill to
+  showing the actual current Paperless tags (`current_tags`). The
+  `Datum` column shows the raw `document_date` value instead of a stage
+  status pill.
+* Renames the row's second action button from "Trigger tagging" (which
+  queued a legacy `tags` stage that no longer runs as a top-level job) to
+  "Run full pipeline" — it now triggers `['ocr', 'metadata']` together,
+  the safe default when an operator wants a complete re-process.
+* Adds `inventory.metadata` and `inventory.trigger_pipeline` keys to all
+  seven UI locales.
+
+No application behaviour change for runs themselves; this is an inventory-
+display correction and a renamed manual trigger. UI sidebar reads `v1.5.5`.
 
 ## v1.5.4 — Full Auto really completes every document
 

@@ -2721,6 +2721,13 @@ pub struct DocumentInventoryItem {
     pub original_file_name: Option<String>,
     pub current_tags: Vec<String>,
     pub ocr_status: String,
+    /// Consolidated v1.4+ Metadata stage status. The six legacy per-field
+    /// columns (tagging_status, title_status, correspondent_status,
+    /// document_type_status, document_date_status, fields_status) are no
+    /// longer written by the worker after the v1.4.0 stage consolidation;
+    /// they remain on the struct for backwards compatibility with old
+    /// dashboards but should not be displayed in fresh UI.
+    pub metadata_status: String,
     pub tagging_status: String,
     pub title_status: String,
     pub correspondent_status: String,
