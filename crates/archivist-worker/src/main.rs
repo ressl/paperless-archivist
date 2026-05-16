@@ -24,9 +24,10 @@ use archivist_db::{
     fail_job, get_active_prompt, get_backlog_counts, get_dashboard_live_status,
     get_runtime_settings, get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
-    named_entity_id_for_name, queue_missing_pipeline, record_document_language, resolve_secret,
-    selector_document_budget, tag_ids_for_names, upsert_inventory_item,
-    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+    named_entity_id_for_name, queue_missing_pipeline, record_dashboard_snapshot,
+    record_document_language, resolve_secret, selector_document_budget, tag_ids_for_names,
+    upsert_inventory_item, upsert_paperless_custom_field, upsert_paperless_named_entity,
+    upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{
@@ -68,6 +69,12 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     let mut tick: u64 = 0;
     let trigger_poll_running = Arc::new(AtomicBool::new(false));
 
+    // Write a fresh dashboard snapshot near startup so the read path has something current
+    // before the periodic tick fires (snapshots used to be written on every /dashboard read).
+    if let Err(error) = record_dashboard_snapshot_tick(&pool).await {
+        warn!(error = %error, "initial dashboard snapshot failed");
+    }
+
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
@@ -88,6 +95,13 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                     .unwrap_or_else(|_| Err(anyhow!("notification tick timed out")))
                 {
                     warn!(error = %error, "notification tick failed");
+                }
+                // Dashboard snapshot writes used to fire on every /dashboard read; now they
+                // happen here once per minute (every 12 five-second ticks).
+                if tick % 12 == 5
+                    && let Err(error) = record_dashboard_snapshot_tick(&pool).await
+                {
+                    warn!(error = %error, "dashboard snapshot tick failed");
                 }
                 if tick % 12 == 1
                     && trigger_poll_running
@@ -123,6 +137,11 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
             }
         }
     }
+}
+
+async fn record_dashboard_snapshot_tick(pool: &DbPool) -> Result<()> {
+    let counts = get_backlog_counts(pool).await?;
+    record_dashboard_snapshot(pool, &counts).await
 }
 
 async fn wait_for_schema(pool: &DbPool) -> Result<()> {

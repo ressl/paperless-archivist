@@ -2248,7 +2248,9 @@ pub async fn get_dashboard_stats(
     now: DateTime<Utc>,
     start: DateTime<Utc>,
 ) -> Result<DashboardStats> {
-    record_dashboard_snapshot(pool, counts).await?;
+    // Snapshots are written by the worker tick loop (see archivist-worker::run_worker) so the
+    // /dashboard read path no longer fires a write per poll. The 5-minute existence guard inside
+    // `record_dashboard_snapshot` keeps the table de-duplicated regardless.
     let activity = activity_summary(pool, start, now).await?;
     let previous = if let Some(duration) = range.duration() {
         Some(activity_summary(pool, start - duration, start).await?)
