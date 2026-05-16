@@ -2,8 +2,73 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.3`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.4`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.4 — Full Auto really completes every document
+
+Closes the gap between what `workflow.mode = full_auto` promised and what was
+actually shipping to Paperless. Four changes ship together:
+
+### 1. Backfill the consolidated `metadata` stage onto OCR-only pipeline runs
+
+Historical `pipeline_runs` queued by trigger polling against documents tagged
+only with the OCR trigger were created with `stages = ["ocr"]` — they
+terminated after OCR with no `Title` / `Correspondent` / `Tags` /
+`DocumentType` / `Date` suggestions ever produced. The Review queue filled up
+with content-only review items that the operator could not meaningfully act
+on. On worker startup the new
+`archivist_db::backfill_metadata_stage_for_ocr_only_runs` (idempotent,
+single-transaction) finds every such run, appends `metadata` to its `stages`
+array, inserts a queued `metadata` job behind the existing OCR job (using
+`stage_priority = 20` so it sequences after OCR), and flips already-finished
+runs back to `queued` so the worker re-picks them up. After the first
+successful pass, subsequent startups find nothing to do.
+
+### 2. Autopilot review drain runs off the main tick loop
+
+`drain_pending_reviews_if_autopilot_tick` used to be `.await`-ed on the
+worker's 5-second tick loop. A drain of 100 items at ~5s of Paperless API
+latency each took ~8 minutes, during which OCR job processing was completely
+starved. The drain is now spawned via `tokio::spawn` with an atomic re-entry
+guard (mirroring the trigger-polling pattern), so the main loop keeps
+claiming and processing OCR jobs in parallel.
+
+`PER_TICK_CEILING` is also bumped from 100 → 500, and the outer drain
+timeout from 8 → 30 minutes to match. Sustained throughput against a 2515-
+item backlog moves from ~140 items/hour to roughly an order of magnitude
+higher, bounded only by Paperless API write latency.
+
+### 3. Real Paperless title in the Review queue
+
+`list_reviews` now joins `document_inventory.title` and surfaces it as
+`paperless_title` on every `ReviewItem`. The Review card prefers it over the
+generic `Document {id}` fallback (which it falls back to only when the
+inventory has no cached title for the document yet).
+
+### 4. Selector pill no longer renders literal `Selector unknown`
+
+When the server-side `debug_context` did not include `selector_reason` or
+`next_required_stage` — the common case for review items, since those fields
+describe the auto-selector decision, not why a review exists — the frontend
+fell back to the literal English word "unknown" embedded inside the
+translated "Prompt-Sprache de; Tag-Sprache de; Selector …" pill. The pill
+now uses a separate i18n template (`review.debug_summary_no_selector` /
+`inventory.debug_summary_no_selector`) that omits the selector segment when
+no meaningful value is available, and the corresponding `<dl>` row is
+hidden too. New keys added to all seven UI locales.
+
+### Heads up for operators on upgrade
+
+* The backfill runs once on the first v1.5.4 worker boot. Expect a one-line
+  `metadata-stage backfill lifted OCR-only pipeline_runs to include the
+  metadata stage` log entry with `runs_updated` and `jobs_inserted` counts.
+* Documents whose OCR was already `succeeded` will have their run flipped
+  back to `queued` so the worker can pick up the new metadata job — the
+  dashboard "succeeded" badge for those documents will briefly drop and then
+  climb back as metadata runs.
+* No application behaviour change for fresh installs. UI sidebar reads
+  `v1.5.4`.
 
 ## v1.5.3 — Apply Debian Security patches in the runtime image
 

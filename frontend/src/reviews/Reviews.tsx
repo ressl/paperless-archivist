@@ -131,7 +131,8 @@ function ReviewCard({ item, selected, onSelect, onReload, setError, t }: ReviewC
       <header>
         <label className="inline">
           <input type="checkbox" checked={selected} onChange={handleSelect} />
-          <strong>{t('review.document', { id: item.paperless_document_id })}</strong>
+          <strong>{item.paperless_title ?? t('review.document', { id: item.paperless_document_id })}</strong>
+          {item.paperless_title && <small className="field-hint">#{item.paperless_document_id}</small>}
         </label>
         <span>{stageLabel(item.stage as Stage, t) ?? item.stage}</span>
       </header>

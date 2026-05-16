@@ -456,6 +456,7 @@ export type ReviewItem = {
   edited_patch?: unknown;
   validation_warnings?: unknown;
   debug_context?: WorkflowDebugContext | null;
+  paperless_title?: string | null;
   created_at: string;
 };
 

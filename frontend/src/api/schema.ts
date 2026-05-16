@@ -2748,6 +2748,8 @@ export interface components {
             edited_patch?: components["schemas"]["DocumentPatch"] | null;
             validation_warnings?: unknown;
             debug_context?: components["schemas"]["WorkflowDebugContext"] | null;
+            /** @description Cached Paperless title from the document_inventory, surfaced so the review UI can show the actual document title instead of falling back to "Document {id}" when the suggested_patch has no title. */
+            paperless_title?: string | null;
             /** Format: date-time */
             created_at: string;
         } & {

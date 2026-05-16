@@ -168,6 +168,8 @@ pub struct ReviewItemRecord {
     pub edited_patch: Option<Value>,
     pub validation_warnings: Value,
     pub debug_context: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paperless_title: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -4700,6 +4702,7 @@ pub async fn list_reviews(
             r#"
             select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
                    ri.suggested_patch, ri.edited_patch, ri.validation_warnings, ri.created_at,
+                   di.title as paperless_title,
                    jsonb_build_object(
                      'detected_language', di.detected_language,
                      'detected_language_confidence', di.detected_language_confidence,
@@ -4725,6 +4728,7 @@ pub async fn list_reviews(
             r#"
             select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
                    ri.suggested_patch, ri.edited_patch, ri.validation_warnings, ri.created_at,
+                   di.title as paperless_title,
                    jsonb_build_object(
                      'detected_language', di.detected_language,
                      'detected_language_confidence', di.detected_language_confidence,
@@ -4759,6 +4763,7 @@ pub async fn list_reviews(
                 edited_patch: row.try_get("edited_patch")?,
                 validation_warnings: row.try_get("validation_warnings")?,
                 debug_context: row.try_get("debug_context")?,
+                paperless_title: row.try_get("paperless_title").ok(),
                 created_at: row.try_get("created_at")?,
             })
         })
@@ -4905,6 +4910,7 @@ pub async fn pending_review_for_apply(
             edited_patch: row.try_get("edited_patch")?,
             validation_warnings: row.try_get("validation_warnings")?,
             debug_context: None,
+            paperless_title: None,
             created_at: row.try_get("created_at")?,
         })
     })
@@ -5061,6 +5067,7 @@ pub async fn list_pending_review_items_for_autopilot_drain(
                 edited_patch: row.try_get("edited_patch")?,
                 validation_warnings: row.try_get("validation_warnings")?,
                 debug_context: None,
+                paperless_title: None,
                 created_at: row.try_get("created_at")?,
             })
         })
@@ -5111,6 +5118,7 @@ pub async fn claim_pending_review_for_autopilot_drain(
         edited_patch: row.try_get("edited_patch")?,
         validation_warnings: row.try_get("validation_warnings")?,
         debug_context: None,
+        paperless_title: None,
         created_at: row.try_get("created_at")?,
     };
 
@@ -6268,6 +6276,178 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
     tx.commit().await?;
     Ok(VisionCrashRequeueSummary {
         jobs_requeued: job_ids.len() as i64,
+    })
+}
+
+/// Summary of a one-shot metadata-stage backfill pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataStageBackfillSummary {
+    pub runs_updated: i64,
+    pub jobs_inserted: i64,
+}
+
+/// One-shot, idempotent helper run on worker startup that lifts the
+/// historical OCR-only `pipeline_runs` (created before v1.5.4 by trigger
+/// polling against documents tagged only with the OCR trigger) up to include
+/// the consolidated `metadata` stage as well. Without this, those runs
+/// terminate after OCR with no Title/Correspondent/Tags suggestion ever
+/// being produced, so the Review queue is full of `{"content": "..."}`-only
+/// review items that the operator cannot meaningfully act on.
+///
+/// What this does, in one transaction:
+///   * Find every `pipeline_runs` whose `stages` jsonb array contains "ocr"
+///     but does NOT contain "metadata", AND does not already have a
+///     `metadata`-stage `jobs` row.
+///   * Append "metadata" to `pipeline_runs.stages`.
+///   * Insert a queued `metadata` job for the run with `stage_priority=20`
+///     so it sequences AFTER the OCR job (priority 10).
+///   * For runs that were already `succeeded` (OCR is done and either auto-
+///     applied or never produced a review): flip status back to `queued`
+///     and clear `finished_at`, so the worker re-picks the run up to claim
+///     the new metadata job. For runs in `waiting_review`/`queued`/`running`,
+///     status is left alone — the natural cascade in `mark_review_auto_applied`
+///     / OCR completion will flip the run back to `queued` once the OCR side
+///     settles, and the metadata job becomes claimable from the existing
+///     run-still-has-work path.
+///
+/// Idempotent: re-running this finds nothing to do because of the
+/// `NOT EXISTS metadata job` predicate. Safe to run on every worker startup.
+pub async fn backfill_metadata_stage_for_ocr_only_runs(
+    pool: &DbPool,
+) -> Result<MetadataStageBackfillSummary> {
+    let mut tx = pool.begin().await?;
+
+    // Step 1: identify the target runs. Lock them for update so a parallel
+    // worker doesn't race us into queueing duplicate metadata jobs.
+    let target_rows = sqlx::query(
+        r#"
+        select pr.id as run_id,
+               pr.paperless_document_id,
+               pr.status as current_status
+          from pipeline_runs pr
+         where pr.stages @> '["ocr"]'::jsonb
+           and not (pr.stages @> '["metadata"]'::jsonb)
+           and not exists (
+             select 1 from jobs j
+              where j.run_id = pr.id and j.stage = 'metadata'
+           )
+         for update of pr skip locked
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if target_rows.is_empty() {
+        tx.commit().await?;
+        return Ok(MetadataStageBackfillSummary::default());
+    }
+
+    let run_ids: Vec<Uuid> = target_rows
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("run_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let document_ids: Vec<i32> = target_rows
+        .iter()
+        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    // Step 2: append "metadata" to the stages array and reset succeeded
+    // runs back to queued so the worker re-claims the new metadata job.
+    sqlx::query(
+        r#"
+        update pipeline_runs
+           set stages = (
+                 select coalesce(jsonb_agg(s order by s_order), '[]'::jsonb)
+                   from (
+                     select 'ocr'      as s, 1 as s_order
+                     union all
+                     select 'metadata' as s, 2 as s_order
+                   ) ordered
+               ),
+               status = case when status = 'succeeded' then 'queued' else status end,
+               finished_at = case when status = 'succeeded' then null else finished_at end,
+               updated_at = now()
+         where id = any($1)
+        "#,
+    )
+    .bind(&run_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    // Step 3: insert a queued metadata job per run, with stage_priority=20
+    // so it claims AFTER the OCR job (stage_priority=10). The cross-run
+    // priority mirrors age_derived_priority so old docs don't jump the queue.
+    let mut jobs_inserted: i64 = 0;
+    for (run_id, document_id) in run_ids.iter().zip(document_ids.iter()) {
+        let cross_run_priority = 1_000_000_i64 - i64::from(*document_id);
+        let inserted = sqlx::query(
+            r#"
+            insert into jobs (run_id, paperless_document_id, stage, status, payload)
+            values ($1, $2, 'metadata', 'queued', jsonb_build_object(
+                'priority', $3::bigint,
+                'stage_priority', 20,
+                'backfill', true
+            ))
+            "#,
+        )
+        .bind(run_id)
+        .bind(document_id)
+        .bind(cross_run_priority)
+        .execute(&mut *tx)
+        .await?;
+        jobs_inserted += inserted.rows_affected() as i64;
+    }
+
+    // Step 4: nudge document_inventory.current_run_status for the formerly-
+    // succeeded runs that just got flipped back to queued, so the dashboard
+    // status badges match the new pipeline_runs state.
+    sqlx::query(
+        r#"
+        update document_inventory di
+           set current_run_status = 'queued',
+               complete = false,
+               updated_at = now()
+          from pipeline_runs pr
+         where pr.id = any($1)
+           and pr.id = di.last_run_id
+           and pr.status = 'queued'
+        "#,
+    )
+    .bind(&run_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "worker.metadata_stage_backfilled".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({
+                "runs_updated": run_ids.len(),
+                "jobs_inserted": jobs_inserted,
+            })),
+            metadata: Some(json!({
+                "trigger": "startup_one_shot",
+                "reason": "ocr_only_runs_missing_metadata_stage",
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(MetadataStageBackfillSummary {
+        runs_updated: run_ids.len() as i64,
+        jobs_inserted,
     })
 }
 

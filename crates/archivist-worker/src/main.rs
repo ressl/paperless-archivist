@@ -20,10 +20,11 @@ use archivist_core::{
     validate_tag_suggestion, validate_title_suggestion,
 };
 use archivist_db::{
-    AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit, claim_jobs,
-    claim_notification_delivery, claim_pending_review_for_autopilot_drain, complete_job, connect,
-    create_review_item, create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job,
-    get_active_prompt, get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
+    AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit,
+    backfill_metadata_stage_for_ocr_only_runs, claim_jobs, claim_notification_delivery,
+    claim_pending_review_for_autopilot_drain, complete_job, connect, create_review_item,
+    create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job, get_active_prompt,
+    get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
     get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
@@ -73,6 +74,11 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     info!(%worker_id, "paperless archivist worker started");
     let mut tick: u64 = 0;
     let trigger_poll_running = Arc::new(AtomicBool::new(false));
+    // Re-entry guard so a long-running autopilot drain tick does not block
+    // subsequent worker ticks. Drains can run minutes when Paperless is slow
+    // or the pending backlog is large; we want OCR job processing to keep
+    // happening in the meantime.
+    let autopilot_drain_running = Arc::new(AtomicBool::new(false));
 
     // Write a fresh dashboard snapshot near startup so the read path has something current
     // before the periodic tick fires (snapshots used to be written on every /dashboard read).
@@ -101,6 +107,23 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     // operators can disable for upgrade scenarios where the queue must not be touched.
     if let Err(error) = run_startup_vision_crash_requeue(&pool).await {
         warn!(error = %error, "startup vision-crash requeue failed");
+    }
+
+    // One-shot: backfill the consolidated `metadata` stage onto historical
+    // `pipeline_runs` that were queued with only `["ocr"]` (e.g. by trigger
+    // polling against documents tagged only with the OCR trigger). Without
+    // this, those runs terminate after OCR and the Review queue fills up
+    // with content-only review items that never get a real
+    // Title/Correspondent/Tags suggestion. Idempotent — once every OCR-only
+    // run has a metadata job, subsequent startups find nothing to do.
+    match backfill_metadata_stage_for_ocr_only_runs(&pool).await {
+        Ok(summary) if summary.runs_updated > 0 => info!(
+            runs_updated = summary.runs_updated,
+            jobs_inserted = summary.jobs_inserted,
+            "metadata-stage backfill lifted OCR-only pipeline_runs to include the metadata stage"
+        ),
+        Ok(_) => info!("metadata-stage backfill found no OCR-only pipeline_runs to lift"),
+        Err(error) => warn!(error = %error, "startup metadata-stage backfill failed"),
     }
 
     loop {
@@ -136,11 +159,29 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 // budget the auto-selector honors. This handles the residual backlog from
                 // historical batches that routed to manual_review before commit 0d7a915 made
                 // routing follow live runtime mode, and any future flip-from-review case.
+                //
+                // Spawned (not awaited) so a slow drain — Paperless under load, or a multi-
+                // thousand-item backlog being chewed through — cannot stall the worker's
+                // main tick loop (which also drives OCR job processing). The atomic guard
+                // makes the next drain firing skip cleanly while the previous one is still
+                // running; v1.5.4 lifted this out of the inline await to fix the
+                // backlog-vs-OCR-throughput contention observed in prod.
                 if tick % 12 == 7
-                    && let Err(error) =
-                        drain_pending_reviews_if_autopilot_tick(&pool, &config).await
+                    && autopilot_drain_running
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
                 {
-                    warn!(error = %error, "autopilot review drain tick failed");
+                    let pool = pool.clone();
+                    let config = Arc::clone(&config);
+                    let autopilot_drain_running = Arc::clone(&autopilot_drain_running);
+                    tokio::spawn(async move {
+                        if let Err(error) =
+                            drain_pending_reviews_if_autopilot_tick(&pool, &config).await
+                        {
+                            warn!(error = %error, "autopilot review drain tick failed");
+                        }
+                        autopilot_drain_running.store(false, Ordering::Release);
+                    });
                 }
                 if tick % 12 == 1
                     && trigger_poll_running
@@ -188,15 +229,17 @@ async fn record_dashboard_snapshot_tick(pool: &DbPool) -> Result<()> {
 /// Loads the latest runtime settings each invocation (the dashboard mode
 /// badge reflects the live runtime mode, and so should this drain).
 ///
-/// The outer timeout is intentionally generous (8 minutes) because each
-/// drained item already has its own short Paperless-side timeout — see
-/// `apply_one_autopilot_drain_review`. The outer cap is just a last-ditch
-/// liveness guard so a fully wedged Paperless host can't permanently
-/// occupy this tick slot.
+/// The outer timeout is generous (30 minutes) because each drained item
+/// already has its own short Paperless-side timeout — see
+/// `apply_one_autopilot_drain_review`. With v1.5.4's PER_TICK_CEILING=500
+/// and ~5s per Paperless apply, a fully loaded drain runs ~40min; the cap
+/// is a last-ditch liveness guard so a fully wedged Paperless host can't
+/// permanently occupy this tick slot. The drain is spawned (not awaited)
+/// in the main loop, so a slow drain no longer starves OCR processing.
 async fn drain_pending_reviews_if_autopilot_tick(pool: &DbPool, config: &AppConfig) -> Result<()> {
     let settings = get_runtime_settings(pool).await?;
     let applied = timeout(
-        Duration::from_secs(8 * 60),
+        Duration::from_secs(30 * 60),
         drain_pending_reviews_if_autopilot(pool, config, &settings),
     )
     .await
@@ -2320,12 +2363,15 @@ async fn drain_pending_reviews_if_autopilot(
     let Some(budget) = autopilot_drain_budget(settings, &safety) else {
         return Ok(0);
     };
-    // Hard ceiling per tick. Bumped from 50 to 100 in v1.3.2 after the
-    // first production deployment showed the original cap drained too
-    // slowly on backlogs in the multi-thousand range. Still safety-budget
-    // bounded, so an operator hourly cap of e.g. 200/h continues to land
-    // ~200 items/h regardless of this ceiling.
-    const PER_TICK_CEILING: i64 = 100;
+    // Hard ceiling per tick. Bumped from 50 to 100 in v1.3.2, then to 500 in
+    // v1.5.4 after live debugging at 2515-pending backlog showed the 100 cap
+    // combined with the previous in-loop await (which blocked OCR processing
+    // for the duration of the drain) capped throughput at ~140 items/h. v1.5.4
+    // also moved the drain off the main tick loop into a spawned task, so a
+    // larger per-tick batch no longer starves OCR. Still safety-budget
+    // bounded — an operator hourly cap of e.g. 200/h still lands ~200/h
+    // regardless of this ceiling.
+    const PER_TICK_CEILING: i64 = 500;
     let limit = match budget {
         None => PER_TICK_CEILING,
         Some(remaining) => remaining.min(PER_TICK_CEILING),
