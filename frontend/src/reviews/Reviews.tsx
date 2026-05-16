@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, ListChecks, Save, X } from 'lucide-react';
 import { api, ReviewItem, Stage } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
@@ -22,15 +22,18 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const load = () => api.reviews().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t)));
+  const load = useCallback(
+    () => api.reviews().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t))),
+    [setError, t]
+  );
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
-  const toggleSelected = (id: string) => {
+  const toggleSelected = useCallback((id: string) => {
     setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  };
+  }, []);
   const batch = async (decision: 'approve' | 'reject') => {
     await run(setBusy, setError, async () => {
       const result = await api.batchReview(selected, decision);
@@ -58,11 +61,11 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
       </div>
       <div className="review-list">
         {items.map((item) => (
-          <ReviewCard
+          <ReviewCardMemo
             key={item.id}
             item={item}
             selected={selected.includes(item.id)}
-            onSelect={() => toggleSelected(item.id)}
+            onSelect={toggleSelected}
             onReload={load}
             setError={setError}
             t={t}
@@ -73,21 +76,16 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
   );
 }
 
-function ReviewCard({
-  item,
-  selected,
-  onSelect,
-  onReload,
-  setError,
-  t
-}: {
+type ReviewCardProps = {
   item: ReviewItem;
   selected: boolean;
-  onSelect: () => void;
+  onSelect: (id: string) => void;
   onReload: () => void;
   setError: (error: string | null) => void;
   t: TFunction;
-}) {
+};
+
+function ReviewCard({ item, selected, onSelect, onReload, setError, t }: ReviewCardProps) {
   const patch = asReviewPatch(item.suggested_patch);
   const metadata = asReviewPatch(patch?.standard_metadata);
   const [edit, setEdit] = useState<ReviewEditState>(() => reviewEditStateFromPatch(patch));
@@ -97,7 +95,7 @@ function ReviewCard({
     setEdit(reviewEditStateFromPatch(patch));
   }, [item.id]);
 
-  const applyEdited = async () => {
+  const applyEdited = useCallback(async () => {
     if (!patch) {
       setError(t('review.patch_not_editable'));
       return;
@@ -111,7 +109,19 @@ function ReviewCard({
       await api.editReview(item.id, editedPatch);
       onReload();
     }, t);
-  };
+  }, [patch, edit, item.id, onReload, setError, t]);
+
+  const approve = useCallback(
+    () => api.approveReview(item.id).then(onReload).catch((err) => setError(localizedErrorMessage(err, t))),
+    [item.id, onReload, setError, t]
+  );
+
+  const reject = useCallback(
+    () => api.rejectReview(item.id).then(onReload).catch((err) => setError(localizedErrorMessage(err, t))),
+    [item.id, onReload, setError, t]
+  );
+
+  const handleSelect = useCallback(() => onSelect(item.id), [onSelect, item.id]);
 
   const warnings = reviewWarnings(item.validation_warnings);
   const rows = standardMetadataRows(item.stage, patch, metadata, t);
@@ -120,7 +130,7 @@ function ReviewCard({
     <article className="review-item">
       <header>
         <label className="inline">
-          <input type="checkbox" checked={selected} onChange={onSelect} />
+          <input type="checkbox" checked={selected} onChange={handleSelect} />
           <strong>{t('review.document', { id: item.paperless_document_id })}</strong>
         </label>
         <span>{stageLabel(item.stage as Stage, t) ?? item.stage}</span>
@@ -171,7 +181,7 @@ function ReviewCard({
       </details>
 
       <footer>
-        <button title={t('review.approve')} disabled={busy} onClick={() => api.approveReview(item.id).then(onReload).catch((err) => setError(localizedErrorMessage(err, t)))}>
+        <button title={t('review.approve')} disabled={busy} onClick={approve}>
           <Check size={16} /> {t('review.approve')}
         </button>
         {patch && Object.keys(edit).length > 0 && (
@@ -179,13 +189,37 @@ function ReviewCard({
             <Save size={16} /> {t('review.apply_edited')}
           </button>
         )}
-        <button title={t('review.reject')} disabled={busy} onClick={() => api.rejectReview(item.id).then(onReload).catch((err) => setError(localizedErrorMessage(err, t)))}>
+        <button title={t('review.reject')} disabled={busy} onClick={reject}>
           <X size={16} /> {t('review.reject')}
         </button>
       </footer>
     </article>
   );
 }
+
+const ReviewCardMemo = memo(
+  ReviewCard,
+  (prev, next) => {
+    if (prev.t !== next.t) return false;
+    if (prev.selected !== next.selected) return false;
+    if (prev.onSelect !== next.onSelect) return false;
+    if (prev.onReload !== next.onReload) return false;
+    if (prev.setError !== next.setError) return false;
+    const a = prev.item;
+    const b = next.item;
+    return (
+      a.id === b.id &&
+      a.status === b.status &&
+      a.stage === b.stage &&
+      a.created_at === b.created_at &&
+      a.paperless_document_id === b.paperless_document_id &&
+      a.suggested_patch === b.suggested_patch &&
+      a.edited_patch === b.edited_patch &&
+      a.validation_warnings === b.validation_warnings &&
+      a.debug_context === b.debug_context
+    );
+  }
+);
 
 function asReviewPatch(value: unknown): ReviewPatchRecord | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
