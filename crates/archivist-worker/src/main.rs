@@ -169,10 +169,36 @@ async fn process_available_jobs(
     }
     info!(claimed_jobs = jobs.len(), %worker_id, "claimed jobs for processing");
 
+    // Cache RuntimeSettings + PaperlessClient at the batch boundary so each claimed job no
+    // longer re-fetches settings and re-decrypts the Paperless token. Effective TTL is the
+    // batch interval (~5s by default); a fresh batch always re-reads the latest settings.
+    let settings = match get_runtime_settings(pool).await {
+        Ok(settings) => Arc::new(settings),
+        Err(error) => {
+            warn!(error = %error, "failed to load runtime settings for batch; failing claimed jobs");
+            for job in &jobs {
+                let _ = fail_job(pool, job, &error.to_string(), true).await;
+            }
+            return Ok(());
+        }
+    };
+    let paperless = match paperless_client(pool, config, &settings).await {
+        Ok(client) => Arc::new(client),
+        Err(error) => {
+            warn!(error = %error, "failed to construct Paperless client for batch; failing claimed jobs");
+            for job in &jobs {
+                let _ = fail_job(pool, job, &error.to_string(), true).await;
+            }
+            return Ok(());
+        }
+    };
+
     let mut pending = FuturesUnordered::new();
     for job in jobs {
         let pool = pool.clone();
         let config = Arc::clone(config);
+        let settings = Arc::clone(&settings);
+        let paperless = Arc::clone(&paperless);
         let trace_id = job.run_id;
         let span = info_span!(
             "archivist_job",
@@ -186,7 +212,8 @@ async fn process_available_jobs(
         pending.push(tokio::spawn(
             async move {
                 let started = std::time::Instant::now();
-                let result = process_job(&pool, &config, &job).await;
+                let result =
+                    process_job(&pool, &config, settings.as_ref(), paperless.as_ref(), &job).await;
                 if let Err(error) = &result {
                     let failure_class = classify_processing_failure(error);
                     warn!(
@@ -385,21 +412,25 @@ fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass 
     }
 }
 
-async fn process_job(pool: &DbPool, config: &AppConfig, job: &JobRecord) -> Result<()> {
+async fn process_job(
+    pool: &DbPool,
+    config: &AppConfig,
+    settings: &RuntimeSettings,
+    paperless: &PaperlessClient,
+    job: &JobRecord,
+) -> Result<()> {
     info!(job_id = %job.id, run_id = %job.run_id, document_id = job.paperless_document_id, stage = %job.stage, "processing job");
-    let settings = get_runtime_settings(pool).await?;
-    let paperless = paperless_client(pool, config, &settings).await?;
 
     match job.stage {
-        Stage::Ocr => process_ocr(pool, config, &paperless, &settings, job).await,
-        Stage::Tags => process_tags(pool, config, &paperless, &settings, job).await,
-        Stage::Title => process_title(pool, config, &paperless, &settings, job).await,
+        Stage::Ocr => process_ocr(pool, config, paperless, settings, job).await,
+        Stage::Tags => process_tags(pool, config, paperless, settings, job).await,
+        Stage::Title => process_title(pool, config, paperless, settings, job).await,
         Stage::Correspondent => {
             process_choice(
                 pool,
                 config,
-                &paperless,
-                &settings,
+                paperless,
+                settings,
                 job,
                 "correspondent",
                 "paperless_correspondents",
@@ -410,16 +441,16 @@ async fn process_job(pool: &DbPool, config: &AppConfig, job: &JobRecord) -> Resu
             process_choice(
                 pool,
                 config,
-                &paperless,
-                &settings,
+                paperless,
+                settings,
                 job,
                 "document type",
                 "paperless_document_types",
             )
             .await
         }
-        Stage::DocumentDate => process_document_date(pool, &paperless, &settings, job).await,
-        Stage::Fields => process_fields(pool, config, &paperless, &settings, job).await,
+        Stage::DocumentDate => process_document_date(pool, paperless, settings, job).await,
+        Stage::Fields => process_fields(pool, config, paperless, settings, job).await,
         Stage::OcrFix | Stage::Apply => Err(anyhow!(
             "stage {} is not directly executable by the worker",
             job.stage
