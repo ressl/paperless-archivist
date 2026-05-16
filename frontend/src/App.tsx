@@ -47,7 +47,6 @@ import {
   OidcConfig,
   OllamaInstalledModel,
   PaperlessConsistencyResult,
-  ProcessingMode,
   Prompt,
   PromptTestResponse,
   PromptUsage,
@@ -92,6 +91,7 @@ import { localizedMessage, useI18n, type TFunction } from './i18n/I18nProvider';
 import { Dashboard } from './dashboard/Dashboard';
 import { ErrorBoundary } from './lib/ErrorBoundary';
 import { ActionButton, PageHeader, Status, errorToString, localizedErrorMessage, run } from './lib/ui';
+import { workflowModeDescription, workflowModeLabel, workflowModeOptions } from './lib/workflow';
 import {
   deltaTone,
   formatCost,
@@ -142,33 +142,6 @@ type HardwareRecommendationData = {
 };
 
 const recommendationProfile = (hardwareRecommendations as HardwareRecommendationData).profiles[0];
-export const workflowModeOptions: Array<{ value: ProcessingMode; labelKey: Parameters<TFunction>[0]; descriptionKey: Parameters<TFunction>[0] }> = [
-  {
-    value: 'manual_review',
-    labelKey: 'workflow.mode.manual.label',
-    descriptionKey: 'workflow.mode.manual.description'
-  },
-  {
-    value: 'auto_select_review',
-    labelKey: 'workflow.mode.auto_select_review.label',
-    descriptionKey: 'workflow.mode.auto_select_review.description'
-  },
-  {
-    value: 'full_auto',
-    labelKey: 'workflow.mode.full_auto.label',
-    descriptionKey: 'workflow.mode.full_auto.description'
-  }
-];
-
-export const workflowModeLabel = (mode: ProcessingMode, t: TFunction) => {
-  const option = workflowModeOptions.find((entry) => entry.value === mode);
-  return option ? t(option.labelKey) : mode;
-};
-
-export const workflowModeDescription = (mode: ProcessingMode, t: TFunction) => {
-  const option = workflowModeOptions.find((entry) => entry.value === mode);
-  return option ? t(option.descriptionKey) : '';
-};
 
 export function App() {
   const { t } = useI18n();

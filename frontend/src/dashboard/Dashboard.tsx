@@ -57,7 +57,7 @@ import {
   stageLabel,
   statusLabel
 } from '../lib/format';
-import { workflowModeDescription, workflowModeLabel, workflowModeOptions } from '../App';
+import { workflowModeDescription, workflowModeLabel, workflowModeOptions } from '../lib/workflow';
 
 const defaultDashboardRanges: Array<{ key: DashboardRange; label: string }> = [
   { key: '24h', label: '24h' },
