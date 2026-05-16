@@ -6106,6 +6106,148 @@ fn status_column_for_stage(stage: Stage) -> Result<&'static str> {
         .ok_or_else(|| anyhow!("stage does not map to inventory status: {stage}"))
 }
 
+/// SQL `ilike` patterns matching the vision-runtime-crash error-message
+/// signatures (`GGML_ASSERT(...)`, "runner process no longer running", "signal
+/// arrived during cgo execution"). Kept in sync with
+/// `archivist_worker::is_vision_model_runtime_crash`.
+pub const VISION_CRASH_SQL_PATTERNS: &[&str] = &[
+    "%GGML_ASSERT%",
+    "%runner process no longer running%",
+    "%signal arrived during cgo execution%",
+];
+
+/// Summary of a one-shot startup requeue pass. Helpful for log lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VisionCrashRequeueSummary {
+    pub jobs_requeued: i64,
+}
+
+/// One-shot, idempotent helper run on worker startup that lifts `failed` OCR-stage jobs
+/// whose error message matches the vision-runtime-crash signature back into the queue so
+/// they get one more attempt under the new fallback machinery. We bump `max_attempts` by
+/// one (rather than resetting `attempts`) so a job that has already burned through its
+/// retry budget on the broken primary model still has one fresh attempt to run under the
+/// fallback, but does not get an unbounded budget.
+///
+/// Also flips the matching `pipeline_runs` row back to `queued`, and resets the
+/// inventory stage status, so the dashboard reflects the second chance.
+///
+/// All writes happen in a single transaction; either all matching rows are requeued or
+/// none of them are. Returns the number of jobs that were lifted.
+pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashRequeueSummary> {
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        with crashed as (
+          select id, run_id, paperless_document_id, max_attempts
+            from jobs
+           where status = 'failed'
+             and stage = 'ocr'
+             and (
+                  error_message ilike $1
+               or error_message ilike $2
+               or error_message ilike $3
+             )
+           for update
+        )
+        update jobs j
+           set status = 'queued',
+               max_attempts = j.max_attempts + 1,
+               run_after = now(),
+               lease_owner = null,
+               lease_until = null,
+               error_message = null,
+               updated_at = now()
+          from crashed
+         where j.id = crashed.id
+        returning j.id, j.run_id, j.paperless_document_id
+        "#,
+    )
+    .bind(VISION_CRASH_SQL_PATTERNS[0])
+    .bind(VISION_CRASH_SQL_PATTERNS[1])
+    .bind(VISION_CRASH_SQL_PATTERNS[2])
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if rows.is_empty() {
+        tx.commit().await?;
+        return Ok(VisionCrashRequeueSummary { jobs_requeued: 0 });
+    }
+
+    let run_ids: Vec<Uuid> = rows
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("run_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let document_ids: Vec<i32> = rows
+        .iter()
+        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let job_ids: Vec<Uuid> = rows
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    sqlx::query(
+        r#"
+        update pipeline_runs
+           set status = 'queued',
+               error_message = null,
+               finished_at = null,
+               updated_at = now()
+         where id = any($1)
+           and status = 'failed'
+        "#,
+    )
+    .bind(&run_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        update document_inventory
+           set ocr_status = 'queued',
+               current_run_status = 'queued',
+               updated_at = now()
+         where paperless_document_id = any($1)
+           and ocr_status = 'failed'
+        "#,
+    )
+    .bind(&document_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "worker.vision_crash_jobs_requeued".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({
+                "count": job_ids.len(),
+                "job_ids": job_ids,
+            })),
+            metadata: Some(json!({
+                "trigger": "startup_one_shot",
+                "patterns": VISION_CRASH_SQL_PATTERNS,
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(VisionCrashRequeueSummary {
+        jobs_requeued: job_ids.len() as i64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

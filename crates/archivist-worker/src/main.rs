@@ -28,9 +28,10 @@ use archivist_db::{
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
     named_entity_id_for_name, queue_missing_pipeline, record_dashboard_snapshot,
-    record_document_language, resolve_secret, revert_review_to_pending_after_failed_drain,
-    selector_document_budget, tag_ids_for_names, upsert_inventory_item,
-    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+    record_document_language, requeue_vision_crashed_jobs, resolve_secret,
+    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_ids_for_names,
+    upsert_inventory_item, upsert_paperless_custom_field, upsert_paperless_named_entity,
+    upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{
@@ -77,6 +78,14 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     // before the periodic tick fires (snapshots used to be written on every /dashboard read).
     if let Err(error) = record_dashboard_snapshot_tick(&pool).await {
         warn!(error = %error, "initial dashboard snapshot failed");
+    }
+
+    // One-shot: lift failed OCR jobs killed by the GGML vision-runtime crash signature back
+    // into the queue so they get a second chance under the new fallback machinery.
+    // Idempotent — finding no matching rows is a no-op. Gated by the runtime setting so
+    // operators can disable for upgrade scenarios where the queue must not be touched.
+    if let Err(error) = run_startup_vision_crash_requeue(&pool).await {
+        warn!(error = %error, "startup vision-crash requeue failed");
     }
 
     loop {
@@ -201,6 +210,31 @@ async fn wait_for_schema(pool: &DbPool) -> Result<()> {
     Ok(())
 }
 
+/// One-shot startup helper: when enabled in runtime settings, lifts `failed` OCR jobs that
+/// match the vision-runtime-crash signature back into `queued` and bumps their attempt
+/// budget by one. Designed to run exactly once per worker process start; idempotent if a
+/// rerun finds zero matching rows. Errors are swallowed by the caller (the worker should
+/// still come up even if this housekeeping fails).
+async fn run_startup_vision_crash_requeue(pool: &DbPool) -> Result<()> {
+    let settings = get_runtime_settings(pool).await?;
+    if !settings.ai.requeue_vision_crashes_on_startup {
+        info!(
+            "vision-crash startup requeue disabled by setting requeue_vision_crashes_on_startup=false"
+        );
+        return Ok(());
+    }
+    let summary = requeue_vision_crashed_jobs(pool).await?;
+    if summary.jobs_requeued > 0 {
+        info!(
+            jobs_requeued = summary.jobs_requeued,
+            "vision_model_fallback_requeue_used = true; lifted vision-crashed jobs back to the queue"
+        );
+    } else {
+        info!("vision-crash startup requeue found no matching jobs");
+    }
+    Ok(())
+}
+
 async fn process_available_jobs(
     pool: &DbPool,
     config: &Arc<AppConfig>,
@@ -262,16 +296,19 @@ async fn process_available_jobs(
                     let vision_model_crash = is_vision_model_runtime_crash(error);
                     if vision_model_crash {
                         // GGML_ASSERT / "llama runner process no longer running" come from the
-                        // Ollama runtime aborting on specific input shapes — retrying with the
-                        // same model usually crashes again. Flag the log line so operators can
-                        // pivot to model swap (e.g. qwen2-vl:7b, llava-llama3:8b) rather than
-                        // chasing transient infra causes.
+                        // Ollama runtime aborting on specific input shapes. If we reach this
+                        // branch the worker already attempted the explicit/auto-discovered
+                        // fallback in `run_vision_with_fallback` and that ALSO crashed (or no
+                        // fallback was available). Surface enough breadcrumb info for
+                        // operators to either install a safer chain entry or set
+                        // `ai.fallback_vision_model` explicitly. Under Full-Auto this still
+                        // falls through to the standard transient retry budget.
                         warn!(
                             error = %error,
                             failure_class = failure_class.as_str(),
                             duration_ms = started.elapsed().as_millis() as u64,
                             vision_model_crash = true,
-                            hint = "ollama vision model aborted (GGML_ASSERT / runner crash); consider switching the configured vision model in Settings -> Provider",
+                            hint = "ollama vision model and fallback both crashed (GGML_ASSERT / runner crash); install one of qwen2-vl:7b / llava-llama3:8b / llava:13b or set ai.fallback_vision_model",
                             "job processing failed"
                         );
                     } else {
@@ -516,6 +553,234 @@ fn is_vision_model_runtime_crash(error: &anyhow::Error) -> bool {
         || message.contains("signal arrived during cgo execution")
 }
 
+/// Hardcoded safe-default chain walked when the primary vision model crashes and no explicit
+/// `fallback_vision_model` is configured. Order matters — the worker picks the first entry
+/// that is installed locally and not equal to the current primary. These names match the
+/// public Ollama tags as of 2025; nothing experimental is included on purpose. If an entry
+/// becomes unsafe (e.g. a tag is retracted) drop it here rather than relying on operators.
+const VISION_FALLBACK_CHAIN: &[&str] = &[
+    "qwen2-vl:7b",
+    "llava-llama3:8b",
+    "llava:13b",
+    "llava:latest",
+];
+
+/// Where a fallback candidate came from. Carried into log lines and audit metadata so
+/// operators can tell whether the recovery used their explicit setting or the safe-default
+/// chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisionFallbackSource {
+    Explicit,
+    AutoDiscovered,
+}
+
+impl VisionFallbackSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            VisionFallbackSource::Explicit => "explicit",
+            VisionFallbackSource::AutoDiscovered => "auto_discovered",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisionFallbackChoice {
+    model: String,
+    source: VisionFallbackSource,
+}
+
+/// Pure selector for a vision-model fallback. Prefers the explicit setting when it is
+/// set, non-empty, and not the same as the primary model. Otherwise walks
+/// `VISION_FALLBACK_CHAIN` and picks the first entry that is in `installed_models` and
+/// not equal to the primary. Case-insensitive match on model names.
+///
+/// `installed_models` may be empty (e.g. when the provider is not Ollama or the tag list
+/// call failed) — in that case the chain cannot be walked and the function returns the
+/// explicit choice if any, or `None`.
+fn pick_vision_fallback_model(
+    settings: &RuntimeSettings,
+    primary_model: &str,
+    installed_models: &[String],
+) -> Option<VisionFallbackChoice> {
+    if let Some(explicit) = settings
+        .ai
+        .fallback_vision_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case(primary_model))
+    {
+        return Some(VisionFallbackChoice {
+            model: explicit.to_owned(),
+            source: VisionFallbackSource::Explicit,
+        });
+    }
+
+    let installed_lower: Vec<String> = installed_models
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    for candidate in VISION_FALLBACK_CHAIN {
+        if candidate.eq_ignore_ascii_case(primary_model) {
+            continue;
+        }
+        let candidate_lower = candidate.to_ascii_lowercase();
+        if installed_lower.iter().any(|name| name == &candidate_lower) {
+            return Some(VisionFallbackChoice {
+                model: (*candidate).to_owned(),
+                source: VisionFallbackSource::AutoDiscovered,
+            });
+        }
+    }
+    None
+}
+
+/// Best-effort fetch of locally-installed Ollama models for the given provider. Returns
+/// an empty list (with a warn-level log) when the provider is not Ollama or the tag list
+/// call fails — that downgrades the auto-discovered fallback path to a no-op without
+/// crashing the worker tick.
+async fn installed_ollama_models_for_provider(
+    pool: &DbPool,
+    config: &AppConfig,
+    provider: &StageProvider,
+) -> Vec<String> {
+    if provider.kind != AiProviderKind::Ollama {
+        return Vec::new();
+    }
+    let secret = match provider_secret(pool, config, provider).await {
+        Ok(secret) => secret,
+        Err(error) => {
+            warn!(
+                error = %error,
+                provider = %provider.name,
+                "fallback chain skipped: could not resolve provider secret"
+            );
+            return Vec::new();
+        }
+    };
+    let client = match OllamaClient::new(&provider.base_url, secret) {
+        Ok(client) => client,
+        Err(error) => {
+            warn!(
+                error = %error,
+                provider = %provider.name,
+                "fallback chain skipped: could not construct Ollama client"
+            );
+            return Vec::new();
+        }
+    };
+    match client.list_models().await {
+        Ok(models) => models.into_iter().map(|model| model.name).collect(),
+        Err(error) => {
+            warn!(
+                error = %error,
+                provider = %provider.name,
+                "fallback chain skipped: Ollama tag list call failed"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Run a single vision request, transparently retrying on a vision-runtime-crash error
+/// against a configured or auto-discovered fallback model. The return value carries the
+/// model that actually produced the response so the caller can record the swap in
+/// per-page logs / audit metadata.
+///
+/// Behaviour:
+/// 1. Call the primary provider/model.
+/// 2. On success, return immediately.
+/// 3. On error: if `is_vision_model_runtime_crash` is true AND a fallback can be picked,
+///    log + emit a `worker.vision_model_fallback` audit event, then retry the exact same
+///    request against the fallback model once.
+/// 4. If the fallback also fails, or no fallback is available, return the original error.
+///
+/// This function does NOT consume the job's attempt slot — both calls happen within the
+/// same worker tick. The orchestrator-driven retry budget only kicks in if the fallback
+/// also fails (transient classification keeps current retry+jitter behaviour intact).
+async fn run_vision_with_fallback(
+    pool: &DbPool,
+    config: &AppConfig,
+    provider: &StageProvider,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    page_index: usize,
+    request: VisionRequest,
+) -> Result<(AiResponse, String, bool)> {
+    let primary_model = provider.model.clone();
+    let mut request_with_primary = request.clone();
+    request_with_primary.model = primary_model.clone();
+    match vision_with_provider(pool, config, provider, request_with_primary).await {
+        Ok(response) => Ok((response, primary_model, false)),
+        Err(error) => {
+            if !is_vision_model_runtime_crash(&error) {
+                return Err(error);
+            }
+            let installed = installed_ollama_models_for_provider(pool, config, provider).await;
+            let Some(choice) = pick_vision_fallback_model(settings, &primary_model, &installed)
+            else {
+                return Err(error);
+            };
+            warn!(
+                primary_model = %primary_model,
+                fallback_model = %choice.model,
+                fallback_source = choice.source.as_str(),
+                page_index,
+                vision_model_fallback_used = true,
+                document_id = job.paperless_document_id,
+                stage = %job.stage,
+                "vision model crashed; retrying same page on fallback model"
+            );
+            let auto_discovered = choice.source == VisionFallbackSource::AutoDiscovered;
+            let audit_metadata = json!({
+                "primary": primary_model,
+                "fallback": choice.model,
+                "fallback_source": choice.source.as_str(),
+                "auto_discovered_fallback": auto_discovered,
+                "stage": job.stage,
+                "page_index": page_index,
+                "document_id": job.paperless_document_id,
+                "primary_error": error.to_string()
+            });
+            if let Err(audit_error) = append_audit(
+                pool,
+                AuditEventInput {
+                    event_type: "worker.vision_model_fallback".to_owned(),
+                    actor_type: "worker".to_owned(),
+                    actor_id: None,
+                    run_id: Some(job.run_id),
+                    job_id: Some(job.id),
+                    paperless_document_id: Some(job.paperless_document_id),
+                    before: None,
+                    after: None,
+                    metadata: Some(audit_metadata),
+                    outcome: "success".to_owned(),
+                    error_message: None,
+                    source_ip: None,
+                    user_agent: None,
+                },
+            )
+            .await
+            {
+                warn!(error = %audit_error, "failed to record worker.vision_model_fallback audit event");
+            }
+            let mut fallback_request = request;
+            fallback_request.model = choice.model.clone();
+            let response = vision_with_provider(pool, config, provider, fallback_request).await?;
+            info!(
+                primary_model = %primary_model,
+                fallback_model = %choice.model,
+                fallback_source = choice.source.as_str(),
+                page_index,
+                vision_model_fallback_used = true,
+                document_id = job.paperless_document_id,
+                stage = %job.stage,
+                "vision fallback succeeded"
+            );
+            Ok((response, choice.model, true))
+        }
+    }
+}
+
 async fn process_job(
     pool: &DbPool,
     config: &AppConfig,
@@ -596,6 +861,8 @@ async fn process_ocr(
     let prompt = get_active_prompt(pool, Stage::Ocr).await?;
     let mut texts = Vec::new();
     let mut raw_responses = Vec::new();
+    let mut models_used: Vec<String> = Vec::new();
+    let mut any_fallback_used = false;
     let started = std::time::Instant::now();
     for (index, page) in pages.iter().enumerate() {
         let page_prompt = prompt
@@ -614,21 +881,20 @@ async fn process_ocr(
                     index + 1
                 )
             });
-        let response = vision_with_provider(
-            pool,
-            config,
-            &provider,
-            VisionRequest {
-                model: provider.model.clone(),
-                temperature: 0.0,
-                prompt: page_prompt,
-                images: vec![ImageInput {
-                    mime_type: page.mime_type.clone(),
-                    bytes: page.bytes.clone(),
-                }],
-            },
-        )
-        .await?;
+        let request = VisionRequest {
+            model: provider.model.clone(),
+            temperature: 0.0,
+            prompt: page_prompt,
+            images: vec![ImageInput {
+                mime_type: page.mime_type.clone(),
+                bytes: page.bytes.clone(),
+            }],
+        };
+        let (response, model_used, fallback_used) =
+            run_vision_with_fallback(pool, config, &provider, settings, job, index, request)
+                .await?;
+        any_fallback_used |= fallback_used;
+        models_used.push(model_used);
         texts.push(response.text);
         raw_responses.push(response.raw_response);
     }
@@ -661,7 +927,9 @@ async fn process_ocr(
                 "content_chars": text.chars().count(),
                 "language": language_detection.language,
                 "language_confidence": language_detection.confidence,
-                "language_source": language_detection.source
+                "language_source": language_detection.source,
+                "models_used_per_page": models_used,
+                "vision_model_fallback_used": any_fallback_used
             })),
             duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
             storage_mode: settings.security.ai_artifact_storage,
@@ -2949,5 +3217,69 @@ mod tests {
         safety.daily_remaining = Some(120);
         // Drain budget is the smaller of the two remaining quotas.
         assert_eq!(autopilot_drain_budget(&settings, &safety), Some(Some(7)));
+    }
+
+    #[test]
+    fn vision_fallback_prefers_explicit_setting_when_different_from_primary() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.fallback_vision_model = Some("llava:13b".to_owned());
+        let choice = pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &[]).unwrap();
+        assert_eq!(choice.model, "llava:13b");
+        assert_eq!(choice.source, VisionFallbackSource::Explicit);
+    }
+
+    #[test]
+    fn vision_fallback_ignores_explicit_setting_that_equals_primary() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.fallback_vision_model = Some("QWEN2.5VL:7B".to_owned());
+        // Same model (case-insensitive) → don't use it; fall through to chain. With no
+        // installed models in the test list, the chain cannot be walked either.
+        assert!(pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &[]).is_none());
+    }
+
+    #[test]
+    fn vision_fallback_walks_safe_default_chain_when_no_explicit_setting() {
+        let settings = RuntimeSettings::default();
+        let installed = vec![
+            "llava-llama3:8b".to_owned(),
+            "qwen3:8b".to_owned(),
+            "llava:13b".to_owned(),
+        ];
+        // Chain order: qwen2-vl:7b (not installed), llava-llama3:8b (installed) → picked.
+        let choice = pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &installed).unwrap();
+        assert_eq!(choice.model, "llava-llama3:8b");
+        assert_eq!(choice.source, VisionFallbackSource::AutoDiscovered);
+    }
+
+    #[test]
+    fn vision_fallback_safe_default_skips_primary_even_if_installed() {
+        let settings = RuntimeSettings::default();
+        // Primary IS in the chain; auto-discovery must skip it and pick the next entry.
+        let installed = vec!["llava:13b".to_owned(), "llava-llama3:8b".to_owned()];
+        let choice = pick_vision_fallback_model(&settings, "llava-llama3:8b", &installed).unwrap();
+        assert_eq!(choice.model, "llava:13b");
+        assert_eq!(choice.source, VisionFallbackSource::AutoDiscovered);
+    }
+
+    #[test]
+    fn vision_fallback_returns_none_when_chain_has_no_installed_match() {
+        let settings = RuntimeSettings::default();
+        // No installed models from the chain → no fallback possible.
+        let installed = vec!["qwen3:8b".to_owned(), "phi3:mini".to_owned()];
+        assert!(pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &installed).is_none());
+    }
+
+    #[test]
+    fn vision_fallback_returns_none_when_no_explicit_and_no_installed() {
+        let settings = RuntimeSettings::default();
+        assert!(pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &[]).is_none());
+    }
+
+    #[test]
+    fn vision_fallback_explicit_trims_whitespace_and_skips_empty() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.fallback_vision_model = Some("   ".to_owned());
+        // Whitespace-only explicit is treated as unset.
+        assert!(pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &[]).is_none());
     }
 }

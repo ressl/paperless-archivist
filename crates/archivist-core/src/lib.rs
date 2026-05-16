@@ -1070,6 +1070,19 @@ pub struct AiSettings {
     pub providers: Vec<AiProviderSettings>,
     #[serde(default)]
     pub external_provider_warning_acknowledged: bool,
+    /// Optional model to retry a vision call against when the configured primary
+    /// model crashes the Ollama runtime (GGML_ASSERT / "runner process no longer
+    /// running"). When set, the worker silently retries the same page on this
+    /// model before bubbling the error to the orchestrator. Backward-compatible:
+    /// when `None`, the worker walks a hardcoded safe-default chain instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_vision_model: Option<String>,
+    /// One-shot startup behavior: when true (default), the worker requeues any
+    /// `failed` OCR jobs whose error message matches the vision-runtime-crash
+    /// signature so they get a second chance under the new fallback machinery.
+    /// Operators can disable this if the queue should not be touched on upgrade.
+    #[serde(default = "default_true")]
+    pub requeue_vision_crashes_on_startup: bool,
 }
 
 impl Default for AiSettings {
@@ -1082,6 +1095,8 @@ impl Default for AiSettings {
             stage_models: Vec::new(),
             providers: AiProviderSettings::default_providers(),
             external_provider_warning_acknowledged: false,
+            fallback_vision_model: None,
+            requeue_vision_crashes_on_startup: true,
         }
     }
 }
