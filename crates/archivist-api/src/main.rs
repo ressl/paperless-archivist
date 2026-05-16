@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -1464,7 +1464,20 @@ async fn test_paperless(
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::ReadSettings)?;
     let result = async {
-        let client = paperless_client(&state.pool, &state.config).await?;
+        let settings = get_runtime_settings(&state.pool).await?;
+        let active_profile = settings.paperless.archive_profiles.iter().find(|profile| {
+            profile.enabled
+                && profile
+                    .name
+                    .eq_ignore_ascii_case(&settings.paperless.active_archive)
+        });
+        let base_url = active_profile
+            .map(|profile| profile.base_url.as_str())
+            .unwrap_or(&settings.paperless.base_url);
+        if let Err(error) = validate_outbound_url(base_url).await {
+            return Err(anyhow!("Paperless base URL rejected: {}", error.message));
+        }
+        let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
         client.test_connection().await
     }
     .await;
@@ -1481,6 +1494,12 @@ async fn test_provider(
     require(&auth.0, Permission::ReadSettings)?;
     let settings = get_runtime_settings(&state.pool).await?;
     let provider = provider_for_default_text(&settings)?;
+    if let Err(error) = validate_outbound_url(&provider.base_url).await {
+        return Ok(Json(json!({
+            "ok": false,
+            "error": format!("AI provider base URL rejected: {}", error.message),
+        })));
+    }
     let result = test_ai_provider(&state, &provider).await;
     match result {
         Ok(value) => Ok(Json(json!({ "ok": true, "details": value }))),
@@ -1527,12 +1546,108 @@ async fn notification_webhook_url(state: &AppState, settings: &RuntimeSettings) 
     let webhook_url = resolve_secret(&state.pool, &state.config.secret_key, secret_id)
         .await?
         .ok_or_else(|| anyhow!("Notification webhook secret reference does not exist"))?;
-    let parsed = Url::parse(webhook_url.expose_secret())
-        .map_err(|_| anyhow!("Notification webhook URL is invalid"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(anyhow!("Notification webhook URL must use http or https"));
-    }
+    validate_outbound_url(webhook_url.expose_secret())
+        .await
+        .map_err(|error| anyhow!(error.message))?;
     Ok(webhook_url.expose_secret().to_owned())
+}
+
+/// Parse a URL provided by an administrator and reject targets that would
+/// allow Server-Side Request Forgery (SSRF) against the host network. The
+/// caller is expected to use this on every outbound "tester" endpoint where
+/// an admin can supply an arbitrary URL.
+///
+/// Rejections:
+///  * non-http/https schemes
+///  * URLs containing `user:pass@` userinfo
+///  * URLs whose host resolves (DNS) to a loopback, link-local, private
+///    (RFC1918), shared-address (RFC6598), or unique-local (RFC4193) address
+///
+/// Returns the parsed `Url` on success.
+async fn validate_outbound_url(raw: &str) -> Result<Url, ApiError> {
+    let parsed = Url::parse(raw.trim()).map_err(|_| ApiError::bad_request("invalid URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ApiError::bad_request("URL scheme must be http or https"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApiError::bad_request("URL must not contain userinfo"));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ApiError::bad_request("URL is missing a host"))?
+        .to_owned();
+    let port = parsed.port_or_known_default().unwrap_or(0);
+    // `lookup_host` accepts both literal IPs (in `Host`) and DNS names.
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|error| ApiError::bad_request(format!("failed to resolve host: {error}")))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(ApiError::bad_request("host did not resolve to any address"));
+    }
+    for addr in &addrs {
+        if is_private_or_local_ip(addr.ip()) {
+            return Err(ApiError::bad_request(
+                "URL resolves to a private, loopback, or link-local address",
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
+fn is_private_or_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_or_local_ipv4(v4),
+        IpAddr::V6(v6) => is_private_or_local_ipv6(v6),
+    }
+}
+
+fn is_private_or_local_ipv4(ip: Ipv4Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
+        return true;
+    }
+    // is_private already covers 10/8, 172.16/12, 192.168/16.
+    if ip.is_private() {
+        return true;
+    }
+    // is_link_local covers 169.254/16.
+    if ip.is_link_local() {
+        return true;
+    }
+    // RFC6598 shared-address space 100.64.0.0/10.
+    let octets = ip.octets();
+    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000 {
+        return true;
+    }
+    false
+}
+
+fn is_private_or_local_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    // Mapped IPv4: re-evaluate the embedded v4.
+    if let Some(v4) = ip.to_ipv4_mapped()
+        && is_private_or_local_ipv4(v4)
+    {
+        return true;
+    }
+    // 4-in-6 deprecated form.
+    if let Some(v4) = ip.to_ipv4()
+        && is_private_or_local_ipv4(v4)
+    {
+        return true;
+    }
+    let segments = ip.segments();
+    // Link-local fe80::/10
+    if (segments[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    // Unique-local fc00::/7
+    if (segments[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    false
 }
 
 async fn send_notification_webhook(webhook_url: &str, payload: Value) -> Result<()> {
@@ -1588,6 +1703,14 @@ async fn model_provider_models(
             "installed model discovery is only available for Ollama providers",
         ));
     }
+    validate_outbound_url(&provider.base_url)
+        .await
+        .map_err(|error| {
+            ApiError::bad_request(format!(
+                "Ollama provider base URL rejected: {}",
+                error.message
+            ))
+        })?;
     let client = OllamaClient::new_with_timeout(
         &provider.base_url,
         provider_secret(&state, &provider).await?,
@@ -4299,6 +4422,61 @@ mod tests {
         assert!(validate_password_strength("short").is_err());
         assert!(validate_password_strength("            ").is_err());
         assert!(validate_password_strength("long-enough-password").is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_accepts_public_host() {
+        // 8.8.8.8 is a public unicast address; no DNS needed.
+        let ok = validate_outbound_url("https://8.8.8.8/healthz").await;
+        assert!(ok.is_ok(), "expected public IP to be accepted: {ok:?}");
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_loopback() {
+        let err = validate_outbound_url("http://127.0.0.1:8080/")
+            .await
+            .expect_err("loopback must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_rfc1918() {
+        let err = validate_outbound_url("https://10.0.0.5/api")
+            .await
+            .expect_err("RFC1918 must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_non_http_scheme() {
+        let err = validate_outbound_url("file:///etc/passwd")
+            .await
+            .expect_err("non-http scheme rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_userinfo() {
+        let err = validate_outbound_url("http://user:pass@8.8.8.8/")
+            .await
+            .expect_err("userinfo rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_ipv6_loopback() {
+        let err = validate_outbound_url("http://[::1]/")
+            .await
+            .expect_err("IPv6 loopback rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_link_local() {
+        let err = validate_outbound_url("http://169.254.169.254/latest/meta-data/")
+            .await
+            .expect_err("link-local rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]
