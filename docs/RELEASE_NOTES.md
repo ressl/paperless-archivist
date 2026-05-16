@@ -1,5 +1,55 @@
 # Release Notes
 
+> Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
+> `frontend/package.json` tracks the UI release alongside the tag (currently
+> `1.1.2`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> internal version `0.3.2`; bumping them does not change the release.
+
+## In Progress — Milestone #14 Post-v1.1 hardening
+
+Post-v1.1 hardening work is ongoing. Recently merged issues include:
+
+- #80 partial indexes on `audit_events(job_id)` and `(run_id)`
+- #81 deduped dashboard helper queries (range start + runtime settings)
+- #82 shared `ErrorBoundary` at shell, tab, and dashboard-ops levels
+- #83 constant-time CSRF token comparison + threat-model docs
+- #87 explicit request body size limits with per-route overrides
+- #88 worker retry backoff jitter (+/-25%) to avoid thundering herds
+- #92 O(1) tag lookup in the worker's Paperless trigger poll
+- #96 release notes catch-up
+- #99 dashboard `provider_usage` feedback join bounded by date range
+
+Larger items (audit streaming, queue_missing SQL LIMIT push-down, login
+IP rate limit, SSRF URL validator, App.tsx extraction, code splitting,
+tracing, snapshot off the read path) remain open against Milestone #14.
+
+## v1.1.2
+
+- Workflow card stack layout fix on the operations strip.
+- HealthBadge wrap fix and per-provider sparkline data wired up from
+  bucketed series.
+- Chart-pattern fills and a proper tablist under 1100 px viewport.
+- Frontend a11y smoke test (axe-core) wired into the static check.
+
+## v1.1.1
+
+- Apply `rustfmt` to dashboard enrichment code so the workspace
+  formatting check stays green.
+
+## v1.1.0 — Operations Dashboard Overhaul (Milestone #13)
+
+Operations-first refresh of the dashboard.
+
+- AlertsBar with severity grouping and quick links to recovery actions.
+- HealthBadge consolidating Paperless, providers, and worker liveness.
+- StageMatrix with per-stage status, throughput, and failure rates.
+- CostPanel with provider, model, and time-range breakdowns; cost is
+  surfaced as `Option` (no fabricated zeros).
+- MaintenanceDrawer for safe, low-traffic operator actions.
+- A11y pass on dashboard pills, tabs, and chart fallback contexts.
+- Renamed `frontend/package.json` to `1.1.0` (now `1.1.2` after the
+  v1.1.1 and v1.1.2 follow-ups above).
+
 ## v1.0.0 GA
 
 Paperless Archivist v1.0.0 is the first GA-ready release of the secure AI
