@@ -26,17 +26,16 @@ use archivist_db::{
     create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
     document_chat_session_visible, find_api_token, find_session, find_user_for_login,
     get_backlog_counts, get_dashboard_live_status, get_dashboard_stats, get_runtime_settings,
-    provider_bucket_entries,
     has_any_user, hash_token, insert_document_chat_message, insert_document_chat_sources,
     list_allowed_named_entities, list_allowed_tag_names, list_audit_events, list_custom_fields,
     list_document_chat_messages, list_document_chat_sessions, list_inventory, list_prompt_usage,
     list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
-    metrics_snapshot as db_metrics_snapshot, migrate, paperless_sync_cursor, queue_missing_stage,
-    record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
-    recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
-    rotate_api_token, search_document_chat_candidates, set_user_enabled, set_user_roles,
-    update_paperless_sync_cursor, update_runtime_settings, update_user_password_hash,
-    upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
+    metrics_snapshot as db_metrics_snapshot, migrate, paperless_sync_cursor,
+    provider_bucket_entries, queue_missing_stage, record_login_failure, record_login_success,
+    recover_stale_leases, recover_stuck_runs, recovery_candidates, resolve_secret, review_decision,
+    revoke_session_by_admin, rotate_api_token, search_document_chat_candidates, set_user_enabled,
+    set_user_roles, update_paperless_sync_cursor, update_runtime_settings,
+    update_user_password_hash, upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
     verify_audit_integrity,
 };
@@ -2283,7 +2282,11 @@ fn enrich_dashboard_costs(stats: &mut DashboardStats, settings: &RuntimeSettings
         .iter()
         .filter_map(|item| item.estimated_cost_usd)
         .sum();
-    stats.kpis.cost_in_range_usd = if stats.provider_usage.iter().any(|p| p.estimated_cost_usd.is_some()) {
+    stats.kpis.cost_in_range_usd = if stats
+        .provider_usage
+        .iter()
+        .any(|p| p.estimated_cost_usd.is_some())
+    {
         Some(total_cost)
     } else {
         None
@@ -2362,9 +2365,8 @@ fn enrich_provider_sparklines(
     if bucket_count == 0 {
         return;
     }
-    let bucket_index_of = |bucket: DateTime<Utc>| -> Option<usize> {
-        labels.iter().position(|(b, _)| *b == bucket)
-    };
+    let bucket_index_of =
+        |bucket: DateTime<Utc>| -> Option<usize> { labels.iter().position(|(b, _)| *b == bucket) };
     let rate_for = |provider_name: &str| -> Option<(f64, f64)> {
         let provider = settings
             .ai

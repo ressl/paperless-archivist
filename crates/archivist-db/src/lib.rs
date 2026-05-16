@@ -2816,9 +2816,11 @@ pub fn dashboard_bucket_labels(
             archivist_core::DashboardGranularity::Day => cursor + ChronoDuration::days(1),
             archivist_core::DashboardGranularity::Month => {
                 let next_month = if cursor.month() == 12 {
-                    Utc.with_ymd_and_hms(cursor.year() + 1, 1, 1, 0, 0, 0).single()
+                    Utc.with_ymd_and_hms(cursor.year() + 1, 1, 1, 0, 0, 0)
+                        .single()
                 } else {
-                    Utc.with_ymd_and_hms(cursor.year(), cursor.month() + 1, 1, 0, 0, 0).single()
+                    Utc.with_ymd_and_hms(cursor.year(), cursor.month() + 1, 1, 0, 0, 0)
+                        .single()
                 };
                 match next_month {
                     Some(value) => value,
@@ -2848,7 +2850,14 @@ fn truncate_to_granularity(
             .single()
             .unwrap_or(timestamp),
         archivist_core::DashboardGranularity::Day => Utc
-            .with_ymd_and_hms(timestamp.year(), timestamp.month(), timestamp.day(), 0, 0, 0)
+            .with_ymd_and_hms(
+                timestamp.year(),
+                timestamp.month(),
+                timestamp.day(),
+                0,
+                0,
+                0,
+            )
             .single()
             .unwrap_or(timestamp),
         archivist_core::DashboardGranularity::Month => Utc
@@ -3342,8 +3351,9 @@ async fn needs_attention_items(
             kind: "stale_leases".to_owned(),
             severity: "warning".to_owned(),
             title: format!("{stale_leases} stale lease(s)"),
-            description: "Workers hold expired leases. Requeue to let healthy workers pick them up."
-                .to_owned(),
+            description:
+                "Workers hold expired leases. Requeue to let healthy workers pick them up."
+                    .to_owned(),
             action_key: Some("dashboard.alerts.action.requeue_leases".to_owned()),
             count: Some(stale_leases),
         });
@@ -3393,8 +3403,9 @@ async fn needs_attention_items(
             kind: "dry_run_active".to_owned(),
             severity: "info".to_owned(),
             title: "Dry-run mode is active".to_owned(),
-            description: "Validated patches will not be applied to Paperless until dry-run is disabled."
-                .to_owned(),
+            description:
+                "Validated patches will not be applied to Paperless until dry-run is disabled."
+                    .to_owned(),
             action_key: Some("dashboard.alerts.action.disable_dry_run".to_owned()),
             count: None,
         });
