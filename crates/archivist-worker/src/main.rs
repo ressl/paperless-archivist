@@ -162,13 +162,17 @@ async fn record_dashboard_snapshot_tick(pool: &DbPool) -> Result<()> {
 /// Tick wrapper for the autopilot review drain.
 ///
 /// Loads the latest runtime settings each invocation (the dashboard mode
-/// badge reflects the live runtime mode, and so should this drain). Wrapped
-/// in a tokio timeout so a stuck Paperless host cannot freeze the worker
-/// tick loop — the next tick can retry.
+/// badge reflects the live runtime mode, and so should this drain).
+///
+/// The outer timeout is intentionally generous (8 minutes) because each
+/// drained item already has its own short Paperless-side timeout — see
+/// `apply_one_autopilot_drain_review`. The outer cap is just a last-ditch
+/// liveness guard so a fully wedged Paperless host can't permanently
+/// occupy this tick slot.
 async fn drain_pending_reviews_if_autopilot_tick(pool: &DbPool, config: &AppConfig) -> Result<()> {
     let settings = get_runtime_settings(pool).await?;
     let applied = timeout(
-        Duration::from_secs(120),
+        Duration::from_secs(8 * 60),
         drain_pending_reviews_if_autopilot(pool, config, &settings),
     )
     .await
@@ -1376,10 +1380,12 @@ async fn drain_pending_reviews_if_autopilot(
     let Some(budget) = autopilot_drain_budget(settings, &safety) else {
         return Ok(0);
     };
-    // Hard ceiling per tick so a fresh backlog cannot stall the worker tick
-    // loop on a single drain. Combined with the safety budget, this also
-    // gives the dashboard a visible ramp rather than a single spike.
-    const PER_TICK_CEILING: i64 = 50;
+    // Hard ceiling per tick. Bumped from 50 to 100 in v1.3.2 after the
+    // first production deployment showed the original cap drained too
+    // slowly on backlogs in the multi-thousand range. Still safety-budget
+    // bounded, so an operator hourly cap of e.g. 200/h continues to land
+    // ~200 items/h regardless of this ceiling.
+    const PER_TICK_CEILING: i64 = 100;
     let limit = match budget {
         None => PER_TICK_CEILING,
         Some(remaining) => remaining.min(PER_TICK_CEILING),
@@ -1393,11 +1399,45 @@ async fn drain_pending_reviews_if_autopilot(
     }
     let paperless = paperless_client(pool, config, settings).await?;
 
+    // Hoist the tag list out of the per-item loop. The v1.3.1 drain called
+    // `paperless.list_tags()` AND `paperless.ensure_tag()` (which itself
+    // calls `list_tags` internally) on every iteration. With paginated
+    // tag responses that's a multi-second cost per item; on a 4000-item
+    // backlog the per-tick deadline ran out before more than 1-2 items
+    // were applied. We snapshot tags once per drain batch, ensure all
+    // workflow tags we might need, and reuse them per item. New tags
+    // created during the batch are appended to the local snapshot.
+    let mut tag_cache = paperless.list_tags().await?;
+    let completion_full = ensure_tag_cached(
+        &paperless,
+        &mut tag_cache,
+        &settings.workflow.tags.completion_processed,
+    )
+    .await?;
+
     let mut applied = 0usize;
     for review in pending {
         let review_id = review.id;
         let paperless_document_id = review.paperless_document_id;
-        match apply_one_autopilot_drain_review(pool, &paperless, settings, review).await {
+        // Per-item timeout: keep one slow Paperless call from holding up
+        // the whole batch. The PATCH itself rarely blocks for more than a
+        // second or two; 45s gives even a sluggish or rate-limited
+        // Paperless time to respond before we move on and let the row
+        // retry on the next tick.
+        let result = timeout(
+            Duration::from_secs(45),
+            apply_one_autopilot_drain_review(
+                pool,
+                &paperless,
+                settings,
+                review,
+                &mut tag_cache,
+                completion_full.clone(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("per-item drain timeout after 45s")));
+        match result {
             Ok(true) => {
                 applied += 1;
                 info!(
@@ -1424,17 +1464,47 @@ async fn drain_pending_reviews_if_autopilot(
     Ok(applied)
 }
 
+/// Local cache helper for the drain: look up a workflow tag by name in the
+/// pre-fetched tag list, creating it on Paperless (and inserting into the
+/// cache) only if it really isn't there yet. Replaces the per-item
+/// `paperless.ensure_tag()` call that re-fetched the whole tag page.
+async fn ensure_tag_cached(
+    paperless: &PaperlessClient,
+    cache: &mut Vec<archivist_paperless::PaperlessTag>,
+    name: &str,
+) -> Result<archivist_paperless::PaperlessTag> {
+    if let Some(tag) = cache.iter().find(|t| t.name.eq_ignore_ascii_case(name)) {
+        return Ok(tag.clone());
+    }
+    let created = paperless.ensure_tag(name).await?;
+    if !cache.iter().any(|t| t.id == created.id) {
+        cache.push(created.clone());
+    }
+    Ok(created)
+}
+
 async fn apply_one_autopilot_drain_review(
     pool: &DbPool,
     paperless: &PaperlessClient,
     settings: &RuntimeSettings,
     review: ReviewItemRecord,
+    tag_cache: &mut Vec<archivist_paperless::PaperlessTag>,
+    completion_full: archivist_paperless::PaperlessTag,
 ) -> Result<bool> {
     let Some(claimed) = claim_pending_review_for_autopilot_drain(pool, review.id).await? else {
         // Raced — the row is no longer pending.
         return Ok(false);
     };
-    if let Err(error) = apply_autopilot_drain_patch(pool, paperless, settings, &claimed).await {
+    if let Err(error) = apply_autopilot_drain_patch(
+        pool,
+        paperless,
+        settings,
+        &claimed,
+        tag_cache,
+        &completion_full,
+    )
+    .await
+    {
         // Roll the row back to pending so the next tick can retry. We
         // deliberately don't audit a failure event here — Paperless errors
         // already get an `document.patch_apply_failed` audit inside
@@ -1460,6 +1530,8 @@ async fn apply_autopilot_drain_patch(
     paperless: &PaperlessClient,
     settings: &RuntimeSettings,
     review: &ReviewItemRecord,
+    tag_cache: &mut Vec<archivist_paperless::PaperlessTag>,
+    completion_full: &archivist_paperless::PaperlessTag,
 ) -> Result<()> {
     let patch_value = review
         .edited_patch
@@ -1472,35 +1544,29 @@ async fn apply_autopilot_drain_patch(
         false
     };
     let document = paperless.get_document(review.paperless_document_id).await?;
-    let all_tags = paperless.list_tags().await?;
     let mut tag_ids = patch.tags.clone().unwrap_or_else(|| document.tags.clone());
     if let Some(completion_name) = settings
         .workflow
         .tags
         .completion_tag_for_stage(review.stage)
     {
-        let tag = paperless.ensure_tag(completion_name).await?;
+        let tag = ensure_tag_cached(paperless, tag_cache, completion_name).await?;
         if !tag_ids.contains(&tag.id) {
             tag_ids.push(tag.id);
         }
     }
-    if final_run_stage {
-        let tag = paperless
-            .ensure_tag(&settings.workflow.tags.completion_processed)
-            .await?;
-        if !tag_ids.contains(&tag.id) {
-            tag_ids.push(tag.id);
-        }
+    if final_run_stage && !tag_ids.contains(&completion_full.id) {
+        tag_ids.push(completion_full.id);
     }
     if let Some(trigger_name) = settings.workflow.tags.trigger_tag_for_stage(review.stage)
-        && let Some(tag) = all_tags
+        && let Some(tag) = tag_cache
             .iter()
             .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
     {
         tag_ids.retain(|id| *id != tag.id);
     }
     if final_run_stage
-        && let Some(tag) = all_tags.iter().find(|tag| {
+        && let Some(tag) = tag_cache.iter().find(|tag| {
             tag.name
                 .eq_ignore_ascii_case(&settings.workflow.tags.trigger_process)
         })
