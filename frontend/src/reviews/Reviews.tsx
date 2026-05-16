@@ -6,11 +6,11 @@ import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
 import { stageLabel } from '../lib/format';
 import { DebugContextDetails } from '../lib/DebugContextDetails';
 
-type ReviewPatchRecord = Record<string, unknown> & {
+export type ReviewPatchRecord = Record<string, unknown> & {
   standard_metadata?: Record<string, unknown>;
 };
 
-type ReviewEditState = {
+export type ReviewEditState = {
   title?: string;
   correspondent?: string;
   document_type?: string;
@@ -228,7 +228,7 @@ function asReviewPatch(value: unknown): ReviewPatchRecord | null {
   return null;
 }
 
-function reviewEditStateFromPatch(patch: ReviewPatchRecord | null): ReviewEditState {
+export function reviewEditStateFromPatch(patch: ReviewPatchRecord | null): ReviewEditState {
   if (!patch) return {};
   const state: ReviewEditState = {};
   if (Object.prototype.hasOwnProperty.call(patch, 'title')) state.title = String(patch.title ?? '');
@@ -238,7 +238,7 @@ function reviewEditStateFromPatch(patch: ReviewPatchRecord | null): ReviewEditSt
   return state;
 }
 
-function buildEditedReviewPatch(patch: ReviewPatchRecord, edit: ReviewEditState): Record<string, unknown> | null {
+export function buildEditedReviewPatch(patch: ReviewPatchRecord, edit: ReviewEditState): Record<string, unknown> | null {
   const edited: Record<string, unknown> = { ...patch };
   delete edited.standard_metadata;
   if (edit.title !== undefined) edited.title = edit.title.trim();

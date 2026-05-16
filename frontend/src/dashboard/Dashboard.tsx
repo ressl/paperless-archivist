@@ -106,7 +106,7 @@ function liveFailureTiming(
   return t('dashboard.live.updated', { time: formatRelative(failure.updated_at) });
 }
 
-function computeHealthScore(stats: DashboardStats | null, live: DashboardLiveStatus | null) {
+export function computeHealthScore(stats: DashboardStats | null, live: DashboardLiveStatus | null) {
   if (!stats) return null;
   let score = 100;
   score -= Math.min(50, stats.kpis.failure_rate * 100);
@@ -689,7 +689,7 @@ function StageMatrix({ stats, onStageSelect }: { stats: DashboardStats | null; o
               <th><button type="button" onClick={() => handleSort('p95_ms')}>{t('dashboard.stage_matrix.p95')}{arrow('p95_ms')}</button></th>
               <th><button type="button" onClick={() => handleSort('throughput_per_hour')}>{t('dashboard.stage_matrix.throughput_per_hour')}{arrow('throughput_per_hour')}</button></th>
               <th>{t('dashboard.stage_matrix.complete')}</th>
-              <th>{' '}</th>
+              <th scope="col">{t('dashboard.stage_matrix.bottleneck')}</th>
             </tr>
           </thead>
           <tbody>

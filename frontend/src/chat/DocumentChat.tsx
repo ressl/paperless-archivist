@@ -146,7 +146,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
   );
 }
 
-function parseDocumentIds(value: string): number[] | null | false {
+export function parseDocumentIds(value: string): number[] | null | false {
   const trimmed = value.trim();
   if (!trimmed) return null;
   const ids = trimmed.split(',').map((part) => Number(part.trim()));

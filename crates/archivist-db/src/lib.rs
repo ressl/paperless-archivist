@@ -3033,7 +3033,7 @@ async fn dashboard_comparison(
     current: ActivitySummary,
     previous: Option<ActivitySummary>,
 ) -> Result<DashboardComparison> {
-    let previous_open_backlog = sqlx::query(
+    let previous_open_backlog: Option<i64> = sqlx::query(
         r#"
         select total_documents - complete as open_backlog
           from dashboard_snapshots
@@ -3046,19 +3046,38 @@ async fn dashboard_comparison(
     .fetch_optional(pool)
     .await?
     .map(|row| row.try_get::<i64, _>("open_backlog"))
-    .transpose()?
-    .unwrap_or(counts.total_documents - counts.complete);
+    .transpose()?;
+    Ok(compute_dashboard_comparison(
+        counts,
+        current,
+        previous,
+        previous_open_backlog,
+    ))
+}
+
+/// Pure half of `dashboard_comparison` — composes a `DashboardComparison`
+/// from the current activity summary, the optional previous-period summary
+/// and an optional historical open-backlog snapshot. Extracted so the math
+/// can be unit-tested without a pool.
+fn compute_dashboard_comparison(
+    counts: &BacklogCounts,
+    current: ActivitySummary,
+    previous: Option<ActivitySummary>,
+    previous_open_backlog: Option<i64>,
+) -> DashboardComparison {
+    let previous_open_backlog =
+        previous_open_backlog.unwrap_or(counts.total_documents - counts.complete);
     let previous = previous.unwrap_or(ActivitySummary {
         jobs_created: current.jobs_created,
         jobs_succeeded: current.jobs_succeeded,
         jobs_failed: current.jobs_failed,
     });
-    Ok(DashboardComparison {
+    DashboardComparison {
         jobs_created_delta: current.jobs_created - previous.jobs_created,
         jobs_succeeded_delta: current.jobs_succeeded - previous.jobs_succeeded,
         jobs_failed_delta: current.jobs_failed - previous.jobs_failed,
         open_backlog_delta: counts.total_documents - counts.complete - previous_open_backlog,
-    })
+    }
 }
 
 async fn stage_status(pool: &DbPool) -> Result<Vec<DashboardStageStatus>> {
@@ -3213,6 +3232,20 @@ async fn backlog_series(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    apply_backlog_series_empty_state_fallback(&mut points, now, granularity, counts);
+
+    Ok(points)
+}
+
+/// Pure helper that synthesises a single "now" backlog point from the live
+/// `counts` snapshot when no `dashboard_snapshots` rows fall inside the
+/// requested range. Extracted so the empty-state behaviour can be unit-tested.
+fn apply_backlog_series_empty_state_fallback(
+    points: &mut Vec<DashboardBacklogPoint>,
+    now: DateTime<Utc>,
+    granularity: archivist_core::DashboardGranularity,
+    counts: &BacklogCounts,
+) {
     if points.is_empty() {
         points.push(DashboardBacklogPoint {
             bucket: now,
@@ -3225,8 +3258,6 @@ async fn backlog_series(
             running: counts.running,
         });
     }
-
-    Ok(points)
 }
 
 /// Tables that the dashboard groups by `status`. The variants are the only valid
@@ -3387,8 +3418,9 @@ async fn needs_attention_items(
     safety: &WorkflowSafetyStatus,
     recent_failures: &[DashboardLiveFailure],
 ) -> Result<Vec<NeedsAttentionItem>> {
-    let mut items = Vec::new();
-
+    // Pull the two pool-dependent counts first; the rest of the composition
+    // is pure and lives in `compose_needs_attention_items` so it can be
+    // unit-tested without a database. See the tests module.
     let stuck_runs: i64 = sqlx::query_scalar(
         r#"
         select count(*)::bigint
@@ -3400,17 +3432,6 @@ async fn needs_attention_items(
     .fetch_one(pool)
     .await
     .context("count stuck runs")?;
-    if stuck_runs > 0 {
-        items.push(NeedsAttentionItem {
-            kind: "stuck_runs".to_owned(),
-            severity: "critical".to_owned(),
-            title: format!("{stuck_runs} stuck run(s)"),
-            description: "Pipeline runs have not progressed in the last 10 minutes.".to_owned(),
-            action_key: Some("dashboard.alerts.action.recover_runs".to_owned()),
-            count: Some(stuck_runs),
-        });
-    }
-
     let stale_leases: i64 = sqlx::query_scalar(
         r#"
         select count(*)::bigint
@@ -3423,6 +3444,37 @@ async fn needs_attention_items(
     .fetch_one(pool)
     .await
     .context("count stale leases")?;
+
+    Ok(compose_needs_attention_items(
+        stuck_runs,
+        stale_leases,
+        safety,
+        recent_failures,
+    ))
+}
+
+/// Pure composition of `NeedsAttentionItem`s from a snapshot of the inputs
+/// `needs_attention_items` would otherwise gather from the database. Extracted
+/// so the ordering and threshold logic can be unit-tested without a pool.
+fn compose_needs_attention_items(
+    stuck_runs: i64,
+    stale_leases: i64,
+    safety: &WorkflowSafetyStatus,
+    recent_failures: &[DashboardLiveFailure],
+) -> Vec<NeedsAttentionItem> {
+    let mut items = Vec::new();
+
+    if stuck_runs > 0 {
+        items.push(NeedsAttentionItem {
+            kind: "stuck_runs".to_owned(),
+            severity: "critical".to_owned(),
+            title: format!("{stuck_runs} stuck run(s)"),
+            description: "Pipeline runs have not progressed in the last 10 minutes.".to_owned(),
+            action_key: Some("dashboard.alerts.action.recover_runs".to_owned()),
+            count: Some(stuck_runs),
+        });
+    }
+
     if stale_leases > 0 {
         items.push(NeedsAttentionItem {
             kind: "stale_leases".to_owned(),
@@ -3495,7 +3547,7 @@ async fn needs_attention_items(
         _ => 3,
     });
 
-    Ok(items)
+    items
 }
 
 fn quota_below_threshold(remaining: Option<i64>, limit: Option<i64>) -> bool {
@@ -5698,6 +5750,243 @@ mod tests {
         }
         assert!(status_column_for_stage(Stage::OcrFix).is_err());
         assert!(status_column_for_stage(Stage::Apply).is_err());
+    }
+
+    fn empty_counts(total: i64, complete: i64) -> BacklogCounts {
+        BacklogCounts {
+            total_documents: total,
+            complete,
+            missing_ocr: 0,
+            missing_tagging: 0,
+            missing_title: 0,
+            missing_correspondent: 0,
+            missing_document_type: 0,
+            missing_document_date: 0,
+            missing_fields: 0,
+            waiting_review: 0,
+            failed: 0,
+            running: 0,
+            never_processed: 0,
+        }
+    }
+
+    fn unrestricted_safety(dry_run: bool) -> WorkflowSafetyStatus {
+        WorkflowSafetyStatus {
+            paused: false,
+            dry_run,
+            hourly_document_limit: None,
+            daily_document_limit: None,
+            hourly_remaining: None,
+            daily_remaining: None,
+        }
+    }
+
+    fn live_failure(failure_kind: &str) -> DashboardLiveFailure {
+        DashboardLiveFailure {
+            id: Uuid::nil(),
+            run_id: Uuid::nil(),
+            paperless_document_id: 0,
+            stage: Stage::Ocr,
+            status: "failed".to_owned(),
+            failure_kind: failure_kind.to_owned(),
+            attempts: 1,
+            error_message: String::new(),
+            next_attempt_at: None,
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn dashboard_comparison_subtracts_previous_window_and_uses_snapshot_when_present() {
+        let counts = empty_counts(120, 80);
+        let current = ActivitySummary {
+            jobs_created: 50,
+            jobs_succeeded: 40,
+            jobs_failed: 7,
+        };
+        let previous = Some(ActivitySummary {
+            jobs_created: 30,
+            jobs_succeeded: 25,
+            jobs_failed: 4,
+        });
+        let comparison = compute_dashboard_comparison(&counts, current, previous, Some(50));
+        assert_eq!(comparison.jobs_created_delta, 20);
+        assert_eq!(comparison.jobs_succeeded_delta, 15);
+        assert_eq!(comparison.jobs_failed_delta, 3);
+        // open_backlog = 120 - 80 = 40; previous_open_backlog = 50; delta = -10.
+        assert_eq!(comparison.open_backlog_delta, -10);
+    }
+
+    #[test]
+    fn dashboard_comparison_falls_back_to_zero_deltas_when_history_is_missing() {
+        let counts = empty_counts(120, 80);
+        let current = ActivitySummary {
+            jobs_created: 5,
+            jobs_succeeded: 3,
+            jobs_failed: 1,
+        };
+        // No previous window and no snapshot -> deltas should all be zero
+        // because the "previous" defaults to the current values and the
+        // historical backlog defaults to the current open backlog.
+        let comparison = compute_dashboard_comparison(&counts, current, None, None);
+        assert_eq!(comparison.jobs_created_delta, 0);
+        assert_eq!(comparison.jobs_succeeded_delta, 0);
+        assert_eq!(comparison.jobs_failed_delta, 0);
+        assert_eq!(comparison.open_backlog_delta, 0);
+    }
+
+    #[test]
+    fn backlog_series_empty_state_synthesises_a_single_now_point() {
+        let mut points: Vec<DashboardBacklogPoint> = Vec::new();
+        let now = Utc::now();
+        let counts = BacklogCounts {
+            total_documents: 250,
+            complete: 200,
+            missing_ocr: 0,
+            missing_tagging: 0,
+            missing_title: 0,
+            missing_correspondent: 0,
+            missing_document_type: 0,
+            missing_document_date: 0,
+            missing_fields: 0,
+            waiting_review: 3,
+            failed: 4,
+            running: 2,
+            never_processed: 0,
+        };
+        apply_backlog_series_empty_state_fallback(
+            &mut points,
+            now,
+            archivist_core::DashboardGranularity::Hour,
+            &counts,
+        );
+        assert_eq!(points.len(), 1);
+        let point = &points[0];
+        assert_eq!(point.total_documents, 250);
+        assert_eq!(point.complete, 200);
+        assert_eq!(point.open_backlog, 50);
+        assert_eq!(point.failed, 4);
+        assert_eq!(point.waiting_review, 3);
+        assert_eq!(point.running, 2);
+    }
+
+    #[test]
+    fn backlog_series_empty_state_does_not_overwrite_existing_points() {
+        let mut points: Vec<DashboardBacklogPoint> = vec![DashboardBacklogPoint {
+            bucket: Utc::now(),
+            label: "10:00".to_owned(),
+            total_documents: 1,
+            complete: 1,
+            open_backlog: 0,
+            failed: 0,
+            waiting_review: 0,
+            running: 0,
+        }];
+        apply_backlog_series_empty_state_fallback(
+            &mut points,
+            Utc::now(),
+            archivist_core::DashboardGranularity::Hour,
+            &empty_counts(99, 99),
+        );
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].total_documents, 1);
+    }
+
+    #[test]
+    fn needs_attention_items_emit_one_entry_per_kind() {
+        let safety = WorkflowSafetyStatus {
+            paused: false,
+            dry_run: true,
+            hourly_document_limit: Some(100),
+            daily_document_limit: Some(1000),
+            hourly_remaining: Some(2),  // <= ceil(100 * 0.1) = 10
+            daily_remaining: Some(900), // 900 > 100 -> not below threshold
+        };
+        let failures = vec![
+            live_failure("failed"),
+            live_failure("failed"),
+            live_failure("failed"),
+            live_failure("retry_scheduled"),
+        ];
+        let items = compose_needs_attention_items(2, 1, &safety, &failures);
+        let kinds: Vec<&str> = items.iter().map(|i| i.kind.as_str()).collect();
+        assert!(kinds.contains(&"stuck_runs"));
+        assert!(kinds.contains(&"stale_leases"));
+        assert!(kinds.contains(&"quota_low"));
+        assert!(kinds.contains(&"provider_error"));
+        assert!(kinds.contains(&"dry_run_active"));
+    }
+
+    #[test]
+    fn needs_attention_items_sort_critical_before_warning_before_info() {
+        let items = compose_needs_attention_items(
+            5,
+            5,
+            &unrestricted_safety(true),
+            &[
+                live_failure("failed"),
+                live_failure("failed"),
+                live_failure("failed"),
+            ],
+        );
+        let severities: Vec<&str> = items.iter().map(|i| i.severity.as_str()).collect();
+        // stuck_runs (critical) must come before stale_leases (warning),
+        // dry_run_active (info) must come last.
+        let critical_pos = severities
+            .iter()
+            .position(|s| *s == "critical")
+            .expect("expected at least one critical item");
+        let info_pos = severities
+            .iter()
+            .position(|s| *s == "info")
+            .expect("expected at least one info item");
+        assert!(
+            critical_pos < info_pos,
+            "critical severity ({critical_pos}) must sort before info ({info_pos}): {severities:?}"
+        );
+        for (index, severity) in severities.iter().enumerate().skip(1) {
+            let prev = match severities[index - 1] {
+                "critical" => 0,
+                "warning" => 1,
+                "info" => 2,
+                _ => 3,
+            };
+            let curr = match *severity {
+                "critical" => 0,
+                "warning" => 1,
+                "info" => 2,
+                _ => 3,
+            };
+            assert!(prev <= curr, "ordering broken at {index}: {severities:?}");
+        }
+    }
+
+    #[test]
+    fn needs_attention_items_skips_provider_error_when_failures_are_below_threshold() {
+        let items = compose_needs_attention_items(
+            0,
+            0,
+            &unrestricted_safety(false),
+            &[live_failure("failed"), live_failure("failed")],
+        );
+        let has_provider_error = items.iter().any(|i| i.kind == "provider_error");
+        assert!(!has_provider_error);
+    }
+
+    #[test]
+    fn quota_below_threshold_uses_ten_percent_floor() {
+        // Limit of 100 -> threshold = 10; remaining 10 must trip the alert,
+        // remaining 11 must not.
+        assert!(quota_below_threshold(Some(10), Some(100)));
+        assert!(!quota_below_threshold(Some(11), Some(100)));
+        // Limit of 3 -> threshold = max(ceil(0.3), 1) = 1; remaining 0 trips,
+        // remaining 2 doesn't.
+        assert!(quota_below_threshold(Some(0), Some(3)));
+        assert!(!quota_below_threshold(Some(2), Some(3)));
+        // Missing remaining or limit means no alert.
+        assert!(!quota_below_threshold(None, Some(100)));
+        assert!(!quota_below_threshold(Some(10), None));
+        assert!(!quota_below_threshold(Some(10), Some(0)));
     }
 
     #[test]
