@@ -4,7 +4,7 @@
 --   * document_inventory.metadata_status            — completion tracking for the consolidated
 --                                                    Stage::Metadata that replaces the six
 --                                                    per-field stages (title/tags/...).
---   * jobs.stage_priority (virtual column)          — derived from payload->>'stage_priority'.
+--   * jobs.stage_priority (stored generated column) — derived from payload->>'stage_priority'.
 --                                                    The legacy `priority` column previously
 --                                                    served BOTH cross-run prioritisation AND
 --                                                    within-run stage ordering (10, 20, 30...).
@@ -24,8 +24,24 @@ alter table document_inventory
 create index if not exists document_inventory_metadata_status_idx
   on document_inventory (metadata_status);
 
--- Virtual stage_priority column. Falls back to the legacy `priority` so in-flight runs queued
--- with payload = {"priority": N} (no stage_priority key) preserve their original stage ordering.
+-- Stored generated stage_priority column. PostgreSQL 18 does not allow indexes on virtual
+-- generated columns, and claim_jobs needs an indexable column for the within-run ordering key.
+-- Falls back to the legacy `priority` so in-flight runs queued with payload = {"priority": N}
+-- (no stage_priority key) preserve their original stage ordering.
+do $$
+begin
+  if exists (
+    select 1
+      from pg_attribute
+     where attrelid = 'jobs'::regclass
+       and attname = 'stage_priority'
+       and not attisdropped
+       and attgenerated <> 's'
+  ) then
+    alter table jobs drop column stage_priority;
+  end if;
+end $$;
+
 alter table jobs
   add column if not exists stage_priority integer generated always as (
     coalesce(
@@ -33,6 +49,6 @@ alter table jobs
       (payload ->> 'priority')::integer,
       100
     )
-  ) virtual;
+  ) stored;
 
 create index if not exists jobs_stage_priority_idx on jobs (run_id, stage_priority);

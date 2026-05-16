@@ -47,4 +47,24 @@ async fn migrations_apply_on_fresh_postgresql_18_database() {
     .expect("read table count");
 
     assert_eq!(tables, 8, "all GA tables should exist after migration");
+
+    let stage_priority_generated: String = sqlx::query(
+        r#"
+        select attgenerated::text
+          from pg_attribute
+         where attrelid = 'jobs'::regclass
+           and attname = 'stage_priority'
+           and not attisdropped
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect jobs.stage_priority generation mode")
+    .try_get(0)
+    .expect("read generated mode");
+
+    assert_eq!(
+        stage_priority_generated, "s",
+        "jobs.stage_priority must be stored so its index is supported"
+    );
 }

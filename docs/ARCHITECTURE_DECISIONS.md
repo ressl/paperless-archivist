@@ -395,8 +395,9 @@ Decision: Job rows carry two priority columns derived from `payload`:
 - `priority`        — cross-run ordering (smaller wins). Manual triggers
                        stamp `0`; auto-selected runs stamp
                        `1_000_000 - paperless_document_id`.
-- `stage_priority`  — within-run stage ordering (smaller wins). Stage 1
-                       gets 10, stage 2 gets 20, etc.
+- `stage_priority`  — stored generated column for within-run stage ordering
+                       (smaller wins). Stage 1 gets 10, stage 2 gets 20,
+                       etc.
 
 `claim_jobs` orders by `priority, stage_priority, run_after, created_at`
 and uses `stage_priority` (not `priority`) in the within-run dependency
@@ -423,6 +424,8 @@ Implications:
   migration's `coalesce` fallback. The split is fully backward compatible.
 - A future reschedule API can change a job's cross-run priority by editing
   `payload->>'priority'` without disturbing stage ordering.
+- `stage_priority` is stored rather than virtual because PostgreSQL 18 does
+  not support indexes on virtual generated columns.
 - The `claim_jobs` retry bias (`order by case when error_message is not
   null ... then 0 else 1 end`) still runs first, so a stuck retry never
   starves out behind a flood of priority-0 manual triggers.

@@ -2,8 +2,16 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.4.0`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.4.1`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.4.1 — Migration compatibility fix
+
+- Fixes migration `0019_metadata_stage.sql` by making
+  `jobs.stage_priority` a stored generated column. PostgreSQL 18 does not
+  support indexes on virtual generated columns.
+- Extends the PostgreSQL 18 migration smoke test to assert that
+  `jobs.stage_priority` is stored before a release can pass validation.
 
 ## v1.4.0 — Consolidated metadata stage + age-derived job scheduling
 
@@ -54,10 +62,11 @@ triggers jumping the queue.
   matching the legacy variants and produces review items as before.
 - Migration `0019_metadata_stage.sql`:
   - adds `document_inventory.metadata_status` (default `'unknown'`),
-  - adds `jobs.stage_priority` as a virtual column derived from
+  - adds `jobs.stage_priority` as a stored generated column derived from
     `payload->>'stage_priority'` with a fallback to the legacy
     `payload->>'priority'` so pre-existing rows preserve their original
-    stage ordering.
+    stage ordering. It is stored because PostgreSQL 18 does not support
+    indexes on virtual generated columns.
 - Frontend `Stage` union, `defaultStageStatus`, `promptStageOrder`, and
   Reviews per-field renderer all gain a `metadata` entry. All seven
   completeLocales (en/de/fr/es/it/nl/pl) ship `stage.metadata`.
