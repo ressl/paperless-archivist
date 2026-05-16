@@ -2283,7 +2283,22 @@ export interface components {
         MeResponse: {
             username: string;
             roles: components["schemas"]["Role"][];
+            permissions: components["schemas"]["PermissionFlags"];
             csrf_token?: string | null;
+        };
+        PermissionFlags: {
+            read_dashboard: boolean;
+            read_runs: boolean;
+            write_runs: boolean;
+            read_inventory: boolean;
+            write_batches: boolean;
+            use_chat: boolean;
+            read_reviews: boolean;
+            write_reviews: boolean;
+            read_settings: boolean;
+            write_settings: boolean;
+            manage_users: boolean;
+            read_audit: boolean;
         };
         OidcConfigResponse: {
             enabled: boolean;

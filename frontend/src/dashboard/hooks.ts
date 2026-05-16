@@ -129,7 +129,10 @@ export type DashboardLiveState = {
 };
 
 export function useDashboardLive(
-  canManageSettings: boolean,
+  // Recovery visibility is now gated on the `ReadRuns` permission instead of a
+  // hardcoded admin role check: see issue #98. The server enforces ReadRuns on
+  // `/operations/recovery`, so the frontend mirrors the same gate.
+  canReadRuns: boolean,
   setError: (message: string | null) => void
 ): DashboardLiveState {
   const { t } = useI18n();
@@ -156,8 +159,8 @@ export function useDashboardLive(
 
   const tick = useCallback(() => {
     void reload();
-    if (canManageSettings) void reloadRecovery();
-  }, [reload, reloadRecovery, canManageSettings]);
+    if (canReadRuns) void reloadRecovery();
+  }, [reload, reloadRecovery, canReadRuns]);
 
   useVisibleInterval(tick, LIVE_REFRESH_INTERVAL_MS);
 

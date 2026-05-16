@@ -557,7 +557,46 @@ struct LoginRequest {
 struct MeResponse {
     username: String,
     roles: Vec<Role>,
+    /// Permission flags derived from `roles`, exposed so the frontend can gate
+    /// fetches/actions on the same matrix the server enforces rather than on a
+    /// hardcoded role name (see #98).
+    permissions: PermissionFlags,
     csrf_token: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct PermissionFlags {
+    read_dashboard: bool,
+    read_runs: bool,
+    write_runs: bool,
+    read_inventory: bool,
+    write_batches: bool,
+    use_chat: bool,
+    read_reviews: bool,
+    write_reviews: bool,
+    read_settings: bool,
+    write_settings: bool,
+    manage_users: bool,
+    read_audit: bool,
+}
+
+impl PermissionFlags {
+    fn from_roles(roles: &[Role]) -> Self {
+        Self {
+            read_dashboard: roles_have_permission(roles, Permission::ReadDashboard),
+            read_runs: roles_have_permission(roles, Permission::ReadRuns),
+            write_runs: roles_have_permission(roles, Permission::WriteRuns),
+            read_inventory: roles_have_permission(roles, Permission::ReadInventory),
+            write_batches: roles_have_permission(roles, Permission::WriteBatches),
+            use_chat: roles_have_permission(roles, Permission::UseChat),
+            read_reviews: roles_have_permission(roles, Permission::ReadReviews),
+            write_reviews: roles_have_permission(roles, Permission::WriteReviews),
+            read_settings: roles_have_permission(roles, Permission::ReadSettings),
+            write_settings: roles_have_permission(roles, Permission::WriteSettings),
+            manage_users: roles_have_permission(roles, Permission::ManageUsers),
+            read_audit: roles_have_permission(roles, Permission::ReadAudit),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -860,9 +899,11 @@ async fn login(
 
     let (session_token, csrf_token) = issue_session(&state, user.id).await?;
 
+    let permissions = PermissionFlags::from_roles(&user.roles);
     let body = Json(MeResponse {
         username: user.username,
         roles: user.roles,
+        permissions,
         csrf_token: Some(csrf_token.clone()),
     });
     let mut response = body.into_response();
@@ -966,9 +1007,11 @@ async fn paperless_login(
     .await?;
 
     let (session_token, csrf_token) = issue_session(&state, user.id).await?;
+    let permissions = PermissionFlags::from_roles(&user.roles);
     let body = Json(MeResponse {
         username: user.username,
         roles: user.roles,
+        permissions,
         csrf_token: Some(csrf_token.clone()),
     });
     let mut response = body.into_response();
@@ -1061,9 +1104,11 @@ async fn logout(
 }
 
 async fn me(auth: Authenticated) -> ApiResult<Json<MeResponse>> {
+    let permissions = PermissionFlags::from_roles(&auth.0.roles);
     Ok(Json(MeResponse {
         username: auth.0.username.unwrap_or_else(|| "api-token".to_owned()),
         roles: auth.0.roles,
+        permissions,
         csrf_token: None,
     }))
 }

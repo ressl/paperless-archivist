@@ -107,7 +107,11 @@ export function App() {
         )}
         {tab === 'dashboard' && (
           <ErrorBoundary>
-            <Dashboard setError={setError} canManageSettings={canManageSettings} />
+            <Dashboard
+              setError={setError}
+              canManageSettings={canManageSettings}
+              permissions={me.permissions}
+            />
           </ErrorBoundary>
         )}
         {tab === 'inventory' && (

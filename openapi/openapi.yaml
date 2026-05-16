@@ -50,14 +50,43 @@ components:
         password: { type: string, format: password }
     MeResponse:
       type: object
-      required: [username, roles]
+      required: [username, roles, permissions]
       properties:
         username: { type: string }
         roles:
           type: array
           items: { $ref: "#/components/schemas/Role" }
+        permissions: { $ref: "#/components/schemas/PermissionFlags" }
         csrf_token:
           type: [string, "null"]
+    PermissionFlags:
+      type: object
+      required:
+        - read_dashboard
+        - read_runs
+        - write_runs
+        - read_inventory
+        - write_batches
+        - use_chat
+        - read_reviews
+        - write_reviews
+        - read_settings
+        - write_settings
+        - manage_users
+        - read_audit
+      properties:
+        read_dashboard: { type: boolean }
+        read_runs: { type: boolean }
+        write_runs: { type: boolean }
+        read_inventory: { type: boolean }
+        write_batches: { type: boolean }
+        use_chat: { type: boolean }
+        read_reviews: { type: boolean }
+        write_reviews: { type: boolean }
+        read_settings: { type: boolean }
+        write_settings: { type: boolean }
+        manage_users: { type: boolean }
+        read_audit: { type: boolean }
     OidcConfigResponse:
       type: object
       required: [enabled]

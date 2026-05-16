@@ -1047,7 +1047,20 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
   );
 }
 
-export function Dashboard({ setError, canManageSettings }: { setError: (error: string | null) => void; canManageSettings: boolean }) {
+export function Dashboard({
+  setError,
+  canManageSettings,
+  permissions
+}: {
+  setError: (error: string | null) => void;
+  canManageSettings: boolean;
+  permissions: import('../api/client').Permissions;
+}) {
+  // Recovery visibility/actions are gated on permissions, not the admin role,
+  // so that any caller the server lets read/write runs gets the matching UI.
+  // See issue #98.
+  const canReadRuns = permissions.read_runs;
+  const canWriteRuns = permissions.write_runs;
   const { t, formatNumber, formatPercent, formatRelativeTime: formatRelative } = useI18n();
   const [range, setRange] = useState<DashboardRange>(() => {
     if (typeof window === 'undefined') return '24h';
@@ -1076,7 +1089,7 @@ export function Dashboard({ setError, canManageSettings }: { setError: (error: s
   }, [drawerOpen]);
 
   const { stats, counts, lastLoadedAt, reload: load } = useDashboardStats(range, setError);
-  const { live, recovery, reload: loadLive, reloadRecovery: loadRecovery, setLive } = useDashboardLive(canManageSettings, setError);
+  const { live, recovery, reload: loadLive, reloadRecovery: loadRecovery, setLive } = useDashboardLive(canReadRuns, setError);
   const { nextRefreshIn, pulse } = useFreshness(30_000, lastLoadedAt);
   const compactLayout = useMediaQuery('(max-width: 1100px)');
   const [activeTab, setActiveTab] = useState<'analytics' | 'live' | 'activity'>('analytics');
@@ -1181,7 +1194,9 @@ export function Dashboard({ setError, canManageSettings }: { setError: (error: s
   ];
 
   const onAlertAction = (item: NeedsAttentionItem) => {
-    if (!canManageSettings) return;
+    // Recovery actions require WriteRuns server-side; mirror that gate here so
+    // the alert button is interactive for any user the server lets act.
+    if (!canWriteRuns) return;
     switch (item.kind) {
       case 'stuck_runs':
         void run(setRecoveryBusy, setError, recoverStuckRuns, t);

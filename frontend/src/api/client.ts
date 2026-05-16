@@ -136,9 +136,25 @@ const openapi = createClient<paths>({
   credentials: 'include'
 });
 
+export type Permissions = {
+  read_dashboard: boolean;
+  read_runs: boolean;
+  write_runs: boolean;
+  read_inventory: boolean;
+  write_batches: boolean;
+  use_chat: boolean;
+  read_reviews: boolean;
+  write_reviews: boolean;
+  read_settings: boolean;
+  write_settings: boolean;
+  manage_users: boolean;
+  read_audit: boolean;
+};
+
 export type Me = {
   username: string;
   roles: Role[];
+  permissions: Permissions;
   csrf_token?: string | null;
 };
 
