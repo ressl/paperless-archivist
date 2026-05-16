@@ -14,10 +14,13 @@ archivist-paperless = { path = "../archivist-paperless" }
 argon2.workspace = true
 axum.workspace = true
 base64.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 cookie.workspace = true
+futures.workspace = true
 http.workspace = true
 hex.workspace = true
+tokio-stream = "0.1"
 jsonwebtoken.workspace = true
 rand.workspace = true
 reqwest.workspace = true

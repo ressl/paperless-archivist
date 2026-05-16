@@ -3431,39 +3431,71 @@ async fn audit_events(
 }
 
 async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> ApiResult<Response> {
+    use bytes::Bytes;
+    use futures::TryStreamExt;
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+
     require(&auth.0, Permission::ReadAudit)?;
-    let events = list_audit_events(&state.pool, 10_000).await?;
-    let mut body =
-        "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash\n"
-            .to_owned();
-    for event in events {
-        let row = [
-            event.id.to_string(),
-            event.created_at.to_rfc3339(),
-            event.event_type,
-            event.actor_type,
-            event.actor_id.unwrap_or_default(),
-            event
-                .paperless_document_id
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-            event.outcome,
-            event.error_message.unwrap_or_default(),
-            event
-                .metadata
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            event.prev_event_hash.unwrap_or_default(),
-            event.event_hash.unwrap_or_default(),
-        ]
-        .into_iter()
-        .map(|value| csv_escape(&value))
-        .collect::<Vec<_>>()
-        .join(",");
-        body.push_str(&row);
-        body.push('\n');
-    }
-    let mut response = body.into_response();
+
+    // Use a bounded channel so the writer task applies backpressure when
+    // the HTTP client (or proxy) is slow: rows accumulate in postgres /
+    // sqlx, not in our process. Capacity 16 is plenty for one-CSV-row-
+    // at-a-time delivery.
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        const HEADER: &str = "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash,source_ip,user_agent\n";
+        if tx
+            .send(Ok(Bytes::from_static(HEADER.as_bytes())))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let mut stream = sqlx::query(
+            r#"
+            select id, event_type, actor_type, actor_id, paperless_document_id,
+                   outcome, error_message, created_at, metadata,
+                   prev_event_hash, event_hash, source_ip, user_agent
+              from audit_events
+             order by created_at desc, id desc
+            "#,
+        )
+        .fetch(&pool);
+
+        loop {
+            match stream.try_next().await {
+                Ok(Some(row)) => match audit_csv_row(&row) {
+                    Ok(line) => {
+                        if tx.send(Ok(Bytes::from(line))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx
+                            .send(Err(std::io::Error::other(format!(
+                                "encode audit row: {error}"
+                            ))))
+                            .await;
+                        break;
+                    }
+                },
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::other(format!(
+                            "stream audit events: {error}"
+                        ))))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let body = Body::from_stream(ReceiverStream::new(rx));
+    let mut response = Response::new(body);
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/csv"));
@@ -3472,6 +3504,48 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
         HeaderValue::from_static("attachment; filename=\"paperless-archivist-audit.csv\""),
     );
     Ok(response)
+}
+
+fn audit_csv_row(row: &sqlx::postgres::PgRow) -> Result<String, sqlx::Error> {
+    let id: Uuid = row.try_get("id")?;
+    let event_type: String = row.try_get("event_type")?;
+    let actor_type: String = row.try_get("actor_type")?;
+    let actor_id: Option<String> = row.try_get("actor_id")?;
+    let paperless_document_id: Option<i32> = row.try_get("paperless_document_id")?;
+    let outcome: String = row.try_get("outcome")?;
+    let error_message: Option<String> = row.try_get("error_message")?;
+    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let metadata: Option<Value> = row.try_get("metadata")?;
+    let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
+    let event_hash: Option<String> = row.try_get("event_hash")?;
+    let source_ip: Option<String> = row.try_get("source_ip")?;
+    let user_agent: Option<String> = row.try_get("user_agent")?;
+    let cells = [
+        id.to_string(),
+        created_at.to_rfc3339(),
+        event_type,
+        actor_type,
+        actor_id.unwrap_or_default(),
+        paperless_document_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        outcome,
+        error_message.unwrap_or_default(),
+        metadata.map(|value| value.to_string()).unwrap_or_default(),
+        prev_event_hash.unwrap_or_default(),
+        event_hash.unwrap_or_default(),
+        source_ip.unwrap_or_default(),
+        user_agent.unwrap_or_default(),
+    ];
+    let mut out = String::with_capacity(256);
+    for (i, cell) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&csv_escape(cell));
+    }
+    out.push('\n');
+    Ok(out)
 }
 
 async fn audit_integrity(

@@ -5370,12 +5370,19 @@ pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEve
 }
 
 pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityReport> {
+    use futures::TryStreamExt;
+
     let legacy_events: i64 =
         sqlx::query("select count(*)::bigint as count from audit_events where event_hash is null")
             .fetch_one(pool)
             .await?
             .try_get("count")?;
-    let rows = sqlx::query(
+
+    // Stream the audit chain instead of loading the entire table into memory.
+    // Verification is intrinsically streamable: each row's prev_event_hash
+    // must match the previous row's event_hash, so we only carry one cursor
+    // value forward.
+    let mut stream = sqlx::query(
         r#"
         select id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
                before, after, metadata, outcome, error_message, created_at,
@@ -5385,12 +5392,11 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
          order by created_at asc, id asc
         "#,
     )
-    .fetch_all(pool)
-    .await?;
+    .fetch(pool);
 
     let mut checked_events = 0_i64;
-    let mut latest_event_hash = None;
-    for row in rows {
+    let mut latest_event_hash: Option<String> = None;
+    while let Some(row) = stream.try_next().await? {
         let id: Uuid = row.try_get("id")?;
         let created_at: DateTime<Utc> = row.try_get("created_at")?;
         let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
