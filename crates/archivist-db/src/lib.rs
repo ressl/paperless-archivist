@@ -4186,7 +4186,11 @@ pub async fn is_last_active_job(pool: &DbPool, run_id: Uuid, current_job_id: Uui
 pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bool) -> Result<()> {
     let retry = retryable && job.attempts < job.max_attempts;
     let status = if retry { "queued" } else { "failed" };
-    let delay_seconds = (2_i64.pow(job.attempts.clamp(0, 6) as u32)) * 30;
+    let base_delay = (2_i64.pow(job.attempts.clamp(0, 6) as u32)) * 30;
+    // +/-25% uniform jitter avoids thundering-herd retries when many workers
+    // hit the same transient upstream failure (e.g. provider restart).
+    let jitter = (rand::random::<f64>() - 0.5) * 0.5 * base_delay as f64;
+    let delay_seconds = ((base_delay as f64) + jitter).max(1.0);
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
@@ -4203,7 +4207,7 @@ pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bo
     .bind(job.id)
     .bind(status)
     .bind(error)
-    .bind(delay_seconds as f64)
+    .bind(delay_seconds)
     .execute(&mut *tx)
     .await?;
 
