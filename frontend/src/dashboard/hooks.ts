@@ -13,6 +13,57 @@ import { localizedErrorMessage } from '../lib/ui';
 const DASHBOARD_REFRESH_INTERVAL_MS = 30_000;
 const LIVE_REFRESH_INTERVAL_MS = 5_000;
 
+// Runs `tick` immediately, then on `intervalMs` while the page is visible.
+// Pauses on `visibilitychange` -> hidden, force-refreshes once on -> visible,
+// and tears the interval down cleanly on unmount.
+function useVisibleInterval(tick: () => void, intervalMs: number) {
+  const tickRef = useRef(tick);
+  useEffect(() => {
+    tickRef.current = tick;
+  }, [tick]);
+
+  useEffect(() => {
+    let timer: number | null = null;
+    const start = () => {
+      if (timer != null) return;
+      timer = window.setInterval(() => {
+        tickRef.current();
+      }, intervalMs);
+    };
+    const stop = () => {
+      if (timer != null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const handleVisibility = () => {
+      if (typeof document === 'undefined') return;
+      if (document.hidden) {
+        stop();
+      } else {
+        // Immediate refresh on return so the dashboard isn't stale.
+        tickRef.current();
+        start();
+      }
+    };
+
+    // Initial fire and start.
+    tickRef.current();
+    if (typeof document === 'undefined' || !document.hidden) {
+      start();
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+    }
+    return () => {
+      stop();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibility);
+      }
+    };
+  }, [intervalMs]);
+}
+
 const DEFAULT_COUNTS: Counts = {
   total_documents: 0,
   complete: 0,
@@ -57,13 +108,7 @@ export function useDashboardStats(
     }
   }, [range, setError, t]);
 
-  useEffect(() => {
-    void reload();
-    const timer = window.setInterval(() => {
-      void reload();
-    }, DASHBOARD_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [reload]);
+  useVisibleInterval(reload, DASHBOARD_REFRESH_INTERVAL_MS);
 
   const updateStats = useCallback(
     (updater: (current: DashboardStats | null) => DashboardStats | null) => {
@@ -109,15 +154,12 @@ export function useDashboardLive(
     }
   }, [setError, t]);
 
-  useEffect(() => {
+  const tick = useCallback(() => {
     void reload();
     if (canManageSettings) void reloadRecovery();
-    const timer = window.setInterval(() => {
-      void reload();
-      if (canManageSettings) void reloadRecovery();
-    }, LIVE_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
   }, [reload, reloadRecovery, canManageSettings]);
+
+  useVisibleInterval(tick, LIVE_REFRESH_INTERVAL_MS);
 
   const updateLive = useCallback(
     (updater: (current: DashboardLiveStatus | null) => DashboardLiveStatus | null) => {
