@@ -15,12 +15,11 @@ export function LanguageSelector({ compact }: { compact?: boolean }) {
         {localeOptions.map((option) => (
           <option key={option.tag} value={option.tag}>
             {option.uiName === option.nativeName
-              ? `${option.uiName} · ${t(`language.status.${option.status}`)}`
-              : `${option.uiName} · ${option.nativeName} · ${t(`language.status.${option.status}`)}`}
+              ? option.uiName
+              : `${option.uiName} · ${option.nativeName}`}
           </option>
         ))}
       </select>
-      {selectedOption?.status === 'fallback' && <small>{t('language.fallback.hint')}</small>}
     </label>
   );
 }
