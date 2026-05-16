@@ -4788,7 +4788,7 @@ fn enforce_csrf(auth: &AuthContext, method: &Method, headers: &HeaderMap) -> Res
         .as_deref()
         .ok_or_else(|| ApiError::forbidden("invalid CSRF token"))?;
     // Constant-time compare to deny timing oracles on the hex hash.
-    if expected.as_bytes().len() != provided_hash.as_bytes().len()
+    if expected.len() != provided_hash.len()
         || !bool::from(expected.as_bytes().ct_eq(provided_hash.as_bytes()))
     {
         return Err(ApiError::forbidden("invalid CSRF token"));
