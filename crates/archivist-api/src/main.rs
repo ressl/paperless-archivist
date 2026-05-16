@@ -44,7 +44,7 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Argon2, Params};
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -137,13 +137,24 @@ fn init_tracing(filter: &str) {
 }
 
 fn router(state: AppState) -> Router {
+    // Most API writes are tiny JSON bodies. Large payloads
+    // (settings, prompts, chat) are overridden per-route below.
+    const DEFAULT_BODY_LIMIT: usize = 64 * 1024;
+    const LARGE_BODY_LIMIT: usize = 256 * 1024;
+    const SETTINGS_BODY_LIMIT: usize = 1024 * 1024;
+
     let protected = Router::new()
         .route("/auth/me", get(me))
         .route("/auth/logout", post(logout))
         .route("/auth/change-password", post(change_password))
         .route("/auth/sessions", get(sessions))
         .route("/auth/sessions/{id}/revoke", post(revoke_session_endpoint))
-        .route("/settings", get(settings).put(update_settings))
+        .route(
+            "/settings",
+            get(settings)
+                .put(update_settings)
+                .layer(DefaultBodyLimit::max(SETTINGS_BODY_LIMIT)),
+        )
         .route("/settings/test-paperless", post(test_paperless))
         .route("/notifications/test", post(test_notification))
         .route("/model-providers/test", post(test_provider))
@@ -152,9 +163,17 @@ fn router(state: AppState) -> Router {
             post(model_provider_models),
         )
         .route("/secret-references", get(secret_references))
-        .route("/prompts", get(prompts).post(create_prompt_endpoint))
+        .route(
+            "/prompts",
+            get(prompts)
+                .post(create_prompt_endpoint)
+                .layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
+        )
         .route("/prompts/usage", get(prompt_usage))
-        .route("/prompts/test", post(test_prompt_endpoint))
+        .route(
+            "/prompts/test",
+            post(test_prompt_endpoint).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
+        )
         .route("/prompts/{id}/activate", post(activate_prompt_endpoint))
         .route("/paperless/sync-metadata", post(sync_paperless))
         .route("/paperless/consistency", get(paperless_consistency))
@@ -172,7 +191,10 @@ fn router(state: AppState) -> Router {
             get(chat_sessions).post(create_chat_session),
         )
         .route("/chat/sessions/{id}", get(chat_messages))
-        .route("/chat/sessions/{id}/messages", post(post_chat_message))
+        .route(
+            "/chat/sessions/{id}/messages",
+            post(post_chat_message).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
+        )
         .route(
             "/documents/{paperless_document_id}/trigger",
             post(trigger_document),
@@ -209,7 +231,8 @@ fn router(state: AppState) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
-        ));
+        ))
+        .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT));
 
     let static_dir = state.config.static_dir.clone();
     let spa = ServeDir::new(&static_dir)
