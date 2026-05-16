@@ -268,6 +268,12 @@ export const enMessages = {
     'Used automatically when the primary vision model crashes the Ollama runtime (GGML_ASSERT). The worker silently retries the page on this model before failing the job. Leave empty to use a hardcoded safe-default chain.',
   'settings.ai.requeue_vision_crashes_on_startup':
     'On startup, requeue OCR jobs killed by the vision-runtime crash signature',
+  'settings.ai.ollama_vision_num_ctx': 'Ollama vision context window (num_ctx)',
+  'settings.ai.ollama_vision_num_ctx_hint':
+    "Sets options.num_ctx on Ollama vision calls. Default 16384 is the GGML_ASSERT fix (ollama/ollama#14401) — Ollama's 4096-token default is too small for realistic document pages. Raise for huge multi-page renders, lower on memory-constrained hosts.",
+  'settings.ai.ollama_text_num_ctx': 'Ollama text context window (num_ctx)',
+  'settings.ai.ollama_text_num_ctx_hint':
+    "Sets options.num_ctx on Ollama text-chat calls. Default 8192 gives the consolidated metadata prompt comfortable headroom over Ollama's 4096-token default without the memory cost of the vision ceiling.",
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Mode',
   'settings.workflow.paused': 'Pause automatic selector',
@@ -732,6 +738,12 @@ export const deMessages: Record<MessageKey, string> = {
     'Wird automatisch verwendet, wenn das primäre Vision-Modell die Ollama-Runtime crasht (GGML_ASSERT). Der Worker wiederholt die Seite still auf diesem Modell, bevor der Job fehlschlägt. Leer lassen, um eine fest eingebaute, sichere Fallback-Kette zu nutzen.',
   'settings.ai.requeue_vision_crashes_on_startup':
     'Beim Start OCR-Jobs erneut in die Warteschlange stellen, die an einer Vision-Crash-Signatur gescheitert sind',
+  'settings.ai.ollama_vision_num_ctx': 'Ollama Vision-Kontextfenster (num_ctx)',
+  'settings.ai.ollama_vision_num_ctx_hint':
+    'Setzt options.num_ctx für Ollama Vision-Aufrufe. Standard 16384 ist der Fix für GGML_ASSERT (ollama/ollama#14401) — der Ollama-Standard von 4096 Tokens ist für reale Dokumentseiten zu klein. Bei großen mehrseitigen Renders erhöhen, auf speicherbeschränkten Hosts senken.',
+  'settings.ai.ollama_text_num_ctx': 'Ollama Text-Kontextfenster (num_ctx)',
+  'settings.ai.ollama_text_num_ctx_hint':
+    'Setzt options.num_ctx für Ollama Text-Aufrufe. Standard 8192 gibt dem konsolidierten Metadaten-Prompt komfortablen Spielraum gegenüber dem 4096-Token-Standard, ohne die Speicherkosten des Vision-Limits.',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modus',
   'settings.workflow.paused': 'Automatischen Selector pausieren',
@@ -1194,6 +1206,12 @@ export const frMessages: Record<MessageKey, string> = {
     "Utilisé automatiquement lorsque le modèle vision principal fait planter le runtime Ollama (GGML_ASSERT). Le worker réessaie silencieusement la page sur ce modèle avant d’échouer le job. Laissez vide pour utiliser une chaîne de secours sûre intégrée.",
   'settings.ai.requeue_vision_crashes_on_startup':
     "Au démarrage, remettre dans la file les jobs OCR tués par la signature de crash vision",
+  'settings.ai.ollama_vision_num_ctx': 'Fenêtre de contexte vision Ollama (num_ctx)',
+  'settings.ai.ollama_vision_num_ctx_hint':
+    "Définit options.num_ctx sur les appels vision Ollama. La valeur par défaut 16384 corrige le crash GGML_ASSERT (ollama/ollama#14401) — la valeur par défaut Ollama de 4096 jetons est trop petite pour des pages de document réelles. Augmentez pour des rendus multi-pages, baissez sur des hôtes à mémoire limitée.",
+  'settings.ai.ollama_text_num_ctx': 'Fenêtre de contexte texte Ollama (num_ctx)',
+  'settings.ai.ollama_text_num_ctx_hint':
+    "Définit options.num_ctx sur les appels texte Ollama. La valeur par défaut 8192 offre au prompt de métadonnées consolidé une marge confortable au-dessus de la valeur par défaut Ollama de 4096 jetons, sans le coût mémoire du plafond vision.",
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Mode',
   'settings.workflow.paused': 'Mettre en pause le selector automatique',
@@ -1656,6 +1674,12 @@ export const esMessages: Record<MessageKey, string> = {
     'Se usa automáticamente cuando el modelo de visión principal hace caer el runtime de Ollama (GGML_ASSERT). El worker reintenta la página en silencio en este modelo antes de fallar el job. Déjelo vacío para usar una cadena segura por defecto integrada.',
   'settings.ai.requeue_vision_crashes_on_startup':
     'Al arrancar, reencolar los trabajos OCR muertos por la firma de crash de visión',
+  'settings.ai.ollama_vision_num_ctx': 'Ventana de contexto de visión de Ollama (num_ctx)',
+  'settings.ai.ollama_vision_num_ctx_hint':
+    'Establece options.num_ctx en las llamadas de visión de Ollama. El valor por defecto 16384 corrige el crash GGML_ASSERT (ollama/ollama#14401) — el valor por defecto de Ollama de 4096 tokens es demasiado pequeño para páginas de documento reales. Aumenta para renderizados multipágina grandes, baja en hosts con memoria limitada.',
+  'settings.ai.ollama_text_num_ctx': 'Ventana de contexto de texto de Ollama (num_ctx)',
+  'settings.ai.ollama_text_num_ctx_hint':
+    'Establece options.num_ctx en las llamadas de texto de Ollama. El valor por defecto 8192 ofrece al prompt consolidado de metadatos un margen cómodo sobre el valor por defecto de 4096 tokens, sin el coste de memoria del techo de visión.',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modo',
   'settings.workflow.paused': 'Pausar el selector automático',
@@ -2118,6 +2142,12 @@ export const itMessages: Record<MessageKey, string> = {
     'Usato automaticamente quando il modello vision principale fa crashare il runtime Ollama (GGML_ASSERT). Il worker riprova la pagina in silenzio su questo modello prima di far fallire il job. Lascia vuoto per usare una catena di sicurezza predefinita.',
   'settings.ai.requeue_vision_crashes_on_startup':
     "All'avvio, rimetti in coda i job OCR uccisi dalla firma di crash vision",
+  'settings.ai.ollama_vision_num_ctx': 'Finestra di contesto vision di Ollama (num_ctx)',
+  'settings.ai.ollama_vision_num_ctx_hint':
+    "Imposta options.num_ctx sulle chiamate vision di Ollama. Il valore predefinito 16384 risolve il crash GGML_ASSERT (ollama/ollama#14401) — il valore predefinito di Ollama di 4096 token è troppo piccolo per pagine di documento reali. Aumenta per render multipagina grandi, abbassa su host con memoria limitata.",
+  'settings.ai.ollama_text_num_ctx': 'Finestra di contesto testo di Ollama (num_ctx)',
+  'settings.ai.ollama_text_num_ctx_hint':
+    "Imposta options.num_ctx sulle chiamate testo di Ollama. Il valore predefinito 8192 offre al prompt di metadati consolidato un margine confortevole sopra il valore predefinito di 4096 token, senza il costo di memoria del limite vision.",
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modalità',
   'settings.workflow.paused': 'Metti in pausa il selector automatico',
@@ -2580,6 +2610,12 @@ export const nlMessages: Record<MessageKey, string> = {
     'Wordt automatisch gebruikt wanneer het primaire visionmodel de Ollama-runtime laat crashen (GGML_ASSERT). De worker probeert de pagina stil opnieuw met dit model voordat de job faalt. Laat leeg om een ingebouwde veilige fallbackketen te gebruiken.',
   'settings.ai.requeue_vision_crashes_on_startup':
     'Bij het opstarten OCR-jobs opnieuw in de wachtrij plaatsen die door de vision-crash-signatuur zijn beëindigd',
+  'settings.ai.ollama_vision_num_ctx': 'Ollama vision-contextvenster (num_ctx)',
+  'settings.ai.ollama_vision_num_ctx_hint':
+    'Stelt options.num_ctx in voor Ollama vision-aanroepen. De standaard 16384 herstelt de GGML_ASSERT-crash (ollama/ollama#14401) — de Ollama-standaard van 4096 tokens is te klein voor realistische documentpaginas. Verhoog voor grote multipagina-renders, verlaag op geheugenbeperkte hosts.',
+  'settings.ai.ollama_text_num_ctx': 'Ollama tekst-contextvenster (num_ctx)',
+  'settings.ai.ollama_text_num_ctx_hint':
+    'Stelt options.num_ctx in voor Ollama tekst-aanroepen. De standaard 8192 geeft de geconsolideerde metadata-prompt comfortabele ruimte boven de 4096-token-standaard, zonder de geheugenkosten van het vision-plafond.',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modus',
   'settings.workflow.paused': 'Automatische selector pauzeren',
@@ -3042,6 +3078,12 @@ export const plMessages: Record<MessageKey, string> = {
     'Używany automatycznie, gdy główny model vision spowoduje awarię runtime Ollamy (GGML_ASSERT). Worker ponawia stronę po cichu na tym modelu, zanim zakończy zadanie niepowodzeniem. Pozostaw puste, aby użyć wbudowanego bezpiecznego łańcucha domyślnego.',
   'settings.ai.requeue_vision_crashes_on_startup':
     'Przy starcie ponownie kolejkuj zadania OCR zabite przez sygnaturę awarii vision',
+  'settings.ai.ollama_vision_num_ctx': 'Okno kontekstu vision Ollamy (num_ctx)',
+  'settings.ai.ollama_vision_num_ctx_hint':
+    'Ustawia options.num_ctx dla wywołań vision Ollamy. Domyślna wartość 16384 naprawia awarię GGML_ASSERT (ollama/ollama#14401) — domyślna wartość Ollamy 4096 tokenów jest za mała dla realistycznych stron dokumentów. Zwiększ dla dużych wielostronicowych renderów, zmniejsz na hostach z ograniczoną pamięcią.',
+  'settings.ai.ollama_text_num_ctx': 'Okno kontekstu tekstu Ollamy (num_ctx)',
+  'settings.ai.ollama_text_num_ctx_hint':
+    'Ustawia options.num_ctx dla wywołań tekstowych Ollamy. Domyślna wartość 8192 daje skonsolidowanemu promptowi metadanych wygodny zapas nad domyślną wartością 4096 tokenów, bez kosztu pamięciowego limitu vision.',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Tryb',
   'settings.workflow.paused': 'Wstrzymaj automatyczny selector',

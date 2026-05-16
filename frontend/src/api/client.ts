@@ -70,6 +70,8 @@ export type RuntimeSettings = {
     external_provider_warning_acknowledged: boolean;
     fallback_vision_model?: string | null;
     requeue_vision_crashes_on_startup?: boolean;
+    ollama_vision_num_ctx?: number;
+    ollama_text_num_ctx?: number;
   };
   security: {
     audit_retention_days: number;
