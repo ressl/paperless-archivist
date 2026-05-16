@@ -365,6 +365,36 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
               onRefresh={() => loadOllamaModels(selectedDefaultProvider.name)}
             />
           </div>
+          <div className="settings-field">
+            {t('settings.ai.vision_crash_fallback_model')}
+            <ProviderModelSelect
+              capability="vision"
+              provider={selectedDefaultProvider}
+              value={settings.ai.fallback_vision_model ?? ''}
+              ollamaState={ollamaModels[selectedDefaultProvider.name]}
+              onChange={(value) =>
+                update((s) => ({
+                  ...s,
+                  ai: { ...s.ai, fallback_vision_model: value.trim() === '' ? null : value }
+                }))
+              }
+              onRefresh={() => loadOllamaModels(selectedDefaultProvider.name)}
+            />
+            <small>{t('settings.ai.vision_crash_fallback_hint')}</small>
+          </div>
+          <label className="inline">
+            <input
+              type="checkbox"
+              checked={settings.ai.requeue_vision_crashes_on_startup ?? true}
+              onChange={(event) =>
+                update((s) => ({
+                  ...s,
+                  ai: { ...s.ai, requeue_vision_crashes_on_startup: event.target.checked }
+                }))
+              }
+            />
+            {t('settings.ai.requeue_vision_crashes_on_startup')}
+          </label>
           <button title={t('generic.test')} disabled={providerTest?.status === 'running'} onClick={runProviderTest}>
             <Activity size={16} /> {providerTest?.status === 'running' ? t('generic.testing') : t('generic.test')}
           </button>
