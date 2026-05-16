@@ -2,8 +2,87 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.4.1`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.1`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.1 — Root-cause fix for glm-ocr GGML_ASSERT crashes
+
+Pins Ollama's `options.num_ctx` on vision and text calls so the configured
+primary vision model (glm-ocr by default) stops crashing on realistic
+document pages. This is the **root-cause** fix for the GGML_ASSERT runtime
+crash that the v1.5.0 fallback machinery had to paper over.
+
+### What was crashing
+
+Vision runs against `glm-ocr` (or any vision model that expands a page into
+many thousands of vision tokens) were aborting Ollama's llama runner with:
+
+```
+GGML_ASSERT(a->ne[2] * 4 == b->ne[0]) failed
+llama runner process no longer running: 2 error: ...
+```
+
+Upstream confirmed in [ollama/ollama#14401][upstream-14401] and
+[ollama/ollama#14171][upstream-14171] that the assertion fires when the
+vision-token count for a page exceeds Ollama's context window. Ollama's
+built-in default is **4096 tokens**, which is too small for a realistic
+single-page render. Upstream user `hapm` confirmed: "Context size was
+configured to 7000, works well with 8192."
+
+[upstream-14401]: https://github.com/ollama/ollama/issues/14401
+[upstream-14171]: https://github.com/ollama/ollama/issues/14171
+
+### The fix
+
+- The worker now wires `options.num_ctx` into every Ollama vision and text
+  payload. The default for vision is **16384** (safe ceiling for commodity
+  hosts, headroom for multi-page rendering at high DPI). The default for
+  text-chat is **8192** (covers the 16k-char metadata-extraction prompt
+  with comfortable headroom).
+- Remote providers (OpenAI / Anthropic / OpenAI-compatible) ignore the
+  field — the override only travels to the local Ollama runner.
+- Operators can re-tune both numbers from the Settings → AI section.
+  Memory-constrained Ollama hosts can lower them; very-high-DPI multi-page
+  scanners can raise them.
+- All seven locales (en/de/fr/es/it/nl/pl) ship the new labels and hints.
+
+### Defense in depth (carried over from v1.5.0)
+
+The v1.5.0 fallback machinery stays in place:
+
+- **Crash detection** — `is_vision_model_runtime_crash` still recognises
+  the GGML_ASSERT / "runner process no longer running" signatures and
+  retries the page on a fallback model (operator's `fallback_vision_model`
+  setting or a hardcoded safe-default chain).
+- **Startup requeue** — `run_startup_vision_crash_requeue` still lifts
+  pre-fix `failed` OCR jobs back into the queue on worker boot. Because
+  the requeue clears the matching `error_message`, it is naturally
+  idempotent — subsequent restarts do not double-fire.
+
+The **expected behavior after v1.5.1** is that this fallback machinery
+becomes dormant: `vision_model_fallback_used=true` counts trend toward
+zero, and primary glm-ocr completes without crash.
+
+### What to watch in production after deploy
+
+- Worker startup log line:
+  `setting vision options.num_ctx and text options.num_ctx for Ollama calls`
+  with the configured values. If you see 16384 / 8192, the fix is live.
+- `vision_model_fallback_used=true` log count should **drop toward zero**.
+  The fallback existed to mask the crash; the crash should no longer fire.
+- Previously-dead OCR jobs killed by the GGML_ASSERT signature are
+  automatically requeued on worker startup (one-shot) and should now
+  succeed on the first attempt without a fallback hop.
+- Operator does nothing. Full-Auto stays Full-Auto.
+
+### Compatibility
+
+- New settings (`ai.ollama_vision_num_ctx`, `ai.ollama_text_num_ctx`) carry
+  `#[serde(default = ...)]` so existing `RuntimeSettings` rows deserialize
+  without migration.
+- `ChatRequest.num_ctx` and `VisionRequest.num_ctx` are new optional fields
+  with `#[serde(default)]`. Existing API consumers that build these structs
+  manually need to add `num_ctx: None` (compiler-enforced in the workspace).
 
 ## v1.4.1 — Migration compatibility fix
 

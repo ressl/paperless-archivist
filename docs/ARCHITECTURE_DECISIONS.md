@@ -429,3 +429,74 @@ Implications:
 - The `claim_jobs` retry bias (`order by case when error_message is not
   null ... then 0 else 1 end`) still runs first, so a stuck retry never
   starves out behind a flood of priority-0 manual triggers.
+
+## ADR-013: Pin Ollama `options.num_ctx` Explicitly Instead of Relying on the Built-In Default
+
+Context: Vision-OCR jobs against the v1.5.0 default vision model
+(`glm-ocr:latest`) crashed Ollama's llama runner with
+`GGML_ASSERT(a->ne[2] * 4 == b->ne[0])` on realistic single-page renders.
+Upstream tracked the same assertion in
+[ollama/ollama#14401](https://github.com/ollama/ollama/issues/14401) and
+[ollama/ollama#14171](https://github.com/ollama/ollama/issues/14171) and
+established that the assertion fires whenever the vision-token count for
+the page exceeds the Ollama context window. Ollama's built-in default is
+4096 tokens, which is too small for the vision-token expansion produced by
+a normal letter-size page.
+
+v1.5.0 shipped a fallback safety net — detect the crash signature, swap to
+a different model, retry. That keeps documents flowing under Full-Auto but
+masks the actual problem.
+
+Decision: The worker explicitly sets `options.num_ctx` on every Ollama
+vision and text payload, sourced from two new runtime settings:
+
+- `RuntimeSettings.ai.ollama_vision_num_ctx` — default `16384`. Sized so a
+  realistic multi-page render at high DPI still fits without bumping the
+  ceiling.
+- `RuntimeSettings.ai.ollama_text_num_ctx`   — default `8192`. Sized for
+  the consolidated metadata prompt that embeds up to 16k chars of document
+  content with prompt scaffolding.
+
+Both fields are wired through `ChatRequest.num_ctx` /
+`VisionRequest.num_ctx` as `Option<i64>` and only surface on the wire for
+the Ollama provider. Remote providers (OpenAI / Anthropic /
+OpenAI-compatible) ignore the field. The override is exposed in the
+Settings UI under AI Defaults so operators can re-tune for unusual
+hardware without redeploying.
+
+Rationale:
+
+- **Root-cause fix, not workaround.** Upstream identified the assertion as
+  a context-window mismatch; setting `num_ctx` removes the precondition for
+  the crash rather than catching the crash and retrying on another model.
+- **Operator-tunable without code changes.** The default works on
+  commodity Ollama hosts. Tiny boxes (low RAM) can lower the value;
+  high-DPI multi-page scanners can raise it. The setting lives next to the
+  other AI defaults so it surfaces during normal operations review.
+- **Symmetric for text and vision.** The metadata prompt is also large
+  (16k chars), so keeping text at the 4096 default would leave a smaller
+  but related class of edge-case truncation/quality issues unaddressed.
+  The text default is conservative (8k) because text tokens are cheaper
+  than vision tokens.
+- **Defense in depth stays.** The v1.5.0 fallback machinery is left in
+  place. After v1.5.1 deploys, the expected steady state is that
+  `vision_model_fallback_used=true` counts drop toward zero — but if some
+  unforeseen page still trips the assertion, the fallback still catches it
+  before the run dies.
+
+Implications:
+
+- New `RuntimeSettings.ai` fields carry `#[serde(default = "...")]` so
+  existing rows in the `runtime_settings` table deserialize cleanly
+  without a migration.
+- `ChatRequest` and `VisionRequest` gain `num_ctx: Option<i64>` with
+  `#[serde(default)]`. Any external caller constructing these structs
+  manually needs `num_ctx: None` (compiler-enforced in-tree).
+- The Ollama HTTP payload is built via two free functions
+  (`build_ollama_chat_payload`, `build_ollama_vision_payload`) so the
+  num_ctx wiring is unit-testable without spinning up an HTTP server.
+- The startup helper `run_startup_vision_crash_requeue` (introduced in
+  v1.5.0) is idempotent — it clears `error_message` on the rows it
+  matches, so subsequent worker restarts cannot re-requeue the same job.
+  Combined with the v1.5.1 num_ctx fix, the previously-dead OCR jobs
+  succeed on first retry without going through the fallback path.
