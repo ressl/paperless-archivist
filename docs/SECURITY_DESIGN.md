@@ -159,6 +159,30 @@ API requirements:
 - consistent error responses
 - no stack traces in production responses
 
+### 4.1 CSRF Threat Model
+
+The CSRF token is minted on session establishment and stored both as a
+`SameSite=Lax` cookie and inside the session record. Browser writes must
+echo the token via the `X-CSRF-Token` header; the API rehashes the
+incoming value and compares it against the stored hash with
+`subtle::ConstantTimeEq` so that comparison time does not depend on
+which byte first differs.
+
+Known limitations of the current design (accepted for v1.x):
+
+- CSRF tokens persist for the lifetime of the session (up to 12 hours
+  by default) and are not rotated on privilege change. A leaked token
+  remains valid until the session expires or the user logs out.
+- There is no binding to client IP address or user-agent. A token
+  exfiltrated to another network is still accepted while the session
+  lives.
+- Bearer-token (machine) requests bypass CSRF entirely; the bearer
+  token itself is the only secret.
+
+Mitigations: short session lifetime, `SameSite=Lax` and `Secure`
+cookies in production, and audit-logged logout. Future hardening is
+tracked in the roadmap (CSRF rotation, optional IP/UA binding).
+
 ## 5. API Tokens and Service Accounts
 
 Support API tokens for automation.

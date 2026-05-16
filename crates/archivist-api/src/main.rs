@@ -64,6 +64,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use sqlx::Row;
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -4104,7 +4105,14 @@ fn enforce_csrf(auth: &AuthContext, method: &Method, headers: &HeaderMap) -> Res
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::forbidden("missing CSRF token"))?;
     let provided_hash = hash_token(provided);
-    if auth.csrf_secret_hash.as_deref() != Some(provided_hash.as_str()) {
+    let expected = auth
+        .csrf_secret_hash
+        .as_deref()
+        .ok_or_else(|| ApiError::forbidden("invalid CSRF token"))?;
+    // Constant-time compare to deny timing oracles on the hex hash.
+    if expected.as_bytes().len() != provided_hash.as_bytes().len()
+        || !bool::from(expected.as_bytes().ct_eq(provided_hash.as_bytes()))
+    {
         return Err(ApiError::forbidden("invalid CSRF token"));
     }
     Ok(())
