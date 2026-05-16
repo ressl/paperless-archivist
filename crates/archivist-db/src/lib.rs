@@ -3910,11 +3910,18 @@ pub async fn queue_missing_stage(
     mode: ProcessingMode,
     actor: &str,
     rules: &WorkflowRules,
+    max_documents: Option<i64>,
 ) -> Result<i64> {
     let column = status_column_for_stage(stage)?;
     let include_tags = WorkflowRules::normalized_tags(&rules.include_tags);
     let exclude_tags = WorkflowRules::normalized_tags(&rules.exclude_tags);
-    let rows = sqlx::query(&format!(
+    // Eligibility is fully expressible in SQL for this function, so push the budget as `limit $3`
+    // and avoid materialising the entire candidate set in Rust.
+    let limit_clause = match max_documents {
+        Some(_) => "limit $3",
+        None => "",
+    };
+    let query = format!(
         r#"
         select paperless_document_id
           from document_inventory
@@ -3923,12 +3930,14 @@ pub async fn queue_missing_stage(
            and ($1::text[] = '{{}}' or current_tags && $1::text[])
            and not (current_tags && $2::text[])
          order by paperless_document_id
+         {limit_clause}
         "#
-    ))
-    .bind(&include_tags)
-    .bind(&exclude_tags)
-    .fetch_all(pool)
-    .await?;
+    );
+    let mut builder = sqlx::query(&query).bind(&include_tags).bind(&exclude_tags);
+    if let Some(limit) = max_documents {
+        builder = builder.bind(limit);
+    }
+    let rows = builder.fetch_all(pool).await?;
 
     let mut created = 0;
     for row in rows {
@@ -3950,58 +3959,91 @@ pub async fn queue_missing_pipeline(
 ) -> Result<i64> {
     let include_tags = WorkflowRules::normalized_tags(&rules.include_tags);
     let exclude_tags = WorkflowRules::normalized_tags(&rules.exclude_tags);
-    let rows = sqlx::query(
-        r#"
-        select paperless_document_id,
-               ocr_status,
-               tagging_status,
-               title_status,
-               correspondent_status,
-               document_type_status,
-               document_date_status,
-               fields_status,
-               has_ocr_completion_tag,
-               has_tagging_completion_tag,
-               has_full_completion_tag
-          from document_inventory
-         where coalesce(current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
-           and ($1::text[] = '{}' or current_tags && $1::text[])
-           and not (current_tags && $2::text[])
-         order by paperless_document_id
-        "#,
-    )
-    .bind(&include_tags)
-    .bind(&exclude_tags)
-    .fetch_all(pool)
-    .await?;
+    // Eligibility depends on which stages are enabled (Rust-side filter), so we fetch in
+    // capped chunks of ~2x budget keyset-paginated by paperless_document_id rather than push
+    // a brittle predicate into SQL. When the budget is None, fetch everything in one shot.
+    let chunk_size = max_documents.map(|limit| limit.saturating_mul(2).max(16));
 
-    let mut created = 0;
-    for row in rows {
+    let mut created: i64 = 0;
+    let mut last_seen: i32 = i32::MIN;
+    loop {
         if max_documents.is_some_and(|limit| created >= limit) {
             break;
         }
-        let stages = missing_pipeline_stages_for_inventory(
-            enabled_stages,
-            InventoryStageState {
-                ocr_status: row.try_get("ocr_status")?,
-                tagging_status: row.try_get("tagging_status")?,
-                title_status: row.try_get("title_status")?,
-                correspondent_status: row.try_get("correspondent_status")?,
-                document_type_status: row.try_get("document_type_status")?,
-                document_date_status: row.try_get("document_date_status")?,
-                fields_status: row.try_get("fields_status")?,
-                has_ocr_completion_tag: row.try_get("has_ocr_completion_tag")?,
-                has_tagging_completion_tag: row.try_get("has_tagging_completion_tag")?,
-                has_full_completion_tag: row.try_get("has_full_completion_tag")?,
-            },
+        let limit_clause = match chunk_size {
+            Some(_) => "limit $4",
+            None => "",
+        };
+        let query = format!(
+            r#"
+            select paperless_document_id,
+                   ocr_status,
+                   tagging_status,
+                   title_status,
+                   correspondent_status,
+                   document_type_status,
+                   document_date_status,
+                   fields_status,
+                   has_ocr_completion_tag,
+                   has_tagging_completion_tag,
+                   has_full_completion_tag
+              from document_inventory
+             where coalesce(current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
+               and ($1::text[] = '{{}}' or current_tags && $1::text[])
+               and not (current_tags && $2::text[])
+               and paperless_document_id > $3
+             order by paperless_document_id
+             {limit_clause}
+            "#
         );
-        if stages.is_empty() {
-            continue;
+        let mut builder = sqlx::query(&query)
+            .bind(&include_tags)
+            .bind(&exclude_tags)
+            .bind(last_seen);
+        if let Some(size) = chunk_size {
+            builder = builder.bind(size);
         }
+        let rows = builder.fetch_all(pool).await?;
+        if rows.is_empty() {
+            break;
+        }
+        let fetched = rows.len();
+        for row in rows {
+            let document_id: i32 = row.try_get("paperless_document_id")?;
+            last_seen = document_id.max(last_seen);
+            if max_documents.is_some_and(|limit| created >= limit) {
+                break;
+            }
+            let stages = missing_pipeline_stages_for_inventory(
+                enabled_stages,
+                InventoryStageState {
+                    ocr_status: row.try_get("ocr_status")?,
+                    tagging_status: row.try_get("tagging_status")?,
+                    title_status: row.try_get("title_status")?,
+                    correspondent_status: row.try_get("correspondent_status")?,
+                    document_type_status: row.try_get("document_type_status")?,
+                    document_date_status: row.try_get("document_date_status")?,
+                    fields_status: row.try_get("fields_status")?,
+                    has_ocr_completion_tag: row.try_get("has_ocr_completion_tag")?,
+                    has_tagging_completion_tag: row.try_get("has_tagging_completion_tag")?,
+                    has_full_completion_tag: row.try_get("has_full_completion_tag")?,
+                },
+            );
+            if stages.is_empty() {
+                continue;
+            }
 
-        let document_id: i32 = row.try_get("paperless_document_id")?;
-        create_run_with_jobs(pool, document_id, &stages, mode, trigger_tag, actor).await?;
-        created += 1;
+            create_run_with_jobs(pool, document_id, &stages, mode, trigger_tag, actor).await?;
+            created += 1;
+        }
+        // No budget set means we already fetched everything once.
+        if chunk_size.is_none() {
+            break;
+        }
+        // No more rows possible than we fetched in this round.
+        if chunk_size.is_some_and(|size| fetched < size as usize) {
+            break;
+        }
     }
     Ok(created)
 }

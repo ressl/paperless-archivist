@@ -3128,6 +3128,7 @@ async fn queue_ocr_batch(
         settings.workflow.mode,
         &auth.0.actor_type,
         &settings.workflow.rules,
+        None,
     )
     .await?;
     Ok(Json(json!({ "queued": created })))
@@ -3145,6 +3146,7 @@ async fn queue_tags_batch(
         settings.workflow.mode,
         &auth.0.actor_type,
         &settings.workflow.rules,
+        None,
     )
     .await?;
     Ok(Json(json!({ "queued": created })))
@@ -3164,6 +3166,7 @@ async fn queue_full_batch(
             settings.workflow.mode,
             &auth.0.actor_type,
             &settings.workflow.rules,
+            None,
         )
         .await?;
     }
