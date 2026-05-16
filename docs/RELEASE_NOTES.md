@@ -5,23 +5,37 @@
 > `1.1.2`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
 
-## In Progress — Milestone #14 Post-v1.1 hardening
+## Milestone #14 — Post-v1.1 hardening (closed)
 
-Post-v1.1 hardening work is ongoing. Recently merged issues include:
+All 25 hardening issues are landed. Highlights:
 
-- #80 partial indexes on `audit_events(job_id)` and `(run_id)`
-- #81 deduped dashboard helper queries (range start + runtime settings)
-- #82 shared `ErrorBoundary` at shell, tab, and dashboard-ops levels
-- #83 constant-time CSRF token comparison + threat-model docs
-- #87 explicit request body size limits with per-route overrides
-- #88 worker retry backoff jitter (+/-25%) to avoid thundering herds
-- #92 O(1) tag lookup in the worker's Paperless trigger poll
-- #96 release notes catch-up
-- #99 dashboard `provider_usage` feedback join bounded by date range
-
-Larger items (audit streaming, queue_missing SQL LIMIT push-down, login
-IP rate limit, SSRF URL validator, App.tsx extraction, code splitting,
-tracing, snapshot off the read path) remain open against Milestone #14.
+- Backend perf and safety: audit-event indexes (#80), deduped dashboard
+  helper queries (#81), `queue_missing` SQL LIMIT push-down, snapshot
+  off the read path (#97), bounded `provider_usage` joins (#99), typed
+  SQL allowlists for status counts and stage-keyed queries (#91).
+- Security: constant-time CSRF token comparison and threat-model docs
+  (#83), explicit request body size limits with per-route overrides
+  (#87), login IP rate limiter, SSRF URL validator, recovery permission
+  alignment surfacing `permissions.read_runs` / `permissions.write_runs`
+  on `/auth/me` (#98), prompt-injection threat model and cookie-secure
+  default documentation (#100).
+- Worker: retry backoff jitter (#88), O(1) tag lookup (#92), typed
+  error variants (`PaperlessError`, `AiProviderError`) replacing the
+  bulk of substring-based failure classification (#100).
+- Frontend: shared ErrorBoundary at shell/tab/dashboard layers (#82),
+  App.tsx extraction (Settings/Prompts/Audit/Users/DocumentChat code
+  splits), inventory and reviews row memoisation, dashboard sparkline
+  HashMap lookups (#100), real a11y fix in the dashboard stage matrix
+  (caught by the new render test).
+- Testing & tooling: pure dashboard helpers extracted and unit-tested
+  in archivist-db; vitest + jest-axe coverage for `computeHealthScore`,
+  `parseDocumentIds`, the review patch helpers, and shell-level axe
+  assertions for `<Dashboard>`, `<Reviews>` and `<SettingsPage>` (#101).
+  Informational `pnpm i18n:check` script reporting untranslated DE
+  values (#100).
+- Docs: ADR-010 on snapshot-bucket trade-offs, SECURITY_DESIGN.md
+  section 4.2 (cookie Secure flag) and 14.1 (prompt-injection threat
+  model).
 
 ## v1.1.2
 
