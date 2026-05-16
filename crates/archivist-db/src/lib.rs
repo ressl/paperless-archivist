@@ -4874,6 +4874,267 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
     Ok(())
 }
 
+/// List `pending` review_items for the autopilot drain.
+///
+/// Oldest-first so the operator-visible backlog is whittled down from the
+/// front (and any "stuck for hours" rows leave the dashboard first). The
+/// returned shape is identical to [`pending_review_for_apply`] so the worker
+/// drain can reuse the same apply path.
+pub async fn list_pending_review_items_for_autopilot_drain(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<ReviewItemRecord>> {
+    let rows = sqlx::query(
+        r#"
+        select id, run_id, job_id, paperless_document_id, stage, status,
+               suggested_patch, edited_patch, validation_warnings, created_at
+          from review_items
+         where status = 'pending'
+         order by created_at asc
+         limit $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let stage: String = row.try_get("stage")?;
+            Ok(ReviewItemRecord {
+                id: row.try_get("id")?,
+                run_id: row.try_get("run_id")?,
+                job_id: row.try_get("job_id")?,
+                paperless_document_id: row.try_get("paperless_document_id")?,
+                stage: stage.parse()?,
+                status: row.try_get("status")?,
+                suggested_patch: row.try_get("suggested_patch")?,
+                edited_patch: row.try_get("edited_patch")?,
+                validation_warnings: row.try_get("validation_warnings")?,
+                debug_context: None,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect()
+}
+
+/// Atomically claim a pending review item for autopilot drain.
+///
+/// Flips the row from `pending` → `approved` and stamps a `review.approved`
+/// audit event with `actor_type = "worker"` and `trigger = "autopilot_drain"`
+/// in the metadata so post-hoc analysis can distinguish these from
+/// human-initiated approvals. Returns the claimed record when the transition
+/// succeeded, or `Ok(None)` if the row was no longer pending (raced by a
+/// human reviewer or another worker tick).
+pub async fn claim_pending_review_for_autopilot_drain(
+    pool: &DbPool,
+    review_id: Uuid,
+) -> Result<Option<ReviewItemRecord>> {
+    let mut tx = pool.begin().await?;
+    let Some(row) = sqlx::query(
+        r#"
+        update review_items
+           set status = 'approved',
+               reviewed_at = now()
+         where id = $1 and status = 'pending'
+        returning id, run_id, job_id, paperless_document_id, stage, status,
+                  suggested_patch, edited_patch, validation_warnings, created_at
+        "#,
+    )
+    .bind(review_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+
+    let stage_text: String = row.try_get("stage")?;
+    let stage: Stage = stage_text.parse()?;
+    let record = ReviewItemRecord {
+        id: row.try_get("id")?,
+        run_id: row.try_get("run_id")?,
+        job_id: row.try_get("job_id")?,
+        paperless_document_id: row.try_get("paperless_document_id")?,
+        stage,
+        status: row.try_get("status")?,
+        suggested_patch: row.try_get("suggested_patch")?,
+        edited_patch: row.try_get("edited_patch")?,
+        validation_warnings: row.try_get("validation_warnings")?,
+        debug_context: None,
+        created_at: row.try_get("created_at")?,
+    };
+
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "review.approved".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: Some(record.run_id),
+            job_id: record.job_id,
+            paperless_document_id: Some(record.paperless_document_id),
+            before: Some(record.suggested_patch.clone()),
+            after: record.edited_patch.clone(),
+            metadata: Some(json!({
+                "review_id": record.id,
+                "stage": stage_text,
+                "trigger": "autopilot_drain"
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Some(record))
+}
+
+/// Mark a review_item as applied via the autopilot drain.
+///
+/// Mirrors [`mark_review_applied`] but with worker-actor audit (no user ID)
+/// and a `trigger = "autopilot_drain"` metadata marker. Updates job and run
+/// status to keep the dashboard counters consistent with the existing
+/// human-approve path.
+pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        update review_items
+           set status = 'applied',
+               reviewed_at = coalesce(reviewed_at, now())
+         where id = $1
+        returning run_id, job_id, paperless_document_id, stage
+        "#,
+    )
+    .bind(review_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let job_id: Option<Uuid> = row.try_get("job_id")?;
+    if let Some(job_id) = job_id {
+        sqlx::query("update jobs set status = 'succeeded', updated_at = now() where id = $1")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
+    let document_id: i32 = row.try_get("paperless_document_id")?;
+    let run_id: Uuid = row.try_get("run_id")?;
+    set_inventory_stage_status_tx(
+        &mut tx,
+        document_id,
+        stage,
+        "succeeded",
+        None,
+        false,
+        Some(run_id),
+    )
+    .await?;
+
+    if no_remaining_jobs_tx(&mut tx, run_id).await? {
+        sqlx::query(
+            r#"
+            update pipeline_runs
+               set status = 'succeeded',
+                   finished_at = now(),
+                   updated_at = now()
+             where id = $1
+            "#,
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'succeeded',
+                   complete = true,
+                   updated_at = now()
+             where paperless_document_id = $1
+            "#,
+        )
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            update pipeline_runs
+               set status = 'queued',
+                   updated_at = now()
+             where id = $1
+            "#,
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'queued',
+                   updated_at = now()
+             where paperless_document_id = $1
+            "#,
+        )
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "review.applied".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: Some(run_id),
+            job_id,
+            paperless_document_id: Some(document_id),
+            before: None,
+            after: Some(json!({ "review_id": review_id })),
+            metadata: Some(json!({
+                "stage": stage,
+                "trigger": "autopilot_drain"
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Roll a review item back to `pending` after a failed autopilot drain apply.
+///
+/// Used when the Paperless PATCH (or any subsequent step) errors after
+/// [`claim_pending_review_for_autopilot_drain`] has already flipped the row
+/// to `approved`. Without rollback the row would be stuck in `approved`
+/// status with no apply ever performed.
+pub async fn revert_review_to_pending_after_failed_drain(
+    pool: &DbPool,
+    review_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update review_items
+           set status = 'pending',
+               reviewed_at = null
+         where id = $1 and status = 'approved'
+        "#,
+    )
+    .bind(review_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub struct AiArtifactInput<'a> {
     pub run_id: Uuid,
     pub job_id: Uuid,

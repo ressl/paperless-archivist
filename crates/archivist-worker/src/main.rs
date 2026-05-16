@@ -20,15 +20,17 @@ use archivist_core::{
     validate_title_suggestion,
 };
 use archivist_db::{
-    AiArtifactInput, DbPool, JobRecord, append_audit, claim_jobs, claim_notification_delivery,
-    complete_job, connect, create_review_item, create_run_with_jobs, custom_field_ids_for_names,
-    fail_job, get_active_prompt, get_backlog_counts, get_dashboard_live_status,
-    get_runtime_settings, get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
+    AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit, claim_jobs,
+    claim_notification_delivery, claim_pending_review_for_autopilot_drain, complete_job, connect,
+    create_review_item, create_run_with_jobs, custom_field_ids_for_names, fail_job,
+    get_active_prompt, get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
+    get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
+    list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
     named_entity_id_for_name, queue_missing_pipeline, record_dashboard_snapshot,
-    record_document_language, resolve_secret, selector_document_budget, tag_ids_for_names,
-    upsert_inventory_item, upsert_paperless_custom_field, upsert_paperless_named_entity,
-    upsert_paperless_tag,
+    record_document_language, resolve_secret, revert_review_to_pending_after_failed_drain,
+    selector_document_budget, tag_ids_for_names, upsert_inventory_item,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{
@@ -105,6 +107,17 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 {
                     warn!(error = %error, "dashboard snapshot tick failed");
                 }
+                // Autopilot review drain: when the runtime is in full_auto, any review_items
+                // still sitting in `pending` are auto-applied here, respecting the same safety
+                // budget the auto-selector honors. This handles the residual backlog from
+                // historical batches that routed to manual_review before commit 0d7a915 made
+                // routing follow live runtime mode, and any future flip-from-review case.
+                if tick % 12 == 7
+                    && let Err(error) =
+                        drain_pending_reviews_if_autopilot_tick(&pool, &config).await
+                {
+                    warn!(error = %error, "autopilot review drain tick failed");
+                }
                 if tick % 12 == 1
                     && trigger_poll_running
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -144,6 +157,30 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
 async fn record_dashboard_snapshot_tick(pool: &DbPool) -> Result<()> {
     let counts = get_backlog_counts(pool).await?;
     record_dashboard_snapshot(pool, &counts).await
+}
+
+/// Tick wrapper for the autopilot review drain.
+///
+/// Loads the latest runtime settings each invocation (the dashboard mode
+/// badge reflects the live runtime mode, and so should this drain). Wrapped
+/// in a tokio timeout so a stuck Paperless host cannot freeze the worker
+/// tick loop — the next tick can retry.
+async fn drain_pending_reviews_if_autopilot_tick(pool: &DbPool, config: &AppConfig) -> Result<()> {
+    let settings = get_runtime_settings(pool).await?;
+    let applied = timeout(
+        Duration::from_secs(120),
+        drain_pending_reviews_if_autopilot(pool, config, &settings),
+    )
+    .await
+    .map_err(|_| anyhow!("autopilot drain tick timed out"))??;
+    if applied > 0 {
+        info!(
+            applied,
+            mode = %settings.workflow.mode,
+            "autopilot review drain applied pending items"
+        );
+    }
+    Ok(())
 }
 
 async fn wait_for_schema(pool: &DbPool) -> Result<()> {
@@ -1293,6 +1330,249 @@ async fn apply_patch_with_workflow_tags(
     Ok(())
 }
 
+/// Decide whether the autopilot review drain should run on this tick.
+///
+/// Returns `Some(budget)` when the drain is allowed:
+/// - `budget = None`   means "no per-tick cap" (unlimited)
+/// - `budget = Some(n)` means "at most n items this tick" (n > 0)
+///
+/// Returns `None` when the drain must skip — mode is not `FullAuto`, dry-run
+/// is on, the workflow is paused, or the safety budget is exhausted.
+///
+/// Kept as a pure function (no DB / IO) so it is unit-testable.
+fn autopilot_drain_budget(
+    settings: &RuntimeSettings,
+    safety: &archivist_core::WorkflowSafetyStatus,
+) -> Option<Option<i64>> {
+    if !settings.workflow.mode.auto_apply_validated_suggestions() {
+        return None;
+    }
+    if settings.workflow.dry_run {
+        return None;
+    }
+    if safety.paused {
+        return None;
+    }
+    let budget = selector_document_budget(safety);
+    match budget {
+        None => Some(None),
+        Some(remaining) if remaining > 0 => Some(Some(remaining)),
+        Some(_) => None,
+    }
+}
+
+/// Drain pending review_items by auto-applying them when the runtime is in
+/// full_auto. Complements the per-run `handle_patch_result` routing fix: if
+/// items were queued under manual_review and the operator later flipped to
+/// full_auto, those rows would otherwise sit in `pending` forever. The drain
+/// is gated by the same safety dials the auto-selector honors (paused, dry
+/// run, hourly + daily document limits).
+async fn drain_pending_reviews_if_autopilot(
+    pool: &DbPool,
+    config: &AppConfig,
+    settings: &RuntimeSettings,
+) -> Result<usize> {
+    let safety = get_workflow_safety_status(pool, settings).await?;
+    let Some(budget) = autopilot_drain_budget(settings, &safety) else {
+        return Ok(0);
+    };
+    // Hard ceiling per tick so a fresh backlog cannot stall the worker tick
+    // loop on a single drain. Combined with the safety budget, this also
+    // gives the dashboard a visible ramp rather than a single spike.
+    const PER_TICK_CEILING: i64 = 50;
+    let limit = match budget {
+        None => PER_TICK_CEILING,
+        Some(remaining) => remaining.min(PER_TICK_CEILING),
+    };
+    if limit <= 0 {
+        return Ok(0);
+    }
+    let pending = list_pending_review_items_for_autopilot_drain(pool, limit).await?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let paperless = paperless_client(pool, config, settings).await?;
+
+    let mut applied = 0usize;
+    for review in pending {
+        let review_id = review.id;
+        let paperless_document_id = review.paperless_document_id;
+        match apply_one_autopilot_drain_review(pool, &paperless, settings, review).await {
+            Ok(true) => {
+                applied += 1;
+                info!(
+                    %review_id,
+                    paperless_document_id,
+                    trigger = "autopilot_drain",
+                    "autopilot drain applied pending review item"
+                );
+            }
+            Ok(false) => {
+                // Raced — another worker tick (or a human reviewer) claimed
+                // the row first. Not an error.
+            }
+            Err(error) => {
+                warn!(
+                    %review_id,
+                    paperless_document_id,
+                    error = %error,
+                    "autopilot drain failed to apply review item; row returned to pending"
+                );
+            }
+        }
+    }
+    Ok(applied)
+}
+
+async fn apply_one_autopilot_drain_review(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    review: ReviewItemRecord,
+) -> Result<bool> {
+    let Some(claimed) = claim_pending_review_for_autopilot_drain(pool, review.id).await? else {
+        // Raced — the row is no longer pending.
+        return Ok(false);
+    };
+    if let Err(error) = apply_autopilot_drain_patch(pool, paperless, settings, &claimed).await {
+        // Roll the row back to pending so the next tick can retry. We
+        // deliberately don't audit a failure event here — Paperless errors
+        // already get an `document.patch_apply_failed` audit inside
+        // `apply_autopilot_drain_patch`; non-Paperless errors are rare and
+        // logged via the caller's `warn!`.
+        if let Err(revert_error) =
+            revert_review_to_pending_after_failed_drain(pool, claimed.id).await
+        {
+            warn!(
+                review_id = %claimed.id,
+                error = %revert_error,
+                "failed to revert review item to pending after drain failure"
+            );
+        }
+        return Err(error);
+    }
+    mark_review_auto_applied(pool, claimed.id).await?;
+    Ok(true)
+}
+
+async fn apply_autopilot_drain_patch(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    review: &ReviewItemRecord,
+) -> Result<()> {
+    let patch_value = review
+        .edited_patch
+        .clone()
+        .unwrap_or_else(|| review.suggested_patch.clone());
+    let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
+    let final_run_stage = if let Some(job_id) = review.job_id {
+        is_last_active_job(pool, review.run_id, job_id).await?
+    } else {
+        false
+    };
+    let document = paperless.get_document(review.paperless_document_id).await?;
+    let all_tags = paperless.list_tags().await?;
+    let mut tag_ids = patch.tags.clone().unwrap_or_else(|| document.tags.clone());
+    if let Some(completion_name) = settings
+        .workflow
+        .tags
+        .completion_tag_for_stage(review.stage)
+    {
+        let tag = paperless.ensure_tag(completion_name).await?;
+        if !tag_ids.contains(&tag.id) {
+            tag_ids.push(tag.id);
+        }
+    }
+    if final_run_stage {
+        let tag = paperless
+            .ensure_tag(&settings.workflow.tags.completion_processed)
+            .await?;
+        if !tag_ids.contains(&tag.id) {
+            tag_ids.push(tag.id);
+        }
+    }
+    if let Some(trigger_name) = settings.workflow.tags.trigger_tag_for_stage(review.stage)
+        && let Some(tag) = all_tags
+            .iter()
+            .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
+    {
+        tag_ids.retain(|id| *id != tag.id);
+    }
+    if final_run_stage
+        && let Some(tag) = all_tags.iter().find(|tag| {
+            tag.name
+                .eq_ignore_ascii_case(&settings.workflow.tags.trigger_process)
+        })
+    {
+        tag_ids.retain(|id| *id != tag.id);
+    }
+    tag_ids.sort_unstable();
+    tag_ids.dedup();
+    patch.tags = Some(tag_ids);
+    prune_unchanged_patch_fields(&mut patch, &document);
+    let before = audit_before_for_patch(&document, &patch);
+    let after = audit_patch_payload(&patch);
+    let apply_started = std::time::Instant::now();
+    if let Err(error) = paperless
+        .patch_document(review.paperless_document_id, &patch)
+        .await
+    {
+        let duration_ms = apply_started.elapsed().as_millis() as u64;
+        append_audit(
+            pool,
+            AuditEventInput {
+                event_type: "document.patch_apply_failed".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: Some(review.run_id),
+                job_id: review.job_id,
+                paperless_document_id: Some(review.paperless_document_id),
+                before: Some(before),
+                after: Some(after),
+                metadata: Some(json!({
+                    "stage": review.stage,
+                    "review_id": review.id,
+                    "duration_ms": duration_ms,
+                    "trigger": "autopilot_drain"
+                })),
+                outcome: "failed".to_owned(),
+                error_message: Some(error.to_string()),
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+        return Err(error);
+    }
+    let duration_ms = apply_started.elapsed().as_millis() as u64;
+    append_audit(
+        pool,
+        AuditEventInput {
+            event_type: "document.patch_applied".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: Some(review.run_id),
+            job_id: review.job_id,
+            paperless_document_id: Some(review.paperless_document_id),
+            before: Some(before),
+            after: Some(after),
+            metadata: Some(json!({
+                "stage": review.stage,
+                "review_id": review.id,
+                "duration_ms": duration_ms,
+                "trigger": "autopilot_drain"
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 fn prune_unchanged_patch_fields(patch: &mut DocumentPatch, document: &PaperlessDocumentDetail) {
     if patch.content.as_deref() == document.content.as_deref() {
         patch.content = None;
@@ -1983,5 +2263,88 @@ mod tests {
                 ProcessingFailureClass::Permanent
             );
         }
+    }
+
+    fn unrestricted_safety() -> archivist_core::WorkflowSafetyStatus {
+        archivist_core::WorkflowSafetyStatus {
+            paused: false,
+            dry_run: false,
+            hourly_document_limit: None,
+            daily_document_limit: None,
+            hourly_remaining: None,
+            daily_remaining: None,
+        }
+    }
+
+    #[test]
+    fn autopilot_drain_runs_under_full_auto_with_unlimited_budget() {
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.mode = ProcessingMode::FullAuto;
+        settings.workflow.dry_run = false;
+        let safety = unrestricted_safety();
+        // Unlimited budget → drain is allowed and the per-tick cap is the
+        // only ceiling.
+        assert_eq!(autopilot_drain_budget(&settings, &safety), Some(None));
+    }
+
+    #[test]
+    fn autopilot_drain_skips_when_mode_is_manual_review() {
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.mode = ProcessingMode::ManualReview;
+        let safety = unrestricted_safety();
+        assert_eq!(autopilot_drain_budget(&settings, &safety), None);
+    }
+
+    #[test]
+    fn autopilot_drain_skips_when_mode_is_auto_select_review() {
+        let mut settings = RuntimeSettings::default();
+        // AutoSelectReview enables auto-selection but still requires human
+        // review — drain must not auto-apply under this mode.
+        settings.workflow.mode = ProcessingMode::AutoSelectReview;
+        let safety = unrestricted_safety();
+        assert_eq!(autopilot_drain_budget(&settings, &safety), None);
+    }
+
+    #[test]
+    fn autopilot_drain_skips_when_dry_run_is_enabled() {
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.mode = ProcessingMode::FullAuto;
+        settings.workflow.dry_run = true;
+        let safety = unrestricted_safety();
+        assert_eq!(autopilot_drain_budget(&settings, &safety), None);
+    }
+
+    #[test]
+    fn autopilot_drain_skips_when_workflow_is_paused() {
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.mode = ProcessingMode::FullAuto;
+        let mut safety = unrestricted_safety();
+        safety.paused = true;
+        assert_eq!(autopilot_drain_budget(&settings, &safety), None);
+    }
+
+    #[test]
+    fn autopilot_drain_skips_when_safety_budget_is_exhausted() {
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.mode = ProcessingMode::FullAuto;
+        let mut safety = unrestricted_safety();
+        safety.hourly_document_limit = Some(100);
+        safety.daily_document_limit = Some(1000);
+        safety.hourly_remaining = Some(0);
+        safety.daily_remaining = Some(500);
+        assert_eq!(autopilot_drain_budget(&settings, &safety), None);
+    }
+
+    #[test]
+    fn autopilot_drain_caps_at_smaller_of_hourly_or_daily() {
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.mode = ProcessingMode::FullAuto;
+        let mut safety = unrestricted_safety();
+        safety.hourly_document_limit = Some(50);
+        safety.daily_document_limit = Some(200);
+        safety.hourly_remaining = Some(7);
+        safety.daily_remaining = Some(120);
+        // Drain budget is the smaller of the two remaining quotas.
+        assert_eq!(autopilot_drain_budget(&settings, &safety), Some(Some(7)));
     }
 }
