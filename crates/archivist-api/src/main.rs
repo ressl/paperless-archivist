@@ -1854,78 +1854,100 @@ async fn validate_outbound_url(raw: &str) -> Result<Url, ApiError> {
         return Err(ApiError::bad_request("URL must not contain userinfo"));
     }
     let host = parsed
-        .host_str()
-        .ok_or_else(|| ApiError::bad_request("URL is missing a host"))?
-        .to_owned();
+        .host()
+        .ok_or_else(|| ApiError::bad_request("URL is missing a host"))?;
     let port = parsed.port_or_known_default().unwrap_or(0);
-    // `lookup_host` accepts both literal IPs (in `Host`) and DNS names.
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
-        .await
-        .map_err(|error| ApiError::bad_request(format!("failed to resolve host: {error}")))?
-        .collect();
-    if addrs.is_empty() {
+    let ips: Vec<IpAddr> = match host {
+        // IP literals don't go through DNS — using `lookup_host` for them
+        // is both wasteful and can fail on some platforms for ULA / RFC4193
+        // addresses (macOS getaddrinfo with brackets in the host string).
+        url::Host::Ipv4(v4) => vec![IpAddr::V4(v4)],
+        url::Host::Ipv6(v6) => vec![IpAddr::V6(v6)],
+        url::Host::Domain(domain) => tokio::net::lookup_host((domain, port))
+            .await
+            .map_err(|error| ApiError::bad_request(format!("failed to resolve host: {error}")))?
+            .map(|addr| addr.ip())
+            .collect(),
+    };
+    if ips.is_empty() {
         return Err(ApiError::bad_request("host did not resolve to any address"));
     }
-    for addr in &addrs {
-        if is_private_or_local_ip(addr.ip()) {
+    for ip in &ips {
+        if is_ssrf_dangerous_ip(*ip) {
             return Err(ApiError::bad_request(
-                "URL resolves to a private, loopback, or link-local address",
+                "URL resolves to a loopback, link-local, or otherwise unroutable address",
             ));
         }
     }
     Ok(parsed)
 }
 
-fn is_private_or_local_ip(ip: IpAddr) -> bool {
+/// Decide whether an IP must be hard-rejected for admin-supplied "test"
+/// URLs (Paperless health probe, Ollama provider test, generic notification
+/// webhook test).
+///
+/// The threat model here is narrow on purpose:
+///
+/// - These endpoints require `WriteSettings`; the operator who can call them
+///   already controls the settings document and is trusted to point the
+///   integration at real internal services.
+/// - Paperless Archivist is routinely deployed inside Kubernetes / Docker
+///   Compose / on-prem networks where Paperless-ngx and Ollama live on
+///   private addresses (10/8, 172.16/12, 192.168/16, RFC6598 100.64/10,
+///   RFC4193 fc00::/7). Rejecting those would make the in-UI "Test" buttons
+///   unusable in every realistic deployment.
+///
+/// What we DO still reject — the addresses that have no legitimate operator
+/// use case and that an attacker who briefly steals a session could abuse:
+///
+/// - Loopback (127.0.0.0/8, ::1)
+/// - Link-local incl. cloud metadata IMDS (169.254.0.0/16, fe80::/10)
+/// - Unspecified (0.0.0.0, ::)
+/// - Broadcast (255.255.255.255)
+/// - Multicast
+///
+/// See `docs/SECURITY_DESIGN.md` section 4.3 for the full rationale.
+fn is_ssrf_dangerous_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => is_private_or_local_ipv4(v4),
-        IpAddr::V6(v6) => is_private_or_local_ipv6(v6),
+        IpAddr::V4(v4) => is_ssrf_dangerous_ipv4(v4),
+        IpAddr::V6(v6) => is_ssrf_dangerous_ipv6(v6),
     }
 }
 
-fn is_private_or_local_ipv4(ip: Ipv4Addr) -> bool {
+fn is_ssrf_dangerous_ipv4(ip: Ipv4Addr) -> bool {
+    // Hard reject — no legitimate operator target.
     if ip.is_loopback() || ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
         return true;
     }
-    // is_private already covers 10/8, 172.16/12, 192.168/16.
-    if ip.is_private() {
-        return true;
-    }
-    // is_link_local covers 169.254/16.
+    // Link-local 169.254/16 includes the cloud-metadata IMDS endpoint
+    // (169.254.169.254). Keep rejecting — leaking cloud IAM creds via a
+    // ghost "test" request would be catastrophic, and no real integration
+    // target lives there.
     if ip.is_link_local() {
-        return true;
-    }
-    // RFC6598 shared-address space 100.64.0.0/10.
-    let octets = ip.octets();
-    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000 {
         return true;
     }
     false
 }
 
-fn is_private_or_local_ipv6(ip: Ipv6Addr) -> bool {
+fn is_ssrf_dangerous_ipv6(ip: Ipv6Addr) -> bool {
     if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
         return true;
     }
-    // Mapped IPv4: re-evaluate the embedded v4.
+    // Mapped IPv4: re-evaluate the embedded v4 so an attacker can't smuggle
+    // 127.0.0.1 as ::ffff:127.0.0.1 / ::127.0.0.1 past the loopback check.
     if let Some(v4) = ip.to_ipv4_mapped()
-        && is_private_or_local_ipv4(v4)
+        && is_ssrf_dangerous_ipv4(v4)
     {
         return true;
     }
-    // 4-in-6 deprecated form.
     if let Some(v4) = ip.to_ipv4()
-        && is_private_or_local_ipv4(v4)
+        && is_ssrf_dangerous_ipv4(v4)
     {
         return true;
     }
     let segments = ip.segments();
-    // Link-local fe80::/10
+    // Link-local fe80::/10 — same metadata/IMDS reasoning as v4.
     if (segments[0] & 0xffc0) == 0xfe80 {
-        return true;
-    }
-    // Unique-local fc00::/7
-    if (segments[0] & 0xfe00) == 0xfc00 {
         return true;
     }
     false
@@ -4972,11 +4994,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_outbound_url_rejects_rfc1918() {
-        let err = validate_outbound_url("https://10.0.0.5/api")
-            .await
-            .expect_err("RFC1918 must be rejected");
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    async fn validate_outbound_url_accepts_rfc1918() {
+        // RFC1918 is the common case for K8s service IPs, Docker bridge
+        // networks, and on-prem service meshes. Operator-trusted internal
+        // targets must be allowed for the in-UI "Test" buttons to work.
+        for url in [
+            "http://10.0.0.5/api",
+            "http://172.16.5.5/api",
+            "http://192.168.1.10/api",
+        ] {
+            let ok = validate_outbound_url(url).await;
+            assert!(ok.is_ok(), "{url} must be accepted: {ok:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_accepts_rfc6598() {
+        // RFC6598 shared-address space (100.64.0.0/10) is used by ISP CGN
+        // and some homelab/router setups.
+        let ok = validate_outbound_url("http://100.64.0.5/api").await;
+        assert!(ok.is_ok(), "RFC6598 must be accepted: {ok:?}");
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_accepts_rfc4193() {
+        // RFC4193 unique-local IPv6 (fc00::/7). K8s dual-stack clusters
+        // and on-prem v6 deployments live here. The previous validator
+        // would have rejected this with "private, loopback, or link-local";
+        // the new policy must let it through.
+        //
+        // Use an explicit port so getaddrinfo treats the host as a literal
+        // and doesn't actually try DNS (which fails for `fd00::1` in CI).
+        let ok = validate_outbound_url("http://[fd00::1]:8080/api").await;
+        assert!(ok.is_ok(), "RFC4193 must be accepted: {ok:?}");
     }
 
     #[tokio::test]
@@ -5005,9 +5055,44 @@ mod tests {
 
     #[tokio::test]
     async fn validate_outbound_url_rejects_link_local() {
+        // Cloud-metadata IMDS (AWS/Azure/GCP) is at 169.254.169.254.
         let err = validate_outbound_url("http://169.254.169.254/latest/meta-data/")
             .await
             .expect_err("link-local rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_ipv6_link_local() {
+        let err = validate_outbound_url("http://[fe80::1]/")
+            .await
+            .expect_err("IPv6 link-local rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_v4_mapped_loopback() {
+        // Make sure an attacker can't smuggle 127.0.0.1 past the v4 check
+        // by encoding it as ::ffff:127.0.0.1.
+        let err = validate_outbound_url("http://[::ffff:127.0.0.1]/")
+            .await
+            .expect_err("v4-mapped loopback must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_unspecified() {
+        let err = validate_outbound_url("http://0.0.0.0/")
+            .await
+            .expect_err("0.0.0.0 must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn validate_outbound_url_rejects_multicast() {
+        let err = validate_outbound_url("http://224.0.0.1/")
+            .await
+            .expect_err("multicast must be rejected");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 

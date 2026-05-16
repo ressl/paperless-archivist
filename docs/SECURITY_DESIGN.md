@@ -195,6 +195,55 @@ deploying behind a TLS-terminating reverse proxy should additionally set
 `ARCHIVIST_TRUST_PROXY=true` so the originating client IP — not the
 proxy — is recorded in the audit log.
 
+### 4.3 SSRF Threat Model for Admin Test Endpoints
+
+The admin "test" endpoints — `POST /api/settings/test/paperless`,
+`POST /api/settings/test/provider`, `POST /api/settings/test/notification`,
+and `GET /api/settings/providers/{name}/models` — fire an HTTP request at
+an operator-supplied URL pulled from settings. To stop a session hijacker
+who briefly holds `WriteSettings` from turning those probes into a
+host-side scanner, every test path runs `validate_outbound_url()` before
+opening a socket.
+
+The validator is intentionally **narrow**, not paranoid: Paperless
+Archivist is routinely deployed inside Kubernetes / Docker Compose /
+on-prem networks where Paperless-ngx and Ollama live on private
+addresses. A validator that rejected all of RFC1918 / RFC6598 / RFC4193
+would make the in-UI Test buttons unusable in every realistic deployment
+even though the targets are operator-trusted internal services.
+
+Hard reject (no legitimate operator target):
+
+- Loopback (`127.0.0.0/8`, `::1`, v4-mapped forms of `::ffff:127.0.0.1`)
+- Link-local incl. cloud-metadata IMDS (`169.254.0.0/16`, `fe80::/10`).
+  The IMDS endpoint `169.254.169.254` would expose AWS/Azure/GCP IAM
+  credentials if reachable.
+- Unspecified (`0.0.0.0`, `::`)
+- Broadcast (`255.255.255.255`)
+- Multicast
+- URLs containing userinfo (`http://user:pass@host/`) — these leak the
+  embedded credentials into the request and serve no purpose for a
+  configured integration.
+- Schemes other than `http` and `https` (no `file://`, `gopher://`,
+  `dict://`, etc.)
+
+Explicitly allowed (operator-trusted):
+
+- RFC1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+- RFC6598 shared-address space (`100.64.0.0/10`)
+- RFC4193 unique-local IPv6 (`fc00::/7`)
+- Any public unicast address (the original public-internet case)
+
+The threat model assumes the operator setting an `Ollama` or `Paperless`
+URL deliberately points the integration at the right private service.
+The SSRF guard targets the abuse cases that no operator would ever
+deliberately configure — loopback to scan the API pod itself, IMDS to
+exfiltrate cloud credentials, link-local to probe the host network.
+
+Implementation: `crates/archivist-api/src/main.rs::validate_outbound_url`
+(invoked by `test_paperless`, `test_provider`, `test_notification`,
+`model_provider_models`). Covered by unit tests in the same file.
+
 ## 5. API Tokens and Service Accounts
 
 Support API tokens for automation.
