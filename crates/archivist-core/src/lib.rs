@@ -1083,6 +1083,23 @@ pub struct AiSettings {
     /// Operators can disable this if the queue should not be touched on upgrade.
     #[serde(default = "default_true")]
     pub requeue_vision_crashes_on_startup: bool,
+    /// Ollama context-window override for vision calls (`options.num_ctx`).
+    /// Ollama's built-in default is 4096 tokens, which is too small for the
+    /// per-page vision tokens that glm-ocr and similar models produce at
+    /// realistic document DPIs - see ollama/ollama#14401 and
+    /// ollama/ollama#14171. The crash signature is
+    /// `GGML_ASSERT(a->ne[2] * 4 == b->ne[0])`. 16k is a safe ceiling on
+    /// commodity Ollama hosts; lower it on memory-constrained boxes, raise it
+    /// for huge multi-page renderings at high DPI.
+    #[serde(default = "default_ollama_vision_num_ctx")]
+    pub ollama_vision_num_ctx: i64,
+    /// Ollama context-window override for text-chat calls (`options.num_ctx`).
+    /// Metadata-extraction prompts embed up to 16k chars of document content
+    /// plus the prompt scaffolding, which also benefits from a larger context
+    /// than Ollama's 4096-token default. 8k is enough headroom in practice
+    /// without the memory cost of the vision ceiling.
+    #[serde(default = "default_ollama_text_num_ctx")]
+    pub ollama_text_num_ctx: i64,
 }
 
 impl Default for AiSettings {
@@ -1097,6 +1114,8 @@ impl Default for AiSettings {
             external_provider_warning_acknowledged: false,
             fallback_vision_model: None,
             requeue_vision_crashes_on_startup: true,
+            ollama_vision_num_ctx: default_ollama_vision_num_ctx(),
+            ollama_text_num_ctx: default_ollama_text_num_ctx(),
         }
     }
 }
@@ -1352,6 +1371,14 @@ fn normalized_optional_limit(value: Option<i64>) -> Option<i64> {
 
 fn default_processing_mode() -> ProcessingMode {
     ProcessingMode::ManualReview
+}
+
+fn default_ollama_vision_num_ctx() -> i64 {
+    16_384
+}
+
+fn default_ollama_text_num_ctx() -> i64 {
+    8_192
 }
 
 fn default_true() -> bool {
