@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -1350,11 +1351,15 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
     let snapshot = sync_metadata(pool, &paperless, &settings).await?;
 
     let mut trigger_matches = 0_u64;
+    // O(1) tag lookups per document — avoids a quadratic scan when both
+    // the document set and the tag catalog are large.
+    let tags_by_id: HashMap<i32, &PaperlessTag> =
+        snapshot.tags.iter().map(|tag| (tag.id, tag)).collect();
     for document in snapshot.documents {
         let tag_names = document
             .tags
             .iter()
-            .filter_map(|id| snapshot.tags.iter().find(|tag| tag.id == *id))
+            .filter_map(|id| tags_by_id.get(id).copied())
             .map(|tag| tag.name.clone())
             .collect::<Vec<_>>();
         let stages = settings.workflow.tags.stages_requested_by_tags(&tag_names);
