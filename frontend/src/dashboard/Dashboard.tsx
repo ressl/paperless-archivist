@@ -68,7 +68,11 @@ const defaultDashboardRanges: Array<{ key: DashboardRange; label: string }> = [
   { key: 'all', label: 'All' }
 ];
 
-const defaultStageStatus = ['ocr', 'title', 'document_type', 'correspondent', 'document_date', 'tags', 'fields'].map((stage) => ({
+// v1.4.0: the consolidated `metadata` stage replaces the six per-field stages on the
+// stage-matrix dashboard. The legacy stages stay in this seed array so in-flight runs
+// queued under v1.3.x still render rows; the API will fold them down to zero counts
+// once those runs drain.
+const defaultStageStatus = ['ocr', 'metadata', 'title', 'document_type', 'correspondent', 'document_date', 'tags', 'fields'].map((stage) => ({
   stage,
   complete: 0,
   pending: 0,

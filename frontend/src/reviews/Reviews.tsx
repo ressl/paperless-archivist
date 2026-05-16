@@ -276,7 +276,15 @@ function standardMetadataRows(stage: string, patch: ReviewPatchRecord | null, me
     placeholder?: string;
   }> = [];
   const confidence = numericMetadata(metadata?.confidence);
-  if (stage === 'correspondent' && Object.prototype.hasOwnProperty.call(patch, 'correspondent')) {
+  // v1.4.0 consolidated metadata stage: each review item carries a `field` discriminator in
+  // standard_metadata so the reviewer UX can show "Metadata · Correspondent" etc. cleanly.
+  // For backward compatibility we still match on stage === 'correspondent' / 'document_type'
+  // / 'document_date' for in-flight runs queued before v1.4.0.
+  const metadataField = stage === 'metadata' ? metadataValue(metadata?.field) : undefined;
+  const isMetaCorrespondent = stage === 'metadata' && metadataField === 'correspondent';
+  const isMetaDocumentType = stage === 'metadata' && metadataField === 'document_type';
+  const isMetaDocumentDate = stage === 'metadata' && metadataField === 'document_date';
+  if ((stage === 'correspondent' || isMetaCorrespondent) && Object.prototype.hasOwnProperty.call(patch, 'correspondent')) {
     rows.push({
       field: 'correspondent',
       label: t('stage.correspondent'),
@@ -289,7 +297,7 @@ function standardMetadataRows(stage: string, patch: ReviewPatchRecord | null, me
       placeholder: t('review.placeholder.correspondent')
     });
   }
-  if (stage === 'document_type' && Object.prototype.hasOwnProperty.call(patch, 'document_type')) {
+  if ((stage === 'document_type' || isMetaDocumentType) && Object.prototype.hasOwnProperty.call(patch, 'document_type')) {
     rows.push({
       field: 'document_type',
       label: t('stage.document_type'),
@@ -302,7 +310,7 @@ function standardMetadataRows(stage: string, patch: ReviewPatchRecord | null, me
       placeholder: t('review.placeholder.document_type')
     });
   }
-  if (stage === 'document_date' && Object.prototype.hasOwnProperty.call(patch, 'created')) {
+  if ((stage === 'document_date' || isMetaDocumentDate) && Object.prototype.hasOwnProperty.call(patch, 'created')) {
     rows.push({
       field: 'document_date',
       label: t('stage.document_date'),
