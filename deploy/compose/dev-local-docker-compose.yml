@@ -1,0 +1,138 @@
+# Local end-to-end dev stack overlay.
+#
+# Adds Paperless-ngx + its Redis to the base archivist compose, points the
+# archivist at host-installed Ollama (http://host.docker.internal:11434),
+# and disables a few production-hardening flags that make iteration painful
+# (read-only rootfs, dropped capabilities) so quick docker compose restarts
+# don't require image rebuilds.
+#
+# Usage from repo root:
+#
+#   cp deploy/compose/.env.dev-local.example deploy/compose/.env.dev-local
+#   docker compose \
+#     --env-file deploy/compose/.env.dev-local \
+#     -f deploy/compose/docker-compose.yml \
+#     -f deploy/compose/dev-local-docker-compose.yml \
+#     up --build -d
+#
+# Then `./scripts/dev-local-bootstrap.sh` mints the local Paperless API token,
+# configures the archivist runtime settings, and seeds 20 sample documents
+# pulled from prod Paperless (read-only).
+
+services:
+  postgres:
+    # Expose Postgres on the host for psql poking + the seed script.
+    # 55432 is commonly taken by other Compose stacks on this box (Vocendia etc.),
+    # so we use 55433.
+    ports:
+      - "127.0.0.1:55433:5432"
+    # Surface the Paperless DB credentials to the init script. The base compose
+    # only declares the archivist DB env vars; without these, the init script
+    # would fail with `PAPERLESS_DBPASS must be set` on first boot.
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-archivist}
+      POSTGRES_USER: ${POSTGRES_USER:-archivist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PAPERLESS_DBNAME: ${PAPERLESS_DBNAME:-paperless}
+      PAPERLESS_DBUSER: ${PAPERLESS_DBUSER:-paperless}
+      PAPERLESS_DBPASS: ${PAPERLESS_DBPASS:?set PAPERLESS_DBPASS}
+    # The Paperless-ngx image we run here expects PG 16/17 client features; we
+    # already pin Postgres 18 in the base compose — paperless uses a separate
+    # database inside the same instance via the init script below.
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./dev-local-init-postgres.sh:/docker-entrypoint-initdb.d/10-create-paperless-db.sh:ro
+
+  api:
+    # Loosen prod hardening so dev rebuild loops are cheap.
+    read_only: false
+    cap_drop: []
+    # Override the base compose's 8080 binding because that port is commonly
+    # in use by other dev stacks (Vocendia, oss-bugfinder, etc.).
+    ports: !override
+      - "127.0.0.1:18080:8080"
+    # Point at host Ollama and the local Paperless-ngx service. Cookie secure
+    # is off in the base compose already; we just need the AI provider URL.
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-archivist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-archivist}
+      ARCHIVIST_SECRET_KEY: ${ARCHIVIST_SECRET_KEY:?set ARCHIVIST_SECRET_KEY}
+      ARCHIVIST_ADMIN_USERNAME: ${ARCHIVIST_ADMIN_USERNAME:-admin}
+      ARCHIVIST_ADMIN_PASSWORD: ${ARCHIVIST_ADMIN_PASSWORD:?set ARCHIVIST_ADMIN_PASSWORD}
+      ARCHIVIST_HTTP_ADDR: ${ARCHIVIST_HTTP_ADDR:-0.0.0.0:8080}
+      ARCHIVIST_COOKIE_SECURE: "false"
+      ARCHIVIST_LOG_LEVEL: ${ARCHIVIST_LOG_LEVEL:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paperless-ngx:
+        condition: service_started
+
+  worker:
+    read_only: false
+    cap_drop: []
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-archivist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-archivist}
+      ARCHIVIST_SECRET_KEY: ${ARCHIVIST_SECRET_KEY:?set ARCHIVIST_SECRET_KEY}
+      ARCHIVIST_WORKER_CONCURRENCY: ${ARCHIVIST_WORKER_CONCURRENCY:-2}
+      ARCHIVIST_LOG_LEVEL: ${ARCHIVIST_LOG_LEVEL:-debug}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  paperless-redis:
+    image: docker.io/library/redis:7
+    restart: unless-stopped
+    networks:
+      - archivist-internal
+    volumes:
+      - paperless-redis-data:/data
+
+  paperless-ngx:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paperless-redis:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      PAPERLESS_REDIS: redis://paperless-redis:6379
+      PAPERLESS_DBHOST: postgres
+      PAPERLESS_DBPORT: "5432"
+      PAPERLESS_DBNAME: ${PAPERLESS_DBNAME:-paperless}
+      PAPERLESS_DBUSER: ${PAPERLESS_DBUSER:-paperless}
+      PAPERLESS_DBPASS: ${PAPERLESS_DBPASS:?set PAPERLESS_DBPASS}
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY:?set PAPERLESS_SECRET_KEY}
+      PAPERLESS_OCR_LANGUAGE: ${PAPERLESS_OCR_LANGUAGE:-eng+deu}
+      PAPERLESS_OCR_LANGUAGES: ${PAPERLESS_OCR_LANGUAGES:-eng deu}
+      PAPERLESS_TIME_ZONE: ${PAPERLESS_TIME_ZONE:-Europe/Zurich}
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER:-admin}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD:?set PAPERLESS_ADMIN_PASSWORD}
+      PAPERLESS_URL: ${PAPERLESS_URL:-http://localhost:8000}
+      PAPERLESS_PORT: "8000"
+      PAPERLESS_TASK_WORKERS: "2"
+      PAPERLESS_WEBSERVER_WORKERS: "2"
+      USERMAP_UID: "1000"
+      USERMAP_GID: "1000"
+    volumes:
+      - paperless-data:/usr/src/paperless/data
+      - paperless-media:/usr/src/paperless/media
+      - paperless-export:/usr/src/paperless/export
+      - paperless-consume:/usr/src/paperless/consume
+    networks:
+      - archivist-internal
+
+volumes:
+  paperless-redis-data:
+  paperless-data:
+  paperless-media:
+  paperless-export:
+  paperless-consume:
