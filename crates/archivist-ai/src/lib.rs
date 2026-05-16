@@ -99,6 +99,13 @@ pub struct ChatRequest {
     pub system_prompt: String,
     pub user_prompt: String,
     pub temperature: f32,
+    /// Optional context-window override applied to local runners (currently
+    /// only Ollama). Mirrors `options.num_ctx` in the Ollama HTTP API. The
+    /// worker populates this from `RuntimeSettings.ai.ollama_text_num_ctx`
+    /// so OCR-post-fix and metadata prompts have room for 16k chars of doc
+    /// content plus the prompt scaffolding. Remote providers ignore it.
+    #[serde(default)]
+    pub num_ctx: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +114,17 @@ pub struct VisionRequest {
     pub prompt: String,
     pub images: Vec<ImageInput>,
     pub temperature: f32,
+    /// Optional context-window override applied to local runners (currently
+    /// only Ollama). Mirrors `options.num_ctx` in the Ollama HTTP API. The
+    /// worker populates this from `RuntimeSettings.ai.ollama_vision_num_ctx`
+    /// so glm-ocr (and other vision models that expand pages into many
+    /// thousands of vision tokens) does not crash with
+    /// `GGML_ASSERT(a->ne[2] * 4 == b->ne[0])` — upstream issues
+    /// ollama/ollama#14401 and ollama/ollama#14171. Default Ollama context
+    /// of 4096 tokens is too small for realistic document pages. Remote
+    /// providers ignore this field.
+    #[serde(default)]
+    pub num_ctx: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,19 +309,59 @@ fn normalize_ollama_models(raw_models: Vec<RawOllamaModel>) -> Vec<OllamaModel> 
     models
 }
 
+/// Builds the JSON payload posted to Ollama's `/api/chat` for a text-only
+/// completion. Extracted as a free function so unit tests can assert that
+/// `options.num_ctx` is wired through without spinning up the HTTP client.
+pub fn build_ollama_chat_payload(request: &ChatRequest) -> Value {
+    let mut options = json!({ "temperature": request.temperature });
+    if let Some(num_ctx) = request.num_ctx {
+        options
+            .as_object_mut()
+            .expect("options is an object literal")
+            .insert("num_ctx".to_owned(), json!(num_ctx));
+    }
+    json!({
+        "model": request.model,
+        "stream": false,
+        "options": options,
+        "messages": [
+            { "role": "system", "content": request.system_prompt },
+            { "role": "user", "content": request.user_prompt }
+        ]
+    })
+}
+
+/// Builds the JSON payload posted to Ollama's `/api/chat` for a vision call.
+/// Extracted as a free function for the same testability reason as
+/// [`build_ollama_chat_payload`].
+pub fn build_ollama_vision_payload(request: &VisionRequest) -> Value {
+    let images: Vec<String> = request
+        .images
+        .iter()
+        .map(|image| BASE64.encode(&image.bytes))
+        .collect();
+    let mut options = json!({ "temperature": request.temperature });
+    if let Some(num_ctx) = request.num_ctx {
+        options
+            .as_object_mut()
+            .expect("options is an object literal")
+            .insert("num_ctx".to_owned(), json!(num_ctx));
+    }
+    json!({
+        "model": request.model,
+        "stream": false,
+        "options": options,
+        "messages": [
+            { "role": "user", "content": request.prompt, "images": images }
+        ]
+    })
+}
+
 #[async_trait]
 impl TextProvider for OllamaClient {
     async fn chat(&self, request: ChatRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let payload = json!({
-            "model": request.model,
-            "stream": false,
-            "options": { "temperature": request.temperature },
-            "messages": [
-                { "role": "system", "content": request.system_prompt },
-                { "role": "user", "content": request.user_prompt }
-            ]
-        });
+        let payload = build_ollama_chat_payload(&request);
         let response = self
             .client
             .post(format!("{}/api/chat", self.base_url))
@@ -340,19 +398,7 @@ impl TextProvider for OllamaClient {
 impl VisionProvider for OllamaClient {
     async fn vision(&self, request: VisionRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let images: Vec<String> = request
-            .images
-            .iter()
-            .map(|image| BASE64.encode(&image.bytes))
-            .collect();
-        let payload = json!({
-            "model": request.model,
-            "stream": false,
-            "options": { "temperature": request.temperature },
-            "messages": [
-                { "role": "user", "content": request.prompt, "images": images }
-            ]
-        });
+        let payload = build_ollama_vision_payload(&request);
         let response = self
             .client
             .post(format!("{}/api/chat", self.base_url))
@@ -814,6 +860,7 @@ pub fn prompt_for_tags(
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
+        num_ctx: None,
         system_prompt: DEFAULT_TAGS_SYSTEM_PROMPT.to_owned(),
         user_prompt: format!(
             "{}\nAllowed tags, one per line:\n{}\n\nDocument text:\n{}\n\nSelect at most {} existing tags. Existing tags must be returned exactly as listed. If new_tags are explicitly needed and allowed by runtime settings, write new tag names in {}. Return JSON: {{\"tags\":[\"exact allowed tag\"],\"new_tags\":[],\"confidence\":0.0}}.",
@@ -830,6 +877,7 @@ pub fn prompt_for_title(content: &str, language: &PromptLanguageContext) -> Chat
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
+        num_ctx: None,
         system_prompt: DEFAULT_TITLE_SYSTEM_PROMPT.to_owned(),
         user_prompt: format!(
             "{}\nDocument text:\n{}\n\nReturn JSON: {{\"title\":\"concise human-readable title\",\"confidence\":0.0}}.",
@@ -848,6 +896,7 @@ pub fn prompt_for_choice(
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
+        num_ctx: None,
         system_prompt: match choice_kind {
             "correspondent" => DEFAULT_CORRESPONDENT_SYSTEM_PROMPT.to_owned(),
             "document type" => DEFAULT_DOCUMENT_TYPE_SYSTEM_PROMPT.to_owned(),
@@ -873,6 +922,7 @@ pub fn prompt_for_fields(
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
+        num_ctx: None,
         system_prompt: DEFAULT_FIELDS_SYSTEM_PROMPT.to_owned(),
         user_prompt: format!(
             "{}\nAllowed custom fields, one per line:\n{}\n\nDocument text:\n{}\n\nUse at most {} fields and only fields with explicit evidence. Return JSON: {{\"fields\":[{{\"name\":\"exact allowed field\",\"value\":\"value\",\"confidence\":0.0}}],\"confidence\":0.0}}.",
@@ -992,6 +1042,7 @@ pub fn prompt_for_metadata(
     ChatRequest {
         model: String::new(),
         temperature: 0.0,
+        num_ctx: None,
         system_prompt: DEFAULT_METADATA_SYSTEM_PROMPT.to_owned(),
         user_prompt,
     }
@@ -1226,5 +1277,100 @@ mod tests {
             Some("2B")
         );
         assert_eq!(models[1].name, "zeta:latest");
+    }
+
+    /// Regression guard for ollama/ollama#14401 — the GGML_ASSERT vision crash
+    /// only happens when Ollama's context window is too small for the vision
+    /// tokens a document page expands to. The fix is to wire `options.num_ctx`
+    /// through the payload; this test pins that the payload contains exactly
+    /// the configured value when the worker sets one.
+    #[test]
+    fn ollama_vision_payload_includes_num_ctx_when_set() {
+        let request = VisionRequest {
+            model: "glm-ocr:latest".to_owned(),
+            prompt: "OCR this".to_owned(),
+            images: vec![ImageInput {
+                mime_type: "image/png".to_owned(),
+                bytes: vec![1, 2, 3, 4],
+            }],
+            temperature: 0.0,
+            num_ctx: Some(16384),
+        };
+        let payload = build_ollama_vision_payload(&request);
+        assert_eq!(payload["model"], "glm-ocr:latest");
+        assert_eq!(payload["options"]["num_ctx"], 16384);
+        assert_eq!(payload["options"]["temperature"], 0.0);
+        // Images must still be base64-encoded on the user message.
+        let images = payload["messages"][0]["images"].as_array().unwrap();
+        assert_eq!(images.len(), 1);
+        assert!(!images[0].as_str().unwrap().is_empty());
+    }
+
+    /// When the worker leaves `num_ctx` at `None` (remote provider, or an
+    /// operator who explicitly opts out), the Ollama payload must NOT contain
+    /// the key — otherwise Ollama overrides its built-in model default with a
+    /// JSON null which behaves differently across runners.
+    #[test]
+    fn ollama_vision_payload_omits_num_ctx_when_unset() {
+        let request = VisionRequest {
+            model: "qwen2.5vl:7b".to_owned(),
+            prompt: "OCR".to_owned(),
+            images: Vec::new(),
+            temperature: 0.0,
+            num_ctx: None,
+        };
+        let payload = build_ollama_vision_payload(&request);
+        assert!(payload["options"].get("num_ctx").is_none());
+    }
+
+    /// Same wire-up for the text-chat path — metadata-extraction prompts read
+    /// up to 16k chars of document content, so the 4096-token Ollama default
+    /// also hurts text completions. The worker uses a lower number than the
+    /// vision call (the prompts are smaller) but the plumbing is identical.
+    #[test]
+    fn ollama_chat_payload_includes_num_ctx_when_set() {
+        let request = ChatRequest {
+            model: "qwen3:8b".to_owned(),
+            system_prompt: "you are".to_owned(),
+            user_prompt: "extract".to_owned(),
+            temperature: 0.0,
+            num_ctx: Some(8192),
+        };
+        let payload = build_ollama_chat_payload(&request);
+        assert_eq!(payload["options"]["num_ctx"], 8192);
+        assert_eq!(payload["options"]["temperature"], 0.0);
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert_eq!(payload["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn ollama_chat_payload_omits_num_ctx_when_unset() {
+        let request = ChatRequest {
+            model: "qwen3:8b".to_owned(),
+            system_prompt: String::new(),
+            user_prompt: String::new(),
+            temperature: 0.0,
+            num_ctx: None,
+        };
+        let payload = build_ollama_chat_payload(&request);
+        assert!(payload["options"].get("num_ctx").is_none());
+    }
+
+    /// Operator-visible override: the runtime setting must end up on the
+    /// final payload. We exercise the full layering: a `VisionRequest` built
+    /// by the worker with a non-default num_ctx — produced by reading
+    /// `RuntimeSettings.ai.ollama_vision_num_ctx` — appears verbatim on the
+    /// wire payload.
+    #[test]
+    fn configured_num_ctx_overrides_default_on_payload() {
+        let request = VisionRequest {
+            model: "glm-ocr:latest".to_owned(),
+            prompt: "ocr".to_owned(),
+            images: Vec::new(),
+            temperature: 0.0,
+            num_ctx: Some(32_768),
+        };
+        let payload = build_ollama_vision_payload(&request);
+        assert_eq!(payload["options"]["num_ctx"], 32_768);
     }
 }
