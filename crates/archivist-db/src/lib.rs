@@ -355,6 +355,8 @@ pub async fn create_user_with_roles(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -455,7 +457,13 @@ fn auth_user_from_row(row: PgRow) -> Result<AuthUser> {
     })
 }
 
-pub async fn record_login_success(pool: &DbPool, user_id: Uuid) -> Result<()> {
+pub async fn record_login_success(
+    pool: &DbPool,
+    user_id: Uuid,
+    source_ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         update users
@@ -467,8 +475,15 @@ pub async fn record_login_success(pool: &DbPool, user_id: Uuid) -> Result<()> {
         "#,
     )
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    // Note: the "auth.login_success" / "auth.paperless_login_success" /
+    // "auth.oidc_login_success" audit events are emitted by the API layer
+    // (so they can carry username + extra metadata). We only update the
+    // users row here; the success event itself carries source_ip / user_agent
+    // via append_audit at the call site.
+    let _ = (source_ip, user_agent);
+    tx.commit().await?;
     Ok(())
 }
 
@@ -476,6 +491,8 @@ pub async fn record_login_failure(
     pool: &DbPool,
     user_id: Option<Uuid>,
     username: &str,
+    source_ip: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     if let Some(user_id) = user_id {
@@ -509,6 +526,8 @@ pub async fn record_login_failure(
             metadata: None,
             outcome: "failed".to_owned(),
             error_message: Some("invalid credentials".to_owned()),
+            source_ip: source_ip.map(str::to_owned),
+            user_agent: user_agent.map(str::to_owned),
         },
     )
     .await?;
@@ -688,6 +707,8 @@ pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result
                 metadata: Some(json!({ "external_subject_hash": short_hash(input.subject) })),
                 outcome: "success".to_owned(),
                 error_message: None,
+                source_ip: None,
+                user_agent: None,
             },
         )
         .await?;
@@ -855,7 +876,13 @@ pub async fn find_session(pool: &DbPool, session_hash: &str) -> Result<Option<Se
     }
 }
 
-pub async fn revoke_session(pool: &DbPool, session_id: Uuid, actor_id: Uuid) -> Result<()> {
+pub async fn revoke_session(
+    pool: &DbPool,
+    session_id: Uuid,
+    actor_id: Uuid,
+    source_ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("update sessions set revoked_at = now() where id = $1 and revoked_at is null")
         .bind(session_id)
@@ -875,6 +902,8 @@ pub async fn revoke_session(pool: &DbPool, session_id: Uuid, actor_id: Uuid) -> 
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: source_ip.map(str::to_owned),
+            user_agent: user_agent.map(str::to_owned),
         },
     )
     .await?;
@@ -949,6 +978,8 @@ pub async fn revoke_session_by_admin(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -997,6 +1028,8 @@ pub async fn set_user_enabled(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1045,6 +1078,8 @@ pub async fn set_user_roles(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1093,6 +1128,8 @@ pub async fn update_user_password_hash(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1193,6 +1230,8 @@ pub async fn create_api_token(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1220,6 +1259,8 @@ pub async fn revoke_api_token(pool: &DbPool, id: Uuid, actor_id: Uuid) -> Result
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1282,6 +1323,8 @@ pub async fn rotate_api_token(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1342,6 +1385,8 @@ pub async fn update_runtime_settings(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1474,6 +1519,8 @@ pub async fn create_prompt(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1517,6 +1564,8 @@ pub async fn activate_prompt(pool: &DbPool, prompt_id: Uuid, actor_id: Uuid) -> 
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1609,6 +1658,8 @@ pub async fn upsert_encrypted_secret(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -2000,6 +2051,8 @@ pub async fn record_document_language(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -3841,6 +3894,8 @@ pub async fn create_run_with_jobs(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -4162,6 +4217,8 @@ pub async fn complete_job(pool: &DbPool, job: &JobRecord, result: Value) -> Resu
             metadata: Some(json!({ "stage": job.stage })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -4254,6 +4311,8 @@ pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bo
             metadata: Some(json!({ "stage": job.stage })),
             outcome: if retry { "retry" } else { "failed" }.to_owned(),
             error_message: Some(error.to_owned()),
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -4319,6 +4378,8 @@ pub async fn create_review_item(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -4503,6 +4564,8 @@ pub async fn review_decision(
             metadata: Some(json!({ "review_id": review_id, "stage": stage_text })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -4648,6 +4711,8 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
             metadata: Some(json!({ "stage": stage })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -5017,6 +5082,8 @@ pub async fn recover_stale_leases(
             metadata: Some(json!({ "older_than_seconds": older_than_seconds })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -5158,6 +5225,8 @@ pub async fn recover_stuck_runs(
             metadata: Some(json!({ "older_than_seconds": older_than_seconds })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -5215,9 +5284,10 @@ async fn append_audit_tx(
         r#"
         insert into audit_events (
           id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
+          source_ip, user_agent,
           before, after, metadata, outcome, error_message, prev_event_hash, event_hash, created_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         "#,
     )
     .bind(id)
@@ -5227,6 +5297,8 @@ async fn append_audit_tx(
     .bind(&event.event_type)
     .bind(&event.actor_type)
     .bind(&event.actor_id)
+    .bind(&event.source_ip)
+    .bind(&event.user_agent)
     .bind(&event.before)
     .bind(&event.after)
     .bind(&event.metadata)
@@ -5347,6 +5419,10 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
             metadata: row.try_get("metadata")?,
             outcome: row.try_get("outcome")?,
             error_message: row.try_get("error_message")?,
+            // source_ip / user_agent are persisted but not part of the
+            // audit hash chain; leave None when reconstructing for verify.
+            source_ip: None,
+            user_agent: None,
         };
         let expected_hash = audit_event_hash(id, created_at, &prev_event_hash, &event);
         if expected_hash != event_hash {
@@ -5412,6 +5488,8 @@ pub async fn apply_security_retention(
             })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;

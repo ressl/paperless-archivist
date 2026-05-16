@@ -63,6 +63,25 @@ pub struct AppConfig {
 
     #[arg(long, env = "ARCHIVIST_STATIC_DIR", default_value = "frontend/dist")]
     pub static_dir: String,
+
+    /// Trust X-Forwarded-For when extracting the client IP. Only enable when
+    /// a reverse proxy that strips/normalizes the header sits in front of
+    /// the API.
+    #[arg(long, env = "ARCHIVIST_TRUST_PROXY", default_value_t = false)]
+    pub trust_proxy: bool,
+
+    /// Maximum number of /api/auth/* requests permitted per source IP within
+    /// `auth_rate_limit_window_seconds`. Set to zero to disable the limiter.
+    #[arg(long, env = "ARCHIVIST_AUTH_RATE_LIMIT", default_value_t = 10)]
+    pub auth_rate_limit: u32,
+
+    /// Sliding window for the auth rate limiter, in seconds.
+    #[arg(
+        long,
+        env = "ARCHIVIST_AUTH_RATE_LIMIT_WINDOW_SECONDS",
+        default_value_t = 60
+    )]
+    pub auth_rate_limit_window_seconds: u64,
 }
 
 impl AppConfig {

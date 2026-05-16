@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
@@ -44,7 +46,7 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Argon2, Params};
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -82,6 +84,152 @@ const MAX_CHAT_DOCUMENT_FILTER_IDS: usize = 50;
 struct AppState {
     pool: DbPool,
     config: Arc<AppConfig>,
+    auth_rate_limiter: Arc<AuthRateLimiter>,
+}
+
+/// Hand-rolled per-IP token-bucket limiter used for `/api/auth/*`. We keep
+/// it in-process (no external dependency) and stick with a single-instance
+/// deploy assumption that matches the rest of the API.
+///
+/// Each IP gets `capacity` tokens that refill linearly across `window`
+/// seconds. Consuming a token while empty rejects the request.
+struct AuthRateLimiter {
+    capacity: u32,
+    window: std::time::Duration,
+    buckets: Mutex<HashMap<IpAddr, Bucket>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl AuthRateLimiter {
+    fn new(capacity: u32, window_seconds: u64) -> Self {
+        let window_seconds = window_seconds.max(1);
+        Self {
+            capacity,
+            window: std::time::Duration::from_secs(window_seconds),
+            buckets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns Ok(remaining_tokens) when a request is allowed,
+    /// Err(retry_after_seconds) when it is denied.
+    fn check(&self, ip: IpAddr, now: Instant) -> Result<f64, u64> {
+        if self.capacity == 0 {
+            return Ok(0.0);
+        }
+        let capacity_f = f64::from(self.capacity);
+        let refill_per_second = capacity_f / self.window.as_secs_f64();
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        // Opportunistic cleanup: drop stale buckets so the map does not grow
+        // without bound for short-lived attackers. Cap the work per call.
+        if buckets.len() > 4096 {
+            buckets.retain(|_, bucket| {
+                now.saturating_duration_since(bucket.last_refill) < self.window * 4
+            });
+        }
+
+        let bucket = buckets.entry(ip).or_insert(Bucket {
+            tokens: capacity_f,
+            last_refill: now,
+        });
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * refill_per_second).min(capacity_f);
+        bucket.last_refill = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            Ok(bucket.tokens)
+        } else {
+            let missing = 1.0 - bucket.tokens;
+            let retry_after = (missing / refill_per_second).ceil() as u64;
+            Err(retry_after.max(1))
+        }
+    }
+}
+
+async fn auth_rate_limit_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let path = req.uri().path();
+    if !path.starts_with("/api/auth/") {
+        return Ok(next.run(req).await);
+    }
+    let ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip());
+    let trusted_proxy = state.config.trust_proxy;
+    let header_ip = if trusted_proxy {
+        forwarded_for_first_hop(req.headers())
+    } else {
+        None
+    };
+    let client_ip = header_ip.or(ip);
+    let Some(client_ip) = client_ip else {
+        // No address available (unit-test transport, etc.) — let it through.
+        return Ok(next.run(req).await);
+    };
+    if let Err(retry_after) = state.auth_rate_limiter.check(client_ip, Instant::now()) {
+        let mut response = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "too many authentication attempts" })),
+        )
+            .into_response();
+        if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return Ok(response);
+    }
+    Ok(next.run(req).await)
+}
+
+fn forwarded_for_first_hop(headers: &HeaderMap) -> Option<IpAddr> {
+    let value = headers.get("x-forwarded-for")?.to_str().ok()?;
+    let first = value.split(',').next()?.trim();
+    first.parse::<IpAddr>().ok()
+}
+
+/// Resolve the client IP for audit/logging purposes. When `trust_proxy` is
+/// enabled and `X-Forwarded-For` is present, use the first hop; otherwise
+/// fall back to the TCP peer recorded by axum.
+fn request_source_ip(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> Option<String> {
+    let forwarded = if state.config.trust_proxy {
+        forwarded_for_first_hop(headers)
+    } else {
+        None
+    };
+    forwarded
+        .or_else(|| peer.map(|addr| addr.ip()))
+        .map(|ip| ip.to_string())
+}
+
+fn request_user_agent(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::USER_AGENT)?.to_str().ok()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Cap the length we store so an attacker can't bloat audit rows.
+    const MAX: usize = 255;
+    Some(if raw.len() > MAX {
+        raw.chars().take(MAX).collect()
+    } else {
+        raw.to_owned()
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +260,10 @@ async fn main() -> Result<()> {
     let state = AppState {
         pool,
         config: Arc::new(config.clone()),
+        auth_rate_limiter: Arc::new(AuthRateLimiter::new(
+            config.auth_rate_limit,
+            config.auth_rate_limit_window_seconds,
+        )),
     };
     let app = router(state);
     let addr: SocketAddr = config
@@ -120,7 +272,11 @@ async fn main() -> Result<()> {
         .context("parse ARCHIVIST_HTTP_ADDR")?;
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "paperless archivist API listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -238,15 +394,24 @@ fn router(state: AppState) -> Router {
     let spa = ServeDir::new(&static_dir)
         .not_found_service(ServeFile::new(format!("{static_dir}/index.html")));
 
+    // Rate-limited public auth endpoints. Wrapping them in a sub-router
+    // lets us scope the per-IP token bucket strictly to /api/auth/*.
+    let auth_public = Router::new()
+        .route("/login", post(login))
+        .route("/paperless-login", post(paperless_login))
+        .route("/oidc/config", get(oidc_config))
+        .route("/oidc/login", get(oidc_login))
+        .route("/oidc/callback", get(oidc_callback))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_rate_limit_middleware,
+        ));
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/paperless-login", post(paperless_login))
-        .route("/api/auth/oidc/config", get(oidc_config))
-        .route("/api/auth/oidc/login", get(oidc_login))
-        .route("/api/auth/oidc/callback", get(oidc_callback))
+        .nest("/api/auth", auth_public)
         .nest("/api", protected)
         .fallback_service(spa)
         .layer(TraceLayer::new_for_http())
@@ -505,8 +670,12 @@ async fn oidc_login(
 
 async fn oidc_callback(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(query): Query<OidcCallbackQuery>,
 ) -> ApiResult<Response> {
+    let source_ip = request_source_ip(&state, &headers, Some(peer));
+    let user_agent = request_user_agent(&headers);
     if let Some(error) = query.error {
         let description = query.error_description.unwrap_or_default();
         return Err(ApiError::unauthorized(format!(
@@ -581,7 +750,13 @@ async fn oidc_callback(
         return Err(ApiError::unauthorized("user is disabled"));
     }
 
-    record_login_success(&state.pool, user.id).await?;
+    record_login_success(
+        &state.pool,
+        user.id,
+        source_ip.as_deref(),
+        user_agent.as_deref(),
+    )
+    .await?;
     append_audit(
         &state.pool,
         AuditEventInput {
@@ -600,6 +775,8 @@ async fn oidc_callback(
             })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: source_ip.clone(),
+            user_agent: user_agent.clone(),
         },
     )
     .await?;
@@ -618,11 +795,22 @@ async fn oidc_callback(
 
 async fn login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> ApiResult<Response> {
+    let source_ip = request_source_ip(&state, &headers, Some(peer));
+    let user_agent = request_user_agent(&headers);
     let user = find_user_for_login(&state.pool, &request.username).await?;
     let Some(user) = user else {
-        record_login_failure(&state.pool, None, &request.username).await?;
+        record_login_failure(
+            &state.pool,
+            None,
+            &request.username,
+            source_ip.as_deref(),
+            user_agent.as_deref(),
+        )
+        .await?;
         return Err(ApiError::unauthorized("invalid credentials"));
     };
     if user
@@ -632,11 +820,24 @@ async fn login(
         return Err(ApiError::unauthorized("invalid credentials"));
     }
     if !user.enabled || !verify_password(&user, &request.password)? {
-        record_login_failure(&state.pool, Some(user.id), &request.username).await?;
+        record_login_failure(
+            &state.pool,
+            Some(user.id),
+            &request.username,
+            source_ip.as_deref(),
+            user_agent.as_deref(),
+        )
+        .await?;
         return Err(ApiError::unauthorized("invalid credentials"));
     }
 
-    record_login_success(&state.pool, user.id).await?;
+    record_login_success(
+        &state.pool,
+        user.id,
+        source_ip.as_deref(),
+        user_agent.as_deref(),
+    )
+    .await?;
     append_audit(
         &state.pool,
         AuditEventInput {
@@ -651,6 +852,8 @@ async fn login(
             metadata: Some(json!({ "username": user.username })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: source_ip.clone(),
+            user_agent: user_agent.clone(),
         },
     )
     .await?;
@@ -679,8 +882,12 @@ struct PaperlessTokenResponse {
 
 async fn paperless_login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> ApiResult<Response> {
+    let source_ip = request_source_ip(&state, &headers, Some(peer));
+    let user_agent = request_user_agent(&headers);
     let settings = get_runtime_settings(&state.pool).await?;
     if !settings.paperless.login_bridge_enabled {
         return Err(ApiError::forbidden("Paperless login bridge is disabled"));
@@ -698,6 +905,8 @@ async fn paperless_login(
             &state.pool,
             None,
             &paperless_bridge_username(paperless_username),
+            source_ip.as_deref(),
+            user_agent.as_deref(),
         )
         .await?;
         return Err(ApiError::unauthorized("invalid credentials"));
@@ -726,7 +935,13 @@ async fn paperless_login(
         return Err(ApiError::unauthorized("user is disabled"));
     }
 
-    record_login_success(&state.pool, user.id).await?;
+    record_login_success(
+        &state.pool,
+        user.id,
+        source_ip.as_deref(),
+        user_agent.as_deref(),
+    )
+    .await?;
     append_audit(
         &state.pool,
         AuditEventInput {
@@ -744,6 +959,8 @@ async fn paperless_login(
             })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: source_ip.clone(),
+            user_agent: user_agent.clone(),
         },
     )
     .await?;
@@ -807,10 +1024,21 @@ fn paperless_bridge_username(username: &str) -> String {
 
 async fn logout(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     auth: Authenticated,
 ) -> ApiResult<impl IntoResponse> {
+    let source_ip = request_source_ip(&state, &headers, Some(peer));
+    let user_agent = request_user_agent(&headers);
     if let (Some(session_id), Some(user_id)) = (auth.0.session_id, auth.0.user_id) {
-        archivist_db::revoke_session(&state.pool, session_id, user_id).await?;
+        archivist_db::revoke_session(
+            &state.pool,
+            session_id,
+            user_id,
+            source_ip.as_deref(),
+            user_agent.as_deref(),
+        )
+        .await?;
     }
     let mut response = Json(json!({ "ok": true })).into_response();
     response.headers_mut().append(
@@ -1144,6 +1372,8 @@ async fn test_prompt_endpoint(
                 "validation_failed".to_owned()
             },
             error_message: parsed.validation_errors.first().cloned(),
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -2046,6 +2276,8 @@ async fn sync_paperless(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -2235,6 +2467,8 @@ async fn reconcile_completion_tags(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -2392,6 +2626,8 @@ async fn update_workflow_controls(
             metadata: Some(json!({ "source": "workflow_controls" })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -2682,6 +2918,8 @@ async fn create_chat_session(
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -2804,6 +3042,8 @@ async fn post_chat_message(
             metadata: Some(json!({ "question_hash": hash_token(question) })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -3053,6 +3293,8 @@ async fn batch_review(
                 .and_then(|entry| entry.get("error"))
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -3486,6 +3728,8 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
                 })),
                 outcome: "failed".to_owned(),
                 error_message: Some(error.to_string()),
+                source_ip: None,
+                user_agent: None,
             },
         )
         .await?;
@@ -3510,6 +3754,8 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
             })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -4480,6 +4726,54 @@ mod tests {
     }
 
     #[test]
+    fn auth_rate_limiter_allows_within_capacity_and_blocks_burst() {
+        let limiter = AuthRateLimiter::new(3, 60);
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        let start = Instant::now();
+        assert!(limiter.check(ip, start).is_ok());
+        assert!(limiter.check(ip, start).is_ok());
+        assert!(limiter.check(ip, start).is_ok());
+        // Fourth burst request inside the same instant should be rate-limited.
+        let retry = limiter.check(ip, start).unwrap_err();
+        assert!(retry >= 1, "retry-after seconds must be positive: {retry}");
+    }
+
+    #[test]
+    fn auth_rate_limiter_refills_over_time() {
+        let limiter = AuthRateLimiter::new(2, 60);
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        let start = Instant::now();
+        assert!(limiter.check(ip, start).is_ok());
+        assert!(limiter.check(ip, start).is_ok());
+        assert!(limiter.check(ip, start).is_err());
+        // Half the window later, the bucket should be at 1 token again.
+        let later = start + std::time::Duration::from_secs(31);
+        assert!(limiter.check(ip, later).is_ok());
+    }
+
+    #[test]
+    fn auth_rate_limiter_buckets_are_per_ip() {
+        let limiter = AuthRateLimiter::new(1, 60);
+        let a: IpAddr = "203.0.113.7".parse().unwrap();
+        let b: IpAddr = "203.0.113.8".parse().unwrap();
+        let start = Instant::now();
+        assert!(limiter.check(a, start).is_ok());
+        // Different IP gets its own bucket.
+        assert!(limiter.check(b, start).is_ok());
+        // Same IP burst is rejected.
+        assert!(limiter.check(a, start).is_err());
+    }
+
+    #[test]
+    fn auth_rate_limiter_zero_capacity_is_disabled() {
+        let limiter = AuthRateLimiter::new(0, 60);
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        for _ in 0..1000 {
+            assert!(limiter.check(ip, Instant::now()).is_ok());
+        }
+    }
+
+    #[test]
     fn validates_api_token_scopes() {
         assert!(
             validate_api_token_scopes(&[
@@ -4676,6 +4970,9 @@ mod tests {
             oidc_default_roles: "viewer".to_owned(),
             secret_key: SecretString::from("a 32 byte local secret for tests".to_owned()),
             static_dir: "frontend/dist".to_owned(),
+            trust_proxy: false,
+            auth_rate_limit: 10,
+            auth_rate_limit_window_seconds: 60,
         }
     }
 }

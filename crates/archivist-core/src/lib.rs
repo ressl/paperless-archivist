@@ -2466,6 +2466,14 @@ pub struct AuditEventInput {
     pub metadata: Option<Value>,
     pub outcome: String,
     pub error_message: Option<String>,
+    /// Optional IP that initiated the action. Persisted only — not folded
+    /// into the audit hash chain so legacy events stay verifiable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<String>,
+    /// Optional User-Agent. Persisted only — not folded into the audit hash
+    /// chain so legacy events stay verifiable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
 }
 
 pub fn redact_secret(value: &str) -> String {

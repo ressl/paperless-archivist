@@ -1095,6 +1095,8 @@ async fn handle_patch_result(
                     metadata: Some(json!({ "mode": job.mode })),
                     outcome: "success".to_owned(),
                     error_message: None,
+                    source_ip: None,
+                    user_agent: None,
                 },
             )
             .await?;
@@ -1173,6 +1175,8 @@ async fn apply_patch_with_workflow_tags(
                 metadata: Some(json!({ "stage": job.stage, "duration_ms": duration_ms })),
                 outcome: "failed".to_owned(),
                 error_message: Some(error.to_string()),
+                source_ip: None,
+                user_agent: None,
             },
         )
         .await?;
@@ -1193,6 +1197,8 @@ async fn apply_patch_with_workflow_tags(
             metadata: Some(json!({ "stage": job.stage, "duration_ms": duration_ms })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
         },
     )
     .await?;
@@ -1341,6 +1347,8 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
                 metadata: Some(json!({ "reason": "paused", "mode": settings.workflow.mode })),
                 outcome: "success".to_owned(),
                 error_message: None,
+                source_ip: None,
+                user_agent: None,
             },
         )
         .await?;
@@ -1411,6 +1419,8 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
                     })),
                     outcome: "success".to_owned(),
                     error_message: None,
+                    source_ip: None,
+                    user_agent: None,
                 },
             )
             .await?;
@@ -1446,6 +1456,8 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
                 })),
                 outcome: "success".to_owned(),
                 error_message: None,
+                source_ip: None,
+                user_agent: None,
             },
         )
         .await?;
