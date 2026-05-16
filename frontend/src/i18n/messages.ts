@@ -263,6 +263,11 @@ export const enMessages = {
   'settings.ai.legacy_ollama_url': 'Legacy Ollama URL',
   'settings.ai.fallback_text_model': 'Fallback text model',
   'settings.ai.fallback_vision_model': 'Fallback vision model',
+  'settings.ai.vision_crash_fallback_model': 'Vision crash fallback model',
+  'settings.ai.vision_crash_fallback_hint':
+    'Used automatically when the primary vision model crashes the Ollama runtime (GGML_ASSERT). The worker silently retries the page on this model before failing the job. Leave empty to use a hardcoded safe-default chain.',
+  'settings.ai.requeue_vision_crashes_on_startup':
+    'On startup, requeue OCR jobs killed by the vision-runtime crash signature',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Mode',
   'settings.workflow.paused': 'Pause automatic selector',
@@ -722,6 +727,11 @@ export const deMessages: Record<MessageKey, string> = {
   'settings.ai.legacy_ollama_url': 'Legacy Ollama-URL',
   'settings.ai.fallback_text_model': 'Fallback Textmodell',
   'settings.ai.fallback_vision_model': 'Fallback Vision-Modell',
+  'settings.ai.vision_crash_fallback_model': 'Vision-Modell für Crash-Fallback',
+  'settings.ai.vision_crash_fallback_hint':
+    'Wird automatisch verwendet, wenn das primäre Vision-Modell die Ollama-Runtime crasht (GGML_ASSERT). Der Worker wiederholt die Seite still auf diesem Modell, bevor der Job fehlschlägt. Leer lassen, um eine fest eingebaute, sichere Fallback-Kette zu nutzen.',
+  'settings.ai.requeue_vision_crashes_on_startup':
+    'Beim Start OCR-Jobs erneut in die Warteschlange stellen, die an einer Vision-Crash-Signatur gescheitert sind',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modus',
   'settings.workflow.paused': 'Automatischen Selector pausieren',
@@ -1179,6 +1189,11 @@ export const frMessages: Record<MessageKey, string> = {
   'settings.ai.legacy_ollama_url': 'URL Ollama legacy',
   'settings.ai.fallback_text_model': 'Modèle texte de fallback',
   'settings.ai.fallback_vision_model': 'Modèle vision de fallback',
+  'settings.ai.vision_crash_fallback_model': 'Modèle vision pour fallback sur crash',
+  'settings.ai.vision_crash_fallback_hint':
+    "Utilisé automatiquement lorsque le modèle vision principal fait planter le runtime Ollama (GGML_ASSERT). Le worker réessaie silencieusement la page sur ce modèle avant d’échouer le job. Laissez vide pour utiliser une chaîne de secours sûre intégrée.",
+  'settings.ai.requeue_vision_crashes_on_startup':
+    "Au démarrage, remettre dans la file les jobs OCR tués par la signature de crash vision",
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Mode',
   'settings.workflow.paused': 'Mettre en pause le selector automatique',
@@ -1636,6 +1651,11 @@ export const esMessages: Record<MessageKey, string> = {
   'settings.ai.legacy_ollama_url': 'URL de Ollama legacy',
   'settings.ai.fallback_text_model': 'Modelo de texto de fallback',
   'settings.ai.fallback_vision_model': 'Modelo de visión de fallback',
+  'settings.ai.vision_crash_fallback_model': 'Modelo de visión para fallback por crash',
+  'settings.ai.vision_crash_fallback_hint':
+    'Se usa automáticamente cuando el modelo de visión principal hace caer el runtime de Ollama (GGML_ASSERT). El worker reintenta la página en silencio en este modelo antes de fallar el job. Déjelo vacío para usar una cadena segura por defecto integrada.',
+  'settings.ai.requeue_vision_crashes_on_startup':
+    'Al arrancar, reencolar los trabajos OCR muertos por la firma de crash de visión',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modo',
   'settings.workflow.paused': 'Pausar el selector automático',
@@ -2093,6 +2113,11 @@ export const itMessages: Record<MessageKey, string> = {
   'settings.ai.legacy_ollama_url': 'URL Ollama legacy',
   'settings.ai.fallback_text_model': 'Modello testo di fallback',
   'settings.ai.fallback_vision_model': 'Modello vision di fallback',
+  'settings.ai.vision_crash_fallback_model': 'Modello vision per fallback su crash',
+  'settings.ai.vision_crash_fallback_hint':
+    'Usato automaticamente quando il modello vision principale fa crashare il runtime Ollama (GGML_ASSERT). Il worker riprova la pagina in silenzio su questo modello prima di far fallire il job. Lascia vuoto per usare una catena di sicurezza predefinita.',
+  'settings.ai.requeue_vision_crashes_on_startup':
+    "All'avvio, rimetti in coda i job OCR uccisi dalla firma di crash vision",
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modalità',
   'settings.workflow.paused': 'Metti in pausa il selector automatico',
@@ -2550,6 +2575,11 @@ export const nlMessages: Record<MessageKey, string> = {
   'settings.ai.legacy_ollama_url': 'Legacy Ollama-URL',
   'settings.ai.fallback_text_model': 'Fallback tekstmodel',
   'settings.ai.fallback_vision_model': 'Fallback visionmodel',
+  'settings.ai.vision_crash_fallback_model': 'Visionmodel voor crash-fallback',
+  'settings.ai.vision_crash_fallback_hint':
+    'Wordt automatisch gebruikt wanneer het primaire visionmodel de Ollama-runtime laat crashen (GGML_ASSERT). De worker probeert de pagina stil opnieuw met dit model voordat de job faalt. Laat leeg om een ingebouwde veilige fallbackketen te gebruiken.',
+  'settings.ai.requeue_vision_crashes_on_startup':
+    'Bij het opstarten OCR-jobs opnieuw in de wachtrij plaatsen die door de vision-crash-signatuur zijn beëindigd',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modus',
   'settings.workflow.paused': 'Automatische selector pauzeren',
@@ -3007,6 +3037,11 @@ export const plMessages: Record<MessageKey, string> = {
   'settings.ai.legacy_ollama_url': 'Legacy URL Ollamy',
   'settings.ai.fallback_text_model': 'Fallback model tekstowy',
   'settings.ai.fallback_vision_model': 'Fallback model vision',
+  'settings.ai.vision_crash_fallback_model': 'Model vision dla awaryjnego fallbacku',
+  'settings.ai.vision_crash_fallback_hint':
+    'Używany automatycznie, gdy główny model vision spowoduje awarię runtime Ollamy (GGML_ASSERT). Worker ponawia stronę po cichu na tym modelu, zanim zakończy zadanie niepowodzeniem. Pozostaw puste, aby użyć wbudowanego bezpiecznego łańcucha domyślnego.',
+  'settings.ai.requeue_vision_crashes_on_startup':
+    'Przy starcie ponownie kolejkuj zadania OCR zabite przez sygnaturę awarii vision',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Tryb',
   'settings.workflow.paused': 'Wstrzymaj automatyczny selector',

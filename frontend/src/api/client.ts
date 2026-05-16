@@ -68,6 +68,8 @@ export type RuntimeSettings = {
     stage_models: Array<{ stage: Stage; provider: string; model: string }>;
     providers: AiProvider[];
     external_provider_warning_acknowledged: boolean;
+    fallback_vision_model?: string | null;
+    requeue_vision_crashes_on_startup?: boolean;
   };
   security: {
     audit_retention_days: number;
