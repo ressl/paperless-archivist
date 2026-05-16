@@ -338,3 +338,91 @@ Implications:
 - A worker outage longer than five minutes will produce gaps in the
   backlog chart. The empty-state fallback in `backlog_series` synthesises
   a single "now" row from live counts so the chart still renders.
+
+## ADR-011: Consolidated Metadata Stage
+
+Decision: Replace the six per-field metadata stages (`Title`, `DocumentType`,
+`Correspondent`, `DocumentDate`, `Tags`, `Fields`) with one consolidated
+`Stage::Metadata` that issues a single structured-JSON LLM call and yields up
+to six review items (one per populated field). The default selector sequence
+becomes `[Ocr, Metadata]`. Legacy per-field stages stay in the enum so
+in-flight runs queued before v1.4.0 keep draining.
+
+Rationale:
+
+- Six independent LLM round-trips on the same document text cost six system
+  prompts, six context windows, and six request-response RTTs. A single
+  structured call drops total token spend ~5x and wall-clock latency ~6x in
+  practice. The closed-vocabulary allowlists (correspondents, document
+  types, tags, custom-field names) are only embedded once.
+- The consolidated prompt only requests fields whose flag is true in
+  `MetadataFieldFlags::from_enabled_stages(enabled_stages)`, so operators
+  who keep per-field opt-outs do not pay for fields they disabled.
+- Per-field validation contracts stay byte-for-byte identical — the worker
+  delegates each subfield to the existing `validate_*` helpers
+  (`validate_title_suggestion`, `validate_choice_suggestion`,
+  `validate_document_date_suggestion`, `validate_tag_suggestion`,
+  `validate_field_suggestion`). Closed-vocabulary correctness is not
+  weakened by the consolidation.
+- The fan-out shape (one review item per field with a `field` discriminator
+  inside `suggested_patch.standard_metadata`) keeps the existing reviewer
+  UX working: items still render per-field, can be approved/rejected
+  individually, and the full_auto path can either auto-apply a single
+  composite Paperless patch or fall back to per-field review.
+
+Implications:
+
+- `Stage::all_business_stages()` returns `[Ocr, Metadata]` for new runs;
+  callers that still need the per-field enum variants use
+  `Stage::legacy_per_field_stages()`.
+- `document_inventory.metadata_status` is the column for the consolidated
+  stage; `missing_pipeline_stages_for_inventory` consults both that column
+  AND the legacy per-field columns so v1.3 inventory rows still flow
+  through the v1.4 selector without a backfill migration.
+- Prompt management UI still exposes the six legacy stage prompts; their
+  help copy is marked deprecated and operators are directed to the
+  consolidated `metadata` prompt for new tuning.
+- Per-field overwrite guards (`metadata.overwrite_existing_correspondent`,
+  `metadata.overwrite_existing_document_type`,
+  `metadata.overwrite_existing_document_date`) continue to apply inside
+  the consolidated handler. Each field can independently fall back to
+  review or skip.
+
+## ADR-012: Age-Derived Job Priority With Manual Override
+
+Decision: Job rows carry two priority columns derived from `payload`:
+
+- `priority`        — cross-run ordering (smaller wins). Manual triggers
+                       stamp `0`; auto-selected runs stamp
+                       `1_000_000 - paperless_document_id`.
+- `stage_priority`  — within-run stage ordering (smaller wins). Stage 1
+                       gets 10, stage 2 gets 20, etc.
+
+`claim_jobs` orders by `priority, stage_priority, run_after, created_at`
+and uses `stage_priority` (not `priority`) in the within-run dependency
+subquery so a single key does not have to serve two semantic roles.
+
+Rationale:
+
+- Operators expect a fresh scan or a manual "re-queue" to show up in the
+  UI in seconds, not after the auto-selector drains its backlog. A single
+  priority value with the age formula lets the queue self-order without a
+  separate "high priority" lane and without operator config.
+- Splitting cross-run priority from within-run stage priority cleanly
+  preserves the historical `not exists prev.priority < jobs.priority`
+  subquery contract. Without the split, jobs of the same run would share
+  one priority and the subquery would no longer enforce stage ordering.
+- Saturating arithmetic in `age_derived_priority(doc_id)` keeps the result
+  in `[1, 1_000_000]` so even synthetic doc ids beyond a million never
+  drop below the manual-trigger floor of `0`.
+
+Implications:
+
+- A pre-existing v1.3 job (no `stage_priority` key in payload) inherits its
+  stage ordering from the legacy `payload->>'priority'` value via the
+  migration's `coalesce` fallback. The split is fully backward compatible.
+- A future reschedule API can change a job's cross-run priority by editing
+  `payload->>'priority'` without disturbing stage ordering.
+- The `claim_jobs` retry bias (`order by case when error_message is not
+  null ... then 0 else 1 end`) still runs first, so a stuck retry never
+  starves out behind a flood of priority-0 manual triggers.
