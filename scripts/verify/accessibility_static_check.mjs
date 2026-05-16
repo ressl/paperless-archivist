@@ -7,8 +7,10 @@ const root = new URL('../..', import.meta.url).pathname;
 const app = readFileSync(join(root, 'frontend/src/App.tsx'), 'utf8');
 const dashboard = readFileSync(join(root, 'frontend/src/dashboard/Dashboard.tsx'), 'utf8');
 const ui = readFileSync(join(root, 'frontend/src/lib/ui.tsx'), 'utf8');
+const users = readFileSync(join(root, 'frontend/src/users/Users.tsx'), 'utf8');
 const css = readFileSync(join(root, 'frontend/src/styles/app.css'), 'utf8');
-const inAnySource = (needle) => app.includes(needle) || dashboard.includes(needle) || ui.includes(needle);
+const inAnySource = (needle) =>
+  app.includes(needle) || dashboard.includes(needle) || ui.includes(needle) || users.includes(needle);
 
 const checks = [
   ['workspace main landmark', app.includes('<main className="workspace">')],
@@ -25,7 +27,7 @@ const checks = [
   ['tooltip closes outside pointer/touch', app.includes("document.addEventListener('mousedown'") && app.includes("document.addEventListener('touchstart'")],
   ['global focus visible styles', css.includes('button:focus-visible') && css.includes('input:focus-visible') && css.includes('textarea:focus-visible')],
   ['icon reload button has aria-label', app.includes("aria-label={t('settings.ollama.reload_models')}")],
-  ['user admin controls have labels', app.includes('aria-label="username"') && app.includes('aria-label="token name"')],
+  ['user admin controls have labels', users.includes('aria-label="username"') && users.includes('aria-label="token name"')],
   ['prefers-reduced-motion respected', css.includes('@media (prefers-reduced-motion: reduce)')],
 ];
 
