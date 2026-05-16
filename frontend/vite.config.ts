@@ -78,6 +78,19 @@ export default defineConfig({
     }
   },
   build: {
-    sourcemap: false
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        // Pull heavy third-party libraries out of the main bundle so they can
+        // be cached independently across releases and parallel-fetched on
+        // first paint. Both libraries are unconditionally imported today, so
+        // splitting them does not delay rendering further; it just reduces
+        // the dominant chunk size.
+        manualChunks: {
+          recharts: ['recharts'],
+          'lucide-icons': ['lucide-react']
+        }
+      }
+    }
   }
 });
