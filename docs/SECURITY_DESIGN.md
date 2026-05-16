@@ -183,6 +183,18 @@ Mitigations: short session lifetime, `SameSite=Lax` and `Secure`
 cookies in production, and audit-logged logout. Future hardening is
 tracked in the roadmap (CSRF rotation, optional IP/UA binding).
 
+### 4.2 Cookie `Secure` Attribute
+
+The `ARCHIVIST_COOKIE_SECURE` flag is set to `false` by default so that
+local development against `http://localhost` works without TLS. **Every
+production deployment is required to set `ARCHIVIST_COOKIE_SECURE=true`**
+(or `cookie_secure = true` in the equivalent settings file) so that the
+session and CSRF cookies are only transmitted over HTTPS. The flag is
+read once at startup; changing it requires a process restart. Operators
+deploying behind a TLS-terminating reverse proxy should additionally set
+`ARCHIVIST_TRUST_PROXY=true` so the originating client IP — not the
+proxy — is recorded in the audit log.
+
 ## 5. API Tokens and Service Accounts
 
 Support API tokens for automation.
@@ -430,6 +442,38 @@ Provider rules:
 - provider calls have timeouts
 - provider errors are redacted
 - per-stage external provider use is auditable
+
+### 14.1 Prompt Injection Threat Model
+
+Document text — including OCR output — is interpolated into model
+prompts without scrubbing prompt-injection markers ("ignore previous
+instructions", role-impersonation tokens, embedded system-prompt
+syntaxes, etc.). The threat is real: any actor who can upload a
+document into Paperless can attempt to subvert downstream AI stages
+through crafted content.
+
+Accepted residual risk for v1.x: all model outputs that affect document
+state are funnelled through the typed validators in
+`archivist-core::validate_*` (`validate_tag_suggestion`,
+`validate_title`, `validate_correspondent`, `validate_document_date`,
+`validate_fields`, etc.). Those validators enforce:
+
+- closed allowlists for tag names and document types (rejecting any
+  output that doesn't match a configured taxonomy)
+- length, character class and date-range checks for titles,
+  correspondents and dates
+- workflow-tag protection so the AI cannot toggle the trigger /
+  completion / failure tags that drive the pipeline
+
+A successful prompt-injection attack therefore degrades into one of:
+(a) a validator rejection, surfaced as a failed stage with a typed
+error and a review item; or (b) an output that is already constrained
+to the configured allowlist, no different in effect than a tagging
+mistake. The system does not currently strip injection markers from
+prompt text — the constraint is enforced at the *output* boundary, not
+the input. Hardening the input path (sanitization, dual-LLM
+classification, separation of trusted/untrusted context blocks) is
+tracked in the security roadmap.
 
 ## 15. Supply Chain Security
 

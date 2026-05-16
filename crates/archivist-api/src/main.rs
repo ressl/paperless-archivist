@@ -2856,8 +2856,15 @@ fn enrich_provider_sparklines(
     if bucket_count == 0 {
         return;
     }
+    // Build the bucket -> index map once; the hot loops below iterate `entries`
+    // many times and previously rescanned `labels` linearly for every entry.
+    let bucket_index: HashMap<DateTime<Utc>, usize> = labels
+        .iter()
+        .enumerate()
+        .map(|(idx, (bucket, _))| (*bucket, idx))
+        .collect();
     let bucket_index_of =
-        |bucket: DateTime<Utc>| -> Option<usize> { labels.iter().position(|(b, _)| *b == bucket) };
+        |bucket: DateTime<Utc>| -> Option<usize> { bucket_index.get(&bucket).copied() };
     let rate_for = |provider_name: &str| -> Option<(f64, f64)> {
         let provider = settings
             .ai

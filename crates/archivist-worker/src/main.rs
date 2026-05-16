@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
-    AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT, ImageInput, OllamaClient,
-    OpenAiCompatibleClient, PromptLanguageContext, TextProvider, VisionProvider, VisionRequest,
-    parse_choice_suggestion, parse_field_suggestion, parse_tag_suggestion, parse_title_suggestion,
-    prompt_for_choice, prompt_for_fields, prompt_for_tags, prompt_for_title,
+    AiProviderError, AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT,
+    ImageInput, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext, TextProvider,
+    VisionProvider, VisionRequest, parse_choice_suggestion, parse_field_suggestion,
+    parse_tag_suggestion, parse_title_suggestion, prompt_for_choice, prompt_for_fields,
+    prompt_for_tags, prompt_for_title,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
@@ -31,7 +32,8 @@ use archivist_db::{
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{
-    PaperlessClient, PaperlessDocumentDetail, PaperlessDocumentSummary, PaperlessTag,
+    PaperlessClient, PaperlessDocumentDetail, PaperlessDocumentSummary, PaperlessError,
+    PaperlessTag,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest::Client as HttpClient;
@@ -375,7 +377,36 @@ impl ProcessingFailureClass {
     }
 }
 
+/// Decide whether `error` should be retried with backoff (Transient) or marked
+/// permanent. The function first walks the error chain looking for typed
+/// errors from `archivist-paperless` and `archivist-ai`; those carry an
+/// authoritative `is_transient()` classification and bypass substring guesses.
+/// Anything else — DB driver errors, `reqwest::Error` raised outside the typed
+/// wrappers, third-party HTTP clients — falls through to substring matching as
+/// a documented last resort.
 fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass {
+    for cause in error.chain() {
+        if let Some(paperless_error) = cause.downcast_ref::<PaperlessError>() {
+            return if paperless_error.is_transient() {
+                ProcessingFailureClass::Transient
+            } else {
+                ProcessingFailureClass::Permanent
+            };
+        }
+        if let Some(ai_error) = cause.downcast_ref::<AiProviderError>() {
+            return if ai_error.is_transient() {
+                ProcessingFailureClass::Transient
+            } else {
+                ProcessingFailureClass::Permanent
+            };
+        }
+    }
+
+    // Last-resort substring matcher: covers errors that arise *outside* the
+    // typed surfaces — sqlx pool errors, reqwest errors from helpers that
+    // still use `anyhow!`, raw HTTP responses, etc. Any new error path
+    // should prefer adding a typed variant in the originating crate so this
+    // table can keep shrinking.
     let message = error
         .chain()
         .map(|cause| cause.to_string().to_ascii_lowercase())
@@ -1807,6 +1838,58 @@ fn hash_bytes(value: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn typed_paperless_errors_drive_classification() {
+        let transient: anyhow::Error =
+            anyhow::Error::new(PaperlessError::Timeout("waiting for paperless".to_owned()))
+                .context("higher-level wrap that does not mention transient keywords");
+        assert!(matches!(
+            classify_processing_failure(&transient),
+            ProcessingFailureClass::Transient
+        ));
+
+        let permanent: anyhow::Error = anyhow::Error::new(PaperlessError::Client {
+            status: 422,
+            body: "no transient keyword here".to_owned(),
+        });
+        assert!(matches!(
+            classify_processing_failure(&permanent),
+            ProcessingFailureClass::Permanent
+        ));
+    }
+
+    #[test]
+    fn typed_ai_errors_drive_classification() {
+        let transient: anyhow::Error =
+            anyhow::Error::new(AiProviderError::RunnerUnavailable("ollama".to_owned()));
+        assert!(matches!(
+            classify_processing_failure(&transient),
+            ProcessingFailureClass::Transient
+        ));
+
+        let permanent: anyhow::Error = anyhow::Error::new(AiProviderError::InvalidResponse(
+            "unexpected shape".to_owned(),
+        ));
+        assert!(matches!(
+            classify_processing_failure(&permanent),
+            ProcessingFailureClass::Permanent
+        ));
+    }
+
+    #[test]
+    fn fallback_substring_matching_still_classifies_untyped_errors() {
+        let transient: anyhow::Error = anyhow!("pool timed out waiting for connection");
+        assert!(matches!(
+            classify_processing_failure(&transient),
+            ProcessingFailureClass::Transient
+        ));
+        let permanent: anyhow::Error = anyhow!("invalid configuration: missing field");
+        assert!(matches!(
+            classify_processing_failure(&permanent),
+            ProcessingFailureClass::Permanent
+        ));
+    }
 
     fn document_detail() -> PaperlessDocumentDetail {
         PaperlessDocumentDetail {

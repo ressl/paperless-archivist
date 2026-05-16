@@ -302,3 +302,39 @@ Rationale:
 - enterprise users need SSO, audit, and least-privilege operation
 
 Detailed design is documented in [Security Design](SECURITY_DESIGN.md).
+
+## ADR-010: Dashboard Snapshot Bucketing
+
+Decision: The `dashboard_snapshots` table is written by the worker tick loop
+(not by the `/dashboard` read path) and dedupes inserts within a 5-minute
+existence guard, while the dashboard backlog series is rendered at an
+*hourly* (or coarser) granularity by querying the same table.
+
+Rationale:
+
+- Coalescing writes to one row every five minutes keeps the table linear in
+  time rather than linear in concurrent dashboard polls. With dashboards
+  refreshing every 30 seconds, the previous read-path-writes scheme could
+  produce hundreds of identical rows per hour per polling browser.
+- The worker is the single writer (see #97), so there is no read/write
+  contention on the table during normal operation; the dashboard endpoint
+  only reads.
+- Five minutes is short enough that the "live" KPIs remain meaningful (the
+  same backlog values are surfaced via `/dashboard/live`, which queries the
+  source-of-truth `document_inventory` directly and is not bucketed), and
+  coarse enough to absorb burst worker activity into one snapshot row.
+- The dashboard backlog chart aggregates at hourly granularity for ranges
+  longer than 24h, so the 5-minute write cadence still produces 12 candidate
+  rows per chart bucket. The `select ... order by captured_at desc limit 1`
+  lateral join in `backlog_series` deliberately picks the most recent
+  snapshot inside each bucket — this trades visual continuity for storage
+  cost and is the documented trade-off.
+
+Implications:
+
+- Backfilling historical snapshots requires a worker run, not a dashboard
+  view. Tests that need historical buckets seed `dashboard_snapshots`
+  directly.
+- A worker outage longer than five minutes will produce gaps in the
+  backlog chart. The empty-state fallback in `backlog_series` synthesises
+  a single "now" row from live counts so the chart still renders.

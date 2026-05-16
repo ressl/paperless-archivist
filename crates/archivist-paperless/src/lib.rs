@@ -6,7 +6,71 @@ use bytes::Bytes;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use url::Url;
+
+/// Typed surface for Paperless-ngx integration failures. The worker uses
+/// `is_transient()` to decide whether a job should be retried with backoff
+/// or marked permanent — this avoids substring matching on error text. See
+/// `archivist-worker::classify_processing_failure`.
+#[derive(Debug, Error)]
+pub enum PaperlessError {
+    /// Network-layer failure: DNS, TCP, TLS or socket close. Always transient.
+    #[error("paperless network failure: {0}")]
+    Network(String),
+
+    /// Request timed out before Paperless answered. Always transient.
+    #[error("paperless request timed out: {0}")]
+    Timeout(String),
+
+    /// Paperless returned a 5xx response. Treated as transient.
+    #[error("paperless server error: status={status}, body={body}")]
+    Server { status: u16, body: String },
+
+    /// Paperless returned a 4xx response. Treated as permanent — a client
+    /// fix (auth, payload, missing object) is needed before retrying.
+    #[error("paperless client error: status={status}, body={body}")]
+    Client { status: u16, body: String },
+
+    /// Response shape or pagination violated an invariant. Permanent.
+    #[error("paperless protocol violation: {0}")]
+    Protocol(String),
+}
+
+impl PaperlessError {
+    /// Whether the worker should retry this failure with backoff.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Network(_) | Self::Timeout(_) | Self::Server { .. } => true,
+            Self::Client { .. } | Self::Protocol(_) => false,
+        }
+    }
+}
+
+impl From<reqwest::Error> for PaperlessError {
+    fn from(error: reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::Timeout(error.without_url().to_string())
+        } else if error.is_connect() || error.is_request() || error.is_body() {
+            Self::Network(error.without_url().to_string())
+        } else if let Some(status) = error.status() {
+            let code = status.as_u16();
+            if status.is_server_error() {
+                Self::Server {
+                    status: code,
+                    body: error.without_url().to_string(),
+                }
+            } else {
+                Self::Client {
+                    status: code,
+                    body: error.without_url().to_string(),
+                }
+            }
+        } else {
+            Self::Network(error.without_url().to_string())
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct PaperlessClient {

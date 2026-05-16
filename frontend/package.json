@@ -6,6 +6,7 @@
   "scripts": {
     "generate:client": "openapi-typescript ../openapi/openapi.yaml -o src/api/schema.ts",
     "accessibility:check": "node ../scripts/verify/accessibility_static_check.mjs",
+    "i18n:check": "node ../scripts/verify/i18n_translation_parity.mjs",
     "test:a11y": "vitest run --reporter=verbose",
     "typecheck": "tsc --noEmit",
     "build": "vite build",

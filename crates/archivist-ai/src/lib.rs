@@ -12,6 +12,77 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use thiserror::Error;
+
+/// Typed surface for AI provider failures. The worker uses `is_transient()`
+/// to decide whether to retry — see `archivist-worker::classify_processing_failure`.
+#[derive(Debug, Error)]
+pub enum AiProviderError {
+    /// Network-layer failure between us and the model provider. Transient.
+    #[error("ai provider network failure: {0}")]
+    Network(String),
+
+    /// Request timed out before the provider answered. Transient.
+    #[error("ai provider timed out: {0}")]
+    Timeout(String),
+
+    /// Provider returned a 5xx response. Transient.
+    #[error("ai provider server error: status={status}, body={body}")]
+    Server { status: u16, body: String },
+
+    /// Provider returned a 4xx response. Permanent — typically auth, quota
+    /// or a malformed request.
+    #[error("ai provider client error: status={status}, body={body}")]
+    Client { status: u16, body: String },
+
+    /// Provider responded but the body did not match the expected shape.
+    /// Permanent — usually a model/prompt regression.
+    #[error("ai provider invalid response: {0}")]
+    InvalidResponse(String),
+
+    /// Ollama (or a local runner) reported the runner process died. Transient
+    /// — local runners often recover on the next attempt.
+    #[error("ai runner unavailable: {0}")]
+    RunnerUnavailable(String),
+}
+
+impl AiProviderError {
+    /// Whether the worker should retry this failure with backoff.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Network(_)
+            | Self::Timeout(_)
+            | Self::Server { .. }
+            | Self::RunnerUnavailable(_) => true,
+            Self::Client { .. } | Self::InvalidResponse(_) => false,
+        }
+    }
+}
+
+impl From<reqwest::Error> for AiProviderError {
+    fn from(error: reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::Timeout(error.without_url().to_string())
+        } else if error.is_connect() || error.is_request() || error.is_body() {
+            Self::Network(error.without_url().to_string())
+        } else if let Some(status) = error.status() {
+            let code = status.as_u16();
+            if status.is_server_error() {
+                Self::Server {
+                    status: code,
+                    body: error.without_url().to_string(),
+                }
+            } else {
+                Self::Client {
+                    status: code,
+                    body: error.without_url().to_string(),
+                }
+            }
+        } else {
+            Self::Network(error.without_url().to_string())
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiResponse {

@@ -18,6 +18,11 @@ pub struct AppConfig {
     #[arg(long, env = "ARCHIVIST_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
 
+    /// Marks session and CSRF cookies with the `Secure` attribute, restricting
+    /// them to HTTPS. The default is `false` so that local development against
+    /// `http://localhost` works out of the box. **Any production deployment
+    /// behind TLS must set `ARCHIVIST_COOKIE_SECURE=true`** to prevent cookies
+    /// from being transmitted over plain HTTP — see `docs/SECURITY_DESIGN.md`.
     #[arg(long, env = "ARCHIVIST_COOKIE_SECURE", default_value_t = false)]
     pub cookie_secure: bool,
 
