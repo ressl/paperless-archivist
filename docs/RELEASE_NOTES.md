@@ -2,8 +2,48 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.1`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.3`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.3 — Apply Debian Security patches in the runtime image
+
+The runtime stage of `Dockerfile` now runs `apt-get upgrade` so every build
+pulls the current Debian Security patches for libraries that ship
+pre-installed in `debian:bookworm-slim` and are otherwise frozen at whatever
+version Docker Hub baked into the base tag.
+
+Without this, image scans (Trivy) flagged CVEs that Debian had already fixed
+upstream — observed examples: CVE-2026-0861 (`libc-bin` / `libc6`),
+CVE-2026-4878 (`libcap2`), CVE-2026-29111 (`libsystemd0` / `libudev1`). The
+patched versions were available in the Debian Security mirror; we just
+weren't pulling them.
+
+The fix is a one-line addition to the runtime layer:
+
+```dockerfile
+RUN apt-get update \
+  && apt-get -y --no-install-recommends upgrade \
+  && apt-get install -y --no-install-recommends ca-certificates curl poppler-utils \
+  && rm -rf /var/lib/apt/lists/*
+```
+
+Multi-stage build stages (`rust:1.95-bookworm`, `node:26-bookworm`) are
+unchanged — only the compiled binaries and the frontend dist are copied into
+the runtime image, so their base libraries never ship.
+
+No application behaviour changes. UI sidebar reads `v1.5.3`.
+
+## v1.5.2 — Pipeline-run + tag-resolution fixes
+
+Two surgical fixes on top of v1.5.1:
+
+- `queue_full_batch` now queues a single full pipeline run per document
+  covering all enabled stages (`["ocr", "metadata"]`) instead of N
+  single-stage runs.
+- Tag names and custom-field names emitted by the metadata stage are
+  resolved to integer IDs before being stored in `review_items`, so
+  `POST /api/reviews/{id}/approve` no longer 500s with
+  `invalid type: string "<name>", expected i32`.
 
 ## v1.5.1 — Root-cause fix for glm-ocr GGML_ASSERT crashes
 
