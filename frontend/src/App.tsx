@@ -89,7 +89,9 @@ import { languageOptionLabel, languageOptions } from './data/worldLanguages';
 import { buildInfo, buildInfoLabel } from './buildInfo';
 import { localizedMessage, useI18n, type TFunction } from './i18n/I18nProvider';
 import { Dashboard } from './dashboard/Dashboard';
+import { Inventory } from './inventory/Inventory';
 import { ErrorBoundary } from './lib/ErrorBoundary';
+import { DebugContextDetails } from './lib/DebugContextDetails';
 import { ActionButton, PageHeader, Status, errorToString, localizedErrorMessage, run } from './lib/ui';
 import { workflowModeDescription, workflowModeLabel, workflowModeOptions } from './lib/workflow';
 import {
@@ -328,81 +330,6 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
         </form>
       </section>
     </main>
-  );
-}
-
-function formatLanguageDetection(item: InventoryItem, languages: ReturnType<typeof languageOptions>) {
-  const tag = item.detected_language;
-  if (!tag) return '-';
-  const option = languages.find((language) => language.tag === tag);
-  const label = option ? option.uiName : tag;
-  const confidence = item.detected_language_confidence;
-  if (confidence == null) return label;
-  return `${label} ${Math.round(confidence * 100)}%`;
-}
-
-
-function Inventory({ setError }: { setError: (error: string | null) => void }) {
-  const { t, locale } = useI18n();
-  const [items, setItems] = useState<InventoryItem[]>([]);
-  const [busy, setBusy] = useState(false);
-  const languages = useMemo(() => languageOptions(locale), [locale]);
-  const load = () => api.inventory().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t)));
-
-  useEffect(() => {
-    void load();
-  }, []);
-
-  return (
-    <section className="page">
-      <PageHeader title={t('inventory.title')} />
-      <div className="toolbar">
-        <ActionButton icon={<RefreshCw />} label={t('generic.reload')} busy={busy} onClick={() => run(setBusy, setError, load, t)} />
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>{t('inventory.id')}</th>
-              <th>{t('inventory.document_title')}</th>
-              <th>{t('inventory.ocr')}</th>
-              <th>{t('inventory.language')}</th>
-              <th>{t('inventory.tags')}</th>
-              <th>{t('stage.title')}</th>
-              <th>{t('inventory.type')}</th>
-              <th>{t('inventory.date')}</th>
-              <th>{t('inventory.run')}</th>
-              <th>{t('inventory.debug')}</th>
-              <th>{t('inventory.actions')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <tr key={item.paperless_document_id}>
-                <td>{item.paperless_document_id}</td>
-                <td>{item.title || item.original_file_name || t('inventory.untitled')}</td>
-                <td><Status value={item.ocr_status} /></td>
-                <td>{formatLanguageDetection(item, languages)}</td>
-                <td><Status value={item.tagging_status} /></td>
-                <td><Status value={item.title_status} /></td>
-                <td><Status value={item.document_type_status} /></td>
-                <td><Status value={item.document_date_status} /> {item.document_date ?? ''}</td>
-                <td>{item.current_run_status || '-'}</td>
-                <td><DebugContextDetails context={item.debug_context} compact /></td>
-                <td className="row-actions">
-                  <button title={t('inventory.trigger_ocr')} onClick={() => api.triggerDocument(item.paperless_document_id, ['ocr'], 'manual_review').then(load).catch((err) => setError(localizedErrorMessage(err, t)))}>
-                    <FileText size={16} />
-                  </button>
-                  <button title={t('inventory.trigger_tags')} onClick={() => api.triggerDocument(item.paperless_document_id, ['tags'], 'manual_review').then(load).catch((err) => setError(localizedErrorMessage(err, t)))}>
-                    <Tags size={16} />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
   );
 }
 
@@ -777,38 +704,6 @@ function buildEditedReviewPatch(patch: ReviewPatchRecord, edit: ReviewEditState)
     edited[key] = numeric;
   }
   return edited;
-}
-
-function DebugContextDetails({
-  context,
-  compact
-}: {
-  context?: InventoryItem['debug_context'] | ReviewItem['debug_context'] | null;
-  compact?: boolean;
-}) {
-  const { t } = useI18n();
-  if (!context) return <span className="field-hint">-</span>;
-  const reason = context.selector_reason ?? context.next_required_stage ?? 'unknown';
-  const promptLanguage = context.prompt_language ?? context.detected_language ?? 'und';
-  const tagLanguage = context.tag_output_language ?? '-';
-  return (
-    <details className={`debug-context${compact ? ' compact' : ''}`}>
-      <summary>
-        {compact
-          ? t('inventory.debug_summary', { reason, promptLanguage, tagLanguage })
-          : t('review.debug_summary', { reason, promptLanguage, tagLanguage })}
-      </summary>
-      <dl>
-        <div><dt>{t('inventory.language')}</dt><dd>{promptLanguage}</dd></div>
-        <div><dt>{t('settings.workflow.tag_output_language')}</dt><dd>{tagLanguage}</dd></div>
-        <div><dt>{t('settings.workflow.mode')}</dt><dd>{context.workflow_mode ?? '-'}</dd></div>
-        <div><dt>{t('settings.workflow.paused')}</dt><dd>{context.workflow_paused ? t('generic.yes') : t('generic.no')}</dd></div>
-        <div><dt>{t('settings.workflow.dry_run')}</dt><dd>{context.dry_run ? t('generic.yes') : t('generic.no')}</dd></div>
-        <div><dt>{t('inventory.run')}</dt><dd>{context.current_run_status ?? '-'}</dd></div>
-        <div><dt>{t('inventory.debug')}</dt><dd>{reason}</dd></div>
-      </dl>
-    </details>
-  );
 }
 
 function reviewWarnings(value: unknown): string[] {
