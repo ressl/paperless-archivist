@@ -1568,6 +1568,12 @@ async fn build_prompt_test_chat_request(
             ),
             temperature: 0.0,
         }),
+        // Stage::Metadata uses the consolidated prompt builder added alongside the worker
+        // handler. The builder is registered in archivist-ai in a follow-up commit; until
+        // then, surface a clear error rather than silently testing a stale prompt.
+        Stage::Metadata => Err(anyhow!(
+            "prompt testing for the consolidated metadata stage is added in a later v1.4.0 commit"
+        )),
         Stage::Apply => Err(anyhow!(
             "prompt testing is not supported for stage {}",
             request.stage
@@ -1731,7 +1737,7 @@ async fn parse_prompt_test_output(
             validation_errors: Vec::new(),
             warnings: Vec::new(),
         },
-        Stage::Apply => PromptTestParsed {
+        Stage::Metadata | Stage::Apply => PromptTestParsed {
             parsed: None,
             validation_errors: vec![format!("unsupported stage: {stage}")],
             warnings: Vec::new(),

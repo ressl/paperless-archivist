@@ -273,6 +273,11 @@ const LATIN_LANGUAGE_PROFILES: &[LatinLanguageProfile] = &[
 pub enum Stage {
     Ocr,
     OcrFix,
+    /// Consolidated metadata stage introduced in v1.4.0. Replaces the six legacy per-field stages
+    /// (`Title`, `DocumentType`, `Correspondent`, `DocumentDate`, `Tags`, `Fields`) with one LLM
+    /// round-trip that yields up to six review items — one per populated field. Legacy variants
+    /// stay in the enum so in-flight runs queued before v1.4.0 keep draining.
+    Metadata,
     Tags,
     Title,
     Correspondent,
@@ -283,9 +288,19 @@ pub enum Stage {
 }
 
 impl Stage {
+    /// Default stage sequence for NEW runs created after v1.4.0. Selectors and the
+    /// `create_run_with_jobs` callers should use this list. In-flight runs queued before v1.4.0
+    /// keep their stamped `pipeline_runs.stages` sequence and the worker continues to dispatch
+    /// the legacy per-field variants.
     pub fn all_business_stages() -> Vec<Self> {
+        vec![Self::Ocr, Self::Metadata]
+    }
+
+    /// Legacy per-field stage sequence for callers that still need to reference individual
+    /// fields (prompt management UI, in-flight-run support). Kept as a separate function so
+    /// the v1.4.0 default selector path stays small and the legacy contract stays explicit.
+    pub fn legacy_per_field_stages() -> Vec<Self> {
         vec![
-            Self::Ocr,
             Self::Title,
             Self::DocumentType,
             Self::Correspondent,
@@ -299,6 +314,7 @@ impl Stage {
         match self {
             Self::Ocr => "ocr",
             Self::OcrFix => "ocr_fix",
+            Self::Metadata => "metadata",
             Self::Tags => "tagging",
             Self::Title => "title",
             Self::Correspondent => "correspondent",
@@ -317,6 +333,7 @@ impl Stage {
     pub fn inventory_status_column(self) -> Option<&'static str> {
         match self {
             Self::Ocr => Some("ocr_status"),
+            Self::Metadata => Some("metadata_status"),
             Self::Tags => Some("tagging_status"),
             Self::Title => Some("title_status"),
             Self::Correspondent => Some("correspondent_status"),
@@ -333,6 +350,7 @@ impl Display for Stage {
         let value = match self {
             Self::Ocr => "ocr",
             Self::OcrFix => "ocr_fix",
+            Self::Metadata => "metadata",
             Self::Tags => "tags",
             Self::Title => "title",
             Self::Correspondent => "correspondent",
@@ -352,6 +370,7 @@ impl FromStr for Stage {
         match value {
             "ocr" => Ok(Self::Ocr),
             "ocr_fix" => Ok(Self::OcrFix),
+            "metadata" => Ok(Self::Metadata),
             "tags" | "tagging" => Ok(Self::Tags),
             "title" => Ok(Self::Title),
             "correspondent" => Ok(Self::Correspondent),
@@ -726,7 +745,12 @@ impl WorkflowTags {
             Stage::DocumentDate => Some(&self.completion_document_date),
             Stage::Fields => Some(&self.completion_fields),
             Stage::Apply => Some(&self.completion_processed),
-            Stage::OcrFix => None,
+            // The consolidated metadata stage does not have a dedicated completion tag
+            // because it represents the union of the six per-field stages — each individual
+            // field tag (completion_title, completion_tagging, ...) is still stamped by the
+            // worker when the matching field succeeds, and the final `completion_processed`
+            // tag is applied when the last job in a run drains.
+            Stage::Metadata | Stage::OcrFix => None,
         }
     }
 
@@ -739,7 +763,7 @@ impl WorkflowTags {
             Stage::DocumentType => Some(&self.trigger_document_type),
             Stage::DocumentDate => Some(&self.trigger_document_date),
             Stage::Fields => Some(&self.trigger_fields),
-            Stage::OcrFix | Stage::Apply => None,
+            Stage::Metadata | Stage::OcrFix | Stage::Apply => None,
         }
     }
 
@@ -756,23 +780,20 @@ impl WorkflowTags {
         if normalized.contains(&self.trigger_ocr.to_ascii_lowercase()) {
             stages.insert(Stage::Ocr);
         }
-        if normalized.contains(&self.trigger_tags.to_ascii_lowercase()) {
-            stages.insert(Stage::Tags);
-        }
-        if normalized.contains(&self.trigger_title.to_ascii_lowercase()) {
-            stages.insert(Stage::Title);
-        }
-        if normalized.contains(&self.trigger_correspondent.to_ascii_lowercase()) {
-            stages.insert(Stage::Correspondent);
-        }
-        if normalized.contains(&self.trigger_document_type.to_ascii_lowercase()) {
-            stages.insert(Stage::DocumentType);
-        }
-        if normalized.contains(&self.trigger_document_date.to_ascii_lowercase()) {
-            stages.insert(Stage::DocumentDate);
-        }
-        if normalized.contains(&self.trigger_fields.to_ascii_lowercase()) {
-            stages.insert(Stage::Fields);
+        // In v1.4.0+ any per-field trigger tag funnels into the consolidated metadata stage —
+        // the LLM produces all six fields in one call, and the per-field tags become hints for
+        // the operator about WHY a run was requested rather than separate queue entries.
+        for legacy_trigger in [
+            &self.trigger_tags,
+            &self.trigger_title,
+            &self.trigger_correspondent,
+            &self.trigger_document_type,
+            &self.trigger_document_date,
+            &self.trigger_fields,
+        ] {
+            if normalized.contains(&legacy_trigger.to_ascii_lowercase()) {
+                stages.insert(Stage::Metadata);
+            }
         }
 
         Stage::all_business_stages()
@@ -2069,6 +2090,98 @@ pub fn validate_choice_suggestion(
     }
 }
 
+/// Flags controlling which of the six legacy per-field stages the consolidated
+/// `Stage::Metadata` should request from the LLM. The flags are derived from
+/// `WorkflowSettings::enabled_stages`: if a legacy stage is in `enabled_stages`,
+/// the matching flag is true. This lets operators keep per-field opt-outs without
+/// having to re-introduce six separate prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataFieldFlags {
+    pub title: bool,
+    pub document_type: bool,
+    pub correspondent: bool,
+    pub document_date: bool,
+    pub tags: bool,
+    pub fields: bool,
+}
+
+impl Default for MetadataFieldFlags {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+impl MetadataFieldFlags {
+    pub const ALL: Self = Self {
+        title: true,
+        document_type: true,
+        correspondent: true,
+        document_date: true,
+        tags: true,
+        fields: true,
+    };
+
+    pub const NONE: Self = Self {
+        title: false,
+        document_type: false,
+        correspondent: false,
+        document_date: false,
+        tags: false,
+        fields: false,
+    };
+
+    /// Builds the flag set from `enabled_stages`. Any legacy per-field stage present in the
+    /// slice (and either `Stage::Metadata` or the matching legacy variant) enables that field.
+    /// `Stage::Metadata` on its own enables every field — operators who explicitly add Metadata
+    /// without listing the legacy stages get the full consolidated extraction.
+    pub fn from_enabled_stages(enabled: &[Stage]) -> Self {
+        let mut flags = Self::NONE;
+        for stage in enabled {
+            match stage {
+                Stage::Metadata => return Self::ALL,
+                Stage::Title => flags.title = true,
+                Stage::DocumentType => flags.document_type = true,
+                Stage::Correspondent => flags.correspondent = true,
+                Stage::DocumentDate => flags.document_date = true,
+                Stage::Tags => flags.tags = true,
+                Stage::Fields => flags.fields = true,
+                Stage::Ocr | Stage::OcrFix | Stage::Apply => {}
+            }
+        }
+        flags
+    }
+
+    pub fn any(self) -> bool {
+        self.title
+            || self.document_type
+            || self.correspondent
+            || self.document_date
+            || self.tags
+            || self.fields
+    }
+}
+
+/// Composite payload returned by the consolidated metadata LLM call.
+///
+/// Each field is optional and validated independently — a single bad date does
+/// not invalidate the title, and missing tags do not block the correspondent.
+/// The worker fans this out into up to six review_items (one per Some field).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetadataSuggestion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<TitleSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_type: Option<ChoiceSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correspondent: Option<ChoiceSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_date: Option<DocumentDateSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<TagSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<FieldSuggestion>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2751,6 +2864,16 @@ mod tests {
         let tags = WorkflowTags::default();
         let stages = tags.stages_requested_by_tags(&["ai-process".to_owned()]);
         assert_eq!(stages, Stage::all_business_stages());
+        // v1.4.0 contract: the consolidated default is [Ocr, Metadata]; legacy per-field
+        // stages remain available but are funneled through Metadata at trigger time.
+        assert_eq!(stages, vec![Stage::Ocr, Stage::Metadata]);
+    }
+
+    #[test]
+    fn workflow_tags_map_legacy_per_field_triggers_to_metadata() {
+        let tags = WorkflowTags::default();
+        let stages = tags.stages_requested_by_tags(&["ai-title".to_owned()]);
+        assert_eq!(stages, vec![Stage::Metadata]);
     }
 
     #[test]
@@ -2760,6 +2883,7 @@ mod tests {
         for stage in [
             Stage::Ocr,
             Stage::OcrFix,
+            Stage::Metadata,
             Stage::Tags,
             Stage::Title,
             Stage::Correspondent,
@@ -2783,9 +2907,12 @@ mod tests {
                 }
             }
         }
-        // Every business stage must have a unique column name.
-        let mut columns: Vec<&'static str> = Stage::all_business_stages()
+        // Every stage with an inventory column must have a unique column name across both
+        // the consolidated metadata column and the legacy per-field columns.
+        let business_with_legacy = Stage::all_business_stages()
             .into_iter()
+            .chain(Stage::legacy_per_field_stages());
+        let mut columns: Vec<&'static str> = business_with_legacy
             .map(|stage| stage.inventory_status_column().unwrap())
             .collect();
         columns.sort();
@@ -2796,6 +2923,26 @@ mod tests {
             columns.len(),
             "inventory column names must be unique"
         );
+    }
+
+    #[test]
+    fn metadata_field_flags_from_enabled_stages_understands_consolidated_and_legacy() {
+        // Legacy enabled_stages list resolves to the matching per-field flags.
+        let flags = MetadataFieldFlags::from_enabled_stages(&[
+            Stage::Title,
+            Stage::Tags,
+            Stage::Fields,
+        ]);
+        assert!(flags.title && flags.tags && flags.fields);
+        assert!(!flags.correspondent && !flags.document_type && !flags.document_date);
+
+        // Stage::Metadata alone enables every field.
+        let all = MetadataFieldFlags::from_enabled_stages(&[Stage::Metadata]);
+        assert_eq!(all, MetadataFieldFlags::ALL);
+
+        // Orchestration stages do not contribute flags.
+        let none = MetadataFieldFlags::from_enabled_stages(&[Stage::Ocr, Stage::OcrFix]);
+        assert!(!none.any());
     }
 
     #[test]

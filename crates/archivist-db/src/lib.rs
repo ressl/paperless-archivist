@@ -4050,6 +4050,7 @@ pub async fn queue_missing_pipeline(
             r#"
             select paperless_document_id,
                    ocr_status,
+                   metadata_status,
                    tagging_status,
                    title_status,
                    correspondent_status,
@@ -4090,6 +4091,7 @@ pub async fn queue_missing_pipeline(
                 enabled_stages,
                 InventoryStageState {
                     ocr_status: row.try_get("ocr_status")?,
+                    metadata_status: row.try_get("metadata_status")?,
                     tagging_status: row.try_get("tagging_status")?,
                     title_status: row.try_get("title_status")?,
                     correspondent_status: row.try_get("correspondent_status")?,
@@ -4122,6 +4124,7 @@ pub async fn queue_missing_pipeline(
 
 struct InventoryStageState {
     ocr_status: String,
+    metadata_status: String,
     tagging_status: String,
     title_status: String,
     correspondent_status: String,
@@ -4146,6 +4149,21 @@ fn missing_pipeline_stages_for_inventory(
         .copied()
         .filter(|stage| match stage {
             Stage::Ocr => !state.has_ocr_completion_tag && stage_needs_work(&state.ocr_status),
+            // The consolidated stage subsumes the six per-field stages. A document needs the
+            // metadata stage if its dedicated metadata_status column needs work OR any of the
+            // six legacy per-field columns still report work. Honoring the legacy columns
+            // lets v1.3 inventory snapshots (created before metadata_status existed) still
+            // flow through the v1.4 selector without a backfill migration.
+            Stage::Metadata => {
+                !state.has_tagging_completion_tag
+                    && (stage_needs_work(&state.metadata_status)
+                        || stage_needs_work(&state.tagging_status)
+                        || stage_needs_work(&state.title_status)
+                        || stage_needs_work(&state.correspondent_status)
+                        || stage_needs_work(&state.document_type_status)
+                        || stage_needs_work(&state.document_date_status)
+                        || stage_needs_work(&state.fields_status))
+            }
             Stage::Tags => {
                 !state.has_tagging_completion_tag && stage_needs_work(&state.tagging_status)
             }
@@ -6386,10 +6404,13 @@ mod tests {
 
     #[test]
     fn missing_pipeline_stages_skip_completed_documents_and_stage_tags() {
+        // v1.4.0 default selector sequence is [Ocr, Metadata]; document with the OCR
+        // completion tag but no metadata yet should yield Metadata only.
         let stages = missing_pipeline_stages_for_inventory(
             &Stage::all_business_stages(),
             InventoryStageState {
                 ocr_status: "unknown".to_owned(),
+                metadata_status: "unknown".to_owned(),
                 tagging_status: "unknown".to_owned(),
                 title_status: "unknown".to_owned(),
                 correspondent_status: "unknown".to_owned(),
@@ -6397,19 +6418,21 @@ mod tests {
                 document_date_status: "unknown".to_owned(),
                 fields_status: "unknown".to_owned(),
                 has_ocr_completion_tag: true,
-                has_tagging_completion_tag: true,
+                // Documents with the tagging-completion tag are considered "metadata done"
+                // because the legacy tag was applied after the per-field stages all ran.
+                has_tagging_completion_tag: false,
                 has_full_completion_tag: false,
             },
         );
 
         assert!(!stages.contains(&Stage::Ocr));
-        assert!(!stages.contains(&Stage::Tags));
-        assert!(stages.contains(&Stage::Title));
+        assert!(stages.contains(&Stage::Metadata));
 
         let completed = missing_pipeline_stages_for_inventory(
             &Stage::all_business_stages(),
             InventoryStageState {
                 ocr_status: "unknown".to_owned(),
+                metadata_status: "unknown".to_owned(),
                 tagging_status: "unknown".to_owned(),
                 title_status: "unknown".to_owned(),
                 correspondent_status: "unknown".to_owned(),
@@ -6423,5 +6446,29 @@ mod tests {
         );
 
         assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn missing_pipeline_stages_legacy_per_field_columns_still_trigger_metadata() {
+        // A v1.3 inventory row (metadata_status='unknown' default, per-field columns recorded)
+        // with any per-field column needing work should still queue Metadata.
+        let stages = missing_pipeline_stages_for_inventory(
+            &Stage::all_business_stages(),
+            InventoryStageState {
+                ocr_status: "succeeded".to_owned(),
+                metadata_status: "succeeded".to_owned(),
+                tagging_status: "succeeded".to_owned(),
+                title_status: "unknown".to_owned(),
+                correspondent_status: "succeeded".to_owned(),
+                document_type_status: "succeeded".to_owned(),
+                document_date_status: "succeeded".to_owned(),
+                fields_status: "succeeded".to_owned(),
+                has_ocr_completion_tag: true,
+                has_tagging_completion_tag: false,
+                has_full_completion_tag: false,
+            },
+        );
+
+        assert_eq!(stages, vec![Stage::Metadata]);
     }
 }

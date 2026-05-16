@@ -523,6 +523,11 @@ async fn process_job(
         }
         Stage::DocumentDate => process_document_date(pool, paperless, settings, job).await,
         Stage::Fields => process_fields(pool, config, paperless, settings, job).await,
+        // process_metadata is added in a later commit; the enum variant lives here so
+        // migrations and DB plumbing land first without breaking the build.
+        Stage::Metadata => Err(anyhow!(
+            "Stage::Metadata handler is not yet wired (v1.4.0 in progress)"
+        )),
         Stage::OcrFix | Stage::Apply => Err(anyhow!(
             "stage {} is not directly executable by the worker",
             job.stage
