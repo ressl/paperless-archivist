@@ -308,6 +308,24 @@ impl Stage {
             Self::Apply => "processed",
         }
     }
+
+    /// Maps a stage to its `document_inventory.<column>` status column name.
+    ///
+    /// Returns `None` for stages that do not have a dedicated inventory status column
+    /// (currently `Stage::OcrFix` and `Stage::Apply`). The returned strings are static
+    /// literals — callers may safely interpolate them into SQL.
+    pub fn inventory_status_column(self) -> Option<&'static str> {
+        match self {
+            Self::Ocr => Some("ocr_status"),
+            Self::Tags => Some("tagging_status"),
+            Self::Title => Some("title_status"),
+            Self::Correspondent => Some("correspondent_status"),
+            Self::DocumentType => Some("document_type_status"),
+            Self::DocumentDate => Some("document_date_status"),
+            Self::Fields => Some("fields_status"),
+            Self::OcrFix | Self::Apply => None,
+        }
+    }
 }
 
 impl Display for Stage {
@@ -2733,6 +2751,51 @@ mod tests {
         let tags = WorkflowTags::default();
         let stages = tags.stages_requested_by_tags(&["ai-process".to_owned()]);
         assert_eq!(stages, Stage::all_business_stages());
+    }
+
+    #[test]
+    fn stage_inventory_status_columns_cover_all_business_stages_and_skip_orchestration_stages() {
+        // Every variant produces a deterministic answer — exhaustive match guards against
+        // drift if a new Stage variant is added.
+        for stage in [
+            Stage::Ocr,
+            Stage::OcrFix,
+            Stage::Tags,
+            Stage::Title,
+            Stage::Correspondent,
+            Stage::DocumentType,
+            Stage::DocumentDate,
+            Stage::Fields,
+            Stage::Apply,
+        ] {
+            let column = stage.inventory_status_column();
+            match stage {
+                Stage::OcrFix | Stage::Apply => assert!(
+                    column.is_none(),
+                    "{stage} should not have an inventory status column"
+                ),
+                _ => {
+                    let column = column.expect("business stage must map to a column");
+                    assert!(
+                        column.ends_with("_status"),
+                        "inventory column for {stage} must end with _status, got {column}"
+                    );
+                }
+            }
+        }
+        // Every business stage must have a unique column name.
+        let mut columns: Vec<&'static str> = Stage::all_business_stages()
+            .into_iter()
+            .map(|stage| stage.inventory_status_column().unwrap())
+            .collect();
+        columns.sort();
+        let unique = columns.len();
+        columns.dedup();
+        assert_eq!(
+            unique,
+            columns.len(),
+            "inventory column names must be unique"
+        );
     }
 
     #[test]

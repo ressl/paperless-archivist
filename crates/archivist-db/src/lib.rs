@@ -2258,7 +2258,7 @@ pub async fn get_dashboard_stats(
         None
     };
     let comparison = dashboard_comparison(pool, start, counts, activity, previous).await?;
-    let job_status = status_counts(pool, "jobs").await?;
+    let job_status = status_counts(pool, StatusTable::Jobs).await?;
     let running_jobs = job_status
         .iter()
         .find(|item| item.status == "running")
@@ -2299,8 +2299,8 @@ pub async fn get_dashboard_stats(
         throughput_series: throughput_series(pool, start, now, range).await?,
         backlog_series: backlog_series(pool, start, now, range, counts).await?,
         job_status,
-        run_status: status_counts(pool, "pipeline_runs").await?,
-        review_status: status_counts(pool, "review_items").await?,
+        run_status: status_counts(pool, StatusTable::PipelineRuns).await?,
+        review_status: status_counts(pool, StatusTable::ReviewItems).await?,
         provider_usage: provider_usage(pool, start).await?,
         quality: quality_stats(pool, start).await?,
         cost_series,
@@ -3229,20 +3229,38 @@ async fn backlog_series(
     Ok(points)
 }
 
-async fn status_counts(pool: &DbPool, table: &str) -> Result<Vec<DashboardStatusCount>> {
-    let table = match table {
-        "jobs" => "jobs",
-        "pipeline_runs" => "pipeline_runs",
-        "review_items" => "review_items",
-        _ => return Err(anyhow!("unsupported status table: {table}")),
-    };
+/// Tables that the dashboard groups by `status`. The variants are the only valid
+/// inputs to [`status_counts`] — we use a closed Rust enum instead of a free-form
+/// string so the table name can never originate from caller-controlled data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusTable {
+    Jobs,
+    PipelineRuns,
+    ReviewItems,
+}
+
+impl StatusTable {
+    /// Static SQL identifier for this table. The returned value is a compile-time
+    /// constant — safe to interpolate into queries.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Jobs => "jobs",
+            Self::PipelineRuns => "pipeline_runs",
+            Self::ReviewItems => "review_items",
+        }
+    }
+}
+
+async fn status_counts(pool: &DbPool, table: StatusTable) -> Result<Vec<DashboardStatusCount>> {
+    // SAFETY: `table.name()` is a compile-time constant chosen from a closed enum.
     let rows = sqlx::query(&format!(
         r#"
         select status, count(*)::bigint as count
           from {table}
          group by status
          order by count desc, status
-        "#
+        "#,
+        table = table.name(),
     ))
     .fetch_all(pool)
     .await?;
@@ -5640,17 +5658,13 @@ async fn set_inventory_stage_status_tx(
     Ok(())
 }
 
+/// Thin wrapper around [`Stage::inventory_status_column`] that surfaces a typed
+/// error when a caller passes an orchestration-only stage. The returned string is
+/// a static literal — callers may safely interpolate it into SQL.
 fn status_column_for_stage(stage: Stage) -> Result<&'static str> {
-    match stage {
-        Stage::Ocr => Ok("ocr_status"),
-        Stage::Tags => Ok("tagging_status"),
-        Stage::Title => Ok("title_status"),
-        Stage::Correspondent => Ok("correspondent_status"),
-        Stage::DocumentType => Ok("document_type_status"),
-        Stage::DocumentDate => Ok("document_date_status"),
-        Stage::Fields => Ok("fields_status"),
-        Stage::OcrFix | Stage::Apply => Err(anyhow!("stage does not map to inventory status")),
-    }
+    stage
+        .inventory_status_column()
+        .ok_or_else(|| anyhow!("stage does not map to inventory status: {stage}"))
 }
 
 #[cfg(test)]
@@ -5661,6 +5675,29 @@ mod tests {
     fn hashes_tokens_without_returning_raw_value() {
         assert_eq!(hash_token("secret"), hash_token("secret"));
         assert_ne!(hash_token("secret"), "secret");
+    }
+
+    #[test]
+    fn status_table_names_are_static_known_tables() {
+        assert_eq!(StatusTable::Jobs.name(), "jobs");
+        assert_eq!(StatusTable::PipelineRuns.name(), "pipeline_runs");
+        assert_eq!(StatusTable::ReviewItems.name(), "review_items");
+    }
+
+    #[test]
+    fn status_column_for_stage_round_trips_every_business_stage() {
+        // Every business stage must yield a static column name; orchestration-only stages
+        // must surface a typed error so callers never silently fall through to format!.
+        for stage in Stage::all_business_stages() {
+            let column = status_column_for_stage(stage)
+                .unwrap_or_else(|err| panic!("missing column for {stage}: {err}"));
+            assert!(
+                column.ends_with("_status"),
+                "column for {stage} must end with _status, got {column}"
+            );
+        }
+        assert!(status_column_for_stage(Stage::OcrFix).is_err());
+        assert!(status_column_for_stage(Stage::Apply).is_err());
     }
 
     #[test]
