@@ -2,8 +2,44 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.5`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.6`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.6 — Hot-fix the backfilled metadata-job priority
+
+Follow-up correction to the v1.5.4 metadata-stage backfill. The backfill
+priced every newly inserted metadata job with
+`payload.priority = 1_000_000 − paperless_document_id` (~993 000–999 999),
+but the historical trigger-polling OCR jobs sit at `payload.priority = 10`.
+`claim_jobs` orders by `priority ASC, stage_priority ASC`, so the
+backfilled metadata jobs could not be claimed until *every* OCR job in the
+entire queue was succeeded — even for runs whose own OCR was already done.
+In production, this left all 5953 metadata jobs queued indefinitely behind
+the OCR backlog, the exact opposite of the "full_auto completes every
+document" promise of v1.5.4.
+
+Two changes:
+
+* `backfill_metadata_stage_for_ocr_only_runs` now sets the new metadata
+  job's `payload.priority` by INHERITING the sibling OCR job's priority
+  for the same `run_id` instead of computing a fresh `1M − doc_id`. The
+  `stage_priority = 20` is unchanged and still guarantees OCR-before-
+  metadata ordering within the run; the corrected `priority` keeps the
+  cross-run ordering exactly as the operator who queued the run intended.
+* A new one-shot `rebalance_backfilled_metadata_priorities` runs on
+  worker startup, finds every still-queued metadata job whose
+  `payload.backfill = true` and whose `payload.priority` disagrees with
+  its OCR sibling, and rewrites the priority to match. Idempotent —
+  subsequent startups find nothing to do once every backfilled job is
+  rebalanced.
+
+After v1.5.6 rolls out, the worker resumes claiming metadata jobs in
+interleaved order with OCR jobs (sorted by the run's original
+operator-intended priority and the per-run stage order), draining the
+combined OCR+metadata backlog at the realistic two-jobs-per-tick concurrency
+the worker is configured for.
+
+UI sidebar reads `v1.5.6`. No frontend behaviour change.
 
 ## v1.5.5 — Inventory page reflects the v1.4 stage model
 

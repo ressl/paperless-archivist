@@ -6348,10 +6348,6 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
         .iter()
         .map(|row| row.try_get::<Uuid, _>("run_id"))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let document_ids: Vec<i32> = target_rows
-        .iter()
-        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     // Step 2: append "metadata" to the stages array and reset succeeded
     // runs back to queued so the worker re-claims the new metadata job.
@@ -6378,27 +6374,43 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
 
     // Step 3: insert a queued metadata job per run, with stage_priority=20
     // so it claims AFTER the OCR job (stage_priority=10). The cross-run
-    // priority mirrors age_derived_priority so old docs don't jump the queue.
-    let mut jobs_inserted: i64 = 0;
-    for (run_id, document_id) in run_ids.iter().zip(document_ids.iter()) {
-        let cross_run_priority = 1_000_000_i64 - i64::from(*document_id);
-        let inserted = sqlx::query(
-            r#"
-            insert into jobs (run_id, paperless_document_id, stage, status, payload)
-            values ($1, $2, 'metadata', 'queued', jsonb_build_object(
-                'priority', $3::bigint,
-                'stage_priority', 20,
-                'backfill', true
-            ))
-            "#,
-        )
-        .bind(run_id)
-        .bind(document_id)
-        .bind(cross_run_priority)
-        .execute(&mut *tx)
-        .await?;
-        jobs_inserted += inserted.rows_affected() as i64;
-    }
+    // `priority` is INHERITED from the same run's OCR job — this is the
+    // v1.5.6 fix for the v1.5.4 backfill bug where metadata jobs were
+    // priced with `1_000_000 - document_id` (~993K-999K) while legacy
+    // trigger-polling OCR jobs sit at priority=10. Since claim_jobs orders
+    // by priority ASC then stage_priority ASC, mispriced metadata never
+    // claimed until every OCR job globally was done. Inheriting the
+    // sibling OCR's priority keeps the cross-run ordering exactly as the
+    // operator who queued the run intended, and the stage_priority=20
+    // alone guarantees OCR-before-metadata ordering within the run.
+    let inserted = sqlx::query(
+        r#"
+        insert into jobs (run_id, paperless_document_id, stage, status, payload)
+        select pr.id,
+               pr.paperless_document_id,
+               'metadata',
+               'queued',
+               jsonb_build_object(
+                 'priority', coalesce(
+                   (ocr.payload ->> 'priority')::bigint,
+                   100
+                 ),
+                 'stage_priority', 20,
+                 'backfill', true
+               )
+          from pipeline_runs pr
+          join jobs ocr on ocr.run_id = pr.id and ocr.stage = 'ocr'
+         where pr.id = any($1)
+           and not exists (
+             select 1 from jobs m
+              where m.run_id = pr.id and m.stage = 'metadata'
+           )
+        "#,
+    )
+    .bind(&run_ids)
+    .execute(&mut *tx)
+    .await?;
+    let jobs_inserted = inserted.rows_affected() as i64;
 
     // Step 4: nudge document_inventory.current_run_status for the formerly-
     // succeeded runs that just got flipped back to queued, so the dashboard
@@ -6451,6 +6463,85 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
         runs_updated: run_ids.len() as i64,
         jobs_inserted,
     })
+}
+
+/// Summary of a one-shot rebalance pass for backfilled metadata jobs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataPriorityRebalanceSummary {
+    pub jobs_repriced: i64,
+}
+
+/// One-shot, idempotent fix for the v1.5.4 metadata-stage backfill bug.
+///
+/// The v1.5.4 backfill priced every new metadata job with
+/// `payload.priority = 1_000_000 - paperless_document_id` (~993K–999K),
+/// but the legacy trigger-polling OCR jobs sit at `payload.priority = 10`.
+/// Since `claim_jobs` orders by `priority ASC` first, those metadata jobs
+/// could not be claimed until every OCR job globally was succeeded — even
+/// for runs whose own OCR was already done — which meant the backfilled
+/// 5953 metadata jobs sat queued indefinitely behind the OCR backlog.
+///
+/// This helper finds every still-queued metadata job that has the
+/// `payload.backfill = true` marker AND whose stored `payload.priority`
+/// disagrees with the sibling OCR job's `payload.priority` for the same
+/// `run_id`. It rewrites the metadata job's payload to inherit the OCR's
+/// priority. Single transaction, idempotent — once every backfilled
+/// metadata job's priority matches its OCR sibling, subsequent startups
+/// find nothing to do.
+pub async fn rebalance_backfilled_metadata_priorities(
+    pool: &DbPool,
+) -> Result<MetadataPriorityRebalanceSummary> {
+    let mut tx = pool.begin().await?;
+    let result = sqlx::query(
+        r#"
+        update jobs m
+           set payload = jsonb_set(
+                 m.payload,
+                 '{priority}',
+                 to_jsonb(coalesce((ocr.payload ->> 'priority')::bigint, 100))
+               ),
+               updated_at = now()
+          from jobs ocr
+         where m.stage = 'metadata'
+           and m.status = 'queued'
+           and (m.payload ->> 'backfill')::boolean = true
+           and ocr.run_id = m.run_id
+           and ocr.stage = 'ocr'
+           and (m.payload ->> 'priority')::bigint
+             is distinct from coalesce((ocr.payload ->> 'priority')::bigint, 100)
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let jobs_repriced = result.rows_affected() as i64;
+
+    if jobs_repriced > 0 {
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "worker.metadata_priority_rebalanced".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: None,
+                job_id: None,
+                paperless_document_id: None,
+                before: None,
+                after: Some(json!({ "jobs_repriced": jobs_repriced })),
+                metadata: Some(json!({
+                    "trigger": "startup_one_shot",
+                    "reason": "v1.5.4_backfill_priority_bug",
+                })),
+                outcome: "success".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(MetadataPriorityRebalanceSummary { jobs_repriced })
 }
 
 #[cfg(test)]

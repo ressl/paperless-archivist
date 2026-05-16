@@ -28,11 +28,11 @@ use archivist_db::{
     get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
-    named_entity_id_for_name, queue_missing_pipeline, record_dashboard_snapshot,
-    record_document_language, requeue_vision_crashed_jobs, resolve_secret,
-    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_id_pairs_for_names,
-    tag_ids_for_names, upsert_inventory_item, upsert_paperless_custom_field,
-    upsert_paperless_named_entity, upsert_paperless_tag,
+    named_entity_id_for_name, queue_missing_pipeline, rebalance_backfilled_metadata_priorities,
+    record_dashboard_snapshot, record_document_language, requeue_vision_crashed_jobs,
+    resolve_secret, revert_review_to_pending_after_failed_drain, selector_document_budget,
+    tag_id_pairs_for_names, tag_ids_for_names, upsert_inventory_item,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
 use archivist_paperless::{
@@ -124,6 +124,21 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         ),
         Ok(_) => info!("metadata-stage backfill found no OCR-only pipeline_runs to lift"),
         Err(error) => warn!(error = %error, "startup metadata-stage backfill failed"),
+    }
+
+    // One-shot: fix the v1.5.4 backfill bug where new metadata jobs got
+    // `payload.priority = 1_000_000 - document_id` instead of inheriting
+    // the OCR sibling's priority. Without this, the backfilled metadata
+    // jobs sit queued indefinitely behind every other OCR job globally.
+    // Idempotent — once every backfilled metadata job has a matching
+    // priority, subsequent startups find nothing to do.
+    match rebalance_backfilled_metadata_priorities(&pool).await {
+        Ok(summary) if summary.jobs_repriced > 0 => info!(
+            jobs_repriced = summary.jobs_repriced,
+            "rebalanced backfilled metadata-job priorities to inherit OCR siblings'"
+        ),
+        Ok(_) => info!("metadata-job priority rebalance found no mispriced rows"),
+        Err(error) => warn!(error = %error, "startup metadata-priority rebalance failed"),
     }
 
     loop {
