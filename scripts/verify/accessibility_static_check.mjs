@@ -8,9 +8,14 @@ const app = readFileSync(join(root, 'frontend/src/App.tsx'), 'utf8');
 const dashboard = readFileSync(join(root, 'frontend/src/dashboard/Dashboard.tsx'), 'utf8');
 const ui = readFileSync(join(root, 'frontend/src/lib/ui.tsx'), 'utf8');
 const users = readFileSync(join(root, 'frontend/src/users/Users.tsx'), 'utf8');
+const prompts = readFileSync(join(root, 'frontend/src/prompts/Prompts.tsx'), 'utf8');
 const css = readFileSync(join(root, 'frontend/src/styles/app.css'), 'utf8');
 const inAnySource = (needle) =>
-  app.includes(needle) || dashboard.includes(needle) || ui.includes(needle) || users.includes(needle);
+  app.includes(needle)
+  || dashboard.includes(needle)
+  || ui.includes(needle)
+  || users.includes(needle)
+  || prompts.includes(needle);
 
 const checks = [
   ['workspace main landmark', app.includes('<main className="workspace">')],
@@ -22,9 +27,9 @@ const checks = [
   ['status pills expose aria-label', ui.includes('role="status" aria-label={label}')],
   ['connection feedback live region', inAnySource('aria-live="polite"')],
   ['model selects have accessible labels', app.includes('aria-label={`${provider.name} ${capability} model`}')],
-  ['tooltip uses describedby', app.includes('aria-describedby={open ? tooltipId : undefined}')],
-  ['tooltip supports escape close', app.includes("event.key === 'Escape'")],
-  ['tooltip closes outside pointer/touch', app.includes("document.addEventListener('mousedown'") && app.includes("document.addEventListener('touchstart'")],
+  ['tooltip uses describedby', inAnySource('aria-describedby={open ? tooltipId : undefined}')],
+  ['tooltip supports escape close', inAnySource("event.key === 'Escape'")],
+  ['tooltip closes outside pointer/touch', inAnySource("document.addEventListener('mousedown'") && inAnySource("document.addEventListener('touchstart'")],
   ['global focus visible styles', css.includes('button:focus-visible') && css.includes('input:focus-visible') && css.includes('textarea:focus-visible')],
   ['icon reload button has aria-label', app.includes("aria-label={t('settings.ollama.reload_models')}")],
   ['user admin controls have labels', users.includes('aria-label="username"') && users.includes('aria-label="token name"')],
