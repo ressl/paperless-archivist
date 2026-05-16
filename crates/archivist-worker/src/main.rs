@@ -8,16 +8,16 @@ use archivist_ai::{
     AiProviderError, AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT,
     ImageInput, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext, TextProvider,
     VisionProvider, VisionRequest, parse_choice_suggestion, parse_field_suggestion,
-    parse_tag_suggestion, parse_title_suggestion, prompt_for_choice, prompt_for_fields,
-    prompt_for_tags, prompt_for_title,
+    parse_metadata_suggestion, parse_tag_suggestion, parse_title_suggestion, prompt_for_choice,
+    prompt_for_fields, prompt_for_metadata, prompt_for_tags, prompt_for_title,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, ChoiceSuggestion, DocumentPatch, LanguageDetection,
-    OldTagStrategy, ProcessingMode, RuntimeSettings, Stage, TagSuggestion, TitleSuggestion,
-    detect_document_language, extract_issue_date_suggestion, validate_choice_suggestion,
-    validate_document_date_suggestion, validate_field_suggestion, validate_tag_suggestion,
-    validate_title_suggestion,
+    MetadataFieldFlags, MetadataSuggestion, OldTagStrategy, ProcessingMode, RuntimeSettings, Stage,
+    TagSuggestion, TitleSuggestion, detect_document_language, extract_issue_date_suggestion,
+    validate_choice_suggestion, validate_document_date_suggestion, validate_field_suggestion,
+    validate_tag_suggestion, validate_title_suggestion,
 };
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit, claim_jobs,
@@ -523,11 +523,7 @@ async fn process_job(
         }
         Stage::DocumentDate => process_document_date(pool, paperless, settings, job).await,
         Stage::Fields => process_fields(pool, config, paperless, settings, job).await,
-        // process_metadata is added in a later commit; the enum variant lives here so
-        // migrations and DB plumbing land first without breaking the build.
-        Stage::Metadata => Err(anyhow!(
-            "Stage::Metadata handler is not yet wired (v1.4.0 in progress)"
-        )),
+        Stage::Metadata => process_metadata(pool, config, paperless, settings, job).await,
         Stage::OcrFix | Stage::Apply => Err(anyhow!(
             "stage {} is not directly executable by the worker",
             job.stage
@@ -1180,6 +1176,471 @@ async fn process_fields(
             .await?;
             Ok(())
         }
+    }
+}
+
+/// Consolidated metadata stage (v1.4.0). One LLM call replaces six per-field
+/// round-trips. The response is fanned out into up to six review items (or one
+/// composite Paperless patch in full_auto mode) so existing reviewer UX, audit
+/// trails, and per-field opt-outs keep working.
+async fn process_metadata(
+    pool: &DbPool,
+    config: &AppConfig,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+) -> Result<()> {
+    let enabled = MetadataFieldFlags::from_enabled_stages(&settings.workflow.enabled_stages);
+    if !enabled.any() {
+        complete_job(
+            pool,
+            job,
+            json!({ "skipped": "no metadata fields are enabled in workflow settings" }),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let document = paperless.get_document(job.paperless_document_id).await?;
+    let content = document.content.clone().unwrap_or_default();
+    let language = language_context_for_content(pool, settings, job, &content).await?;
+
+    // Cheap pre-flight: short-circuit fields that Paperless already populated and the operator
+    // has not opted into overwriting. We still ask the LLM for the field if any other field is
+    // requested, but we drop the suggestion before creating a review item / applying. Doing the
+    // gating after the LLM call keeps the prompt deterministic across runs.
+    let allowed_correspondents = if enabled.correspondent {
+        list_allowed_named_entities(pool, "paperless_correspondents").await?
+    } else {
+        Vec::new()
+    };
+    let allowed_document_types = if enabled.document_type {
+        list_allowed_named_entities(pool, "paperless_document_types").await?
+    } else {
+        Vec::new()
+    };
+    let allowed_tags = if enabled.tags {
+        list_allowed_tag_names(pool).await?
+    } else {
+        Vec::new()
+    };
+    let allowed_field_names = if enabled.fields {
+        list_custom_fields(pool)
+            .await?
+            .into_iter()
+            .filter(|field| settings.fields.field_enabled(&field.name))
+            .map(|field| field.name)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let mut request = prompt_for_metadata(
+        &content,
+        &allowed_correspondents,
+        &allowed_document_types,
+        &allowed_tags,
+        &allowed_field_names,
+        &enabled,
+        &language,
+        settings.tagging.max_tags,
+        settings.fields.max_fields,
+    );
+    let prompt_id = apply_active_prompt(pool, Stage::Metadata, &mut request).await?;
+    let response = chat_for_stage(pool, config, settings, Stage::Metadata, request.clone()).await?;
+    let suggestion =
+        parse_metadata_suggestion(&response.text).unwrap_or_else(|_| MetadataSuggestion::default());
+    let normalized = serde_json::to_value(&suggestion)?;
+
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: Stage::Metadata,
+            provider: &response.provider,
+            model: &response.model,
+            prompt_id,
+            input_hash: &hash_text(&content),
+            request: Some(serde_json::to_value(request)?),
+            response: Some(response.raw_response),
+            normalized_output: Some(normalized.clone()),
+            duration_ms: response.duration_ms,
+            storage_mode: settings.security.ai_artifact_storage,
+        },
+    )
+    .await?;
+
+    // Fan the suggestion out into per-field outcomes.
+    //
+    // Each field is one of:
+    //   * `Apply(field_patch)`              — valid, ready to auto-apply or to attach to a
+    //                                         composite review item.
+    //   * `Review(review_patch, warnings)`  — needs operator review (low confidence, validation
+    //                                         failure, or operator policy says "don't overwrite").
+    //   * `Skip(reason)`                     — model omitted the field or the document already had
+    //                                         a value we are not allowed to overwrite.
+    let auto_apply = settings.workflow.mode.auto_apply_validated_suggestions()
+        && !settings.workflow.dry_run;
+    let mut composite_patch = DocumentPatch {
+        content: None,
+        title: None,
+        tags: None,
+        correspondent: None,
+        document_type: None,
+        created: None,
+        custom_fields: None,
+    };
+    let mut composite_warnings: Vec<String> = Vec::new();
+    let mut review_items: Vec<(serde_json::Value, serde_json::Value)> = Vec::new();
+    let mut applied_fields: Vec<&'static str> = Vec::new();
+    let mut skipped_fields: Vec<&'static str> = Vec::new();
+
+    // --- title ---
+    if enabled.title
+        && let Some(title) = suggestion.title.clone()
+    {
+        match validate_title_suggestion(title.clone(), 160, settings.tagging.confidence_threshold) {
+            Ok(valid) => {
+                composite_patch.title = Some(valid.title.clone());
+                applied_fields.push("title");
+            }
+            Err(errors) => {
+                review_items.push((
+                    json!({
+                        "title": title.title,
+                        "standard_metadata": { "field": "title", "confidence": title.confidence }
+                    }),
+                    json!(errors),
+                ));
+            }
+        }
+    }
+
+    // --- document_type ---
+    if enabled.document_type
+        && let Some(choice) = suggestion.document_type.clone()
+    {
+        if document.document_type.is_some()
+            && !settings.metadata.overwrite_existing_document_type
+        {
+            skipped_fields.push("document_type");
+        } else {
+            match validate_choice_suggestion(
+                choice.clone(),
+                &allowed_document_types,
+                settings.metadata.confidence_threshold,
+            ) {
+                Ok(valid) => {
+                    let id = named_entity_id_for_name(pool, "paperless_document_types", &valid.name)
+                        .await?;
+                    if let Some(id) = id {
+                        composite_patch.document_type = Some(Some(id));
+                        applied_fields.push("document_type");
+                    } else {
+                        skipped_fields.push("document_type");
+                    }
+                }
+                Err(errors) => {
+                    review_items.push((
+                        json!({
+                            "document_type": "",
+                            "standard_metadata": {
+                                "field": "document_type",
+                                "suggested_name": choice.name,
+                                "confidence": choice.confidence,
+                                "evidence": choice.evidence,
+                                "current_document_type": document.document_type,
+                            }
+                        }),
+                        json!(errors),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- correspondent ---
+    if enabled.correspondent
+        && let Some(choice) = suggestion.correspondent.clone()
+    {
+        if document.correspondent.is_some()
+            && !settings.metadata.overwrite_existing_correspondent
+        {
+            skipped_fields.push("correspondent");
+        } else {
+            match validate_choice_suggestion(
+                choice.clone(),
+                &allowed_correspondents,
+                settings.metadata.confidence_threshold,
+            ) {
+                Ok(valid) => {
+                    let id =
+                        named_entity_id_for_name(pool, "paperless_correspondents", &valid.name)
+                            .await?;
+                    if let Some(id) = id {
+                        composite_patch.correspondent = Some(Some(id));
+                        applied_fields.push("correspondent");
+                    } else {
+                        skipped_fields.push("correspondent");
+                    }
+                }
+                Err(errors) => {
+                    review_items.push((
+                        json!({
+                            "correspondent": "",
+                            "standard_metadata": {
+                                "field": "correspondent",
+                                "suggested_name": choice.name,
+                                "confidence": choice.confidence,
+                                "evidence": choice.evidence,
+                                "current_correspondent": document.correspondent,
+                            }
+                        }),
+                        json!(errors),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- document_date ---
+    if enabled.document_date
+        && let Some(date) = suggestion.document_date.clone()
+    {
+        let already_set = document
+            .created
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+        if already_set && !settings.metadata.overwrite_existing_document_date {
+            skipped_fields.push("document_date");
+        } else {
+            match validate_document_date_suggestion(
+                date.clone(),
+                settings.metadata.document_date_confidence_threshold,
+            ) {
+                Ok(valid) => {
+                    composite_patch.created = Some(valid.date.clone());
+                    composite_warnings.extend(valid.warnings);
+                    applied_fields.push("document_date");
+                }
+                Err(errors) => {
+                    review_items.push((
+                        json!({
+                            "created": date.date.clone(),
+                            "standard_metadata": {
+                                "field": "document_date",
+                                "suggested_date": date.date,
+                                "confidence": date.confidence,
+                                "evidence": date.evidence,
+                                "warnings": date.warnings,
+                                "current_date": document.created,
+                            }
+                        }),
+                        json!(errors),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- tags ---
+    if enabled.tags
+        && let Some(tags) = suggestion.tags.clone()
+    {
+        match validate_tag_suggestion(
+            tags.clone(),
+            &allowed_tags,
+            &settings.workflow.tags,
+            &settings.tagging,
+        ) {
+            Ok(valid) => {
+                let selected_ids = tag_ids_for_names(pool, &valid.tags).await?;
+                let mut tag_ids = match settings.tagging.old_tag_strategy {
+                    OldTagStrategy::KeepExisting | OldTagStrategy::ReplaceAiManaged => {
+                        document.tags.clone()
+                    }
+                    OldTagStrategy::RemoveAllBusiness => Vec::new(),
+                };
+                for tag_id in selected_ids {
+                    if !tag_ids.contains(&tag_id) {
+                        tag_ids.push(tag_id);
+                    }
+                }
+                tag_ids.sort_unstable();
+                tag_ids.dedup();
+                composite_patch.tags = Some(tag_ids);
+                composite_warnings.extend(valid.warnings);
+                applied_fields.push("tags");
+            }
+            Err(errors) => {
+                review_items.push((
+                    json!({
+                        "tags": tags.tags.clone(),
+                        "standard_metadata": { "field": "tags", "confidence": tags.confidence }
+                    }),
+                    json!(errors),
+                ));
+            }
+        }
+    }
+
+    // --- fields ---
+    if enabled.fields
+        && let Some(fields) = suggestion.fields.clone()
+    {
+        match validate_field_suggestion(
+            fields.clone(),
+            &allowed_field_names,
+            settings.fields.max_fields,
+            settings.fields.confidence_threshold,
+        ) {
+            Ok(valid) => {
+                let names = valid
+                    .fields
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect::<Vec<_>>();
+                let ids = custom_field_ids_for_names(pool, &names).await?;
+                let values = valid
+                    .fields
+                    .iter()
+                    .filter_map(|field| {
+                        ids.iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case(&field.name))
+                            .map(|(_, id)| json!({ "field": id, "value": field.value }))
+                    })
+                    .collect::<Vec<_>>();
+                composite_patch.custom_fields = Some(json!(values));
+                composite_warnings.extend(valid.warnings);
+                applied_fields.push("fields");
+            }
+            Err(errors) => {
+                review_items.push((
+                    json!({ "custom_fields": fields.fields }),
+                    json!(errors),
+                ));
+            }
+        }
+    }
+
+    info!(
+        job_id = %job.id,
+        document_id = job.paperless_document_id,
+        applied_fields = ?applied_fields,
+        review_items = review_items.len(),
+        skipped_fields = ?skipped_fields,
+        "consolidated metadata stage planned outcome"
+    );
+
+    // Routing:
+    //   * If anything needs review, every field becomes a review item — the operator inspects
+    //     all suggestions atomically rather than seeing a half-applied document.
+    //   * Otherwise, in full_auto mode we apply one composite Paperless patch.
+    //   * If everything was skipped (already-set fields with overwrite disabled), we still
+    //     mark the job complete so the run drains.
+    if !review_items.is_empty() {
+        // Demote applied fields to review items too, so the operator can sign off on the full
+        // set rather than seeing partial application.
+        if composite_patch.title.is_some() {
+            review_items.push((
+                json!({
+                    "title": composite_patch.title.clone().unwrap_or_default(),
+                    "standard_metadata": { "field": "title", "auto_validated": true }
+                }),
+                json!([]),
+            ));
+        }
+        if let Some(Some(correspondent)) = composite_patch.correspondent {
+            review_items.push((
+                json!({
+                    "correspondent": correspondent,
+                    "standard_metadata": { "field": "correspondent", "auto_validated": true }
+                }),
+                json!([]),
+            ));
+        }
+        if let Some(Some(document_type)) = composite_patch.document_type {
+            review_items.push((
+                json!({
+                    "document_type": document_type,
+                    "standard_metadata": { "field": "document_type", "auto_validated": true }
+                }),
+                json!([]),
+            ));
+        }
+        if let Some(date) = composite_patch.created.clone() {
+            review_items.push((
+                json!({
+                    "created": date,
+                    "standard_metadata": { "field": "document_date", "auto_validated": true }
+                }),
+                json!([]),
+            ));
+        }
+        if let Some(tags) = composite_patch.tags.clone() {
+            review_items.push((
+                json!({
+                    "tags": tags,
+                    "standard_metadata": { "field": "tags", "auto_validated": true }
+                }),
+                json!([]),
+            ));
+        }
+        if let Some(custom_fields) = composite_patch.custom_fields.clone() {
+            review_items.push((
+                json!({
+                    "custom_fields": custom_fields,
+                    "standard_metadata": { "field": "fields", "auto_validated": true }
+                }),
+                json!([]),
+            ));
+        }
+
+        for (patch, warnings) in review_items {
+            create_review_item(pool, job, patch, warnings).await?;
+        }
+        Ok(())
+    } else if !applied_fields.is_empty() {
+        if auto_apply {
+            let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
+            apply_patch_with_workflow_tags(
+                pool,
+                paperless,
+                settings,
+                job,
+                composite_patch,
+                final_run_stage,
+            )
+            .await?;
+            complete_job(
+                pool,
+                job,
+                json!({
+                    "applied": true,
+                    "fields": applied_fields,
+                    "warnings": composite_warnings,
+                }),
+            )
+            .await
+        } else {
+            // manual_review (or dry_run): a single composite review item with all validated
+            // suggestions so the operator approves the whole set atomically.
+            let composite_review_patch = serde_json::to_value(&composite_patch)?;
+            create_review_item(pool, job, composite_review_patch, json!(composite_warnings))
+                .await?;
+            Ok(())
+        }
+    } else {
+        complete_job(
+            pool,
+            job,
+            json!({
+                "skipped": "all metadata fields skipped (already-set or model omitted)",
+                "skipped_fields": skipped_fields,
+            }),
+        )
+        .await
     }
 }
 
