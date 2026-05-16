@@ -538,8 +538,9 @@ th {
 
 .autopilot-card {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
   gap: 14px;
   padding: 16px;
 }
@@ -577,9 +578,11 @@ th {
 }
 
 .mode-button-group {
-  flex: 0 0 min(280px, 100%);
+  flex: 0 0 auto;
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 6px;
+  width: 100%;
 }
 
 .mode-button-group button {
@@ -702,14 +705,16 @@ th {
 
 .health-badge {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   margin-top: 4px;
-  padding: 8px 12px;
+  padding: 8px 14px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 18px;
   background: var(--surface);
   width: fit-content;
+  max-width: 100%;
 }
 
 .health-badge .health-score {
@@ -749,6 +754,7 @@ th {
   border-left: 1px solid var(--line);
   color: var(--muted);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .health-badge .freshness-indicator em {
