@@ -71,7 +71,7 @@ use tokio::net::TcpListener;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::{Span, info, warn};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 use uuid::Uuid;
@@ -1166,6 +1166,10 @@ struct UpdateSettingsRequest {
     provider_secrets: Option<HashMap<String, String>>,
 }
 
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(user_id = tracing::field::Empty)
+)]
 async fn update_settings(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -1173,6 +1177,7 @@ async fn update_settings(
 ) -> ApiResult<Json<RuntimeSettings>> {
     require(&auth.0, Permission::WriteSettings)?;
     let actor_id = require_user_session(&auth.0, "settings updates require a user session")?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
     if let Some(token) = request
         .paperless_token
         .filter(|token| !token.trim().is_empty())
@@ -1227,6 +1232,7 @@ async fn update_settings(
         request.settings.notifications.webhook_url_secret_id = Some(secret_id);
     }
     update_runtime_settings(&state.pool, &request.settings, actor_id).await?;
+    info!(%actor_id, "runtime settings updated");
     Ok(Json(request.settings))
 }
 
@@ -2254,11 +2260,18 @@ fn chat_candidate_metadata(candidate: &DocumentChatCandidate) -> String {
     parts.join("\n")
 }
 
+#[tracing::instrument(
+    skip(state, auth),
+    fields(user_id = tracing::field::Empty)
+)]
 async fn sync_paperless(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteBatches)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
     let settings = get_runtime_settings(&state.pool).await?;
     let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
     let summary = sync_paperless_inventory(&state.pool, &client, &settings).await?;
@@ -2281,14 +2294,22 @@ async fn sync_paperless(
         },
     )
     .await?;
+    info!(?summary, "paperless sync completed");
     Ok(Json(summary))
 }
 
+#[tracing::instrument(
+    skip(state, auth),
+    fields(user_id = tracing::field::Empty, documents_checked = tracing::field::Empty)
+)]
 async fn paperless_consistency(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::ReadInventory)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
     let settings = get_runtime_settings(&state.pool).await?;
     let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
     let documents = client.list_documents().await?;
@@ -2372,8 +2393,17 @@ async fn paperless_consistency(
         .copied()
         .collect::<Vec<_>>();
 
+    let documents_checked = documents.len();
+    Span::current().record("documents_checked", documents_checked);
+    info!(
+        documents_checked,
+        missing_local = missing_local.len(),
+        stale_local = stale_local.len(),
+        mismatches = mismatches.len(),
+        "paperless consistency check completed"
+    );
     Ok(Json(json!({
-        "documents_checked": documents.len(),
+        "documents_checked": documents_checked,
         "missing_local": missing_local,
         "stale_local": stale_local,
         "mismatches": mismatches,
@@ -2387,16 +2417,24 @@ struct ReconcileCompletionTagsRequest {
     document_ids: Option<Vec<i32>>,
 }
 
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(user_id = tracing::field::Empty, dry_run = tracing::field::Empty)
+)]
 async fn reconcile_completion_tags(
     State(state): State<AppState>,
     auth: Authenticated,
     request: Option<Json<ReconcileCompletionTagsRequest>>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteBatches)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
     let request = request.map(|Json(request)| request).unwrap_or_default();
     let settings = get_runtime_settings(&state.pool).await?;
     let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
     let dry_run = request.dry_run.unwrap_or(true);
+    Span::current().record("dry_run", dry_run);
     let mut tags = client.list_tags().await?;
     let mut full_tag: Option<PaperlessTag> = None;
     let stage_completion_tags = settings
@@ -2472,6 +2510,12 @@ async fn reconcile_completion_tags(
         },
     )
     .await?;
+    info!(
+        dry_run,
+        planned = planned.len(),
+        applied = applied.len(),
+        "completion tag reconciliation completed"
+    );
     Ok(Json(
         json!({ "dry_run": dry_run, "planned": planned, "applied": applied }),
     ))
@@ -2551,6 +2595,10 @@ struct UpdateWorkflowModeRequest {
     mode: ProcessingMode,
 }
 
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(user_id = tracing::field::Empty, mode = tracing::field::Empty)
+)]
 async fn update_workflow_mode(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -2558,9 +2606,12 @@ async fn update_workflow_mode(
 ) -> ApiResult<Json<RuntimeSettings>> {
     require(&auth.0, Permission::WriteSettings)?;
     let actor_id = require_user_session(&auth.0, "workflow mode updates require a user session")?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
+    Span::current().record("mode", tracing::field::debug(request.mode));
     let mut settings = get_runtime_settings(&state.pool).await?;
     settings.workflow.mode = request.mode;
     update_runtime_settings(&state.pool, &settings, actor_id).await?;
+    info!(%actor_id, mode = ?request.mode, "workflow mode updated");
     Ok(Json(settings))
 }
 
@@ -2572,6 +2623,10 @@ struct UpdateWorkflowControlsRequest {
     daily_document_limit: Option<Option<i64>>,
 }
 
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(user_id = tracing::field::Empty)
+)]
 async fn update_workflow_controls(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -2580,6 +2635,7 @@ async fn update_workflow_controls(
     require(&auth.0, Permission::WriteSettings)?;
     let actor_id =
         require_user_session(&auth.0, "workflow control updates require a user session")?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
     let before = get_runtime_settings(&state.pool).await?;
     let mut settings = before.clone();
     if let Some(paused) = request.paused {
@@ -2632,6 +2688,13 @@ async fn update_workflow_controls(
     )
     .await?;
 
+    info!(
+        %actor_id,
+        event = event_type,
+        paused = settings.workflow.paused,
+        dry_run = settings.workflow.dry_run,
+        "workflow controls updated"
+    );
     Ok(Json(settings))
 }
 
@@ -3092,6 +3155,14 @@ struct TriggerRequest {
     mode: Option<ProcessingMode>,
 }
 
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(
+        paperless_document_id = document_id,
+        user_id = tracing::field::Empty,
+        run_id = tracing::field::Empty
+    )
+)]
 async fn trigger_document(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -3099,6 +3170,9 @@ async fn trigger_document(
     Json(request): Json<TriggerRequest>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteRuns)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
     let settings = get_runtime_settings(&state.pool).await?;
     let stages = request
         .stages
@@ -3113,14 +3187,23 @@ async fn trigger_document(
         &auth.0.actor_type,
     )
     .await?;
+    Span::current().record("run_id", tracing::field::display(run_id));
+    info!(%run_id, paperless_document_id = document_id, "manual run triggered");
     Ok(Json(json!({ "run_id": run_id })))
 }
 
+#[tracing::instrument(
+    skip(state, auth),
+    fields(user_id = tracing::field::Empty, queued = tracing::field::Empty)
+)]
 async fn queue_ocr_batch(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteBatches)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
     let settings = get_runtime_settings(&state.pool).await?;
     let created = queue_missing_stage(
         &state.pool,
@@ -3131,14 +3214,23 @@ async fn queue_ocr_batch(
         None,
     )
     .await?;
+    Span::current().record("queued", created);
+    info!(queued = created, "queued missing OCR documents");
     Ok(Json(json!({ "queued": created })))
 }
 
+#[tracing::instrument(
+    skip(state, auth),
+    fields(user_id = tracing::field::Empty, queued = tracing::field::Empty)
+)]
 async fn queue_tags_batch(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteBatches)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
     let settings = get_runtime_settings(&state.pool).await?;
     let created = queue_missing_stage(
         &state.pool,
@@ -3149,14 +3241,23 @@ async fn queue_tags_batch(
         None,
     )
     .await?;
+    Span::current().record("queued", created);
+    info!(queued = created, "queued missing tagging documents");
     Ok(Json(json!({ "queued": created })))
 }
 
+#[tracing::instrument(
+    skip(state, auth),
+    fields(user_id = tracing::field::Empty, queued = tracing::field::Empty)
+)]
 async fn queue_full_batch(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteBatches)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
     let settings = get_runtime_settings(&state.pool).await?;
     let mut created = 0;
     for stage in settings.workflow.enabled_stages.iter().copied() {
@@ -3170,6 +3271,8 @@ async fn queue_full_batch(
         )
         .await?;
     }
+    Span::current().record("queued", created);
+    info!(queued = created, "queued full pipeline batch");
     Ok(Json(json!({ "queued": created })))
 }
 
@@ -3309,6 +3412,10 @@ async fn batch_review(
     })))
 }
 
+#[tracing::instrument(
+    skip(state, auth),
+    fields(review_id = %id, user_id = tracing::field::Empty)
+)]
 async fn approve_review(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -3319,11 +3426,17 @@ async fn approve_review(
         .0
         .user_id
         .ok_or_else(|| ApiError::forbidden("review decisions require a user session"))?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
     review_decision(&state.pool, id, "approved", None, actor_id).await?;
     apply_review_patch(&state, id, actor_id).await?;
+    info!(review_id = %id, %actor_id, "review approved");
     Ok(Json(json!({ "ok": true })))
 }
 
+#[tracing::instrument(
+    skip(state, auth),
+    fields(review_id = %id, user_id = tracing::field::Empty)
+)]
 async fn reject_review(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -3334,7 +3447,9 @@ async fn reject_review(
         .0
         .user_id
         .ok_or_else(|| ApiError::forbidden("review decisions require a user session"))?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
     review_decision(&state.pool, id, "rejected", None, actor_id).await?;
+    info!(review_id = %id, %actor_id, "review rejected");
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -3393,6 +3508,10 @@ async fn recovery_status(
     })))
 }
 
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(user_id = tracing::field::Empty, older_than_seconds = tracing::field::Empty)
+)]
 async fn recover_stale_leases_endpoint(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -3400,14 +3519,26 @@ async fn recover_stale_leases_endpoint(
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteRuns)?;
     let actor_id = require_user_session(&auth.0, "recovery requires a user session")?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
     let older_than_seconds = recovery_window_seconds(request.older_than_seconds);
+    Span::current().record("older_than_seconds", older_than_seconds);
     let summary = recover_stale_leases(&state.pool, older_than_seconds, actor_id).await?;
+    info!(
+        %actor_id,
+        older_than_seconds,
+        ?summary,
+        "stale leases recovered"
+    );
     Ok(Json(json!({
         "older_than_seconds": older_than_seconds,
         "summary": summary
     })))
 }
 
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(user_id = tracing::field::Empty, older_than_seconds = tracing::field::Empty)
+)]
 async fn recover_stuck_runs_endpoint(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -3415,8 +3546,16 @@ async fn recover_stuck_runs_endpoint(
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteRuns)?;
     let actor_id = require_user_session(&auth.0, "recovery requires a user session")?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
     let older_than_seconds = recovery_window_seconds(request.older_than_seconds);
+    Span::current().record("older_than_seconds", older_than_seconds);
     let summary = recover_stuck_runs(&state.pool, older_than_seconds, actor_id).await?;
+    info!(
+        %actor_id,
+        older_than_seconds,
+        ?summary,
+        "stuck runs recovered"
+    );
     Ok(Json(json!({
         "older_than_seconds": older_than_seconds,
         "summary": summary
@@ -3761,10 +3900,21 @@ async fn revoke_api_token(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[tracing::instrument(
+    skip(state),
+    fields(
+        review_id = %review_id,
+        user_id = %actor_id,
+        run_id = tracing::field::Empty,
+        paperless_document_id = tracing::field::Empty
+    )
+)]
 async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -> Result<()> {
     let Some(review) = archivist_db::pending_review_for_apply(&state.pool, review_id).await? else {
         return Ok(());
     };
+    Span::current().record("run_id", tracing::field::display(review.run_id));
+    Span::current().record("paperless_document_id", review.paperless_document_id);
     let patch_value = review
         .edited_patch
         .clone()
@@ -3837,6 +3987,13 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
     )
     .await?;
     archivist_db::mark_review_applied(&state.pool, review_id, actor_id).await?;
+    info!(
+        %review_id,
+        run_id = %review.run_id,
+        paperless_document_id = review.paperless_document_id,
+        duration_ms,
+        "review patch applied to Paperless"
+    );
     Ok(())
 }
 
