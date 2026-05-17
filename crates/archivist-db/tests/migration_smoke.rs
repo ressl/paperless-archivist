@@ -1,5 +1,6 @@
 use archivist_db::{connect, migrate};
 use sqlx::Row;
+use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18; run scripts/verify/migration_smoke.sh"]
@@ -81,5 +82,42 @@ async fn migrations_apply_on_fresh_postgresql_18_database() {
         dedup.is_ok(),
         "find_metadata_dedup_source must parse against the live schema: {:?}",
         dedup.err()
+    );
+
+    // v1.5.21 metadata-trace helpers. Same regression pattern: every helper
+    // referenced by the `GET /api/inventory/{id}/metadata-trace` route runs
+    // against the empty fresh-migration DB so a future "non-existent column"
+    // bug is caught at CI time rather than in front of operators. Throwaway
+    // ids — the DB is empty so each call must return None/empty without
+    // touching real rows.
+    let throwaway_doc_id = 0;
+    let throwaway_run_id = Uuid::nil();
+
+    let header = archivist_db::latest_metadata_run_for_document(&pool, throwaway_doc_id).await;
+    assert!(
+        matches!(header, Ok(None)),
+        "latest_metadata_run_for_document must parse against the live schema: {:?}",
+        header.err()
+    );
+
+    let artifact = archivist_db::latest_metadata_artifact_for_run(&pool, throwaway_run_id).await;
+    assert!(
+        matches!(artifact, Ok(None)),
+        "latest_metadata_artifact_for_run must parse against the live schema: {:?}",
+        artifact.err()
+    );
+
+    let reviews = archivist_db::metadata_review_items_for_run(&pool, throwaway_run_id).await;
+    assert!(
+        matches!(&reviews, Ok(items) if items.is_empty()),
+        "metadata_review_items_for_run must parse against the live schema: {:?}",
+        reviews.err()
+    );
+
+    let audit = archivist_db::latest_apply_audit_for_run(&pool, throwaway_run_id).await;
+    assert!(
+        matches!(audit, Ok(None)),
+        "latest_apply_audit_for_run must parse against the live schema: {:?}",
+        audit.err()
     );
 }

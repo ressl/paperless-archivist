@@ -7082,6 +7082,251 @@ pub async fn rebalance_backfilled_metadata_priorities(
     Ok(MetadataPriorityRebalanceSummary { jobs_repriced })
 }
 
+// ---------------------------------------------------------------------------
+// Metadata-trace diagnostic helpers (v1.5.21).
+//
+// Power the `GET /api/inventory/{document_id}/metadata-trace` endpoint: given a
+// Paperless document id, fetch the most recent metadata-stage `pipeline_runs`
+// row, the LLM `ai_artifacts` payload (if any), all `review_items` for the run,
+// and the apply-time `audit_events` row (if any). The API layer composes these
+// into a per-field outcome view.
+//
+// SQL quirk to remember: `ai_artifacts` has NO `paperless_document_id` column —
+// the link to a document goes through `pipeline_runs.id` via `ai_artifacts.run_id`.
+// The v1.5.14 → v1.5.19 regression was exactly this kind of "non-existent column
+// resolved at runtime" bug; `tests/migration_smoke.rs` calls each helper below
+// against the empty fresh-migration DB so the SQL parser catches it in CI.
+
+/// Header for the most recent metadata-stage `pipeline_runs` row of a document.
+/// Mirrors the fields the diagnostic UI needs without depending on the global
+/// `pipeline_runs` row struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataRunHeader {
+    pub run_id: Uuid,
+    pub paperless_document_id: i32,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// Most recent `ai_artifacts` row for a given run + `stage = 'metadata'`.
+/// Carries model/provider for the run header and `normalized_output` so the
+/// frontend can render the raw LLM suggestion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataArtifact {
+    pub id: Uuid,
+    pub model: String,
+    pub provider: String,
+    pub normalized_output: Option<Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One `review_items` row scoped to a metadata-stage run. Stage stays as a
+/// string (not parsed `Stage`) because legacy in-flight v1.3 runs may still be
+/// drained against legacy per-field stages and the diagnostic should not crash
+/// on an unrecognised value — it just won't be matched against any of the six
+/// metadata fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataReviewItem {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub stage: String,
+    pub status: String,
+    pub suggested_patch: Value,
+    pub edited_patch: Option<Value>,
+    pub validation_warnings: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The most recent `audit_events` row carrying `event_type = 'document.patch_applied'`
+/// for the run. Its `after` payload is the patch the worker pushed to Paperless,
+/// keyed by `title` / `correspondent` (id) / `document_type` (id) / `created`
+/// (document_date) / `tags` (Vec<i32>) / `custom_fields` (redacted summary).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataApplyAudit {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub after: Option<Value>,
+    pub outcome: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Most recent metadata-stage `pipeline_runs` row for a document.
+///
+/// "Metadata-stage" means: the run has a `jobs` row with `stage = 'metadata'`
+/// or, for legacy v1.3.x runs queued before the consolidation, any of the
+/// per-field stages (`title`, `correspondent`, `document_type`,
+/// `document_date`, `tags`, `fields`). We use the broad set so the diagnostic
+/// still works against in-flight legacy runs.
+pub async fn latest_metadata_run_for_document(
+    pool: &DbPool,
+    paperless_document_id: i32,
+) -> Result<Option<MetadataRunHeader>> {
+    let row = sqlx::query(
+        r#"
+        select pr.id as run_id,
+               pr.paperless_document_id as paperless_document_id,
+               pr.status as status,
+               pr.created_at as created_at,
+               pr.finished_at as finished_at
+          from pipeline_runs pr
+         where pr.paperless_document_id = $1
+           and exists (
+             select 1
+               from jobs j
+              where j.run_id = pr.id
+                and j.stage in (
+                  'metadata',
+                  'title',
+                  'correspondent',
+                  'document_type',
+                  'document_date',
+                  'tags',
+                  'fields'
+                )
+           )
+         order by pr.created_at desc
+         limit 1
+        "#,
+    )
+    .bind(paperless_document_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| -> Result<MetadataRunHeader> {
+        Ok(MetadataRunHeader {
+            run_id: row.try_get("run_id")?,
+            paperless_document_id: row.try_get("paperless_document_id")?,
+            status: row.try_get("status")?,
+            created_at: row.try_get("created_at")?,
+            finished_at: row.try_get("finished_at")?,
+        })
+    })
+    .transpose()
+}
+
+/// Most recent `ai_artifacts` row for a metadata-stage run.
+///
+/// Returns `None` when the LLM call has not produced an artifact yet (e.g. the
+/// run is still `queued` or failed before the metadata stage executed).
+pub async fn latest_metadata_artifact_for_run(
+    pool: &DbPool,
+    run_id: Uuid,
+) -> Result<Option<MetadataArtifact>> {
+    let row = sqlx::query(
+        r#"
+        select id,
+               model,
+               provider,
+               normalized_output,
+               created_at
+          from ai_artifacts
+         where run_id = $1
+           and stage = 'metadata'
+         order by created_at desc
+         limit 1
+        "#,
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| -> Result<MetadataArtifact> {
+        Ok(MetadataArtifact {
+            id: row.try_get("id")?,
+            model: row.try_get("model")?,
+            provider: row.try_get("provider")?,
+            normalized_output: row.try_get("normalized_output")?,
+            created_at: row.try_get("created_at")?,
+        })
+    })
+    .transpose()
+}
+
+/// All `review_items` rows for a metadata-stage run, ordered by creation time.
+///
+/// Returns an empty `Vec` for runs that produced no review items (full-auto
+/// happy path) or for runs that have not reached the validation stage yet.
+pub async fn metadata_review_items_for_run(
+    pool: &DbPool,
+    run_id: Uuid,
+) -> Result<Vec<MetadataReviewItem>> {
+    let rows = sqlx::query(
+        r#"
+        select id,
+               run_id,
+               stage,
+               status,
+               suggested_patch,
+               edited_patch,
+               validation_warnings,
+               created_at
+          from review_items
+         where run_id = $1
+         order by created_at asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| -> Result<MetadataReviewItem> {
+            Ok(MetadataReviewItem {
+                id: row.try_get("id")?,
+                run_id: row.try_get("run_id")?,
+                stage: row.try_get("stage")?,
+                status: row.try_get("status")?,
+                suggested_patch: row.try_get("suggested_patch")?,
+                edited_patch: row.try_get("edited_patch")?,
+                validation_warnings: row.try_get("validation_warnings")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect()
+}
+
+/// Most recent `audit_events.document.patch_applied` row for the run.
+///
+/// Used to detect that the metadata patch made it all the way to Paperless and
+/// to derive `latest_run.applied_at`. The `after` payload mirrors the
+/// `DocumentPatch` shape the worker pushed (title/tags/correspondent/
+/// document_type/created/custom_fields).
+pub async fn latest_apply_audit_for_run(
+    pool: &DbPool,
+    run_id: Uuid,
+) -> Result<Option<MetadataApplyAudit>> {
+    let row = sqlx::query(
+        r#"
+        select id,
+               run_id,
+               after,
+               outcome,
+               created_at
+          from audit_events
+         where run_id = $1
+           and event_type = 'document.patch_applied'
+         order by created_at desc
+         limit 1
+        "#,
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| -> Result<MetadataApplyAudit> {
+        // `audit_events.run_id` is nullable in the schema, but the row is
+        // filtered by `run_id = $1` so the bind value is the canonical id.
+        // Pulling it from `row.try_get` would force `Option<Uuid>` handling
+        // for no real benefit.
+        let _: Option<Uuid> = row.try_get("run_id")?;
+        Ok(MetadataApplyAudit {
+            id: row.try_get("id")?,
+            run_id,
+            after: row.try_get("after")?,
+            outcome: row.try_get("outcome")?,
+            created_at: row.try_get("created_at")?,
+        })
+    })
+    .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
