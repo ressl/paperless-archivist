@@ -823,6 +823,24 @@ pub struct RuntimeSettings {
     pub metadata: MetadataSettings,
     #[serde(default)]
     pub fields: FieldSettings,
+    #[serde(default)]
+    pub ui: UiSettings,
+}
+
+/// UI-side feature toggles. Kept separate from the workflow / AI runtime
+/// settings because flipping them never changes the worker's processing
+/// behaviour — they only affect what the operator sees in the dashboard
+/// shell.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiSettings {
+    /// Show a Debug tab in the left sidebar with a live activity feed
+    /// (active runs, active jobs, recent LLM events, recent failures,
+    /// recent audit events). Off by default; operators flip it on from
+    /// Settings → UI when they need it. The data sources (e.g.
+    /// `/api/dashboard/live`) are gated by their own permissions, so the
+    /// toggle is purely a UI-visibility convenience.
+    #[serde(default)]
+    pub debug_console_enabled: bool,
 }
 
 impl RuntimeSettings {

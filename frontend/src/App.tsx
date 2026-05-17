@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState, type ReactNode } from 'react';
 import {
   Activity,
   Archive,
+  Bug,
   ClipboardList,
   KeyRound,
   ListChecks,
@@ -27,8 +28,9 @@ const Prompts = lazy(() => import('./prompts/Prompts').then((mod) => ({ default:
 const Audit = lazy(() => import('./audit/Audit').then((mod) => ({ default: mod.Audit })));
 const Users = lazy(() => import('./users/Users').then((mod) => ({ default: mod.Users })));
 const DocumentChat = lazy(() => import('./chat/DocumentChat').then((mod) => ({ default: mod.DocumentChat })));
+const DebugConsole = lazy(() => import('./debug/DebugConsole').then((mod) => ({ default: mod.DebugConsole })));
 
-type Tab = 'dashboard' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users';
+type Tab = 'dashboard' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users' | 'debug';
 
 export function App() {
   const { t } = useI18n();
@@ -36,6 +38,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>('dashboard');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [debugConsoleEnabled, setDebugConsoleEnabled] = useState(false);
 
   useEffect(() => {
     api
@@ -44,6 +47,25 @@ export function App() {
       .catch(() => setMe(null))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!me) return;
+    // Pull the UI toggle independently of the rest of the boot flow — it only
+    // controls Debug-tab visibility and we don't want a slow /api/settings to
+    // delay the rest of the shell.
+    let cancelled = false;
+    api
+      .settings()
+      .then((settings) => {
+        if (!cancelled) setDebugConsoleEnabled(Boolean(settings.ui?.debug_console_enabled));
+      })
+      .catch(() => {
+        if (!cancelled) setDebugConsoleEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [me]);
 
   if (loading) return <div className="boot">{t('app.loading')}</div>;
   if (!me) return <Login onLogin={setMe} />;
@@ -77,6 +99,9 @@ export function App() {
           <NavButton icon={<ClipboardList />} label={t('nav.prompts')} active={tab === 'prompts'} onClick={() => setTab('prompts')} />
           <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => setTab('audit')} />
           <NavButton icon={<UserPlus />} label={t('nav.users')} active={tab === 'users'} onClick={() => setTab('users')} />
+          {debugConsoleEnabled && (
+            <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => setTab('debug')} />
+          )}
         </nav>
         <LanguageSelector />
         <div className="sidebar-version" aria-label={buildInfoLabel} title={buildInfoLabel}>
@@ -156,6 +181,13 @@ export function App() {
           <ErrorBoundary>
             <Suspense fallback={lazyFallback}>
               <Users setError={setError} />
+            </Suspense>
+          </ErrorBoundary>
+        )}
+        {tab === 'debug' && debugConsoleEnabled && (
+          <ErrorBoundary>
+            <Suspense fallback={lazyFallback}>
+              <DebugConsole setError={setError} />
             </Suspense>
           </ErrorBoundary>
         )}

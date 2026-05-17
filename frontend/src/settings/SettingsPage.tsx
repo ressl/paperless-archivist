@@ -687,6 +687,21 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             />
           </label>
         </fieldset>
+        <fieldset>
+          <legend>{t('settings.ui')}</legend>
+          <label className="inline">
+            <input
+              type="checkbox"
+              checked={settings.ui?.debug_console_enabled ?? false}
+              onChange={(event) => update((s) => ({
+                ...s,
+                ui: { ...(s.ui ?? {}), debug_console_enabled: event.target.checked }
+              }))}
+            />
+            <span>{t('settings.ui.debug_console_enabled')}</span>
+          </label>
+          <small className="field-hint">{t('settings.ui.debug_console_enabled_hint')}</small>
+        </fieldset>
       </div>
       <PageHeader title={t('settings.providers')} />
       <div className="provider-list">

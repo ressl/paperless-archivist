@@ -2,8 +2,38 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.7`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.8`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.8 — Opt-in Debug console with live activity feed
+
+Adds a Debug section to the sidebar with a real-time view of what the
+worker is doing right now — handy when chasing problems like the
+"why is nothing happening" or "why does this document keep failing"
+investigations we ran against v1.5.6 / v1.5.7.
+
+### Settings → UI → Enable Debug console
+
+A new opt-in toggle under Settings → UI. Off by default; flip it on and
+a Debug entry appears in the left sidebar. Off, the sidebar stays
+unchanged. Backed by a fresh `ui.debug_console_enabled` boolean on
+`RuntimeSettings` (with a new `UiSettings` substruct).
+
+### What the Debug page shows
+
+Polls `/api/dashboard/live` and `/api/audit` every 2.5 s and renders
+five panels:
+
+* **Active jobs** — what the worker is currently processing
+  (document, stage, status, attempts, updated-relative).
+* **Active runs** — what's mid-pipeline.
+* **Recent LLM events** — last provider/model calls with duration.
+* **Recent failures** — most recent error messages and failure kinds.
+* **Recent audit events** — last 50 audit rows (event type, actor,
+  outcome, document, when).
+
+A Pause / Resume button stops polling so the operator can read a frozen
+snapshot. All keys i18n'd across the seven supported locales.
 
 ## v1.5.7 — Five fixes so `full_auto` is really hands-off
 

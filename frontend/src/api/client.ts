@@ -134,6 +134,9 @@ export type RuntimeSettings = {
       instructions?: string | null;
     }>;
   };
+  ui?: {
+    debug_console_enabled?: boolean;
+  };
 };
 
 const openapi = createClient<paths>({
