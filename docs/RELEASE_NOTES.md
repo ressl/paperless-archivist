@@ -2,8 +2,83 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.20`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.21`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.21 — Metadata-trace diagnostic + test architecture (milestone v1.6.1)
+
+Operator-facing diagnostic: for any document that has been through
+the metadata stage, surface what the LLM proposed, what passed
+validation, what was applied to Paperless, and — for fields that
+didn't land — exactly why. Closes GitLab issues #121 (umbrella),
+#122 (backend), #123 (frontend), #124 (docs).
+
+### Endpoint
+
+`GET /api/inventory/{document_id}/metadata-trace` (requires
+`read_inventory`). Returns a `MetadataTrace` body containing:
+
+* `current_state` — what `document_inventory` reflects right now
+  (title / correspondent / document_type / document_date / tags).
+* `latest_run` — most-recent metadata-stage `pipeline_run` for the
+  document: model, provider, status, `created_at`, `applied_at` (the
+  `audit_events.document.patch_applied` timestamp), and the raw
+  `ai_artifacts.normalized_output` payload for power users.
+* `per_field_outcomes` — exactly 6 entries in fixed order (`title,
+  correspondent, document_type, document_date, tags, fields`). Each
+  carries an `outcome` (`applied | review | skipped | dropped |
+  rejected`), the value where known, the confidence, a canonical
+  machine `reason` string, and any `validation_warnings` from the
+  associated review item.
+
+`404` with `{"error": "no metadata run for this document"}` when the
+document hasn't been through the stage yet.
+
+### Outcome composition
+
+A pure `compute_field_outcome` function in `archivist-api` runs the
+5-branch decision tree from `docs/METADATA_TRACE_CONTRACT.md`:
+review-item state takes precedence over audit, audit-applied is
+authoritative when no review exists, overwrite-disabled fires when
+the current state is set and the metadata setting forbids overwrite,
+LLM-omitted yields `dropped`, and the fallthrough is
+`entity_not_found`. 15 table-driven tests cover every branch, the
+ordering invariants, and the response-body assembly.
+
+### Frontend drawer
+
+New `Stethoscope` icon action on each Inventory row opens a drawer
+showing the document's current Paperless state, the run header, and
+a 6-card grid (one per metadata field) with color-coded outcome
+chips. Each card surfaces value, confidence, translated reason, and
+warning chips. A collapsed `<details>` at the bottom holds the raw
+`llm_suggestion` JSON. 37 new `inventory.diagnose.*` i18n keys
+across all 7 locales (en/de/fr/es/it/nl/pl) — parity check at
+573 keys / 0 missing.
+
+### Test architecture anchor
+
+New `docs/TESTING_ARCHITECTURE.md` codifies the four-layer test
+model used by the project (unit / `migration_smoke` integration /
+OpenAPI ↔ generated-client contract / manual prod E2E), spells out
+what each layer explicitly does *not* catch, and uses the
+metadata-trace endpoint as the worked example for how a new
+pipeline feature plugs into every layer. The "rule of thumb"
+section codifies the lessons from the v1.5.x regressions: every new
+`sqlx::query` gets a `migration_smoke` call; every wire change
+goes through a contract doc; every decision tree extracts to a
+pure function.
+
+### How to verify in prod
+
+After Argo rollout:
+
+1. Inventory tab → pick a recently-processed document → click the
+   stethoscope icon.
+2. Drawer should show the 6 per-field cards with outcome chips.
+3. For a document where a field didn't land cleanly, the `reason` +
+   warnings on that field's card explain why — feed that back into
+   threshold tuning or `allow_new_*` settings.
 
 ## v1.5.20 — Metadata completion tag + editable in settings
 
