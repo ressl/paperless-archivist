@@ -361,9 +361,12 @@ fn router(state: AppState) -> Router {
         .route("/batches/full", post(queue_full_batch))
         .route("/reviews", get(reviews))
         .route("/reviews/batch", post(batch_review))
+        .route("/reviews/auto-fix-preview", post(auto_fix_preview))
+        .route("/reviews/auto-fix", post(auto_fix_bulk))
         .route("/reviews/{id}/approve", post(approve_review))
         .route("/reviews/{id}/reject", post(reject_review))
         .route("/reviews/{id}/edit", post(edit_review))
+        .route("/reviews/{id}/auto-fix", post(auto_fix_single))
         .route("/operations/recovery", get(recovery_status))
         .route(
             "/operations/recovery/stale-leases",
@@ -3590,6 +3593,303 @@ async fn reject_review(
     review_decision(&state.pool, id, "rejected", None, actor_id).await?;
     info!(review_id = %id, %actor_id, "review rejected");
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Decision made by `clean_review_patch_for_auto_fix` for one review_item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoFixAction {
+    /// Patch has meaningful content after cleaning — apply it.
+    Apply,
+    /// Patch is empty after cleaning — reject the review_item.
+    Reject,
+}
+
+/// Result of cleaning one review_item's suggested_patch for the auto-fix path.
+#[derive(Debug, Clone)]
+struct AutoFixDecision {
+    cleaned_patch: Value,
+    fields_dropped: Vec<String>,
+    action: AutoFixAction,
+}
+
+/// Inspect a review_item's `suggested_patch` + `validation_warnings` and
+/// produce a cleaned patch that drops fields the validator flagged
+/// (UnknownChoice / UnknownTag / UnknownField / EmptyOutput), plus a
+/// decision on whether anything useful remains.
+///
+/// The heuristic is conservative:
+/// * Any `UnknownChoice` or `UnknownField` warning → drop the entire
+///   `custom_fields` array. Most production failures are select-typed
+///   custom-field values the LLM made up; Paperless rejects them at the
+///   patch boundary, so the safest cleanup is to skip them entirely.
+/// * Drop `document_type` / `correspondent` keys whose value is `null`
+///   (means the LLM proposed a name that didn't resolve to an ID).
+/// * Drop empty `tags` arrays.
+/// * Whatever non-null, non-empty fields remain in `{title, correspondent,
+///   document_type, created, tags, custom_fields, content}` → Apply.
+///   Otherwise → Reject (nothing meaningful left to write to Paperless).
+fn clean_review_patch_for_auto_fix(
+    suggested_patch: &Value,
+    validation_warnings: &Value,
+) -> AutoFixDecision {
+    let mut patch_obj = suggested_patch.as_object().cloned().unwrap_or_default();
+    let warnings_arr: Vec<&Value> = validation_warnings
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+
+    let warning_has_kind = |kind: &str| -> bool {
+        warnings_arr.iter().any(|w| match w {
+            Value::Object(obj) => obj.contains_key(kind),
+            Value::String(s) => s == kind || s.contains(kind),
+            _ => false,
+        })
+    };
+
+    let has_unknown_choice = warning_has_kind("UnknownChoice");
+    let has_unknown_field = warning_has_kind("UnknownField");
+    let has_unknown_tag = warning_has_kind("UnknownTag");
+    let has_empty_output = warning_has_kind("EmptyOutput");
+
+    let mut fields_dropped: Vec<String> = Vec::new();
+
+    // Drop custom_fields entirely if any UnknownChoice/UnknownField/EmptyOutput
+    // — these all mean at least one custom-field entry would fail at Paperless.
+    if (has_unknown_choice || has_unknown_field || has_empty_output)
+        && patch_obj.remove("custom_fields").is_some()
+    {
+        fields_dropped.push("custom_fields".to_owned());
+    }
+
+    // Drop document_type / correspondent if they're null (failed resolution).
+    for field in ["document_type", "correspondent"] {
+        if let Some(v) = patch_obj.get(field)
+            && v.is_null()
+        {
+            patch_obj.remove(field);
+            fields_dropped.push(format!("{field} (null)"));
+        }
+    }
+
+    // Drop tags if empty array (nothing to add) OR if there was an UnknownTag
+    // warning AND the patch's tags list is empty/missing (defensive).
+    if let Some(v) = patch_obj.get("tags")
+        && v.as_array().is_some_and(|a| a.is_empty())
+    {
+        patch_obj.remove("tags");
+        fields_dropped.push("tags (empty)".to_owned());
+    }
+    if has_unknown_tag && !patch_obj.contains_key("tags") {
+        // Already dropped or never there; nothing to do.
+    }
+
+    // Strip empty-string title.
+    if let Some(v) = patch_obj.get("title")
+        && v.as_str().is_some_and(|s| s.trim().is_empty())
+    {
+        patch_obj.remove("title");
+        fields_dropped.push("title (empty)".to_owned());
+    }
+
+    // Strip null `created`.
+    if let Some(v) = patch_obj.get("created")
+        && (v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()))
+    {
+        patch_obj.remove("created");
+        fields_dropped.push("created (null/empty)".to_owned());
+    }
+
+    let useful_keys = [
+        "title",
+        "correspondent",
+        "document_type",
+        "created",
+        "tags",
+        "custom_fields",
+        "content",
+    ];
+    let has_meaningful_content = patch_obj.keys().any(|k| {
+        useful_keys.contains(&k.as_str()) && patch_obj.get(k).is_some_and(|v| !v.is_null())
+    });
+
+    AutoFixDecision {
+        cleaned_patch: Value::Object(patch_obj),
+        fields_dropped,
+        action: if has_meaningful_content {
+            AutoFixAction::Apply
+        } else {
+            AutoFixAction::Reject
+        },
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AutoFixRequest {
+    /// Limit how many pending reviews to touch in this call.
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+async fn auto_fix_preview(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<AutoFixRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteReviews)?;
+    let limit = request.limit.unwrap_or(500).clamp(1, 2000);
+    let items = archivist_db::list_reviews(&state.pool, Some("pending"), limit).await?;
+    let mut apply_count = 0_i64;
+    let mut reject_count = 0_i64;
+    let mut sample: Vec<Value> = Vec::with_capacity(20);
+    for item in &items {
+        let decision =
+            clean_review_patch_for_auto_fix(&item.suggested_patch, &item.validation_warnings);
+        match decision.action {
+            AutoFixAction::Apply => apply_count += 1,
+            AutoFixAction::Reject => reject_count += 1,
+        }
+        if sample.len() < 20 {
+            sample.push(json!({
+                "id": item.id,
+                "paperless_document_id": item.paperless_document_id,
+                "stage": item.stage,
+                "action": match decision.action { AutoFixAction::Apply => "apply", AutoFixAction::Reject => "reject" },
+                "fields_dropped": decision.fields_dropped,
+            }));
+        }
+    }
+    Ok(Json(json!({
+        "total_pending": items.len(),
+        "would_apply": apply_count,
+        "would_reject": reject_count,
+        "sample": sample,
+    })))
+}
+
+async fn auto_fix_bulk(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<AutoFixRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteReviews)?;
+    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
+    let limit = request.limit.unwrap_or(500).clamp(1, 2000);
+    let items = archivist_db::list_reviews(&state.pool, Some("pending"), limit).await?;
+    let mut applied = 0_i64;
+    let mut rejected = 0_i64;
+    let mut errors: Vec<Value> = Vec::new();
+
+    for item in items {
+        let outcome = auto_fix_apply_one(&state, &item, actor_id).await;
+        match outcome {
+            Ok(AutoFixAction::Apply) => applied += 1,
+            Ok(AutoFixAction::Reject) => rejected += 1,
+            Err(error) => {
+                errors.push(json!({
+                    "id": item.id,
+                    "error": error.to_string(),
+                }));
+            }
+        }
+    }
+    info!(applied, rejected, errors = errors.len(), %actor_id, "auto-fix bulk completed");
+    Ok(Json(json!({
+        "applied": applied,
+        "rejected": rejected,
+        "errors": errors,
+    })))
+}
+
+async fn auto_fix_single(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteReviews)?;
+    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
+    let items = archivist_db::list_reviews(&state.pool, Some("pending"), 2000).await?;
+    let Some(item) = items.into_iter().find(|i| i.id == id) else {
+        return Err(ApiError::bad_request(
+            "review item not pending or not found",
+        ));
+    };
+    let action = auto_fix_apply_one(&state, &item, actor_id).await?;
+    Ok(Json(json!({
+        "action": match action { AutoFixAction::Apply => "applied", AutoFixAction::Reject => "rejected" },
+    })))
+}
+
+/// Auto-fix one review_item. Returns the action that was taken.
+async fn auto_fix_apply_one(
+    state: &AppState,
+    item: &archivist_db::ReviewItemRecord,
+    actor_id: Uuid,
+) -> Result<AutoFixAction> {
+    let decision =
+        clean_review_patch_for_auto_fix(&item.suggested_patch, &item.validation_warnings);
+    match decision.action {
+        AutoFixAction::Apply => {
+            // Stamp the cleaned patch onto the review_item as edited_patch,
+            // then route through the existing approve+apply pipeline so the
+            // audit trail and Paperless write semantics stay identical.
+            review_decision(
+                &state.pool,
+                item.id,
+                "edited",
+                Some(decision.cleaned_patch.clone()),
+                actor_id,
+            )
+            .await?;
+            review_decision(&state.pool, item.id, "approved", None, actor_id).await?;
+            apply_review_patch(state, item.id, actor_id).await?;
+            append_audit(
+                &state.pool,
+                AuditEventInput {
+                    event_type: "review.auto_fix_applied".to_owned(),
+                    actor_type: "user".to_owned(),
+                    actor_id: Some(actor_id.to_string()),
+                    run_id: Some(item.run_id),
+                    job_id: item.job_id,
+                    paperless_document_id: Some(item.paperless_document_id),
+                    before: None,
+                    after: Some(json!({ "fields_dropped": decision.fields_dropped })),
+                    metadata: Some(json!({ "review_id": item.id, "stage": item.stage })),
+                    outcome: "success".to_owned(),
+                    error_message: None,
+                    source_ip: None,
+                    user_agent: None,
+                },
+            )
+            .await?;
+            Ok(AutoFixAction::Apply)
+        }
+        AutoFixAction::Reject => {
+            review_decision(&state.pool, item.id, "rejected", None, actor_id).await?;
+            append_audit(
+                &state.pool,
+                AuditEventInput {
+                    event_type: "review.auto_fix_rejected".to_owned(),
+                    actor_type: "user".to_owned(),
+                    actor_id: Some(actor_id.to_string()),
+                    run_id: Some(item.run_id),
+                    job_id: item.job_id,
+                    paperless_document_id: Some(item.paperless_document_id),
+                    before: None,
+                    after: Some(json!({
+                        "fields_dropped": decision.fields_dropped,
+                        "reason": "no meaningful patch after cleanup",
+                    })),
+                    metadata: Some(json!({ "review_id": item.id, "stage": item.stage })),
+                    outcome: "success".to_owned(),
+                    error_message: None,
+                    source_ip: None,
+                    user_agent: None,
+                },
+            )
+            .await?;
+            Ok(AutoFixAction::Reject)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -1054,11 +1054,19 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
 export function Dashboard({
   setError,
   canManageSettings,
-  permissions
+  permissions,
+  onNavigate
 }: {
   setError: (error: string | null) => void;
   canManageSettings: boolean;
   permissions: import('../api/client').Permissions;
+  /**
+   * Optional callback for cross-tab navigation. Used by the
+   * "Fehler untersuchen" alert action so it can switch to the
+   * Inventory tab with `has_error=true` pre-applied in the URL.
+   * When omitted, the alert action is a no-op for that kind.
+   */
+  onNavigate?: (tab: string, queryString?: string) => void;
 }) {
   // Recovery visibility/actions are gated on permissions, not the admin role,
   // so that any caller the server lets read/write runs gets the matching UI.
@@ -1198,9 +1206,25 @@ export function Dashboard({
   ];
 
   const onAlertAction = (item: NeedsAttentionItem) => {
-    // Recovery actions require WriteRuns server-side; mirror that gate here so
-    // the alert button is interactive for any user the server lets act.
-    if (!canWriteRuns) return;
+    // The "Fehler untersuchen" / recent_failures alert is a navigation
+    // affordance, not a privileged write — always wire it up if a navigator
+    // was passed in, regardless of WriteRuns.
+    if (item.kind === 'recent_failures') {
+      if (onNavigate) {
+        onNavigate('inventory', '?has_error=true');
+      } else {
+        setError(t('dashboard.alert.navigate_unavailable'));
+      }
+      return;
+    }
+    // Other recovery actions require WriteRuns server-side; surface a clear
+    // error instead of silently doing nothing when the user lacks the
+    // permission (v1.5.16 — previously a silent early return looked like a
+    // dead button).
+    if (!canWriteRuns) {
+      setError(t('dashboard.alert.permission_denied'));
+      return;
+    }
     switch (item.kind) {
       case 'stuck_runs':
         void run(setRecoveryBusy, setError, recoverStuckRuns, t);
@@ -1209,6 +1233,9 @@ export function Dashboard({
         void run(setRecoveryBusy, setError, recoverStaleLeases, t);
         break;
       default:
+        // Unknown alert kind — surface as error so it doesn't silently
+        // disappear (catches future server-side additions without UI work).
+        setError(t('dashboard.alert.unknown_kind', { kind: item.kind }));
         break;
     }
   };

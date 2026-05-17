@@ -2,8 +2,86 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.15`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.16`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.16 — Dashboard actions wired + Review Auto-Fix
+
+Operator-facing release driven by two prod issues:
+
+1. Dashboard buttons under "Aktuelle Vorfälle" ("Runs wiederherstellen",
+   "Leases neu einreihen", "Fehler untersuchen") had hover tooltips but
+   their click handlers were partially silent — failed permissions or
+   unknown alert kinds simply returned without feedback. The "Fehler
+   untersuchen" button on a `recent_failures` alert had no destination
+   at all.
+2. With `full_auto` enabled, the review queue still accumulated items
+   stuck behind `UnknownChoice` / `UnknownField` / `EmptyOutput`
+   warnings produced before the v1.5.7 fix or by all-fields-fallthrough
+   edge cases. Operators had to clear them one-by-one.
+
+### 1. Dashboard alerts: real actions and explicit feedback
+
+* `recent_failures` alerts now navigate to the Inventory tab with the
+  `has_error=true` filter applied. `Dashboard` accepts a new
+  `onNavigate(tab, queryString)` prop, wired in `App.tsx` to push the
+  query string into `window.history` before swapping tabs so
+  `Inventory` reads it from `window.location.search` on mount.
+* `recent_failures` (and the existing `stuck_runs` / `expired_leases`
+  recovery actions) now surface explicit feedback via the banner
+  instead of silently no-oping: permission denial, missing navigation
+  target, and unknown alert kinds each produce a localized message
+  (`dashboard.alert.permission_denied`,
+  `dashboard.alert.navigate_unavailable`,
+  `dashboard.alert.unknown_kind`).
+* All seven locales (en/de/fr/es/it/nl/pl) include the new keys —
+  parity check passes at 532 keys.
+
+### 2. Review Auto-Fix (Mode A: drop unknowns + apply rest)
+
+New backend endpoints under `/reviews/`:
+
+* `POST /reviews/auto-fix-preview` — dry-runs over the pending queue
+  and returns `{total_pending, would_apply, would_reject, sample}` so
+  the UI can show a confirmation dialog with the expected outcome.
+* `POST /reviews/auto-fix` — bulk-applies the same logic and returns
+  `{applied, rejected, errors}`.
+* `POST /reviews/{id}/auto-fix` — single-item variant.
+
+The cleaning logic lives in `clean_review_patch_for_auto_fix`. For each
+review item it inspects `validation_warnings` and the `suggested_patch`
+and:
+
+* if any `UnknownChoice` / `UnknownField` / `EmptyOutput` warning is
+  present, drops the `custom_fields` block from the patch (the unknown
+  values are what made the item land in review — the rest of the patch
+  was already validated);
+* drops `null` / empty `document_type`, `correspondent`, `tags`,
+  `title`, `created` so they don't overwrite existing Paperless
+  metadata with empties;
+* if any meaningful field survives, returns `Apply` with the cleaned
+  patch; otherwise returns `Reject` so the item is closed out instead
+  of looped through review forever.
+
+`auto_fix_apply_one` then runs the standard review pipeline:
+`review_decision(edited)` with the cleaned patch → `approved` → 
+`apply_review_patch`. Reject path uses `review_decision(rejected)`.
+Audit events `review.auto_fix_applied` / `review.auto_fix_rejected`
+are emitted per item.
+
+UI surface in the Review tab:
+
+* New toolbar button **"Auto-Fix alle"** runs preview → confirmation
+  dialog → bulk endpoint and reloads.
+* Each ReviewCard footer gets a third button **"Auto-Fix"** next to
+  Approve / Reject for per-item recovery.
+* Result summary surfaces through the existing banner channel —
+  `applied`/`rejected`/`errors` counts after each run.
+
+Mode B (auto-creating missing Paperless entities) is intentionally out
+of scope for v1.5.16 — Mode A clears the existing backlog first; Mode
+B is queued for a follow-up where the entity-creation API and operator
+preview need their own design pass.
 
 ## v1.5.15 — Bundle E: Consensus + A/B prompt experiments (last bundle of v1.6.0)
 

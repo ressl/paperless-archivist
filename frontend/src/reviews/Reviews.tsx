@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Check, ListChecks, Save, X } from 'lucide-react';
+import { AlertTriangle, Check, ListChecks, Save, Wrench, X } from 'lucide-react';
 import { api, ReviewItem, Stage } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
@@ -45,6 +45,45 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
     }, t);
   };
 
+  const autoFixAll = async () => {
+    if (items.length === 0) return;
+    const preview = await api.autoFixReviewPreview(items.length);
+    const confirmed = window.confirm(
+      t('review.auto_fix_confirm', {
+        count: preview.total_pending,
+      })
+    );
+    if (!confirmed) return;
+    await run(setBusy, setError, async () => {
+      const result = await api.autoFixReviewBulk(items.length);
+      setSelected([]);
+      await load();
+      // Surface result via the same error banner; not an error in the
+      // failure sense — operator wants the summary visible somewhere.
+      setError(
+        t('review.auto_fix_result', {
+          applied: result.applied,
+          rejected: result.rejected,
+          errors: result.errors.length,
+        })
+      );
+    }, t);
+  };
+
+  const autoFixOne = async (id: string) => {
+    await run(setBusy, setError, async () => {
+      const result = await api.autoFixReviewSingle(id);
+      await load();
+      setError(
+        t('review.auto_fix_result', {
+          applied: result.action === 'applied' ? 1 : 0,
+          rejected: result.action === 'rejected' ? 1 : 0,
+          errors: 0,
+        })
+      );
+    }, t);
+  };
+
   return (
     <section className="page">
       <PageHeader title={t('review.title')} />
@@ -58,6 +97,9 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
         <button disabled={busy || selected.length === 0} onClick={() => void batch('reject')}>
           <X size={16} /> {t('review.reject_selected')}
         </button>
+        <button disabled={busy || items.length === 0} onClick={() => void autoFixAll()} title={t('review.auto_fix_all')}>
+          <Wrench size={16} /> {t('review.auto_fix_all')}
+        </button>
       </div>
       <div className="review-list">
         {items.map((item) => (
@@ -67,6 +109,7 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
             selected={selected.includes(item.id)}
             onSelect={toggleSelected}
             onReload={load}
+            onAutoFix={autoFixOne}
             setError={setError}
             t={t}
           />
@@ -81,11 +124,12 @@ type ReviewCardProps = {
   selected: boolean;
   onSelect: (id: string) => void;
   onReload: () => void;
+  onAutoFix: (id: string) => void;
   setError: (error: string | null) => void;
   t: TFunction;
 };
 
-function ReviewCard({ item, selected, onSelect, onReload, setError, t }: ReviewCardProps) {
+function ReviewCard({ item, selected, onSelect, onReload, onAutoFix, setError, t }: ReviewCardProps) {
   const patch = asReviewPatch(item.suggested_patch);
   const metadata = asReviewPatch(patch?.standard_metadata);
   const [edit, setEdit] = useState<ReviewEditState>(() => reviewEditStateFromPatch(patch));
@@ -190,6 +234,9 @@ function ReviewCard({ item, selected, onSelect, onReload, setError, t }: ReviewC
             <Save size={16} /> {t('review.apply_edited')}
           </button>
         )}
+        <button title={t('review.auto_fix_one')} disabled={busy} onClick={() => onAutoFix(item.id)}>
+          <Wrench size={16} /> {t('review.auto_fix_one')}
+        </button>
         <button title={t('review.reject')} disabled={busy} onClick={reject}>
           <X size={16} /> {t('review.reject')}
         </button>
@@ -205,6 +252,7 @@ const ReviewCardMemo = memo(
     if (prev.selected !== next.selected) return false;
     if (prev.onSelect !== next.onSelect) return false;
     if (prev.onReload !== next.onReload) return false;
+    if (prev.onAutoFix !== next.onAutoFix) return false;
     if (prev.setError !== next.setError) return false;
     const a = prev.item;
     const b = next.item;

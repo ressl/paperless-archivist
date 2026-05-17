@@ -763,6 +763,18 @@ export const api = {
   reviews: () => request<{ items: ReviewItem[] }>('/api/reviews?status=pending&limit=100'),
   approveReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/approve`, { method: 'POST' }),
   rejectReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/reject`, { method: 'POST' }),
+  autoFixReviewPreview: (limit?: number) =>
+    request<{ total_pending: number; would_apply: number; would_reject: number; sample: unknown[] }>(
+      '/api/reviews/auto-fix-preview',
+      { method: 'POST', body: JSON.stringify({ limit }) }
+    ),
+  autoFixReviewBulk: (limit?: number) =>
+    request<{ applied: number; rejected: number; errors: unknown[] }>('/api/reviews/auto-fix', {
+      method: 'POST',
+      body: JSON.stringify({ limit }),
+    }),
+  autoFixReviewSingle: (id: string) =>
+    request<{ action: 'applied' | 'rejected' }>(`/api/reviews/${id}/auto-fix`, { method: 'POST' }),
   batchReview: (ids: string[], decision: 'approve' | 'reject') =>
     request<{ ok: boolean; succeeded: string[]; failed: Array<{ id: string; error: string }> }>('/api/reviews/batch', {
       method: 'POST',

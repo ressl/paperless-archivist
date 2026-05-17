@@ -136,6 +136,28 @@ export function App() {
               setError={setError}
               canManageSettings={canManageSettings}
               permissions={me.permissions}
+              onNavigate={(nextTab, search) => {
+                // Cross-tab navigation. Push the optional query-string into
+                // window.history before switching tabs so the destination
+                // component (e.g. Inventory) reads its filter state from
+                // window.location.search on mount.
+                if (search !== undefined) {
+                  window.history.replaceState(
+                    null,
+                    '',
+                    `${window.location.pathname}${search}${window.location.hash}`
+                  );
+                }
+                if (
+                  nextTab === 'dashboard' || nextTab === 'inventory' ||
+                  nextTab === 'chat' || nextTab === 'reviews' ||
+                  nextTab === 'settings' || nextTab === 'prompts' ||
+                  nextTab === 'audit' || nextTab === 'users' ||
+                  nextTab === 'debug'
+                ) {
+                  setTab(nextTab);
+                }
+              }}
             />
           </ErrorBoundary>
         )}
