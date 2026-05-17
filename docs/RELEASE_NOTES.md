@@ -2,8 +2,33 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.19`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.20`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.20 — Metadata completion tag + editable in settings
+
+When the metadata stage settles (auto-apply OR an approved review),
+the worker now stamps a dedicated completion tag onto the document in
+Paperless. Default: `archivist-metadata`. The OCR completion tag
+(`archivist-ocr`) was already in place — the new field plugs the gap
+for the consolidated metadata stage which previously had no dedicated
+completion tag.
+
+`WorkflowTags` gains a `completion_metadata` field with a serde
+default of `"archivist-metadata"`, so settings rows that predate the
+upgrade load cleanly. `completion_tag_for_stage(Stage::Metadata)` now
+returns this name; the existing `apply_patch_with_workflow_tags`
+helper (worker + review-approval path in the API) pulls it through
+`paperless.ensure_tag(...)` so the tag is auto-created on first use
+if it doesn't already exist in Paperless.
+
+Settings UI gains a new section **"Abschluss-Tags / Completion tags"**
+with editable inputs for the OCR and Metadata completion tag names
+across all seven locales. Leaving a field empty keeps the default.
+Other completion tags (per-field title / correspondent / document
+type / fields, plus the final `ai-processed`) remain configurable
+via the existing settings JSON; only the two operator-facing values
+get UI controls here.
 
 ## v1.5.19 — Hotfix: metadata stage failing on dedup query
 

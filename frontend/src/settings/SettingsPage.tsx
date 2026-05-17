@@ -572,6 +572,38 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           </label>
         </fieldset>
         <fieldset>
+          <legend>{t('settings.completion_tags')}</legend>
+          <small>{t('settings.completion_tags.hint')}</small>
+          <label>
+            {t('settings.completion_tags.ocr')}
+            <input
+              value={settings.workflow.tags.completion_ocr ?? 'archivist-ocr'}
+              onChange={(event) => update((s) => ({
+                ...s,
+                workflow: {
+                  ...s.workflow,
+                  tags: { ...s.workflow.tags, completion_ocr: event.target.value }
+                }
+              }))}
+              placeholder="archivist-ocr"
+            />
+          </label>
+          <label>
+            {t('settings.completion_tags.metadata')}
+            <input
+              value={settings.workflow.tags.completion_metadata ?? 'archivist-metadata'}
+              onChange={(event) => update((s) => ({
+                ...s,
+                workflow: {
+                  ...s.workflow,
+                  tags: { ...s.workflow.tags, completion_metadata: event.target.value }
+                }
+              }))}
+              placeholder="archivist-metadata"
+            />
+          </label>
+        </fieldset>
+        <fieldset>
           <legend>{t('settings.notifications')}</legend>
           <label className="inline">
             <input

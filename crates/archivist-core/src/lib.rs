@@ -655,6 +655,8 @@ pub struct WorkflowTags {
     pub trigger_fields: String,
     pub completion_processed: String,
     pub completion_ocr: String,
+    #[serde(default = "default_completion_metadata_tag")]
+    pub completion_metadata: String,
     pub completion_tagging: String,
     pub completion_title: String,
     pub completion_correspondent: String,
@@ -681,6 +683,7 @@ impl Default for WorkflowTags {
             trigger_fields: "ai-fields".to_owned(),
             completion_processed: "ai-processed".to_owned(),
             completion_ocr: "archivist-ocr".to_owned(),
+            completion_metadata: default_completion_metadata_tag(),
             completion_tagging: "archivist-tags".to_owned(),
             completion_title: "ai-processed-title".to_owned(),
             completion_correspondent: "ai-processed-correspondent".to_owned(),
@@ -703,6 +706,10 @@ fn default_completion_document_date_tag() -> String {
     "ai-processed-document-date".to_owned()
 }
 
+fn default_completion_metadata_tag() -> String {
+    "archivist-metadata".to_owned()
+}
+
 impl WorkflowTags {
     pub fn all(&self) -> Vec<&str> {
         vec![
@@ -716,6 +723,7 @@ impl WorkflowTags {
             &self.trigger_fields,
             &self.completion_processed,
             &self.completion_ocr,
+            &self.completion_metadata,
             &self.completion_tagging,
             &self.completion_title,
             &self.completion_correspondent,
@@ -738,6 +746,7 @@ impl WorkflowTags {
     pub fn completion_tag_for_stage(&self, stage: Stage) -> Option<&str> {
         match stage {
             Stage::Ocr => Some(&self.completion_ocr),
+            Stage::Metadata => Some(&self.completion_metadata),
             Stage::Tags => Some(&self.completion_tagging),
             Stage::Title => Some(&self.completion_title),
             Stage::Correspondent => Some(&self.completion_correspondent),
@@ -745,12 +754,7 @@ impl WorkflowTags {
             Stage::DocumentDate => Some(&self.completion_document_date),
             Stage::Fields => Some(&self.completion_fields),
             Stage::Apply => Some(&self.completion_processed),
-            // The consolidated metadata stage does not have a dedicated completion tag
-            // because it represents the union of the six per-field stages — each individual
-            // field tag (completion_title, completion_tagging, ...) is still stamped by the
-            // worker when the matching field succeeds, and the final `completion_processed`
-            // tag is applied when the last job in a run drains.
-            Stage::Metadata | Stage::OcrFix => None,
+            Stage::OcrFix => None,
         }
     }
 
@@ -3475,6 +3479,47 @@ mod tests {
         assert!(ProcessingMode::AutoSelectReview.requires_manual_review());
         assert!(ProcessingMode::FullAuto.auto_select_documents());
         assert!(ProcessingMode::FullAuto.auto_apply_validated_suggestions());
+    }
+
+    #[test]
+    fn metadata_stage_has_completion_tag() {
+        let tags = WorkflowTags::default();
+        assert_eq!(tags.completion_metadata, "archivist-metadata");
+        assert_eq!(
+            tags.completion_tag_for_stage(Stage::Metadata),
+            Some("archivist-metadata")
+        );
+        assert!(tags.is_workflow_tag("archivist-metadata"));
+        assert!(tags.all().contains(&"archivist-metadata"));
+    }
+
+    #[test]
+    fn workflow_tags_deserialize_without_completion_metadata_field() {
+        // Existing rows in the settings table predate the new field; the
+        // serde default must populate it so settings load cleanly after the
+        // upgrade.
+        let json = serde_json::json!({
+            "trigger_process": "ai-process",
+            "trigger_ocr": "ai-ocr",
+            "trigger_tags": "ai-tags",
+            "trigger_title": "ai-title",
+            "trigger_correspondent": "ai-correspondent",
+            "trigger_document_type": "ai-document-type",
+            "trigger_fields": "ai-fields",
+            "completion_processed": "ai-processed",
+            "completion_ocr": "archivist-ocr",
+            "completion_tagging": "archivist-tags",
+            "completion_title": "ai-processed-title",
+            "completion_correspondent": "ai-processed-correspondent",
+            "completion_document_type": "ai-processed-document-type",
+            "completion_fields": "ai-processed-fields",
+            "review_needed": "ai-review-needed",
+            "failed": "ai-failed",
+            "failed_ocr": "ai-failed-ocr",
+            "failed_tagging": "ai-failed-tagging"
+        });
+        let tags: WorkflowTags = serde_json::from_value(json).expect("deserialize legacy tags");
+        assert_eq!(tags.completion_metadata, "archivist-metadata");
     }
 
     #[test]
