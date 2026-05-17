@@ -2,8 +2,77 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.12`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.13`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.13 — Bundle C: Document-type-conditional prompts
+
+Third of four bundles in the v1.6.0 "Prompt & Process Quality" milestone.
+Closes issue #115 from milestone 15.
+
+### How it works
+
+For each document about to enter the consolidated metadata stage,
+`process_metadata` now first runs a cheap one-shot classifier LLM call
+that returns a single category word: `invoice`, `receipt`, `contract`,
+`letter`, `certificate`, `notice`, `medical`, `legal`, `statement`,
+`bank_statement`, or `other`. The category is then used to look up a
+short hint snippet (≤ 400 chars) that is prepended to the main metadata
+user prompt under a `Document-type hint:` header.
+
+The hint snippets are domain-specific guardrails — e.g. for invoices:
+
+> Pay special attention to: invoice number (Rechnungsnummer / Rechnung
+> Nr. / Invoice #), the GROSS total (Bruttobetrag / Gesamtbetrag /
+> Total), and the issue date labeled as 'Rechnungsdatum' / 'Invoice
+> date' (NOT the payment-due date or delivery date). The correspondent
+> is the issuer (top-of-document letterhead), not the recipient.
+
+Eleven distinct snippets cover the canonical categories; `other` ships
+an empty string so the prompt is unchanged when the classifier is
+uncertain. Snippets are hardcoded in `archivist-ai`
+(`metadata_hint_for_doc_type`) for v1.5.13; a follow-up will lift them
+into the `prompts` table for operator-side iteration if the hardcoded
+defaults prove to be the wrong starting point.
+
+### Implementation details
+
+* New `archivist_ai::DocTypeCategory` enum (11 variants + `parse()` +
+  `as_str()`) and a `prompt_for_doc_type_classify` builder that emits
+  a tight 2000-char-bounded prompt.
+* New `archivist_worker::classify_document_type` helper that wraps the
+  classifier call. Reuses the metadata stage's provider+model so no
+  separate endpoint configuration is needed. Failures degrade
+  gracefully to `DocTypeCategory::Other` with a warn-level log; the
+  main pipeline keeps draining.
+* `prompt_for_metadata` gained a 10th argument `doc_type_hint: &str`.
+  Empty string ≡ no hint, current behaviour. The hint is prepended
+  after the language context block.
+
+### Trade-offs
+
+* Adds one extra LLM round-trip per document (the classifier). With
+  Ollama-local + qwen3-paperless:8b the classifier completes in
+  ~3-8s; the main metadata call is ~30-60s, so the overhead is ~10%
+  per doc.
+* Classification errors fall back to `other` (empty hint) — same
+  behaviour as v1.5.12.
+
+### Test coverage
+
+Existing test `metadata_prompt_only_requests_enabled_fields` already
+covered the variable-arity prompt builder; it now exercises the
+10-argument signature with an empty hint. No new failure cases.
+
+### Out of scope (deferred to v1.5.14)
+
+* UI surfaces for the per-field confidence thresholds and date-anchor
+  settings introduced in v1.5.12 — defaults are sensible and the new
+  settings round-trip through Save without UI changes, but they're
+  not yet exposed for direct editing in the Settings page.
+* Lifting `metadata_hint_for_doc_type` snippets into the database.
+* Persistence of the classified category as a column on
+  `document_inventory` so the dashboard can chart category mix.
 
 ## v1.5.12 — Bundle B: Process-quality improvements
 

@@ -1001,6 +1001,132 @@ fn bounded_text(content: &str, max_chars: usize) -> String {
     content.chars().take(max_chars).collect()
 }
 
+/// Canonical document-type categories produced by the cheap pre-pass
+/// classifier introduced in v1.5.13 (Bundle C of milestone v1.6.0). Kept
+/// small and stable so the per-category hint snippets in
+/// `metadata_hint_for_doc_type` stay deterministic. `Other` is the
+/// fallback when the classifier returns anything not in this list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocTypeCategory {
+    Invoice,
+    Receipt,
+    Contract,
+    Letter,
+    Certificate,
+    Notice,
+    Medical,
+    Legal,
+    Statement,
+    BankStatement,
+    Other,
+}
+
+impl DocTypeCategory {
+    pub const ALL: &'static [DocTypeCategory] = &[
+        DocTypeCategory::Invoice,
+        DocTypeCategory::Receipt,
+        DocTypeCategory::Contract,
+        DocTypeCategory::Letter,
+        DocTypeCategory::Certificate,
+        DocTypeCategory::Notice,
+        DocTypeCategory::Medical,
+        DocTypeCategory::Legal,
+        DocTypeCategory::Statement,
+        DocTypeCategory::BankStatement,
+        DocTypeCategory::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Invoice => "invoice",
+            Self::Receipt => "receipt",
+            Self::Contract => "contract",
+            Self::Letter => "letter",
+            Self::Certificate => "certificate",
+            Self::Notice => "notice",
+            Self::Medical => "medical",
+            Self::Legal => "legal",
+            Self::Statement => "statement",
+            Self::BankStatement => "bank_statement",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        let normalized = value.trim().to_lowercase();
+        for candidate in Self::ALL {
+            if candidate.as_str() == normalized {
+                return *candidate;
+            }
+        }
+        Self::Other
+    }
+}
+
+/// Cheap one-shot classifier prompt: returns the document category as a
+/// single bare lowercase word. The caller is expected to parse the
+/// answer via [`DocTypeCategory::parse`]; any non-listed answer maps to
+/// `Other`. Uses a tight 2000-char content cap because the category is
+/// usually evident from the first page header.
+pub fn prompt_for_doc_type_classify(content: &str) -> ChatRequest {
+    let categories = DocTypeCategory::ALL
+        .iter()
+        .map(|c| c.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    ChatRequest {
+        model: String::new(),
+        temperature: 0.0,
+        num_ctx: None,
+        system_prompt: "You classify Paperless-ngx documents into one of a small set of broad categories. Return ONLY the bare lowercase category word, with no punctuation, no JSON, no explanation. If no category clearly applies, return 'other'.".to_owned(),
+        user_prompt: format!(
+            "Categories: {categories}.\n\nDocument:\n{doc}\n\nReturn one word.",
+            doc = bounded_text(content, 2000)
+        ),
+    }
+}
+
+/// Hint snippet added to the consolidated metadata prompt when the
+/// document type is known. Kept short (≤ 400 chars) so the main prompt
+/// budget for OCR text + allowed-lists isn't compressed. Empty for
+/// `Other` so the standard prompt stays unchanged when classification
+/// is uncertain.
+pub fn metadata_hint_for_doc_type(category: DocTypeCategory) -> &'static str {
+    match category {
+        DocTypeCategory::Invoice => {
+            "This document is an invoice. Pay special attention to: invoice number (Rechnungsnummer / Rechnung Nr. / Invoice #), the GROSS total (Bruttobetrag / Gesamtbetrag / Total), and the issue date labeled as 'Rechnungsdatum' / 'Invoice date' (NOT the payment-due date or delivery date). The correspondent is the issuer (top-of-document letterhead), not the recipient."
+        }
+        DocTypeCategory::Receipt => {
+            "This document is a receipt. The correspondent is the merchant. The document date is the transaction date. Amounts are typically inclusive of tax (Brutto / Total)."
+        }
+        DocTypeCategory::Contract => {
+            "This document is a contract. The correspondent is the issuing party (top of document); the recipient is usually the customer. The document date is the contract date (Vertragsdatum), not the signature date if those differ."
+        }
+        DocTypeCategory::Letter => {
+            "This document is a letter. The correspondent is the sender (top-of-document letterhead). The document date is the letter date (typically near the top right or after the sender block)."
+        }
+        DocTypeCategory::Certificate => {
+            "This document is a certificate. The correspondent is the issuing authority. The document date is the issue date (Ausgestellt am)."
+        }
+        DocTypeCategory::Notice => {
+            "This document is an official notice or Bescheid. Pay attention to Aktenzeichen / Geschäftszeichen and any Frist / deadline. The correspondent is the issuing authority. The document date is the notice date (Bescheid-Datum)."
+        }
+        DocTypeCategory::Medical => {
+            "This document is a medical letter, prescription, or report. The correspondent is the issuing institution or doctor (NOT the patient). The document date is typically the consultation, examination, or letter date. Do NOT confuse the patient's date of birth with the document date."
+        }
+        DocTypeCategory::Legal => {
+            "This document is a legal document or court correspondence. The correspondent is the court, lawyer, or authority. The document date is the issue date, not the hearing date if listed."
+        }
+        DocTypeCategory::Statement => {
+            "This document is an account statement. The correspondent is the issuer. The document date is the statement period end or statement issue date, NOT individual transaction dates within the body."
+        }
+        DocTypeCategory::BankStatement => {
+            "This document is a bank statement. The correspondent is the bank. The document date is the statement period end or statement issue date, NOT the dates of individual transactions inside the statement."
+        }
+        DocTypeCategory::Other => "",
+    }
+}
+
 /// Builds the consolidated metadata prompt — one LLM round-trip that yields up
 /// to six fields. Replaces six separate per-field calls with one structured
 /// JSON-output prompt; the worker fans the response into per-field review items
@@ -1015,6 +1141,11 @@ fn bounded_text(content: &str, max_chars: usize) -> String {
 ///   (the widest text budget) because the consolidated call reads the same
 ///   document once.
 /// * Sets `temperature = 0` for deterministic JSON output.
+/// Builds the consolidated metadata prompt — see the doc-comment on the
+/// shorter `prompt_for_metadata_v1` (legacy) for the field-by-field
+/// semantics. `doc_type_hint` is appended after the language context
+/// block (typically generated by `metadata_hint_for_doc_type` after a
+/// cheap pre-pass classifier) and is empty when no hint applies.
 #[allow(clippy::too_many_arguments)]
 pub fn prompt_for_metadata(
     content: &str,
@@ -1026,6 +1157,7 @@ pub fn prompt_for_metadata(
     language: &PromptLanguageContext,
     max_tags: usize,
     max_fields: usize,
+    doc_type_hint: &str,
 ) -> ChatRequest {
     let mut requested_keys: Vec<&'static str> = Vec::with_capacity(6);
     let mut shape_lines: Vec<String> = Vec::with_capacity(6);
@@ -1089,9 +1221,15 @@ pub fn prompt_for_metadata(
         ));
     }
 
+    let hint_block = if doc_type_hint.trim().is_empty() {
+        String::new()
+    } else {
+        format!("Document-type hint:\n{}\n\n", doc_type_hint.trim())
+    };
     let user_prompt = format!(
-        "{language_block}\nRequested keys: {keys}.\nOmit any key whose evidence is unclear or missing rather than guessing.\n\n{examples}\n{allowlists}\nDocument text:\n{doc}\n\nReturn strict JSON only in this exact shape (omit keys that have no evidence):\n{{\n{shape}\n}}",
+        "{language_block}\n{hint}Requested keys: {keys}.\nOmit any key whose evidence is unclear or missing rather than guessing.\n\n{examples}\n{allowlists}\nDocument text:\n{doc}\n\nReturn strict JSON only in this exact shape (omit keys that have no evidence):\n{{\n{shape}\n}}",
         language_block = language_context_block(language),
+        hint = hint_block,
         keys = requested_keys.join(", "),
         examples = METADATA_FEW_SHOT_EXAMPLES,
         allowlists = if allowlist_blocks.is_empty() {
@@ -1245,6 +1383,7 @@ mod tests {
             &language,
             5,
             10,
+            "",
         );
         // Closed-vocabulary allowlists for enabled fields must appear inline.
         assert!(request.user_prompt.contains("Beispiel GmbH"));

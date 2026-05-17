@@ -1789,6 +1789,28 @@ async fn process_metadata(
     let allowed_tags =
         archivist_core::prefilter_allowed_list(&content, &allowed_tags, allowed_list_max);
 
+    // v1.5.13: cheap pre-pass classifier to give the main metadata prompt a
+    // document-type-specific hint. Skips the call gracefully when content is
+    // empty or the classifier fails — main prompt then runs without the hint.
+    let doc_type_category = match classify_document_type(pool, config, settings, &content).await {
+        Ok(category) => category,
+        Err(error) => {
+            warn!(
+                document_id = job.paperless_document_id,
+                error = %error,
+                "doc-type pre-pass failed; falling back to generic metadata prompt"
+            );
+            archivist_ai::DocTypeCategory::Other
+        }
+    };
+    let doc_type_hint = archivist_ai::metadata_hint_for_doc_type(doc_type_category);
+    info!(
+        document_id = job.paperless_document_id,
+        category = doc_type_category.as_str(),
+        hint_chars = doc_type_hint.len(),
+        "classified document type for metadata prompt"
+    );
+
     let mut request = prompt_for_metadata(
         &content,
         &allowed_correspondents,
@@ -1799,6 +1821,7 @@ async fn process_metadata(
         &language,
         settings.tagging.max_tags,
         settings.fields.max_fields,
+        doc_type_hint,
     );
     let prompt_id = apply_active_prompt(pool, Stage::Metadata, &mut request).await?;
     let response = chat_for_stage(pool, config, settings, Stage::Metadata, request.clone()).await?;
@@ -3202,6 +3225,29 @@ async fn apply_active_prompt(
     };
     request.system_prompt = prompt.content;
     Ok(Some(prompt.id))
+}
+
+/// Cheap one-shot LLM pre-pass that classifies the document into one of
+/// the `DocTypeCategory` values. Used to pick a doc-type-specific hint
+/// snippet for the main metadata prompt (v1.5.13, Bundle C of milestone
+/// v1.6.0).
+///
+/// Reuses the metadata stage's provider+model so operators don't have to
+/// configure a separate classifier endpoint. Returns
+/// `DocTypeCategory::Other` on empty content or any classifier error so
+/// the main pipeline keeps draining; the caller logs the error.
+async fn classify_document_type(
+    pool: &DbPool,
+    config: &AppConfig,
+    settings: &RuntimeSettings,
+    content: &str,
+) -> Result<archivist_ai::DocTypeCategory> {
+    if content.trim().is_empty() {
+        return Ok(archivist_ai::DocTypeCategory::Other);
+    }
+    let request = archivist_ai::prompt_for_doc_type_classify(content);
+    let response = chat_for_stage(pool, config, settings, Stage::Metadata, request).await?;
+    Ok(archivist_ai::DocTypeCategory::parse(&response.text))
 }
 
 async fn chat_for_stage(
