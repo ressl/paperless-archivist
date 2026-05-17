@@ -349,6 +349,146 @@
     line-height: 1.55;
   }
 
+  /* Global mode toggle — controls which content blocks are visible
+     across the WHOLE doc. body.mode-simple shows .simple-only and hides
+     .nerd-only; body.mode-nerd is the inverse. Default in markup is
+     mode-simple. */
+  body.mode-simple .nerd-only { display: none !important; }
+  body.mode-nerd   .simple-only { display: none !important; }
+
+  .global-mode-bar {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--ink);
+    color: #fff;
+    padding: 10px 28px;
+    margin: -40px -28px 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border-bottom: 2px solid var(--teal);
+  }
+  .global-mode-bar .mode-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #d0dbe2;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .global-mode-bar .global-toggle {
+    display: inline-flex;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    padding: 3px;
+  }
+  .global-mode-bar .global-toggle label {
+    cursor: pointer;
+  }
+  .global-mode-bar .global-toggle input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .global-mode-bar .global-toggle label span {
+    display: inline-block;
+    padding: 6px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #cbd5dc;
+    transition: background 0.15s, color 0.15s;
+  }
+  .global-mode-bar .global-toggle label input:checked + span {
+    background: var(--teal);
+    color: #fff;
+  }
+  .global-mode-bar .mode-hint {
+    margin-left: auto;
+    font-size: 12px;
+    color: #a4b3bc;
+  }
+
+  /* Simple-mode content card */
+  .simple-overview {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 28px 32px;
+    margin: 28px 0;
+  }
+  .simple-overview h2 {
+    margin-top: 0;
+    border: none;
+    padding-bottom: 0;
+    color: var(--ink);
+  }
+  .simple-overview .lead {
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--text);
+    margin: 12px 0 22px;
+  }
+  .simple-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+    margin-top: 18px;
+  }
+  .simple-step {
+    background: var(--base);
+    border-left: 4px solid var(--teal);
+    border-radius: 0 8px 8px 0;
+    padding: 14px 18px;
+  }
+  .simple-step h3 {
+    margin: 0 0 6px;
+    font-size: 16px;
+    color: var(--ink);
+  }
+  .simple-step .num {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    line-height: 24px;
+    text-align: center;
+    background: var(--teal);
+    color: #fff;
+    border-radius: 50%;
+    font-size: 13px;
+    font-weight: 700;
+    margin-right: 8px;
+  }
+  .simple-step p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .simple-faq {
+    margin-top: 28px;
+  }
+  .simple-faq h3 {
+    margin-bottom: 8px;
+  }
+  .simple-faq details {
+    background: var(--base);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 10px;
+  }
+  .simple-faq details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .simple-faq details p {
+    margin: 10px 0 4px;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
   /* SVG common styles for the diagrams */
   .diagram svg text { font-family: Inter, sans-serif; fill: var(--ink); }
   .diagram svg .lbl { font-size: 13px; font-weight: 600; }
@@ -371,12 +511,32 @@
   .diagram svg .swim-label  { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; fill: var(--muted); }
 </style>
 </head>
-<body>
+<body class="mode-simple">
 <div class="container">
+
+<nav class="global-mode-bar" role="radiogroup" aria-label="Dokumenten-Modus">
+  <span class="mode-label">Modus:</span>
+  <div class="global-toggle">
+    <label>
+      <input type="radio" name="global-mode" value="simple" checked>
+      <span>Einfacher Erklär-Modus</span>
+    </label>
+    <label>
+      <input type="radio" name="global-mode" value="nerd">
+      <span>Nerd-Modus</span>
+    </label>
+  </div>
+  <span class="mode-hint simple-only">Du liest die Kurzfassung. Wechsel auf <em>Nerd-Modus</em> für DB-Tabellen, SQL, Code-Pfade, alle Prompts verbatim.</span>
+  <span class="mode-hint nerd-only">Du liest die vollständige technische Doku. Wechsel auf <em>Einfacher Erklär-Modus</em> für die User-Sicht in 5 Minuten.</span>
+</nav>
 
 <header class="doc-header">
   <h1>Paperless Archivist — Pipeline &amp; Prompts</h1>
-  <div class="sub">
+  <div class="sub simple-only">
+    Wie ein Dokument durch Paperless Archivist läuft — freundliche Übersicht für
+    Nutzer und Operatoren. Stand: <strong>v1.5.15</strong>.
+  </div>
+  <div class="sub nerd-only">
     Wie ein Dokument vom Eingang in Paperless-ngx bis zum angereicherten
     Eintrag im Archiv läuft. Stand: <strong>v1.5.15</strong> (Milestone v1.6.0
     "Prompt &amp; Process Quality" — 11/11 Issues abgeschlossen). Generiert am
@@ -384,7 +544,7 @@
   </div>
 </header>
 
-<div class="callout new">
+<div class="callout new nerd-only">
   <strong>Neu in v1.5.11 – v1.5.15:</strong>
   Metadata-Stage hat jetzt einen DB-editierbaren Prompt mit
   3 Few-Shot-Beispielen und kalibrierter Confidence-Skala (A),
@@ -396,20 +556,119 @@
   den jeweiligen Phasen unten und in der Prompts-Sektion.
 </div>
 
-<section class="diagram-card">
-  <div class="mode-toggle" role="radiogroup" aria-label="Diagramm-Modus">
-    <label>
-      <input type="radio" name="diagram-mode" value="simple" checked>
-      <span>Einfacher Erklär-Modus</span>
-    </label>
-    <label>
-      <input type="radio" name="diagram-mode" value="nerd">
-      <span>Nerd-Modus</span>
-    </label>
+<!-- =================== SIMPLE-MODE OVERVIEW =================== -->
+<section class="simple-overview simple-only">
+  <h2>Was macht Paperless Archivist?</h2>
+  <p class="lead">
+    Du legst Dokumente in Paperless ab. Sobald du einem Dokument den Tag
+    <code>ai-process</code> gibst, übernimmt Paperless Archivist im Hintergrund
+    und ergänzt automatisch <strong>Titel</strong>, <strong>Absender</strong>,
+    <strong>Datum</strong>, <strong>Dokumenttyp</strong> und <strong>Tags</strong>.
+    Dauer pro Dokument: etwa eine Minute.
+  </p>
+
+  <div class="simple-grid">
+    <div class="simple-step">
+      <h3><span class="num">1</span>Du markierst</h3>
+      <p>In Paperless hängst du den Tag <code>ai-process</code> an ein Dokument.
+      Das ist das Signal: "bitte automatisch verarbeiten."</p>
+    </div>
+    <div class="simple-step">
+      <h3><span class="num">2</span>Das System liest</h3>
+      <p>Ein KI-Modell scannt die PDF-Seiten und macht daraus reinen Text (OCR).
+      Schon gelesene Seiten kommen aus einem Cache — spart Zeit bei Wiederholungen.</p>
+    </div>
+    <div class="simple-step">
+      <h3><span class="num">3</span>Das System versteht</h3>
+      <p>Ein zweites KI-Modell schaut den Text an und extrahiert in einem Rutsch:
+      Titel · Absender · Datum · Dokumenttyp · Tags · weitere Felder.
+      Vorher klassifiziert es das Dokument grob (Rechnung? Arztbrief? Bescheid?) und
+      gibt dem Hauptmodell einen passenden Hinweis.</p>
+    </div>
+    <div class="simple-step">
+      <h3><span class="num">4</span>Das System prüft</h3>
+      <p>Jedes Feld bekommt eine Sicherheitsbewertung (Confidence). Datum wird
+      zusätzlich daran geprüft, ob es wirklich neben einer Phrase wie
+      "Rechnungsdatum" steht — nicht etwa Liefer- oder Zahldatum.
+      Optional fragt ein zweites Modell zum Quergleich Absender + Datum nochmal nach.</p>
+    </div>
+    <div class="simple-step">
+      <h3><span class="num">5</span>Das System schreibt zurück</h3>
+      <p>Im Vollautomatik-Modus (<code>full_auto</code>) landen die geprüften Werte
+      direkt in Paperless. Unsichere Vorschläge wandern in die <strong>Review-Liste</strong>,
+      wo du sie bestätigen oder ablehnen kannst. Tag <code>ai-processed</code> markiert
+      das Dokument als fertig.</p>
+    </div>
+    <div class="simple-step">
+      <h3><span class="num">6</span>Du behältst die Übersicht</h3>
+      <p>Im <strong>Inventar</strong> siehst du den Status jedes Dokuments
+      (OCR + Metadata pro Doc). In der <strong>Review-Liste</strong> die
+      offenen Vorschläge. Im optionalen <strong>Debug-Tab</strong> live, was
+      der Worker gerade tut.</p>
+    </div>
   </div>
 
-  <!-- =================== SIMPLE MODE =================== -->
-  <div class="diagram simple-diagram">
+  <div class="simple-faq">
+    <h3>Häufige Fragen</h3>
+    <details>
+      <summary>Was ist der Unterschied zwischen Auto-Modus und Review-Modus?</summary>
+      <p><strong>full_auto</strong>: Vorschläge landen direkt in Paperless, sofern
+      jedes Feld über seinem Confidence-Schwellwert liegt. <strong>manual_review</strong>:
+      jeder Vorschlag wandert in die Review-Liste und du entscheidest manuell.
+      <strong>auto_select_review</strong>: das System wählt selbst aus welche Docs
+      es verarbeitet, Ergebnisse aber zur manuellen Review. Einstellbar in Settings →
+      Workflow.</p>
+    </details>
+    <details>
+      <summary>Was passiert wenn das System unsicher ist?</summary>
+      <p>Für jedes Feld gibt's einen separaten Schwellwert. Titel reicht 60% Sicherheit;
+      Absender braucht 80%; Datum 90%. Wer drunter liegt geht in die Review-Liste
+      anstatt automatisch angewendet zu werden. Zusätzlich gibt's einen Datum-Anker-Check:
+      wenn das vorgeschlagene Datum nicht in der Nähe einer Phrase wie
+      "Rechnungsdatum" / "Issued on" steht, wird die Sicherheit zusätzlich
+      reduziert (verhindert dass Liefer- oder Fälligkeitsdatum als Dokumentdatum
+      ankommen).</p>
+    </details>
+    <details>
+      <summary>Wie viel kostet ein Dokument?</summary>
+      <p>Drei LLM-Aufrufe pro Dokument: einer für OCR pro Seite (kann aus Cache kommen),
+      einer für die Dokumenttyp-Klassifikation (~3-8s), einer für die Metadata-Extraktion
+      (~30-60s). Optional ein vierter Aufruf wenn der Two-Model-Konsens-Check aktiv ist.
+      Bei Verwendung lokaler Ollama-Modelle: nur Strom + Hardware-Auslastung.</p>
+    </details>
+    <details>
+      <summary>Was wenn etwas schief geht?</summary>
+      <p>Das System versucht automatisch Retries. Bei wiederholtem Ausfall siehst
+      du das Dokument in der Review-Liste mit Fehlermeldung. Auf dem Dashboard zeigt
+      das Banner "N stuck runs" wenn Pipeline-Runs feststecken. Im Debug-Tab kannst
+      du live mitschauen welche Jobs gerade laufen und welche Fehler aufgetreten sind.</p>
+    </details>
+    <details>
+      <summary>Kann ich die Prompts oder Schwellwerte anpassen?</summary>
+      <p>Ja. Die Sicherheits-Schwellwerte stehen in Settings → Metadata (UI in
+      Vorbereitung; aktuell via DB). Die Prompt-Texte für jede Stage stehen unter
+      Prompts. Du kannst sogar A/B-Tests fahren: zwei Prompt-Varianten gleichzeitig
+      aktiv, das System wählt für jedes Dokument deterministisch eine — Auswertung
+      anschließend via Audit-Log.</p>
+    </details>
+    <details>
+      <summary>Was wenn ich dasselbe Dokument zweimal scanne?</summary>
+      <p>Das System erkennt das (sha256 vom OCR-Text wird verglichen) und loggt ein
+      Audit-Event. Aktuell wird die Metadata trotzdem frisch berechnet — eine
+      spätere Version kann die Metadata vom Original klonen.</p>
+    </details>
+  </div>
+
+  <p class="diagram-caption" style="margin-top:24px;">
+    Visualisierung dazu siehst du direkt unten. Im Nerd-Modus oben rechts wechseln
+    bekommst du die volle Pipeline mit DB-Tabellen, SQL-Snippets, Code-Pfaden und
+    verbatim Prompts.
+  </p>
+</section>
+
+<section class="diagram-card">
+  <!-- =================== SIMPLE MODE DIAGRAM =================== -->
+  <div class="diagram simple-diagram simple-only">
     <svg viewBox="0 0 1100 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vereinfachter Pipeline-Flow">
       <defs>
         <marker id="arrow-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
@@ -519,7 +778,7 @@
   </div>
 
   <!-- =================== NERD MODE =================== -->
-  <div class="diagram nerd-diagram" hidden>
+  <div class="diagram nerd-diagram nerd-only">
     <svg viewBox="0 0 1240 1180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vollständiger Pipeline-Flow mit allen Sub-Phasen">
       <defs>
         <marker id="arrow-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
@@ -795,17 +1054,7 @@
   </div>
 </section>
 
-<script>
-  // Toggle between simple and nerd diagram modes.
-  document.querySelectorAll('input[name="diagram-mode"]').forEach((radio) => {
-    radio.addEventListener('change', (event) => {
-      const mode = event.target.value;
-      document.querySelector('.simple-diagram').hidden = (mode !== 'simple');
-      document.querySelector('.nerd-diagram').hidden = (mode !== 'nerd');
-    });
-  });
-</script>
-
+<div class="nerd-only">
 <nav class="toc">
   <h2>Inhalt</h2>
   <ol>
@@ -1687,6 +1936,31 @@ You are an OCR post-processor for Paperless-ngx. Correct obvious OCR recognition
     </tr>
   </tbody>
 </table>
+</div><!-- /.nerd-only -->
+
+<script>
+  // Global doc-mode toggle: body class flips between mode-simple and
+  // mode-nerd; CSS rules show/hide .simple-only and .nerd-only blocks.
+  // Persists across reloads via localStorage.
+  (function () {
+    const STORAGE_KEY = 'pipeline-doc-mode';
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved === 'simple' || saved === 'nerd') {
+      document.body.classList.remove('mode-simple', 'mode-nerd');
+      document.body.classList.add('mode-' + saved);
+      const radio = document.querySelector('input[name="global-mode"][value="' + saved + '"]');
+      if (radio) radio.checked = true;
+    }
+    document.querySelectorAll('input[name="global-mode"]').forEach((radio) => {
+      radio.addEventListener('change', (event) => {
+        const mode = event.target.value;
+        document.body.classList.remove('mode-simple', 'mode-nerd');
+        document.body.classList.add('mode-' + mode);
+        localStorage.setItem(STORAGE_KEY, mode);
+      });
+    });
+  })();
+</script>
 
 <footer class="doc-footer">
   Paperless Archivist v1.5.15 · Milestone v1.6.0 "Prompt &amp; Process Quality" 11/11 abgeschlossen ·
