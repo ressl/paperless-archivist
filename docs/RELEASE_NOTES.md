@@ -2,8 +2,35 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.18`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.19`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.19 — Hotfix: metadata stage failing on dedup query
+
+Production hotfix. Bundle D (v1.5.14, #117) added
+`find_metadata_dedup_source` to short-circuit the metadata stage when
+the same OCR content hash had already settled. The SQL query in that
+helper referenced two columns that do not exist on `ai_artifacts`:
+
+* `aa.paperless_document_id` — that column lives on `pipeline_runs`,
+  `jobs`, `review_items`, and `audit_events`, never on `ai_artifacts`.
+* `aa.normalized` — the column is named `normalized_output`.
+
+Because the dedup check runs on every non-empty content path of
+`process_metadata`, every metadata job in prod failed with `column
+aa.paperless_document_id does not exist` from the moment v1.5.14
+deployed. The throughput graph spike at 21:00 in the v1.5.18
+screenshot was real failures, not real success.
+
+Fix: rewrite the query to join `ai_artifacts` to `pipeline_runs` via
+`run_id` (the natural FK) and select `normalized_output`. Added a
+regression check to `migration_smoke.rs` that calls
+`find_metadata_dedup_source` against the empty fresh-migration DB —
+this exercises the SQL parser and column resolution against the real
+schema, so any future re-introduction of a non-existent column will
+fail in CI rather than in front of operators. `sqlx::query` (which
+this code uses) is not schema-checked at compile time; the smoke
+test now closes that gap for this query.
 
 ## v1.5.18 — Dashboard layout robustness + chart tooltip %
 

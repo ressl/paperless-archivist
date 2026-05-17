@@ -5638,10 +5638,12 @@ pub async fn find_metadata_dedup_source(
     let row = sqlx::query(
         r#"
         select di.paperless_document_id as source_id,
-               aa.normalized as metadata_payload
+               aa.normalized_output as metadata_payload
           from document_inventory di
+          join pipeline_runs pr
+            on pr.paperless_document_id = di.paperless_document_id
           join ai_artifacts aa
-            on aa.paperless_document_id = di.paperless_document_id
+            on aa.run_id = pr.id
            and aa.stage = 'metadata'
          where di.ocr_content_hash = $1
            and di.paperless_document_id <> $2

@@ -67,4 +67,19 @@ async fn migrations_apply_on_fresh_postgresql_18_database() {
         stage_priority_generated, "s",
         "jobs.stage_priority must be stored so its index is supported"
     );
+
+    // Regression: v1.5.14 Bundle D shipped find_metadata_dedup_source with a
+    // SQL query that referenced ai_artifacts.paperless_document_id and
+    // ai_artifacts.normalized — neither column exists. The query compiled
+    // (sqlx::query is not schema-checked) and only blew up at runtime in
+    // prod, failing every metadata job. Calling it here against the empty
+    // fresh DB exercises the SQL parser and column resolution against the
+    // real schema; if a future change re-introduces a non-existent column
+    // it will fail loudly in CI instead of in front of operators.
+    let dedup = archivist_db::find_metadata_dedup_source(&pool, 0, "deadbeef").await;
+    assert!(
+        dedup.is_ok(),
+        "find_metadata_dedup_source must parse against the live schema: {:?}",
+        dedup.err()
+    );
 }
