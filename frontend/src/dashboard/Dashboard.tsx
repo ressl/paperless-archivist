@@ -145,6 +145,19 @@ type StageMatrixRow = {
 
 type StageMatrixSortKey = 'stage' | 'queued' | 'running' | 'failed' | 'avg_ms' | 'p95_ms' | 'throughput_per_hour';
 
+// Recharts default tooltip displays raw numbers. For our composed charts the
+// `success_rate` / `completion_rate` series live on the right Y-axis as
+// percentages — surface the % suffix in the tooltip too so 100 reads as
+// 100% to match the axis label.
+const PERCENT_KEYS = new Set(['success_rate', 'completion_rate']);
+const chartTooltipFormatter = (value: unknown, _name: unknown, payload: { dataKey?: string | number | ((obj: unknown) => unknown) }) => {
+  const key = typeof payload?.dataKey === 'string' ? payload.dataKey : '';
+  if (PERCENT_KEYS.has(key) && typeof value === 'number') {
+    return `${value}%`;
+  }
+  return value as string | number;
+};
+
 function buildStageMatrix(stats: DashboardStats | null): StageMatrixRow[] {
   const stages = stats?.stage_status?.length ? stats.stage_status : defaultStageStatus;
   const usageByStage = new Map<string, { total_avg: number; count: number; max_p95: number }>();
@@ -1418,9 +1431,9 @@ export function Dashboard({
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="label" />
-                <YAxis yAxisId="count" allowDecimals={false} />
-                <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" />
-                <Tooltip />
+                <YAxis yAxisId="count" allowDecimals={false} width={56} />
+                <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" width={44} />
+                <Tooltip formatter={chartTooltipFormatter} />
                 <Legend />
                 <Area yAxisId="count" type="monotone" dataKey="jobs_created" name={t('dashboard.chart.created')} stroke="#28649b" fill="url(#pat-created)" />
                 <Area yAxisId="count" type="monotone" dataKey="jobs_succeeded" name={t('dashboard.chart.succeeded')} stroke="#147f7a" fill="url(#pat-succeeded)" />
@@ -1442,9 +1455,9 @@ export function Dashboard({
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="label" />
-                  <YAxis yAxisId="count" allowDecimals={false} />
-                  <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" />
-                  <Tooltip />
+                  <YAxis yAxisId="count" allowDecimals={false} width={56} />
+                  <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" width={44} />
+                  <Tooltip formatter={chartTooltipFormatter} />
                   <Legend />
                   <Area yAxisId="count" type="monotone" dataKey="open_backlog" name={t('dashboard.chart.open')} stroke="#a9782b" fill="url(#pat-backlog)" />
                   <Line yAxisId="rate" type="monotone" dataKey="completion_rate" name={t('dashboard.chart.completion_rate')} stroke="#147f7a" strokeWidth={2} dot={false} />

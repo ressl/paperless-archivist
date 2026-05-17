@@ -2,8 +2,48 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.17`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.18`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.18 — Dashboard layout robustness + chart tooltip %
+
+Cosmetic but operationally important. Prod screenshots at intermediate
+viewport widths (~1500–1900px after sidebar) showed the dashboard
+overflowing horizontally — the "Benötigt Aufmerksamkeit" alert button
+and the right-most KPI column were clipped — and at narrower widths
+the KPI cards stacked into a tall vertical strip while charts ran
+alongside, making the page essentially unreadable.
+
+### Layout
+
+* `.kpi-secondary` / `.kpi-tertiary` now use `repeat(auto-fit,
+  minmax(140px, 1fr))` instead of a rigid `repeat(4, …)`. Cards wrap
+  to the next row as space disappears instead of clipping.
+* `.kpi-grid` collapses to a single column at ≤1200px, where the
+  hero card + 4-col side grid no longer fit. Hero becomes a normal
+  card in that mode.
+* `.operations-strip` switches to auto-fit at ≤1400px so the 4
+  service cards reflow before the rigid `minmax(280px, 1.2fr) + 3 ×
+  minmax(200px, 1fr)` template overruns.
+* `.dashboard-ops-grid` (charts + live panel) collapses one breakpoint
+  earlier (1300px) so the live panel drops below the analytics column
+  instead of squeezing the throughput chart.
+* `.alert-item` is now `minmax(0, 1fr) auto auto` (was `1fr auto
+  auto`) so the alert text gets a real min-width of 0 and wraps. At
+  ≤720px the action button moves to its own row.
+* `.dashboard-heading` is now `flex-wrap: wrap`; long header actions
+  drop to a new row instead of pushing the alerts-bar off-screen.
+* `.workspace` gets `overflow-x: hidden` as a final guardrail so a
+  single mis-measured child can't horizontally scroll the whole page.
+
+### Charts
+
+* Throughput and backlog tooltips now display `success_rate` /
+  `completion_rate` with a `%` suffix to match the right-Y axis
+  label (prod tooltip showed "Erfolgsquote: 100" — read as "100" not
+  "100%").
+* Both Y-axes get explicit `width` (56 left, 44 right) so the axis
+  labels stop overlapping the plot area at narrow widths.
 
 ## v1.5.17 — Dashboard alert kinds: match the actual backend strings
 

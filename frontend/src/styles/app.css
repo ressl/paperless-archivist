@@ -373,6 +373,7 @@ th {
 .workspace {
   min-width: 0;
   padding: 24px;
+  overflow-x: hidden;
 }
 
 .page {
@@ -498,9 +499,15 @@ th {
 
 .dashboard-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  min-width: 0;
+}
+
+.dashboard-heading > * {
+  min-width: 0;
 }
 
 .dashboard-heading p {
@@ -542,8 +549,15 @@ th {
 
 .operations-strip {
   display: grid;
-  grid-template-columns: minmax(280px, 1.2fr) repeat(3, minmax(200px, 1fr));
+  grid-template-columns: minmax(260px, 1.2fr) repeat(3, minmax(200px, 1fr));
   gap: 12px;
+  min-width: 0;
+}
+
+@media (max-width: 1400px) {
+  .operations-strip {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
 }
 
 .autopilot-card,
@@ -964,13 +978,29 @@ th {
 
 .alert-item {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--paper);
+}
+
+.alert-item .alert-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .alert-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 6px;
+  }
+  .alert-item .alert-action {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
 }
 
 .alert-item.severity-critical {
@@ -1021,7 +1051,7 @@ th {
 
 .kpi-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 3fr;
+  grid-template-columns: minmax(220px, 1fr) minmax(0, 3fr);
   gap: 12px;
   align-items: stretch;
 }
@@ -1045,12 +1075,26 @@ th {
 .kpi-secondary,
 .kpi-tertiary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
+  min-width: 0;
 }
 
 .kpi-tertiary .metric strong {
   font-size: 22px;
+}
+
+/* When the hero column collapses next to the cards, allow the secondary
+   and tertiary cards to share a single auto-fit grid each. At intermediate
+   widths the rigid 4-column layout was overflowing the container; auto-fit
+   lets the cards wrap naturally to the next row. */
+@media (max-width: 1200px) {
+  .kpi-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kpi-grid > .metric.hero {
+    grid-row: auto;
+  }
 }
 
 .dry-run-banner {
@@ -1462,9 +1506,6 @@ th {
 }
 
 @media (max-width: 1100px) {
-  .dashboard-ops-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .live-processing-panel {
     position: static;
   }
@@ -1572,9 +1613,16 @@ th {
 
 .dashboard-ops-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 390px);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
   gap: 14px;
   align-items: start;
+  min-width: 0;
+}
+
+@media (max-width: 1300px) {
+  .dashboard-ops-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .dashboard-analytics {
