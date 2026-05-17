@@ -972,8 +972,37 @@ async fn process_ocr(
     let mut raw_responses = Vec::new();
     let mut models_used: Vec<String> = Vec::new();
     let mut any_fallback_used = false;
+    let mut pages_from_cache: u32 = 0;
     let started = std::time::Instant::now();
     for (index, page) in pages.iter().enumerate() {
+        // v1.5.14 (#116): try the OCR page cache before re-running the
+        // vision model. Hit key is (document_id, page_index,
+        // sha256-of-rendered-bytes). The hash captures both the
+        // rendering config and the document content, so re-renders with
+        // identical config produce identical hashes and cached text is
+        // safe to reuse. Re-renders with different config (e.g. higher
+        // DPI) get a new hash and the LLM runs as before.
+        let page_hash = hash_bytes(&page.bytes);
+        if let Some(cached_text) = archivist_db::lookup_ocr_page_cache(
+            pool,
+            job.paperless_document_id,
+            index as i32,
+            &page_hash,
+        )
+        .await?
+        {
+            pages_from_cache += 1;
+            info!(
+                document_id = job.paperless_document_id,
+                page_index = index,
+                "served OCR page from cache, skipped vision call"
+            );
+            models_used.push("(cache)".to_owned());
+            texts.push(cached_text);
+            raw_responses.push(json!({"cached": true}));
+            continue;
+        }
+
         let page_prompt = prompt
             .as_ref()
             .map(|prompt| {
@@ -1013,6 +1042,29 @@ async fn process_ocr(
             run_vision_with_fallback(pool, config, &provider, settings, job, index, request)
                 .await?;
         any_fallback_used |= fallback_used;
+
+        // Cache the successful page-level OCR so a future retry / re-trigger
+        // doesn't pay for the vision call again. Cache write is best-effort:
+        // a failure here is logged but does not fail the OCR job.
+        if let Err(cache_error) = archivist_db::upsert_ocr_page_cache(
+            pool,
+            job.paperless_document_id,
+            index as i32,
+            &page_hash,
+            &response.text,
+            Some(&provider.name),
+            Some(&model_used),
+        )
+        .await
+        {
+            warn!(
+                document_id = job.paperless_document_id,
+                page_index = index,
+                error = %cache_error,
+                "OCR page-cache write failed; not blocking the job"
+            );
+        }
+
         models_used.push(model_used);
         texts.push(response.text);
         raw_responses.push(response.raw_response);
@@ -1048,13 +1100,32 @@ async fn process_ocr(
                 "language_confidence": language_detection.confidence,
                 "language_source": language_detection.source,
                 "models_used_per_page": models_used,
-                "vision_model_fallback_used": any_fallback_used
+                "vision_model_fallback_used": any_fallback_used,
+                "pages_from_cache": pages_from_cache,
             })),
             duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
             storage_mode: settings.security.ai_artifact_storage,
         },
     )
     .await?;
+
+    // v1.5.14 (#117): record sha256(ocr_text) on the inventory row so the
+    // metadata stage can dedup against earlier documents with identical
+    // content. Best-effort write — a failure here doesn't fail OCR.
+    let content_hash = hash_bytes(text.as_bytes());
+    if let Err(error) = archivist_db::set_document_inventory_ocr_content_hash(
+        pool,
+        job.paperless_document_id,
+        &content_hash,
+    )
+    .await
+    {
+        warn!(
+            document_id = job.paperless_document_id,
+            error = %error,
+            "set_document_inventory_ocr_content_hash failed; dedup will not apply"
+        );
+    }
 
     let patch = DocumentPatch {
         content: Some(text),
@@ -1745,6 +1816,48 @@ async fn process_metadata(
 
     let document = paperless.get_document(job.paperless_document_id).await?;
     let content = document.content.clone().unwrap_or_default();
+
+    // v1.5.14 (#117): content-hash dedup. If another document with the
+    // same OCR-text sha256 has already had its metadata stage succeed,
+    // we log the match and emit an audit event but keep running the
+    // LLM call. This makes prod safe to enable: the dedup currently
+    // serves as a signal-only feature (operators see the hit, but the
+    // patch is still freshly LLM-derived). A future release can flip
+    // this to a hard skip + clone of the source patch once we have
+    // confidence the hash match is a reliable substitution.
+    if !content.trim().is_empty() {
+        let dedup_hash = hash_bytes(content.as_bytes());
+        if let Some((source_id, _payload)) =
+            archivist_db::find_metadata_dedup_source(pool, job.paperless_document_id, &dedup_hash)
+                .await?
+        {
+            info!(
+                document_id = job.paperless_document_id,
+                dedup_source = source_id,
+                "content-hash dedup match found (signal-only in v1.5.14)"
+            );
+            append_audit(
+                pool,
+                AuditEventInput {
+                    event_type: "workflow.metadata_dedup_match".to_owned(),
+                    actor_type: "worker".to_owned(),
+                    actor_id: None,
+                    run_id: Some(job.run_id),
+                    job_id: Some(job.id),
+                    paperless_document_id: Some(job.paperless_document_id),
+                    before: None,
+                    after: Some(json!({ "dedup_source": source_id })),
+                    metadata: Some(json!({ "trigger": "content_hash" })),
+                    outcome: "success".to_owned(),
+                    error_message: None,
+                    source_ip: None,
+                    user_agent: None,
+                },
+            )
+            .await?;
+        }
+    }
+
     let language = language_context_for_content(pool, settings, job, &content).await?;
 
     // Cheap pre-flight: short-circuit fields that Paperless already populated and the operator

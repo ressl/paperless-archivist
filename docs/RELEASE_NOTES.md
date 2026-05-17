@@ -2,8 +2,63 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.13`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.14`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.14 — Bundle D: OCR cache + content-hash dedup (and the v1.5.13 clippy hotfix)
+
+Closes issues #116 and #117 from milestone v1.6.0. Fourth of four
+bundles. v1.5.13 failed CI on a `clippy::doc_lazy_continuation` lint
+in the metadata-prompt doc comment; this release rolls that fix in
+along with Bundle D so production skips from v1.5.12 straight to
+v1.5.14.
+
+### 1. OCR page-level cache (#116)
+
+Migration `0022_ocr_page_cache.sql` adds an
+`ocr_page_cache (paperless_document_id, page_index, page_hash,
+ocr_text, provider, model, created_at)` table keyed on
+`(document_id, page_index, page_hash)`.
+
+`process_ocr` now computes `sha256(rendered_png_bytes)` for each page
+and looks it up before sending the page to the vision model. Hit →
+the cached text is reused; the vision model is not called. Miss →
+the vision model runs and the result is cached. Hashes capture both
+the rendering config and the document content, so re-renders with
+different DPI/render settings get a fresh hash and fresh LLM work.
+
+Cached pages are tracked per-job in the new
+`ai_artifacts.normalized.pages_from_cache` counter, so the dashboard
+can chart cache hit rate over time.
+
+Cache writes are best-effort — a failure in the cache layer is
+logged but does not fail the OCR job.
+
+### 2. Content-hash deduplication (#117, signal-only)
+
+Migration `0023_document_inventory_ocr_hash.sql` adds
+`document_inventory.ocr_content_hash` (text, indexed).
+
+After OCR succeeds, the worker writes
+`sha256(combined_ocr_text)` to this column. When the metadata stage
+starts for a document, it checks for another document with the same
+content hash whose `metadata_status` is `succeeded`. On a hit, it
+emits an audit event `workflow.metadata_dedup_match` with
+`dedup_source = <other_document_id>` and **continues** with a fresh
+LLM call.
+
+This is intentionally signal-only for v1.5.14 — operators see in the
+audit log that the system noticed a duplicate, but the metadata is
+still freshly derived. A future release can flip the behaviour to a
+hard skip + clone of the source patch once the hash-match approach
+has proven reliable in production.
+
+### 3. v1.5.13 clippy hotfix (rolled in)
+
+`prompt_for_metadata`'s doc comment had a stray continuation line
+that Rust 1.95's clippy flagged as `doc_lazy_continuation`. The
+bullet list is now correctly closed before the v1.5.13 addition,
+unblocking the CI rust:clippy job.
 
 ## v1.5.13 — Bundle C: Document-type-conditional prompts
 
