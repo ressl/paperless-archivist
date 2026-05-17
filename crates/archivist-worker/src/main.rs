@@ -30,9 +30,8 @@ use archivist_db::{
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
     named_entity_id_for_name, queue_missing_pipeline, rebalance_backfilled_metadata_priorities,
     record_dashboard_snapshot, record_document_language, requeue_vision_crashed_jobs,
-    reset_stuck_running_pipeline_runs, resolve_secret,
-    revert_review_to_pending_after_failed_drain, selector_document_budget,
-    tag_id_pairs_for_names, tag_ids_for_names, upsert_inventory_item,
+    reset_stuck_running_pipeline_runs, resolve_secret, revert_review_to_pending_after_failed_drain,
+    selector_document_budget, tag_id_pairs_for_names, tag_ids_for_names, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};

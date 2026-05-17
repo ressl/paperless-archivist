@@ -6513,9 +6513,7 @@ pub struct VisionNumCtxBumpSummary {
 /// vision model headroom for the page-token blow-up cases without forcing
 /// operators to dig through Settings to find the dial. Operators who have
 /// already set a higher value get left alone.
-pub async fn bump_vision_num_ctx_if_too_small(
-    pool: &DbPool,
-) -> Result<VisionNumCtxBumpSummary> {
+pub async fn bump_vision_num_ctx_if_too_small(pool: &DbPool) -> Result<VisionNumCtxBumpSummary> {
     const FLOOR: i64 = 32768;
     const PREVIOUS_FIX_CEILING: i64 = 16384;
 
@@ -6613,9 +6611,7 @@ pub struct StuckRunStatusFixSummary {
 /// trapped, AND this helper cleans up the historical residue. Targets:
 ///   * runs with status='running' AND no jobs.status='running' for that
 ///     run — flip to 'queued' if any queued job exists, else 'succeeded'.
-pub async fn reset_stuck_running_pipeline_runs(
-    pool: &DbPool,
-) -> Result<StuckRunStatusFixSummary> {
+pub async fn reset_stuck_running_pipeline_runs(pool: &DbPool) -> Result<StuckRunStatusFixSummary> {
     let mut tx = pool.begin().await?;
     // Two phases: (a) flip to 'queued' if there's at least one queued job for
     // the run that has no blocking prior-stage job; (b) otherwise (all jobs
