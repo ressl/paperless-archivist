@@ -725,6 +725,10 @@ export const api = {
   testProvider: () => request<{ ok: boolean; error?: string; details?: unknown }>('/api/model-providers/test', { method: 'POST' }),
   ollamaModels: (providerName: string) =>
     request<{ provider: string; models: OllamaInstalledModel[] }>(`/api/model-providers/${encodeURIComponent(providerName)}/models`, { method: 'POST' }),
+  aiRuntimeHints: (provider?: string) => {
+    const query = provider ? `?provider=${encodeURIComponent(provider)}` : '';
+    return request<AiRuntimeHints>(`/api/ai/runtime-hints${query}`);
+  },
   syncPaperless: () => request<Record<string, unknown>>('/api/paperless/sync-metadata', { method: 'POST' }),
   paperlessConsistency: () => request<PaperlessConsistencyResult>('/api/paperless/consistency'),
   reconcileCompletionTags: (input: { dry_run?: boolean; document_ids?: number[] }) =>

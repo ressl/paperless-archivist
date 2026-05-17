@@ -2523,6 +2523,146 @@ th {
   animation: spin 1s linear infinite;
 }
 
+/* --- Per-provider tuning disclosure (v1.6.2) ------------------------- */
+
+.provider-tuning {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--base);
+}
+
+.provider-tuning > summary {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.provider-tuning > summary:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.provider-tuning-body {
+  display: grid;
+  gap: 10px;
+  padding: 8px 12px 12px;
+}
+
+.provider-tuning-section {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.provider-tuning-section > summary {
+  padding: 6px 10px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-tuning-section[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.provider-tuning-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 10px;
+}
+
+.provider-tuning-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.provider-tuning-field > span {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.provider-tuning-reset {
+  margin: 0 10px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: start;
+  justify-self: start;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.provider-tuning-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.provider-tuning-meta dt {
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.provider-tuning-meta dd {
+  margin: 0;
+  color: var(--ink);
+}
+
+.provider-tuning-meta ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.status-dot.ok {
+  background: var(--teal);
+}
+
+.status-dot.down {
+  background: var(--danger);
+}
+
+.connection-feedback.warning {
+  border-color: #d8c082;
+  background: #fbf6e6;
+  color: var(--ink-2);
+}
+
+.connection-feedback.warning header {
+  color: #7b5d20;
+}
+
+.ollama-kubectl-example {
+  margin: 6px 0 0;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-x: auto;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
