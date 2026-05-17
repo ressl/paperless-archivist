@@ -1415,7 +1415,7 @@ pub async fn get_active_prompt(pool: &DbPool, stage: Stage) -> Result<Option<Pro
         r#"
         select id, stage, name, version, content, output_schema, active, created_at
           from prompts
-         where stage = $1 and active = true
+         where stage = $1 and active = true and experiment_group is null
          order by created_at desc
          limit 1
         "#,
@@ -1424,6 +1424,66 @@ pub async fn get_active_prompt(pool: &DbPool, stage: Stage) -> Result<Option<Pro
     .fetch_optional(pool)
     .await?;
     row.map(prompt_from_row).transpose()
+}
+
+/// A/B-experiment-aware variant of [`get_active_prompt`].
+///
+/// When two active prompts exist for the same (stage, name) — one with
+/// `experiment_group='A'`, one with `experiment_group='B'` — picks the
+/// variant deterministically from `run_id`. Falls back to the
+/// experiment-group-less default (i.e. `get_active_prompt`'s row)
+/// when no A/B pair is configured. Returns the variant marker
+/// alongside the prompt so the worker can stamp it into
+/// `ai_artifacts.normalized.prompt_experiment_group` for downstream
+/// accuracy analysis.
+pub async fn get_active_prompt_with_experiment(
+    pool: &DbPool,
+    stage: Stage,
+    run_id: Uuid,
+) -> Result<Option<(PromptRecord, Option<String>)>> {
+    let rows = sqlx::query(
+        r#"
+        select id, stage, name, version, content, output_schema, active, created_at,
+               experiment_group
+          from prompts
+         where stage = $1 and active = true
+         order by case when experiment_group is null then 0 else 1 end,
+                  experiment_group nulls first,
+                  created_at desc
+        "#,
+    )
+    .bind(stage.to_string())
+    .fetch_all(pool)
+    .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let mut default_row: Option<PgRow> = None;
+    let mut group_a: Option<PgRow> = None;
+    let mut group_b: Option<PgRow> = None;
+    for row in rows {
+        let group: Option<String> = row.try_get("experiment_group").ok();
+        match group.as_deref() {
+            None if default_row.is_none() => default_row = Some(row),
+            Some("A") => group_a = Some(row),
+            Some("B") => group_b = Some(row),
+            _ => {}
+        }
+    }
+
+    let bucket = run_id.as_u128() % 2;
+    match (group_a, group_b, default_row) {
+        (Some(a), Some(b), _) => {
+            // Both groups configured → deterministic 50/50 split on run_id.
+            let (row, label) = if bucket == 0 { (a, "A") } else { (b, "B") };
+            Ok(Some((prompt_from_row(row)?, Some(label.to_owned()))))
+        }
+        (_, _, Some(row)) => Ok(Some((prompt_from_row(row)?, None))),
+        (Some(row), None, None) => Ok(Some((prompt_from_row(row)?, Some("A".to_owned())))),
+        (None, Some(row), None) => Ok(Some((prompt_from_row(row)?, Some("B".to_owned())))),
+        (None, None, None) => Ok(None),
+    }
 }
 
 pub async fn list_prompt_usage(pool: &DbPool) -> Result<Vec<PromptUsageRecord>> {

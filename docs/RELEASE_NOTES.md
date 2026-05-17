@@ -2,8 +2,74 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.14`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.15`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.15 — Bundle E: Consensus + A/B prompt experiments (last bundle of v1.6.0)
+
+Final bundle of the v1.6.0 "Prompt & Process Quality" milestone — closes
+issues #118 and #119 from milestone 15. Backend-only release; UI surfaces
+for both features are deferred to a follow-up. With this release every
+sub-issue in the milestone is closed.
+
+### 1. Two-model consensus for high-stakes fields (#118)
+
+`AiSettings` gains `consensus_secondary_text_model: Option<String>`
+(default `None`) and `consensus_date_tolerance_days: i64` (default 1).
+When the secondary model is configured AND the runtime mode is
+`full_auto` AND `dry_run` is off, `process_metadata` runs a focused
+secondary call against that model asking ONLY for `correspondent` and
+`document_date`. The answer is parsed via
+`archivist_ai::parse_consensus_answer`.
+
+Comparison rules:
+
+* correspondent — case-insensitive exact match on the name. Empty
+  secondary answer is "no opinion" (NOT a disagreement).
+* document_date — both sides parsed as ISO; absolute day difference
+  must be ≤ `consensus_date_tolerance_days`. Empty / un-parsable
+  secondary answer is "no opinion".
+
+On disagreement the disagreeing field is wiped from the primary
+suggestion so it falls into review instead of being auto-applied. An
+audit event `workflow.consensus_disagreement` is emitted with the
+secondary model name, both candidate values, and which fields
+disagreed. A `ConsensusOutcome` is also stamped into
+`ai_artifacts.normalized.consensus` so dashboards can chart the
+disagreement rate over time.
+
+Operators opt in by setting `ai.consensus_secondary_text_model` to a
+text model name different from the primary (e.g. primary
+`qwen3-paperless:8b`, secondary `qwen3:8b`). The setting round-trips
+through the existing `/api/settings` endpoint with the new fields
+typed as optional in `frontend/src/api/client.ts` (a separate UI
+surface for it lands in a follow-up).
+
+### 2. A/B prompt experiment groups (#119, backend)
+
+Migration `0024_prompts_experiment_group.sql` adds an
+`experiment_group text` column to `prompts` constrained to
+`{NULL, 'A', 'B'}`. The "one active per (stage, name)" unique partial
+index is replaced with one that partitions by experiment_group so each
+of `(NULL, 'A', 'B')` can hold one active row independently.
+
+New DB helper `get_active_prompt_with_experiment(stage, run_id)`
+returns the prompt + experiment-group label. When both `A` and `B`
+rows are active, it picks deterministically with `run_id.as_u128() %
+2`. With only `NULL` active, it returns the default (current
+behaviour). With only `A` or only `B` active, it returns that one
+labelled accordingly.
+
+New worker helper `apply_active_prompt_with_experiment` uses it on
+the metadata stage. The chosen label is stamped into
+`ai_artifacts.normalized.prompt_experiment_group` so a future
+dashboard panel can compute per-variant approval rates without
+re-running the LLM.
+
+Backend-only for v1.5.15: operators need to insert the `B` variant
+manually (or via a follow-up Prompts UI extension) before the A/B
+routing kicks in. With only the v1.5.11-seeded `metadata` default
+prompt present, behaviour is unchanged.
 
 ## v1.5.14 — Bundle D: OCR cache + content-hash dedup (and the v1.5.13 clippy hotfix)
 

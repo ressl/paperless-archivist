@@ -1936,11 +1936,60 @@ async fn process_metadata(
         settings.fields.max_fields,
         doc_type_hint,
     );
-    let prompt_id = apply_active_prompt(pool, Stage::Metadata, &mut request).await?;
+    let (prompt_id, prompt_experiment_group) =
+        apply_active_prompt_with_experiment(pool, Stage::Metadata, job.run_id, &mut request)
+            .await?;
     let response = chat_for_stage(pool, config, settings, Stage::Metadata, request.clone()).await?;
-    let suggestion =
+    let mut suggestion =
         parse_metadata_suggestion(&response.text).unwrap_or_else(|_| MetadataSuggestion::default());
-    let normalized = serde_json::to_value(&suggestion)?;
+
+    // v1.5.15 (#118): two-model consensus check. When
+    // `ai.consensus_secondary_text_model` is set AND we're heading for an
+    // auto-apply (full_auto, not dry_run), fire a focused secondary call
+    // against the configured cross-check model asking ONLY for
+    // correspondent + document_date. Drop disagreeing fields from the
+    // primary suggestion so they fall into review instead of being
+    // silently auto-applied with an unverified value.
+    let consensus_enabled = settings
+        .ai
+        .consensus_secondary_text_model
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|m| !m.is_empty())
+        && settings.workflow.mode.auto_apply_validated_suggestions()
+        && !settings.workflow.dry_run;
+    let consensus_outcome = if consensus_enabled {
+        Some(
+            run_consensus_check(
+                pool,
+                config,
+                settings,
+                job,
+                &content,
+                &allowed_correspondents,
+                &language,
+                &mut suggestion,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let mut normalized = serde_json::to_value(&suggestion)?;
+    if let Some(outcome) = consensus_outcome.as_ref()
+        && let Some(object) = normalized.as_object_mut()
+    {
+        object.insert("consensus".to_owned(), serde_json::to_value(outcome)?);
+    }
+    if let Some(label) = prompt_experiment_group.as_ref()
+        && let Some(object) = normalized.as_object_mut()
+    {
+        object.insert(
+            "prompt_experiment_group".to_owned(),
+            serde_json::Value::String(label.clone()),
+        );
+    }
 
     insert_ai_artifact(
         pool,
@@ -2422,6 +2471,164 @@ async fn process_metadata(
         )
         .await
     }
+}
+
+/// Outcome of the two-model consensus cross-check. Captured for the
+/// metadata `ai_artifacts.normalized` payload so dashboards can chart
+/// the disagreement rate without re-parsing audit events.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct ConsensusOutcome {
+    secondary_model: String,
+    correspondent_primary: Option<String>,
+    correspondent_secondary: Option<String>,
+    correspondent_disagreed: bool,
+    date_primary: Option<String>,
+    date_secondary: Option<String>,
+    date_disagreed: bool,
+}
+
+/// Two-model consensus cross-check for high-stakes fields.
+///
+/// Runs a focused secondary LLM call asking ONLY for `correspondent`
+/// and `document_date`. When the secondary answer disagrees with the
+/// primary suggestion's value, that specific field is wiped from the
+/// primary `MetadataSuggestion` so it falls into review instead of
+/// being auto-applied. Disagreements are audited via
+/// `workflow.consensus_disagreement`.
+///
+/// Comparison rules:
+/// * correspondent — case-insensitive exact match on the resolved name.
+///   Empty secondary answer means "no opinion", which is NOT a
+///   disagreement.
+/// * document_date — both sides parsed as ISO; absolute day difference
+///   must be ≤ `settings.ai.consensus_date_tolerance_days`. Empty or
+///   un-parsable secondary answer means "no opinion".
+#[allow(clippy::too_many_arguments)]
+async fn run_consensus_check(
+    pool: &DbPool,
+    config: &AppConfig,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    content: &str,
+    allowed_correspondents: &[String],
+    language: &archivist_ai::PromptLanguageContext,
+    suggestion: &mut MetadataSuggestion,
+) -> Result<ConsensusOutcome> {
+    let secondary_model = settings
+        .ai
+        .consensus_secondary_text_model
+        .clone()
+        .unwrap_or_default();
+    let mut outcome = ConsensusOutcome {
+        secondary_model: secondary_model.clone(),
+        ..Default::default()
+    };
+    if secondary_model.trim().is_empty() {
+        return Ok(outcome);
+    }
+
+    // Build the focused 2-field prompt and override the model for the
+    // call. Reuses the metadata stage's provider (and therefore the
+    // operator's authentication) so no separate endpoint config is
+    // needed.
+    let mut request =
+        archivist_ai::prompt_for_consensus_check(content, allowed_correspondents, language);
+    let mut provider = match provider_for_stage(settings, Stage::Metadata, false) {
+        Ok(p) => p,
+        Err(error) => {
+            warn!(
+                document_id = job.paperless_document_id,
+                error = %error,
+                "consensus skipped: provider_for_stage(metadata) failed"
+            );
+            return Ok(outcome);
+        }
+    };
+    provider.model = secondary_model.clone();
+    request.model = secondary_model.clone();
+    request.num_ctx = ollama_num_ctx_for_provider(&provider, settings.ai.ollama_text_num_ctx);
+
+    let response = match chat_with_provider(pool, config, &provider, request).await {
+        Ok(r) => r,
+        Err(error) => {
+            warn!(
+                document_id = job.paperless_document_id,
+                secondary_model = %secondary_model,
+                error = %error,
+                "consensus secondary call failed; treating as no-opinion"
+            );
+            return Ok(outcome);
+        }
+    };
+    let answer = archivist_ai::parse_consensus_answer(&response.text);
+
+    // Correspondent comparison
+    if let Some(primary) = suggestion.correspondent.clone() {
+        outcome.correspondent_primary = Some(primary.name.clone());
+        outcome.correspondent_secondary = Some(answer.correspondent.clone());
+        let primary_norm = primary.name.trim().to_lowercase();
+        let secondary_norm = answer.correspondent.trim().to_lowercase();
+        if !secondary_norm.is_empty() && primary_norm != secondary_norm {
+            outcome.correspondent_disagreed = true;
+            suggestion.correspondent = None;
+        }
+    }
+
+    // Date comparison
+    if let Some(primary) = suggestion.document_date.clone() {
+        outcome.date_primary = Some(primary.date.clone());
+        outcome.date_secondary = Some(answer.document_date.clone());
+        let primary_parsed = chrono::NaiveDate::parse_from_str(&primary.date, "%Y-%m-%d").ok();
+        let secondary_parsed =
+            chrono::NaiveDate::parse_from_str(answer.document_date.trim(), "%Y-%m-%d").ok();
+        if let (Some(p), Some(s)) = (primary_parsed, secondary_parsed) {
+            let tolerance = settings.ai.consensus_date_tolerance_days.max(0);
+            let diff = (p - s).num_days().abs();
+            if diff > tolerance {
+                outcome.date_disagreed = true;
+                suggestion.document_date = None;
+            }
+        }
+    }
+
+    if outcome.correspondent_disagreed || outcome.date_disagreed {
+        info!(
+            document_id = job.paperless_document_id,
+            secondary_model = %secondary_model,
+            correspondent_disagreed = outcome.correspondent_disagreed,
+            date_disagreed = outcome.date_disagreed,
+            "consensus disagreement — dropping disagreeing fields from auto-apply"
+        );
+        append_audit(
+            pool,
+            AuditEventInput {
+                event_type: "workflow.consensus_disagreement".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: Some(job.run_id),
+                job_id: Some(job.id),
+                paperless_document_id: Some(job.paperless_document_id),
+                before: None,
+                after: Some(json!({
+                    "secondary_model": secondary_model,
+                    "correspondent_disagreed": outcome.correspondent_disagreed,
+                    "correspondent_primary": outcome.correspondent_primary,
+                    "correspondent_secondary": outcome.correspondent_secondary,
+                    "date_disagreed": outcome.date_disagreed,
+                    "date_primary": outcome.date_primary,
+                    "date_secondary": outcome.date_secondary,
+                })),
+                metadata: Some(json!({ "trigger": "consensus_check" })),
+                outcome: "success".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+
+    Ok(outcome)
 }
 
 async fn handle_patch_result(
@@ -3338,6 +3545,26 @@ async fn apply_active_prompt(
     };
     request.system_prompt = prompt.content;
     Ok(Some(prompt.id))
+}
+
+/// v1.5.15 (#119) experiment-aware variant of `apply_active_prompt`.
+/// Picks the A or B variant deterministically by `run_id`, falls
+/// back to the experiment-group-less default. Returns
+/// `(prompt_id, experiment_label)` so the caller can stamp the label
+/// into the normalized output for downstream accuracy analysis.
+async fn apply_active_prompt_with_experiment(
+    pool: &DbPool,
+    stage: Stage,
+    run_id: Uuid,
+    request: &mut ChatRequest,
+) -> Result<(Option<Uuid>, Option<String>)> {
+    let Some((prompt, label)) =
+        archivist_db::get_active_prompt_with_experiment(pool, stage, run_id).await?
+    else {
+        return Ok((None, None));
+    };
+    request.system_prompt = prompt.content;
+    Ok((Some(prompt.id), label))
 }
 
 /// Cheap one-shot LLM pre-pass that classifies the document into one of

@@ -1118,6 +1118,23 @@ pub struct AiSettings {
     /// without the memory cost of the vision ceiling.
     #[serde(default = "default_ollama_text_num_ctx")]
     pub ollama_text_num_ctx: i64,
+    /// Two-model consensus check for the high-stakes metadata fields
+    /// (`correspondent` and `document_date`). When non-empty, after the
+    /// primary metadata LLM call has returned a suggestion, the worker
+    /// issues a second, focused call to THIS model asking only for
+    /// `correspondent` + `document_date`. If both fields agree
+    /// (correspondent: case-insensitive exact match; date: within
+    /// `consensus_date_tolerance_days`) the primary suggestion is kept;
+    /// on disagreement the disagreeing field(s) are dropped from the
+    /// auto-apply path and routed to manual review, with an audit
+    /// event `workflow.consensus_disagreement` recording both values.
+    /// Empty disables the consensus check entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_secondary_text_model: Option<String>,
+    /// Date tolerance (in days) for the consensus comparison. Default 1.
+    /// 0 = require exact-day match.
+    #[serde(default)]
+    pub consensus_date_tolerance_days: i64,
 }
 
 impl Default for AiSettings {
@@ -1134,6 +1151,8 @@ impl Default for AiSettings {
             requeue_vision_crashes_on_startup: true,
             ollama_vision_num_ctx: default_ollama_vision_num_ctx(),
             ollama_text_num_ctx: default_ollama_text_num_ctx(),
+            consensus_secondary_text_model: None,
+            consensus_date_tolerance_days: 1,
         }
     }
 }
