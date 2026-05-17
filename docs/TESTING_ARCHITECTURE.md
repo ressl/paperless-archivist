@@ -137,6 +137,31 @@ After deploying v1.5.21:
    field should explain why (low confidence, unknown choice, etc.) —
    this is the operator-facing value of the feature.
 
+### Second worked example — per-provider tuning (v1.5.22)
+
+Same four-layer pattern, slightly different shape. The
+`ProviderTuning` block is partly a settings-shape change (no SQL) and
+partly a runtime-behaviour change (worker live-reload). What plugs
+into which layer:
+
+* **Unit** — `RuntimeSettings::effective_tuning()` is a pure
+  function. Table-driven tests cover: tuning present → uses tuning;
+  tuning absent → falls through to global; no matching active
+  provider → first enabled; OCR-stage exception; serde-regression
+  for a settings blob with no `tuning` field at all. The
+  worker-pool resize is tested via a harness that swaps the
+  underlying `RuntimeSettings` between `claim_jobs` cycles and
+  asserts the pool grows / shrinks without aborting in-flight work.
+* **Integration** — no new SQL, so `migration_smoke` is unchanged.
+  The serde-regression is the upgrade-path check in this milestone.
+* **Contract** — `AiRuntimeHints` + `AiLoadedModel` go in
+  `openapi.yaml`; the frontend's typed `aiRuntimeHints(provider)`
+  client is the contract-side gate.
+* **Manual E2E** — the release-notes "verify in prod" recipe is the
+  authoritative check that tuning the worker_concurrency live in
+  the UI actually changes `paperless_archivist_jobs_running` in
+  `/metrics`. Operator-level smoke.
+
 ## Known gaps
 
 - **No automated E2E**. Tracked as a follow-up epic. Until then,

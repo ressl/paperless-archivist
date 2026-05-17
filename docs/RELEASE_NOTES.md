@@ -2,8 +2,100 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.21`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.22`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.22 — Per-provider tuning profiles (milestone v1.6.2)
+
+Closes GitLab milestone v1.6.2 (issues #125–#129). Lets an operator
+keep a "Local Ollama on a small GPU" configuration and an "OpenAI
+cloud API" configuration in the same DB at the same time, switchable
+by flipping `ai.default_provider`. The tuning knobs that previously
+lived as global env or as scattered `ai.*` / `workflow.*` / `ocr.*` /
+`metadata.*` fields move into a per-provider `tuning:` block. The
+active default provider's tuning wins; unset fields fall through to
+the existing globals (backwards compatible — existing settings rows
+load unchanged via serde defaults).
+
+### Data model
+
+`AiProviderSettings` gains `tuning: ProviderTuning`:
+
+* **Performance** — `worker_concurrency`, `consensus_secondary_text_model`,
+  `consensus_date_tolerance_days`, `text_num_ctx`, `vision_num_ctx`
+* **Resource caps** — `ocr_page_limit`, `hourly_document_limit`,
+  `daily_document_limit`
+* **Quality thresholds** — `metadata_confidence_threshold`,
+  `title_*`, `correspondent_*`, `document_type_*`, `document_date_*`,
+  `tags_*`, `fields_*` (each `Option<f32>`), `max_tags`,
+  `allowed_list_max`
+
+Every default constructor (`ollama_default`, `openai_default`,
+`anthropic_default`, `ollama_cloud_default`,
+`openai_compatible_default`) ships sensible presets per the
+`docs/PROVIDER_TUNING_PLAN.md` table — Ollama gets `worker_concurrency=2,
+text_num_ctx=4096, ocr_page_limit=2, hourly/daily=200/2000`; OpenAI
+gets `worker_concurrency=8, consensus_secondary='gpt-4o-mini',
+ocr_page_limit=8`; etc.
+
+### Resolution
+
+New `RuntimeSettings::effective_tuning()` returns the fully-resolved
+values. For OCR there's also `effective_tuning_for_stage(Stage::Ocr)`
+because the OCR-stage provider may differ from the default. 17
+call-sites across `archivist-worker`, `archivist-api`, and
+`archivist-db` were migrated to read through `effective_tuning()`
+instead of the old globals.
+
+### Worker live-reload
+
+`ARCHIVIST_WORKER_CONCURRENCY` becomes a **hard upper cap**. The live
+value comes from `effective_tuning.worker_concurrency`. On every
+`claim_jobs` cycle the worker recomputes
+`target = min(env_cap, settings.worker_concurrency).max(1)`. Pool
+upscales by spawning additional tasks; downscale lets surplus tasks
+exit *after* their current job — never aborts in-flight work. Audit
+event `workflow.concurrency_changed` is emitted on transitions with
+`{from, to, env_cap}` so post-hoc you can see when an operator
+tuned.
+
+### Ollama runtime hints
+
+New `GET /api/ai/runtime-hints?provider=<name>` (requires
+`read_settings`). For Ollama providers it calls `/api/version` and
+`/api/ps` and returns the live state: version, loaded models with
+VRAM, reachability. `num_parallel` / `max_loaded_models` /
+`keep_alive` are explicitly `null` because those values live in the
+Ollama pod's env, not on Archivist — the `hint` field carries the
+copy-pasteable `kubectl set env deploy/ollama …` example.
+Non-Ollama providers return a stub with a kind-appropriate hint.
+
+### Settings UI
+
+Each provider card in Settings → AI grows a collapsible **Tuning**
+disclosure with three sub-blocks (Performance / Resource caps /
+Quality thresholds), each with a per-block "Reset to defaults"
+button that writes the kind-appropriate preset. For Ollama providers
+only, a fourth read-only **"Ollama server hints"** panel polls
+`/api/ai/runtime-hints` on mount and shows the loaded model + VRAM +
+version + the kubectl-edit warning box. 32 new i18n keys × 7 locales
+(parity 605 keys / 0 missing).
+
+### How to verify in prod
+
+1. Settings → AI → Ollama provider → open Tuning. Adjust
+   `worker_concurrency` from 2 to 1. Save.
+2. Within ~5 seconds, watch the worker drop to 1 concurrent job (in
+   `/metrics`, `paperless_archivist_jobs_running`). The audit tab
+   shows `workflow.concurrency_changed {from: 2, to: 1}`.
+3. Reset back to default (button writes 2). Pool grows again.
+4. Open the Ollama hints panel — should show the loaded model
+   and VRAM matching `kubectl exec -n <ns> deploy/ollama --
+   nvidia-smi`.
+5. Add an OpenAI provider (or just edit its tuning row), set it as
+   `default_provider`. `worker_concurrency` jumps to 8, the
+   consensus secondary model becomes `gpt-4o-mini`, throughput caps
+   lift.
 
 ## v1.5.21 — Metadata-trace diagnostic + test architecture (milestone v1.6.1)
 
