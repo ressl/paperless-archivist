@@ -2,8 +2,58 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.10`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.11`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.11 — Bundle A: Prompt-quality improvements
+
+First of four bundles in the v1.6.0 "Prompt & Process Quality" milestone.
+Three sub-issues from milestone 15: #109 (Metadata-prompt in DB),
+#110 (few-shot examples), #111 (confidence calibration).
+
+### 1. Metadata system prompt lifted into the `prompts` table (#109)
+
+Migration `0021_metadata_prompt_seed.sql` inserts the consolidated
+Metadata-Stage system prompt as a normal `prompts` row
+(`stage='metadata'`, `name='default'`, `version=1`, `active=true`). Until
+now there was no row for the consolidated stage, so
+`apply_active_prompt` fell through to the hardcoded
+`DEFAULT_METADATA_SYSTEM_PROMPT` constant. Operators can now edit the
+prompt from the Prompts UI without a redeploy. Migration is idempotent
+via `ON CONFLICT (stage, name, version) DO NOTHING`.
+
+### 2. Confidence calibration guidance (#111)
+
+`DEFAULT_METADATA_SYSTEM_PROMPT` (and the DB-seeded twin) now ends with:
+
+> Calibrate confidence on this scale: 0.95 or higher only when the value
+> is literally printed and unambiguous; 0.70 to 0.94 when inferred from
+> clear context; below 0.70 when uncertain. Round to two decimals.
+
+LLMs left to their own devices return 0.99 for everything; this gives
+them a graded scale so downstream confidence thresholds become
+meaningful.
+
+### 3. Three German few-shot examples (#110)
+
+`prompt_for_metadata` now embeds three concrete `INPUT (OCR) → OUTPUT
+(JSON)` examples before the document text: a German invoice (DITech-
+style), a medical letter (Rezept), and an official notice (FernUni
+Hagen Bescheid). The examples deliberately cover only the four
+high-stakes fields (title, document_type, correspondent, document_date)
+and OMIT tags/fields — the shape-lines block built per call already
+documents tags/fields syntax when those features are enabled, so
+duplicating them in the few-shot would pollute the expected output
+shape on docs with tags/fields disabled.
+
+Confidence values in the examples follow the calibration scale,
+giving the LLM a concrete demonstration alongside the abstract rule.
+
+Expected effect: better date extraction (clear separation of
+Rechnungsdatum from Versanddatum / scan date), more confident
+correspondent matching, and tighter title formatting on common doc
+types. To be measured against the production review-approval rate
+once the v1.5.11 image rolls out.
 
 ## v1.5.10 — Inventory search-bar readability fixes
 
