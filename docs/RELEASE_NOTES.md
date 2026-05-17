@@ -2,8 +2,26 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.16`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.17`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.17 — Dashboard alert kinds: match the actual backend strings
+
+Hotfix for v1.5.16. The "Fehler untersuchen" click handler matched
+alert kind `recent_failures`, but the real kind emitted by
+`needs_attention_items` in archivist-db is `provider_error` — so the
+new banner reported "Unbekannter Alert-Typ: provider_error" instead
+of navigating.
+
+* Renamed the `provider_error` branch to match the backend string.
+  Click on a "N recent failure(s)" alert now navigates to Inventory
+  with `?has_error=true` as intended.
+* Added navigation for the other two non-write-action kinds:
+  `dry_run_active` and `quota_low` now jump to the Settings tab so
+  operators can disable dry-run or raise the limit.
+* `App.tsx` cross-tab navigator now always rewrites the query string
+  (using `''` when no search is provided) instead of leaving stale
+  `?has_error=true` behind when navigating away from Inventory.
 
 ## v1.5.16 — Dashboard actions wired + Review Auto-Fix
 

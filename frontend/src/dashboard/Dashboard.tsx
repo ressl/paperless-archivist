@@ -1206,10 +1206,10 @@ export function Dashboard({
   ];
 
   const onAlertAction = (item: NeedsAttentionItem) => {
-    // The "Fehler untersuchen" / recent_failures alert is a navigation
-    // affordance, not a privileged write — always wire it up if a navigator
-    // was passed in, regardless of WriteRuns.
-    if (item.kind === 'recent_failures') {
+    // Navigation-only alerts: never require WriteRuns, just hop to the
+    // relevant tab. Backend kinds come from needs_attention_items in
+    // archivist-db (provider_error, dry_run_active, quota_low).
+    if (item.kind === 'provider_error') {
       if (onNavigate) {
         onNavigate('inventory', '?has_error=true');
       } else {
@@ -1217,10 +1217,17 @@ export function Dashboard({
       }
       return;
     }
-    // Other recovery actions require WriteRuns server-side; surface a clear
-    // error instead of silently doing nothing when the user lacks the
-    // permission (v1.5.16 — previously a silent early return looked like a
-    // dead button).
+    if (item.kind === 'dry_run_active' || item.kind === 'quota_low') {
+      if (onNavigate) {
+        onNavigate('settings');
+      } else {
+        setError(t('dashboard.alert.navigate_unavailable'));
+      }
+      return;
+    }
+    // Recovery actions (stuck_runs, stale_leases) hit privileged write
+    // endpoints — surface a clear error when the user lacks WriteRuns
+    // instead of silently no-oping (v1.5.16 fix).
     if (!canWriteRuns) {
       setError(t('dashboard.alert.permission_denied'));
       return;
@@ -1233,8 +1240,6 @@ export function Dashboard({
         void run(setRecoveryBusy, setError, recoverStaleLeases, t);
         break;
       default:
-        // Unknown alert kind — surface as error so it doesn't silently
-        // disappear (catches future server-side additions without UI work).
         setError(t('dashboard.alert.unknown_kind', { kind: item.kind }));
         break;
     }

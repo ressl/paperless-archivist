@@ -140,14 +140,15 @@ export function App() {
                 // Cross-tab navigation. Push the optional query-string into
                 // window.history before switching tabs so the destination
                 // component (e.g. Inventory) reads its filter state from
-                // window.location.search on mount.
-                if (search !== undefined) {
-                  window.history.replaceState(
-                    null,
-                    '',
-                    `${window.location.pathname}${search}${window.location.hash}`
-                  );
-                }
+                // window.location.search on mount. If no search is provided,
+                // wipe any stale query string so the destination tab starts
+                // clean.
+                const nextSearch = search ?? '';
+                window.history.replaceState(
+                  null,
+                  '',
+                  `${window.location.pathname}${nextSearch}${window.location.hash}`
+                );
                 if (
                   nextTab === 'dashboard' || nextTab === 'inventory' ||
                   nextTab === 'chat' || nextTab === 'reviews' ||
