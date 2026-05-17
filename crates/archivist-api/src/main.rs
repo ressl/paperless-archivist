@@ -2949,34 +2949,66 @@ fn enrich_provider_sparklines(
 }
 
 #[derive(Debug, Deserialize)]
-struct PageQuery {
+struct InventoryQueryParams {
     limit: Option<i64>,
     offset: Option<i64>,
+    id: Option<i32>,
+    q: Option<String>,
+    ocr_status: Option<String>,
+    metadata_status: Option<String>,
+    run_status: Option<String>,
+    tag: Option<String>,
+    not_tag: Option<String>,
+    lang: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    has_error: Option<bool>,
+    needs_review: Option<bool>,
+}
+
+fn split_csv(value: Option<String>) -> Vec<String> {
+    value
+        .map(|s| {
+            s.split(',')
+                .map(|part| part.trim().to_owned())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn inventory(
     State(state): State<AppState>,
     auth: Authenticated,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<InventoryQueryParams>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::ReadInventory)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let offset = query.offset.unwrap_or(0).max(0);
+    let inventory_query = archivist_db::InventoryQuery {
+        id: query.id,
+        q: query.q,
+        ocr_status: split_csv(query.ocr_status),
+        metadata_status: split_csv(query.metadata_status),
+        run_status: split_csv(query.run_status),
+        tags_include: split_csv(query.tag),
+        tags_exclude: split_csv(query.not_tag),
+        language: query.lang.filter(|s| !s.is_empty()),
+        date_from: query.date_from.filter(|s| !s.is_empty()),
+        date_to: query.date_to.filter(|s| !s.is_empty()),
+        has_error: query.has_error,
+        needs_review: query.needs_review,
+    };
     let settings = get_runtime_settings(&state.pool).await?;
     let (items, total) = tokio::try_join!(
         async {
-            list_inventory(&state.pool, limit, offset)
+            list_inventory(&state.pool, &inventory_query, limit, offset)
                 .await?
                 .into_iter()
                 .map(|item| inventory_item_with_debug(item, &settings))
                 .collect::<Result<Vec<_>>>()
         },
-        async {
-            let count: i64 = sqlx::query_scalar("select count(*)::bigint from document_inventory")
-                .fetch_one(&state.pool)
-                .await?;
-            Ok::<i64, anyhow::Error>(count)
-        }
+        async { archivist_db::count_inventory(&state.pool, &inventory_query).await }
     )?;
     Ok(Json(json!({
         "items": items,

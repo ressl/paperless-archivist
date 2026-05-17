@@ -412,6 +412,23 @@ export type DashboardLiveStatus = {
   needs_attention: NeedsAttentionItem[];
 };
 
+export type InventoryQueryParams = {
+  limit?: number;
+  offset?: number;
+  id?: number;
+  q?: string;
+  ocr_status?: string[];
+  metadata_status?: string[];
+  run_status?: string[];
+  tag?: string[];
+  not_tag?: string[];
+  lang?: string;
+  date_from?: string;
+  date_to?: string;
+  has_error?: boolean;
+  needs_review?: boolean;
+};
+
 export type InventoryItem = {
   paperless_document_id: number;
   title?: string | null;
@@ -689,10 +706,26 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch)
     }),
-  inventory: (offset: number = 0, limit: number = 500) =>
-    request<{ items: InventoryItem[]; total: number; offset: number; limit: number }>(
-      `/api/inventory?limit=${limit}&offset=${offset}`
-    ),
+  inventory: (params: InventoryQueryParams = {}) => {
+    const qs = new URLSearchParams();
+    qs.set('limit', String(params.limit ?? 500));
+    qs.set('offset', String(params.offset ?? 0));
+    if (params.id != null) qs.set('id', String(params.id));
+    if (params.q) qs.set('q', params.q);
+    if (params.ocr_status && params.ocr_status.length) qs.set('ocr_status', params.ocr_status.join(','));
+    if (params.metadata_status && params.metadata_status.length) qs.set('metadata_status', params.metadata_status.join(','));
+    if (params.run_status && params.run_status.length) qs.set('run_status', params.run_status.join(','));
+    if (params.tag && params.tag.length) qs.set('tag', params.tag.join(','));
+    if (params.not_tag && params.not_tag.length) qs.set('not_tag', params.not_tag.join(','));
+    if (params.lang) qs.set('lang', params.lang);
+    if (params.date_from) qs.set('date_from', params.date_from);
+    if (params.date_to) qs.set('date_to', params.date_to);
+    if (params.has_error != null) qs.set('has_error', String(params.has_error));
+    if (params.needs_review != null) qs.set('needs_review', String(params.needs_review));
+    return request<{ items: InventoryItem[]; total: number; offset: number; limit: number }>(
+      `/api/inventory?${qs.toString()}`
+    );
+  },
   queueOcr: () => request<{ queued: number }>('/api/batches/ocr', { method: 'POST' }),
   queueTags: () => request<{ queued: number }>('/api/batches/tags', { method: 'POST' }),
   queueFull: () => request<{ queued: number }>('/api/batches/full', { method: 'POST' }),

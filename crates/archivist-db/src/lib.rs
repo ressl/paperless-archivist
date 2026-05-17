@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgPoolOptions, PgRow};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 pub type DbPool = PgPool;
@@ -3625,28 +3625,144 @@ fn bucket_label(
     }
 }
 
+/// Filter shape for `list_inventory` / `count_inventory`. All fields are
+/// optional; the empty default matches every row. Built up by the
+/// `/api/inventory` handler from query-string parameters and passed through
+/// to the SQL layer, which translates the populated fields into WHERE
+/// clauses dynamically.
+#[derive(Debug, Clone, Default)]
+pub struct InventoryQuery {
+    pub id: Option<i32>,
+    /// ILIKE match on `title` OR `original_file_name`. The handler wraps
+    /// the user-supplied string with `%…%` before binding, so callers
+    /// pass plain text.
+    pub q: Option<String>,
+    pub ocr_status: Vec<String>,
+    pub metadata_status: Vec<String>,
+    pub run_status: Vec<String>,
+    /// All listed tag names must be present on `current_tags` (AND).
+    pub tags_include: Vec<String>,
+    /// None of the listed tag names may be present on `current_tags`.
+    pub tags_exclude: Vec<String>,
+    pub language: Option<String>,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
+    pub has_error: Option<bool>,
+    pub needs_review: Option<bool>,
+}
+
+impl InventoryQuery {
+    fn is_empty(&self) -> bool {
+        self.id.is_none()
+            && self.q.as_ref().is_none_or(|s| s.trim().is_empty())
+            && self.ocr_status.is_empty()
+            && self.metadata_status.is_empty()
+            && self.run_status.is_empty()
+            && self.tags_include.is_empty()
+            && self.tags_exclude.is_empty()
+            && self.language.is_none()
+            && self.date_from.is_none()
+            && self.date_to.is_none()
+            && self.has_error.is_none()
+            && self.needs_review.is_none()
+    }
+}
+
+/// Push the `WHERE` predicates derived from an [`InventoryQuery`] onto a
+/// `QueryBuilder`. The caller is expected to have appended the table
+/// reference (and any leading clauses) before calling. Each pushed
+/// predicate is prefixed with ` AND ` so the caller's clause acts as the
+/// implicit `1=1`. Returns early without writing anything when the query
+/// is empty.
+fn push_inventory_filters<'q>(builder: &mut QueryBuilder<'q, Postgres>, query: &'q InventoryQuery) {
+    if let Some(id) = query.id {
+        builder.push(" and paperless_document_id = ").push_bind(id);
+    }
+    if let Some(text) = query.q.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let like = format!("%{}%", text);
+        builder
+            .push(" and (title ilike ")
+            .push_bind(like.clone())
+            .push(" or original_file_name ilike ")
+            .push_bind(like)
+            .push(")");
+    }
+    if !query.ocr_status.is_empty() {
+        builder
+            .push(" and ocr_status = any(")
+            .push_bind(&query.ocr_status)
+            .push(")");
+    }
+    if !query.metadata_status.is_empty() {
+        builder
+            .push(" and metadata_status = any(")
+            .push_bind(&query.metadata_status)
+            .push(")");
+    }
+    if !query.run_status.is_empty() {
+        builder
+            .push(" and coalesce(current_run_status, '') = any(")
+            .push_bind(&query.run_status)
+            .push(")");
+    }
+    if !query.tags_include.is_empty() {
+        builder
+            .push(" and current_tags @> ")
+            .push_bind(&query.tags_include);
+    }
+    if !query.tags_exclude.is_empty() {
+        builder
+            .push(" and not (current_tags && ")
+            .push_bind(&query.tags_exclude)
+            .push(")");
+    }
+    if let Some(lang) = query.language.as_ref().filter(|s| !s.is_empty()) {
+        builder
+            .push(" and detected_language = ")
+            .push_bind(lang.clone());
+    }
+    if let Some(from) = query.date_from.as_ref().filter(|s| !s.is_empty()) {
+        builder
+            .push(" and document_date >= ")
+            .push_bind(from.clone());
+    }
+    if let Some(to) = query.date_to.as_ref().filter(|s| !s.is_empty()) {
+        builder.push(" and document_date <= ").push_bind(to.clone());
+    }
+    if let Some(has_error) = query.has_error {
+        if has_error {
+            builder.push(" and last_error is not null");
+        } else {
+            builder.push(" and last_error is null");
+        }
+    }
+    if let Some(needs_review) = query.needs_review {
+        builder.push(" and needs_review = ").push_bind(needs_review);
+    }
+}
+
 pub async fn list_inventory(
     pool: &DbPool,
+    query: &InventoryQuery,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<DocumentInventoryItem>> {
-    let rows = sqlx::query(
-        r#"
-        select paperless_document_id, title, original_file_name, current_tags, ocr_status,
-               metadata_status, tagging_status, title_status, correspondent_status,
-               document_type_status, document_date_status, fields_status, current_run_status,
-               last_run_id, last_error, next_required_stage, needs_review, complete,
-               document_date, detected_language, detected_language_confidence,
-               detected_language_source, last_seen_at
-          from document_inventory
-         order by paperless_document_id desc
-         limit $1 offset $2
-        "#,
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "select paperless_document_id, title, original_file_name, current_tags, ocr_status, \
+         metadata_status, tagging_status, title_status, correspondent_status, \
+         document_type_status, document_date_status, fields_status, current_run_status, \
+         last_run_id, last_error, next_required_stage, needs_review, complete, \
+         document_date, detected_language, detected_language_confidence, \
+         detected_language_source, last_seen_at \
+         from document_inventory where 1=1",
+    );
+    push_inventory_filters(&mut builder, query);
+    builder
+        .push(" order by paperless_document_id desc limit ")
+        .push_bind(limit)
+        .push(" offset ")
+        .push_bind(offset);
+    let rows = builder.build().fetch_all(pool).await?;
 
     rows.into_iter()
         .map(|row| {
@@ -3677,6 +3793,26 @@ pub async fn list_inventory(
             })
         })
         .collect()
+}
+
+/// Count inventory rows matching the same filters as `list_inventory`. Used
+/// by `/api/inventory` to compute `total` so the frontend's "Showing N of M"
+/// counter reflects the FILTERED total, not the unfiltered table size.
+pub async fn count_inventory(pool: &DbPool, query: &InventoryQuery) -> Result<i64> {
+    if query.is_empty() {
+        // Fast path for the unfiltered case — avoids the QueryBuilder
+        // overhead and lets Postgres serve the answer from the relation
+        // count cache rather than scanning.
+        let count: i64 = sqlx::query_scalar("select count(*)::bigint from document_inventory")
+            .fetch_one(pool)
+            .await?;
+        return Ok(count);
+    }
+    let mut builder =
+        QueryBuilder::<Postgres>::new("select count(*)::bigint from document_inventory where 1=1");
+    push_inventory_filters(&mut builder, query);
+    let count: i64 = builder.build_query_scalar().fetch_one(pool).await?;
+    Ok(count)
 }
 
 pub async fn create_document_chat_session(

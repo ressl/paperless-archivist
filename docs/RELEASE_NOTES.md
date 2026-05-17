@@ -2,8 +2,59 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.8`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.9`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.9 — Inventory search + filters
+
+The Inventory page goes from a flat scrolling list of 5957 rows to a
+filterable, searchable view, so operators can find the one document they
+care about without paging through everything.
+
+### Backend (`archivist-db` + `archivist-api`)
+
+`list_inventory` and a new `count_inventory` take an `InventoryQuery`
+struct and build WHERE clauses dynamically via `sqlx::QueryBuilder`.
+Empty `InventoryQuery` short-circuits to the original full-table count
+path so the unfiltered case stays cheap. `/api/inventory` accepts these
+query-string parameters, all optional:
+
+| Param | Meaning |
+|---|---|
+| `id` | Exact match on `paperless_document_id`. |
+| `q` | ILIKE substring on `title` OR `original_file_name`. |
+| `ocr_status`, `metadata_status`, `run_status` | Comma-separated lists; row matches any value. |
+| `tag`, `not_tag` | Comma-separated tag names; AND-include and any-of-exclude. |
+| `lang` | Exact match on `detected_language`. |
+| `date_from`, `date_to` | Range on `document_date` (YYYY-MM-DD). |
+| `has_error` | `true` requires `last_error is not null`, `false` is the inverse. |
+| `needs_review` | Boolean on `document_inventory.needs_review`. |
+
+`total` in the response reflects the filtered total so the "Showing N of M"
+counter is accurate under filters.
+
+### Frontend (Inventory page rewrite)
+
+* **Smart quick-search bar** at the top — numeric input filters on
+  `paperless_document_id`, free text filters on `q` (title +
+  original_file_name).
+* **Preset chips** for the four common triage cases: Failed OCR,
+  Waiting for review, Has error, Missing metadata. Clicking toggles the
+  underlying filter, click again to clear.
+* **Advanced filter panel** (collapsible) with multi-select for the
+  three status fields, CSV inputs for tag include / exclude,
+  language dropdown, date-from / date-to date pickers, and checkboxes
+  for has_error / needs_review.
+* **URL state sync** — every active filter is serialized into
+  `window.location.search` via `history.replaceState`. Bookmarks and
+  shareable links work; reload preserves the filter state.
+* "Showing N of M" + "Load more" continue to work and reflect the
+  filtered total.
+* Empty filtered result shows a "No documents match the current filters"
+  row rather than a confusing blank table.
+
+Adds ~20 new i18n keys (`inventory.search_*`, `inventory.chip.*`,
+`inventory.filter.*`) across the seven supported locales.
 
 ## v1.5.8 — Opt-in Debug console with live activity feed
 
