@@ -2441,13 +2441,17 @@ pub async fn get_workflow_safety_status(
 ) -> Result<WorkflowSafetyStatus> {
     let hourly_used = auto_selector_runs_since(pool, "1 hour").await?;
     let daily_used = auto_selector_runs_since(pool, "1 day").await?;
+    // Throughput caps follow the active provider's tuning when set, falling
+    // back to the global workflow.* values otherwise. See
+    // `RuntimeSettings::effective_tuning`.
+    let tuning = settings.effective_tuning();
     Ok(WorkflowSafetyStatus {
         paused: settings.workflow.paused,
         dry_run: settings.workflow.dry_run,
-        hourly_document_limit: settings.workflow.hourly_document_limit,
-        daily_document_limit: settings.workflow.daily_document_limit,
-        hourly_remaining: remaining_budget(settings.workflow.hourly_document_limit, hourly_used),
-        daily_remaining: remaining_budget(settings.workflow.daily_document_limit, daily_used),
+        hourly_document_limit: tuning.hourly_document_limit,
+        daily_document_limit: tuning.daily_document_limit,
+        hourly_remaining: remaining_budget(tuning.hourly_document_limit, hourly_used),
+        daily_remaining: remaining_budget(tuning.daily_document_limit, daily_used),
     })
 }
 

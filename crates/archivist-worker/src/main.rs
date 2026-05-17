@@ -93,11 +93,14 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     // visible. The actual wire-up happens per-call in `chat_for_stage` /
     // OCR vision construction.
     match get_runtime_settings(&pool).await {
-        Ok(settings) => info!(
-            ollama_vision_num_ctx = settings.ai.ollama_vision_num_ctx,
-            ollama_text_num_ctx = settings.ai.ollama_text_num_ctx,
-            "setting vision options.num_ctx and text options.num_ctx for Ollama calls"
-        ),
+        Ok(settings) => {
+            let tuning = settings.effective_tuning();
+            info!(
+                ollama_vision_num_ctx = tuning.vision_num_ctx,
+                ollama_text_num_ctx = tuning.text_num_ctx,
+                "setting vision options.num_ctx and text options.num_ctx for Ollama calls"
+            );
+        }
         Err(error) => warn!(error = %error, "failed to read Ollama num_ctx settings at startup"),
     }
 
@@ -951,7 +954,7 @@ async fn process_ocr(
     let pages = render_document_pages(
         &original,
         document.original_file_name.as_deref(),
-        settings.ocr.page_limit,
+        settings.effective_tuning_for_stage(Stage::Ocr).ocr_page_limit,
     )
     .await?;
     if pages.is_empty() {
@@ -1031,7 +1034,10 @@ async fn process_ocr(
         let request = VisionRequest {
             model: provider.model.clone(),
             temperature: 0.0,
-            num_ctx: ollama_num_ctx_for_provider(&provider, settings.ai.ollama_vision_num_ctx),
+            num_ctx: ollama_num_ctx_for_provider(
+                &provider,
+                settings.effective_tuning_for_stage(Stage::Ocr).vision_num_ctx,
+            ),
             prompt: page_prompt,
             images: vec![ImageInput {
                 mime_type: page.mime_type.clone(),
@@ -1176,7 +1182,12 @@ async fn process_tags(
     let content = document.content.unwrap_or_default();
     let allowed = list_allowed_tag_names(pool).await?;
     let language = language_context_for_content(pool, settings, job, &content).await?;
-    let mut request = prompt_for_tags(&content, &allowed, settings.tagging.max_tags, &language);
+    let mut request = prompt_for_tags(
+        &content,
+        &allowed,
+        settings.effective_tuning().max_tags as usize,
+        &language,
+    );
     let prompt_id = apply_active_prompt(pool, Stage::Tags, &mut request).await?;
     let response = chat_for_stage(pool, config, settings, Stage::Tags, request.clone()).await?;
     let suggestion = parse_tag_suggestion(&response.text).unwrap_or(TagSuggestion {
@@ -1374,7 +1385,11 @@ async fn process_choice(
     } else {
         choice_kind
     };
-    match validate_choice_suggestion(suggestion, &allowed, settings.metadata.confidence_threshold) {
+    match validate_choice_suggestion(
+        suggestion,
+        &allowed,
+        settings.effective_tuning().metadata_confidence_threshold,
+    ) {
         Ok(valid) => {
             let id = named_entity_id_for_name(pool, table, &valid.name)
                 .await?
@@ -1510,7 +1525,9 @@ async fn process_document_date(
 
     match validate_document_date_suggestion(
         suggestion,
-        settings.metadata.document_date_confidence_threshold,
+        settings
+            .effective_tuning()
+            .document_date_confidence_threshold,
     ) {
         Ok(valid) => {
             let patch = DocumentPatch {
@@ -1894,7 +1911,7 @@ async fn process_metadata(
     // frequency so the LLM gets the most relevant candidates and the prompt
     // stays under the token budget. Field names are typically a short curated
     // list so they bypass filtering.
-    let allowed_list_max = settings.metadata.allowed_list_max;
+    let allowed_list_max = settings.effective_tuning().allowed_list_max as usize;
     let allowed_correspondents =
         archivist_core::prefilter_allowed_list(&content, &allowed_correspondents, allowed_list_max);
     let allowed_document_types =
@@ -1932,7 +1949,7 @@ async fn process_metadata(
         &allowed_field_names,
         &enabled,
         &language,
-        settings.tagging.max_tags,
+        settings.effective_tuning().max_tags as usize,
         settings.fields.max_fields,
         doc_type_hint,
     );
@@ -1951,7 +1968,7 @@ async fn process_metadata(
     // primary suggestion so they fall into review instead of being
     // silently auto-applied with an unverified value.
     let consensus_enabled = settings
-        .ai
+        .effective_tuning()
         .consensus_secondary_text_model
         .as_deref()
         .map(str::trim)
@@ -2042,7 +2059,7 @@ async fn process_metadata(
         match validate_title_suggestion(
             title.clone(),
             160,
-            settings.metadata.effective_title_threshold(),
+            settings.effective_tuning().title_confidence_threshold,
         ) {
             Ok(valid) => {
                 composite_patch.title = Some(valid.title.clone());
@@ -2070,7 +2087,9 @@ async fn process_metadata(
             match validate_choice_suggestion(
                 choice.clone(),
                 &allowed_document_types,
-                settings.metadata.effective_document_type_threshold(),
+                settings
+                    .effective_tuning()
+                    .document_type_confidence_threshold,
             ) {
                 Ok(valid) => {
                     let id =
@@ -2112,7 +2131,9 @@ async fn process_metadata(
             match validate_choice_suggestion(
                 choice.clone(),
                 &allowed_correspondents,
-                settings.metadata.effective_correspondent_threshold(),
+                settings
+                    .effective_tuning()
+                    .correspondent_confidence_threshold,
             ) {
                 Ok(valid) => {
                     let id =
@@ -2180,7 +2201,9 @@ async fn process_metadata(
             }
             match validate_document_date_suggestion(
                 adjusted_date,
-                settings.metadata.effective_document_date_threshold(),
+                settings
+                    .effective_tuning()
+                    .document_date_confidence_threshold,
             ) {
                 Ok(valid) => {
                     composite_patch.created = Some(valid.date.clone());
@@ -2223,7 +2246,7 @@ async fn process_metadata(
         // metadata override so process_metadata stays decoupled from how the
         // legacy per-field tag stage thresholds work.
         let mut tagging_for_meta = settings.tagging.clone();
-        tagging_for_meta.confidence_threshold = settings.metadata.effective_tags_threshold();
+        tagging_for_meta.confidence_threshold = settings.effective_tuning().tags_confidence_threshold;
         match validate_tag_suggestion(
             tags.clone(),
             &allowed_tags,
@@ -2284,7 +2307,7 @@ async fn process_metadata(
             fields.clone(),
             &allowed_field_names,
             settings.fields.max_fields,
-            settings.metadata.effective_fields_threshold(),
+            settings.effective_tuning().fields_confidence_threshold,
         ) {
             Ok(valid) => {
                 let names = valid
@@ -2514,8 +2537,8 @@ async fn run_consensus_check(
     language: &archivist_ai::PromptLanguageContext,
     suggestion: &mut MetadataSuggestion,
 ) -> Result<ConsensusOutcome> {
-    let secondary_model = settings
-        .ai
+    let tuning = settings.effective_tuning();
+    let secondary_model = tuning
         .consensus_secondary_text_model
         .clone()
         .unwrap_or_default();
@@ -2546,7 +2569,7 @@ async fn run_consensus_check(
     };
     provider.model = secondary_model.clone();
     request.model = secondary_model.clone();
-    request.num_ctx = ollama_num_ctx_for_provider(&provider, settings.ai.ollama_text_num_ctx);
+    request.num_ctx = ollama_num_ctx_for_provider(&provider, tuning.text_num_ctx);
 
     let response = match chat_with_provider(pool, config, &provider, request).await {
         Ok(r) => r,
@@ -2582,7 +2605,7 @@ async fn run_consensus_check(
         let secondary_parsed =
             chrono::NaiveDate::parse_from_str(answer.document_date.trim(), "%Y-%m-%d").ok();
         if let (Some(p), Some(s)) = (primary_parsed, secondary_parsed) {
-            let tolerance = settings.ai.consensus_date_tolerance_days.max(0);
+            let tolerance = tuning.consensus_date_tolerance_days.max(0);
             let diff = (p - s).num_days().abs();
             if diff > tolerance {
                 outcome.date_disagreed = true;
@@ -3603,17 +3626,19 @@ async fn chat_for_stage(
     // (OpenAI / Anthropic / OpenAI-compatible) ignore the field — see
     // `build_ollama_chat_payload`. 8k covers the 16k-char metadata prompts
     // with comfortable headroom over Ollama's 4096-token default.
-    request.num_ctx = ollama_num_ctx_for_provider(&provider, settings.ai.ollama_text_num_ctx);
+    request.num_ctx =
+        ollama_num_ctx_for_provider(&provider, settings.effective_tuning().text_num_ctx);
     chat_with_provider(pool, config, &provider, request).await
 }
 
-/// Returns `Some(num_ctx)` when the provider is the local Ollama runner, else
-/// `None`. Wrapping the lookup keeps the call sites symmetrical between the
-/// vision and chat paths and ensures we never push the override onto remote
-/// providers (which would either ignore it or reject the field).
-fn ollama_num_ctx_for_provider(provider: &StageProvider, configured: i64) -> Option<i64> {
+/// Returns `Some(num_ctx)` when the provider is the local Ollama runner AND
+/// a value is configured, else `None`. Wrapping the lookup keeps the call
+/// sites symmetrical between the vision and chat paths and ensures we never
+/// push the override onto remote providers (which would either ignore it or
+/// reject the field).
+fn ollama_num_ctx_for_provider(provider: &StageProvider, configured: Option<i64>) -> Option<i64> {
     match provider.kind {
-        AiProviderKind::Ollama => Some(configured),
+        AiProviderKind::Ollama => configured,
         _ => None,
     }
 }

@@ -1510,7 +1510,7 @@ async fn build_prompt_test_chat_request(
             Ok(prompt_for_tags(
                 sample_text,
                 &allowed,
-                settings.tagging.max_tags,
+                settings.effective_tuning().max_tags as usize,
                 &language,
             ))
         }
@@ -1722,7 +1722,9 @@ async fn parse_prompt_test_output(
             match extract_issue_date_suggestion(text, &language) {
                 Some(suggestion) => match validate_document_date_suggestion(
                     suggestion.clone(),
-                    settings.metadata.document_date_confidence_threshold,
+                    settings
+                        .effective_tuning()
+                        .document_date_confidence_threshold,
                 ) {
                     Ok(validated) => PromptTestParsed {
                         parsed: serde_json::to_value(validated).ok(),

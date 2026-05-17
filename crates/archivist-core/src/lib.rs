@@ -864,6 +864,130 @@ impl RuntimeSettings {
         self.fields = self.fields.normalized();
         self
     }
+
+    /// Pick the active provider for tuning resolution: prefer the
+    /// `ai.default_provider`, else fall through to the first enabled
+    /// provider. Returns `None` only when the providers list is empty (or
+    /// none are enabled and no name matches).
+    fn active_tuning_provider(&self) -> Option<&AiProviderSettings> {
+        let by_name = self
+            .ai
+            .providers
+            .iter()
+            .find(|provider| provider.name == self.ai.default_provider);
+        if let Some(provider) = by_name {
+            return Some(provider);
+        }
+        self.ai.providers.iter().find(|provider| provider.enabled)
+    }
+
+    /// Resolve the effective tuning for the workflow as a whole. The active
+    /// provider's `tuning` overrides the global fields; unset (`None`)
+    /// values fall through to the existing global location.
+    pub fn effective_tuning(&self) -> EffectiveTuning {
+        self.resolve_tuning(self.active_tuning_provider())
+    }
+
+    /// Resolve effective tuning for a specific stage. The OCR-stage
+    /// exception: `ocr_page_limit` is resolved against the provider that
+    /// will actually execute the OCR stage (via `ai.stage_models[]`).
+    /// Every other field still resolves against the workflow-wide active
+    /// provider — operators reason about caps as "I'm on provider X, X's
+    /// limits apply to my pipeline."
+    pub fn effective_tuning_for_stage(&self, stage: Stage) -> EffectiveTuning {
+        let mut resolved = self.effective_tuning();
+        if matches!(stage, Stage::Ocr | Stage::OcrFix) {
+            let stage_provider_name = self
+                .ai
+                .stage_models
+                .iter()
+                .find(|over| over.stage == stage)
+                .map(|over| over.provider.as_str());
+            if let Some(name) = stage_provider_name
+                && let Some(provider) = self
+                    .ai
+                    .providers
+                    .iter()
+                    .find(|provider| provider.name == name)
+                && let Some(override_pages) = provider.tuning.ocr_page_limit
+            {
+                resolved.ocr_page_limit = override_pages;
+            }
+        }
+        resolved
+    }
+
+    fn resolve_tuning(&self, active: Option<&AiProviderSettings>) -> EffectiveTuning {
+        let tuning = active.map(|provider| &provider.tuning);
+        let pick_string = |get: fn(&ProviderTuning) -> Option<&String>| -> Option<String> {
+            tuning
+                .and_then(get)
+                .filter(|value| !value.trim().is_empty())
+                .cloned()
+        };
+        EffectiveTuning {
+            worker_concurrency: tuning
+                .and_then(|tuning| tuning.worker_concurrency)
+                .unwrap_or(1)
+                .max(1),
+            consensus_secondary_text_model: match pick_string(|tuning| {
+                tuning.consensus_secondary_text_model.as_ref()
+            }) {
+                Some(value) => Some(value),
+                None => self
+                    .ai
+                    .consensus_secondary_text_model
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .cloned(),
+            },
+            consensus_date_tolerance_days: tuning
+                .and_then(|tuning| tuning.consensus_date_tolerance_days)
+                .unwrap_or(self.ai.consensus_date_tolerance_days),
+            text_num_ctx: tuning
+                .and_then(|tuning| tuning.text_num_ctx)
+                .or(Some(self.ai.ollama_text_num_ctx)),
+            vision_num_ctx: tuning
+                .and_then(|tuning| tuning.vision_num_ctx)
+                .or(Some(self.ai.ollama_vision_num_ctx)),
+            ocr_page_limit: tuning
+                .and_then(|tuning| tuning.ocr_page_limit)
+                .unwrap_or(self.ocr.page_limit),
+            hourly_document_limit: tuning
+                .and_then(|tuning| tuning.hourly_document_limit)
+                .or(self.workflow.hourly_document_limit),
+            daily_document_limit: tuning
+                .and_then(|tuning| tuning.daily_document_limit)
+                .or(self.workflow.daily_document_limit),
+            metadata_confidence_threshold: tuning
+                .and_then(|tuning| tuning.metadata_confidence_threshold)
+                .unwrap_or(self.metadata.confidence_threshold),
+            title_confidence_threshold: tuning
+                .and_then(|tuning| tuning.title_confidence_threshold)
+                .unwrap_or_else(|| self.metadata.effective_title_threshold()),
+            correspondent_confidence_threshold: tuning
+                .and_then(|tuning| tuning.correspondent_confidence_threshold)
+                .unwrap_or_else(|| self.metadata.effective_correspondent_threshold()),
+            document_type_confidence_threshold: tuning
+                .and_then(|tuning| tuning.document_type_confidence_threshold)
+                .unwrap_or_else(|| self.metadata.effective_document_type_threshold()),
+            document_date_confidence_threshold: tuning
+                .and_then(|tuning| tuning.document_date_confidence_threshold)
+                .unwrap_or_else(|| self.metadata.effective_document_date_threshold()),
+            tags_confidence_threshold: tuning
+                .and_then(|tuning| tuning.tags_confidence_threshold)
+                .unwrap_or_else(|| self.metadata.effective_tags_threshold()),
+            fields_confidence_threshold: tuning
+                .and_then(|tuning| tuning.fields_confidence_threshold)
+                .unwrap_or_else(|| self.metadata.effective_fields_threshold()),
+            max_tags: tuning
+                .and_then(|tuning| tuning.max_tags)
+                .unwrap_or(self.tagging.max_tags as u32),
+            allowed_list_max: tuning
+                .and_then(|tuning| tuning.allowed_list_max)
+                .unwrap_or(self.metadata.allowed_list_max as u32),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1256,6 +1380,92 @@ pub struct AiProviderSettings {
     pub cost_per_1m_output_tokens_usd: Option<f64>,
     pub secret_id: Option<Uuid>,
     pub enabled: bool,
+    /// Per-provider tuning profile (v1.6.2). All fields are optional; unset
+    /// fields fall through to the existing global locations (`ai.*`,
+    /// `workflow.*`, `ocr.*`, `tagging.*`, `metadata.*`). See
+    /// `RuntimeSettings::effective_tuning` for the resolution rule.
+    #[serde(default)]
+    pub tuning: ProviderTuning,
+}
+
+/// Per-provider tuning knobs. The shape is the contract from
+/// `docs/PROVIDER_TUNING_PLAN.md` — every field is `Option<_>` so the active
+/// provider can override individual values while leaving the rest inherited
+/// from the global settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProviderTuning {
+    // --- Performance ---
+    /// Worker pool size. Replaces `ARCHIVIST_WORKER_CONCURRENCY` as the live
+    /// source of truth; the env stays as a hard upper cap (the worker
+    /// clamps to `min(env_cap, settings_value)`).
+    #[serde(default)]
+    pub worker_concurrency: Option<u32>,
+    /// Secondary text model for two-model consensus check on correspondent
+    /// + document_date. None = disabled.
+    #[serde(default)]
+    pub consensus_secondary_text_model: Option<String>,
+    /// Day tolerance for the consensus check.
+    #[serde(default)]
+    pub consensus_date_tolerance_days: Option<i64>,
+    /// Ollama text num_ctx override. Cloud providers ignore this.
+    #[serde(default)]
+    pub text_num_ctx: Option<i64>,
+    /// Ollama vision num_ctx override. Cloud providers ignore this.
+    #[serde(default)]
+    pub vision_num_ctx: Option<i64>,
+
+    // --- Resource caps ---
+    /// OCR pages to extract per document. None = inherit `ocr.page_limit`.
+    #[serde(default)]
+    pub ocr_page_limit: Option<u16>,
+    /// Throughput safety caps. None = inherit `workflow.*`. None+None = uncapped.
+    #[serde(default)]
+    pub hourly_document_limit: Option<i64>,
+    #[serde(default)]
+    pub daily_document_limit: Option<i64>,
+
+    // --- Quality thresholds (None = inherit MetadataSettings) ---
+    #[serde(default)]
+    pub metadata_confidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub title_confidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub correspondent_confidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub document_type_confidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub document_date_confidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub tags_confidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub fields_confidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub max_tags: Option<u32>,
+    #[serde(default)]
+    pub allowed_list_max: Option<u32>,
+}
+
+/// Resolved tuning: every field collapsed to a concrete value the worker /
+/// API can use directly. Produced by [`RuntimeSettings::effective_tuning`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveTuning {
+    pub worker_concurrency: u32,
+    pub consensus_secondary_text_model: Option<String>,
+    pub consensus_date_tolerance_days: i64,
+    pub text_num_ctx: Option<i64>,
+    pub vision_num_ctx: Option<i64>,
+    pub ocr_page_limit: u16,
+    pub hourly_document_limit: Option<i64>,
+    pub daily_document_limit: Option<i64>,
+    pub metadata_confidence_threshold: f32,
+    pub title_confidence_threshold: f32,
+    pub correspondent_confidence_threshold: f32,
+    pub document_type_confidence_threshold: f32,
+    pub document_date_confidence_threshold: f32,
+    pub tags_confidence_threshold: f32,
+    pub fields_confidence_threshold: f32,
+    pub max_tags: u32,
+    pub allowed_list_max: u32,
 }
 
 impl AiProviderSettings {
@@ -1270,6 +1480,10 @@ impl AiProviderSettings {
     }
 
     pub fn ollama_default() -> Self {
+        // Preset for the "Ollama local 4060 Ti class" deployment. Conservative
+        // concurrency, small num_ctx ceilings, no consensus, tight OCR/page
+        // and throughput caps — these are the values that keep a 16 GB-VRAM
+        // host from thrashing.
         Self {
             name: "ollama".to_owned(),
             kind: AiProviderKind::Ollama,
@@ -1280,6 +1494,25 @@ impl AiProviderSettings {
             cost_per_1m_output_tokens_usd: Some(0.0),
             secret_id: None,
             enabled: true,
+            tuning: ProviderTuning {
+                worker_concurrency: Some(2),
+                consensus_secondary_text_model: None,
+                consensus_date_tolerance_days: None,
+                text_num_ctx: Some(4096),
+                vision_num_ctx: Some(4096),
+                ocr_page_limit: Some(2),
+                hourly_document_limit: Some(200),
+                daily_document_limit: Some(2000),
+                metadata_confidence_threshold: None,
+                title_confidence_threshold: None,
+                correspondent_confidence_threshold: None,
+                document_type_confidence_threshold: None,
+                document_date_confidence_threshold: None,
+                tags_confidence_threshold: None,
+                fields_confidence_threshold: None,
+                max_tags: None,
+                allowed_list_max: None,
+            },
         }
     }
 
@@ -1294,10 +1527,14 @@ impl AiProviderSettings {
             cost_per_1m_output_tokens_usd: None,
             secret_id: None,
             enabled: true,
+            tuning: ProviderTuning::default(),
         }
     }
 
     pub fn openai_default() -> Self {
+        // Preset for "OpenAI paid cloud" deployment. Higher concurrency,
+        // consensus enabled with a cheaper cross-check model, no throughput
+        // caps, num_ctx irrelevant for remote providers.
         Self {
             name: "openai".to_owned(),
             kind: AiProviderKind::Openai,
@@ -1308,6 +1545,25 @@ impl AiProviderSettings {
             cost_per_1m_output_tokens_usd: None,
             secret_id: None,
             enabled: true,
+            tuning: ProviderTuning {
+                worker_concurrency: Some(8),
+                consensus_secondary_text_model: Some("gpt-4o-mini".to_owned()),
+                consensus_date_tolerance_days: None,
+                text_num_ctx: None,
+                vision_num_ctx: None,
+                ocr_page_limit: Some(8),
+                hourly_document_limit: None,
+                daily_document_limit: None,
+                metadata_confidence_threshold: None,
+                title_confidence_threshold: None,
+                correspondent_confidence_threshold: None,
+                document_type_confidence_threshold: None,
+                document_date_confidence_threshold: None,
+                tags_confidence_threshold: None,
+                fields_confidence_threshold: None,
+                max_tags: None,
+                allowed_list_max: None,
+            },
         }
     }
 
@@ -1322,6 +1578,7 @@ impl AiProviderSettings {
             cost_per_1m_output_tokens_usd: None,
             secret_id: None,
             enabled: true,
+            tuning: ProviderTuning::default(),
         }
     }
 
@@ -1336,6 +1593,7 @@ impl AiProviderSettings {
             cost_per_1m_output_tokens_usd: None,
             secret_id: None,
             enabled: false,
+            tuning: ProviderTuning::default(),
         }
     }
 
@@ -3746,5 +4004,205 @@ mod tests {
         assert!(prompt.system_prompt.contains("[doc:<id>]"));
         assert!(prompt.user_prompt.contains("doc:42"));
         assert!(prompt.user_prompt.contains("What is due?"));
+    }
+
+    // -------------------------------------------------------------------
+    // ProviderTuning / EffectiveTuning resolution
+    //
+    // The four resolution states for every tuning field:
+    //   1. active provider's tuning has Some(v)             → use v
+    //   2. active provider's tuning is None                 → fall back to global
+    //   3. ai.default_provider doesn't match any provider   → use first enabled
+    //   4. OCR-stage exception via ai.stage_models[]        → per-stage override
+    // -------------------------------------------------------------------
+
+    fn settings_with_two_providers() -> RuntimeSettings {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![
+            AiProviderSettings::ollama_default(),
+            AiProviderSettings::openai_default(),
+        ];
+        settings
+    }
+
+    #[test]
+    fn effective_tuning_uses_active_provider_tuning_when_present() {
+        // State 1: tuning.<field>.is_some() → use it.
+        let mut settings = settings_with_two_providers();
+        settings.ai.default_provider = "ollama".to_owned();
+        let tuning = settings.effective_tuning();
+        assert_eq!(tuning.worker_concurrency, 2);
+        assert_eq!(tuning.ocr_page_limit, 2);
+        assert_eq!(tuning.text_num_ctx, Some(4096));
+        assert_eq!(tuning.vision_num_ctx, Some(4096));
+        assert_eq!(tuning.hourly_document_limit, Some(200));
+        assert_eq!(tuning.daily_document_limit, Some(2000));
+    }
+
+    #[test]
+    fn effective_tuning_falls_back_to_global_when_tuning_is_none() {
+        // State 2: provider's tuning field is None → use the global location.
+        let mut settings = settings_with_two_providers();
+        settings.ai.default_provider = "anthropic".to_owned();
+        // anthropic_default() ships ProviderTuning::default() (all None) →
+        // every resolved value must equal the global it shadows.
+        settings.ai.providers.push(AiProviderSettings::anthropic_default());
+        let tuning = settings.effective_tuning();
+        assert_eq!(tuning.text_num_ctx, Some(settings.ai.ollama_text_num_ctx));
+        assert_eq!(
+            tuning.vision_num_ctx,
+            Some(settings.ai.ollama_vision_num_ctx)
+        );
+        assert_eq!(tuning.ocr_page_limit, settings.ocr.page_limit);
+        assert_eq!(
+            tuning.hourly_document_limit,
+            settings.workflow.hourly_document_limit
+        );
+        assert_eq!(
+            tuning.daily_document_limit,
+            settings.workflow.daily_document_limit
+        );
+        assert_eq!(tuning.max_tags, settings.tagging.max_tags as u32);
+        assert_eq!(
+            tuning.allowed_list_max,
+            settings.metadata.allowed_list_max as u32
+        );
+        assert_eq!(
+            tuning.metadata_confidence_threshold,
+            settings.metadata.confidence_threshold
+        );
+        assert_eq!(
+            tuning.consensus_secondary_text_model,
+            settings.ai.consensus_secondary_text_model.clone()
+        );
+        assert_eq!(
+            tuning.consensus_date_tolerance_days,
+            settings.ai.consensus_date_tolerance_days
+        );
+    }
+
+    #[test]
+    fn effective_tuning_falls_back_to_first_enabled_when_default_provider_unknown() {
+        // State 3: ai.default_provider name doesn't match any provider →
+        // pick the first enabled provider. We seed openai first so the
+        // fallback should land there (not ollama).
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![
+            AiProviderSettings::openai_default(),
+            AiProviderSettings::ollama_default(),
+        ];
+        settings.ai.default_provider = "no-such-provider".to_owned();
+        let tuning = settings.effective_tuning();
+        // openai_default() carries worker_concurrency=Some(8); ollama is 2.
+        assert_eq!(tuning.worker_concurrency, 8);
+    }
+
+    #[test]
+    fn effective_tuning_per_stage_ocr_override_via_stage_models() {
+        // State 4: a stage_models[] override directs OCR to a different
+        // provider. effective_tuning_for_stage(Ocr) honors that provider's
+        // ocr_page_limit, while every other field stays resolved against the
+        // workflow-wide active provider.
+        let mut settings = settings_with_two_providers();
+        settings.ai.default_provider = "ollama".to_owned();
+        settings.ai.stage_models.push(StageModelOverride {
+            stage: Stage::Ocr,
+            provider: "openai".to_owned(),
+            model: "gpt-5.5".to_owned(),
+        });
+        let workflow_tuning = settings.effective_tuning();
+        let ocr_tuning = settings.effective_tuning_for_stage(Stage::Ocr);
+        // workflow-wide stays on ollama → 2 pages
+        assert_eq!(workflow_tuning.ocr_page_limit, 2);
+        // OCR-stage exception → openai's 8 pages
+        assert_eq!(ocr_tuning.ocr_page_limit, 8);
+        // Every other field is identical (no OCR exception bleed):
+        assert_eq!(workflow_tuning.worker_concurrency, ocr_tuning.worker_concurrency);
+        assert_eq!(workflow_tuning.text_num_ctx, ocr_tuning.text_num_ctx);
+        assert_eq!(workflow_tuning.max_tags, ocr_tuning.max_tags);
+        // The other stages still see the workflow-wide value.
+        assert_eq!(
+            settings.effective_tuning_for_stage(Stage::Metadata).ocr_page_limit,
+            2
+        );
+    }
+
+    #[test]
+    fn ai_provider_settings_deserializes_without_tuning_field() {
+        // Serde regression: pre-v1.6.2 settings blobs have no `tuning` key.
+        // Deserialization must succeed with ProviderTuning::default(), and
+        // effective_tuning() must therefore return the globals.
+        let raw = serde_json::json!({
+            "name": "ollama",
+            "kind": "ollama",
+            "base_url": "http://ollama:11434",
+            "default_text_model": "qwen3:8b",
+            "default_vision_model": "qwen2.5vl:7b",
+            "cost_per_1m_input_tokens_usd": 0.0,
+            "cost_per_1m_output_tokens_usd": 0.0,
+            "secret_id": null,
+            "enabled": true
+            // no `tuning` field
+        });
+        let provider: AiProviderSettings =
+            serde_json::from_value(raw).expect("legacy provider blob must deserialize");
+        assert_eq!(provider.tuning, ProviderTuning::default());
+
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![provider];
+        settings.ai.default_provider = "ollama".to_owned();
+        let tuning = settings.effective_tuning();
+        // worker_concurrency has no global field — defaults to the safety
+        // floor of 1 when nothing overrides it.
+        assert_eq!(tuning.worker_concurrency, 1);
+        // Everything else falls back to the existing globals.
+        assert_eq!(tuning.text_num_ctx, Some(settings.ai.ollama_text_num_ctx));
+        assert_eq!(tuning.ocr_page_limit, settings.ocr.page_limit);
+        assert_eq!(tuning.max_tags, settings.tagging.max_tags as u32);
+    }
+
+    #[test]
+    fn ollama_default_constructor_carries_local_gpu_preset() {
+        let provider = AiProviderSettings::ollama_default();
+        assert_eq!(provider.tuning.worker_concurrency, Some(2));
+        assert!(provider.tuning.consensus_secondary_text_model.is_none());
+        assert_eq!(provider.tuning.text_num_ctx, Some(4096));
+        assert_eq!(provider.tuning.vision_num_ctx, Some(4096));
+        assert_eq!(provider.tuning.ocr_page_limit, Some(2));
+        assert_eq!(provider.tuning.hourly_document_limit, Some(200));
+        assert_eq!(provider.tuning.daily_document_limit, Some(2000));
+    }
+
+    #[test]
+    fn openai_default_constructor_carries_cloud_preset() {
+        let provider = AiProviderSettings::openai_default();
+        assert_eq!(provider.tuning.worker_concurrency, Some(8));
+        assert_eq!(
+            provider.tuning.consensus_secondary_text_model.as_deref(),
+            Some("gpt-4o-mini")
+        );
+        assert_eq!(provider.tuning.text_num_ctx, None);
+        assert_eq!(provider.tuning.vision_num_ctx, None);
+        assert_eq!(provider.tuning.ocr_page_limit, Some(8));
+        assert_eq!(provider.tuning.hourly_document_limit, None);
+        assert_eq!(provider.tuning.daily_document_limit, None);
+    }
+
+    #[test]
+    fn anthropic_default_constructor_ships_blank_tuning() {
+        let provider = AiProviderSettings::anthropic_default();
+        assert_eq!(provider.tuning, ProviderTuning::default());
+    }
+
+    #[test]
+    fn ollama_cloud_default_constructor_ships_blank_tuning() {
+        let provider = AiProviderSettings::ollama_cloud_default();
+        assert_eq!(provider.tuning, ProviderTuning::default());
+    }
+
+    #[test]
+    fn openai_compatible_default_constructor_ships_blank_tuning() {
+        let provider = AiProviderSettings::openai_compatible_default();
+        assert_eq!(provider.tuning, ProviderTuning::default());
     }
 }
