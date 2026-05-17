@@ -4,6 +4,31 @@ import type { components, paths } from './schema';
 export type MetadataTrace = components['schemas']['MetadataTrace'];
 export type MetadataTraceRun = components['schemas']['MetadataTraceRun'];
 export type MetadataFieldOutcome = components['schemas']['MetadataFieldOutcome'];
+export type AiRuntimeHints = components['schemas']['AiRuntimeHints'];
+export type AiLoadedModel = components['schemas']['AiLoadedModel'];
+
+// Per-provider tuning block (v1.6.2). Mirrors archivist_core::ProviderTuning.
+// All fields are optional: when null/undefined, the global setting in
+// workflow / ocr / metadata / tagging applies. See docs/PROVIDER_TUNING_PLAN.md.
+export type ProviderTuning = {
+  worker_concurrency?: number | null;
+  consensus_secondary_text_model?: string | null;
+  consensus_date_tolerance_days?: number | null;
+  text_num_ctx?: number | null;
+  vision_num_ctx?: number | null;
+  ocr_page_limit?: number | null;
+  hourly_document_limit?: number | null;
+  daily_document_limit?: number | null;
+  metadata_confidence_threshold?: number | null;
+  title_confidence_threshold?: number | null;
+  correspondent_confidence_threshold?: number | null;
+  document_type_confidence_threshold?: number | null;
+  document_date_confidence_threshold?: number | null;
+  tags_confidence_threshold?: number | null;
+  fields_confidence_threshold?: number | null;
+  max_tags?: number | null;
+  allowed_list_max?: number | null;
+};
 
 export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
 export type Stage = 'ocr' | 'ocr_fix' | 'metadata' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'document_date' | 'fields';
@@ -21,6 +46,7 @@ export type AiProvider = {
   cost_per_1m_output_tokens_usd?: number | null;
   secret_id?: string | null;
   enabled: boolean;
+  tuning?: ProviderTuning;
 };
 
 export type OllamaInstalledModel = {

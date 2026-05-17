@@ -828,6 +828,30 @@ components:
         snippet: { type: string }
         score: { type: number, format: double }
         source_kind: { type: string }
+    AiRuntimeHints:
+      type: object
+      required: [provider, reachable]
+      properties:
+        provider: { type: string }
+        reachable: { type: boolean }
+        version: { type: [string, "null"] }
+        loaded_models:
+          type: array
+          items: { $ref: "#/components/schemas/AiLoadedModel" }
+        # Env-only on the Ollama pod, not surfaced via Ollamas HTTP API.
+        # Always null; the `hint` string explains where to set them.
+        num_parallel: { type: [integer, "null"] }
+        max_loaded_models: { type: [integer, "null"] }
+        keep_alive: { type: [string, "null"] }
+        hint: { type: [string, "null"] }
+    AiLoadedModel:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        size_vram_bytes: { type: [integer, "null"], format: int64 }
+        # Optional: when the model was last accessed (epoch seconds).
+        last_used_at: { type: [string, "null"], format: date-time }
     MetadataTrace:
       type: object
       required: [paperless_document_id, current_state, latest_run]
@@ -1299,6 +1323,21 @@ paths:
       responses:
         "200":
           description: Inventory page
+  /api/ai/runtime-hints:
+    get:
+      summary: Live runtime hints for a provider (loaded model, VRAM, version)
+      parameters:
+        - name: provider
+          in: query
+          required: false
+          schema: { type: string }
+          description: Provider name. Defaults to ai.default_provider.
+      responses:
+        "200":
+          description: Hints (whether reachable or not is in the body)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AiRuntimeHints" }
   /api/inventory/{document_id}/metadata-trace:
     get:
       summary: Diagnostic trace of the most recent metadata-stage run

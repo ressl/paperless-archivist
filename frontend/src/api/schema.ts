@@ -1174,6 +1174,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ai/runtime-hints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Live runtime hints for a provider (loaded model, VRAM, version) */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Provider name. Defaults to ai.default_provider. */
+                    provider?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Hints (whether reachable or not is in the body) */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AiRuntimeHints"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/inventory/{document_id}/metadata-trace": {
         parameters: {
             query?: never;
@@ -2903,6 +2942,23 @@ export interface components {
             /** Format: double */
             score: number;
             source_kind: string;
+        };
+        AiRuntimeHints: {
+            provider: string;
+            reachable: boolean;
+            version?: string | null;
+            loaded_models?: components["schemas"]["AiLoadedModel"][];
+            num_parallel?: number | null;
+            max_loaded_models?: number | null;
+            keep_alive?: string | null;
+            hint?: string | null;
+        };
+        AiLoadedModel: {
+            name: string;
+            /** Format: int64 */
+            size_vram_bytes?: number | null;
+            /** Format: date-time */
+            last_used_at?: string | null;
         };
         MetadataTrace: {
             paperless_document_id: number;
