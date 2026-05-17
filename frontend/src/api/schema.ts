@@ -1174,6 +1174,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/inventory/{document_id}/metadata-trace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Diagnostic trace of the most recent metadata-stage run */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    document_id: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Trace found */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MetadataTrace"];
+                    };
+                };
+                /** @description No metadata run exists for this document */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/chat/sessions": {
         parameters: {
             query?: never;
@@ -2858,6 +2903,46 @@ export interface components {
             /** Format: double */
             score: number;
             source_kind: string;
+        };
+        MetadataTrace: {
+            paperless_document_id: number;
+            current_state: {
+                title?: string | null;
+                correspondent?: string | null;
+                document_type?: string | null;
+                document_date?: string | null;
+                tags: string[];
+            };
+            latest_run: components["schemas"]["MetadataTraceRun"];
+        };
+        MetadataTraceRun: {
+            /** Format: uuid */
+            run_id: string;
+            stage: string;
+            status: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            applied_at?: string | null;
+            model?: string | null;
+            provider?: string | null;
+            llm_suggestion?: {
+                [key: string]: unknown;
+            } | null;
+            per_field_outcomes: components["schemas"]["MetadataFieldOutcome"][];
+        };
+        MetadataFieldOutcome: {
+            /** @enum {string} */
+            field: "title" | "correspondent" | "document_type" | "document_date" | "tags" | "fields";
+            /** @enum {string} */
+            outcome: "applied" | "review" | "skipped" | "dropped" | "rejected";
+            value?: unknown;
+            /** Format: float */
+            confidence?: number | null;
+            reason?: string | null;
+            warnings: {
+                [key: string]: unknown;
+            }[];
         };
         DocumentChatSession: {
             /** Format: uuid */

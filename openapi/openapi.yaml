@@ -828,6 +828,68 @@ components:
         snippet: { type: string }
         score: { type: number, format: double }
         source_kind: { type: string }
+    MetadataTrace:
+      type: object
+      required: [paperless_document_id, current_state, latest_run]
+      properties:
+        paperless_document_id: { type: integer }
+        current_state:
+          type: object
+          required: [tags]
+          properties:
+            title: { type: [string, "null"] }
+            correspondent: { type: [string, "null"] }
+            document_type: { type: [string, "null"] }
+            document_date: { type: [string, "null"] }
+            tags:
+              type: array
+              items: { type: string }
+        latest_run:
+          $ref: "#/components/schemas/MetadataTraceRun"
+    MetadataTraceRun:
+      type: object
+      required: [run_id, stage, status, created_at, per_field_outcomes]
+      properties:
+        run_id: { type: string, format: uuid }
+        stage: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        applied_at: { type: [string, "null"], format: date-time }
+        model: { type: [string, "null"] }
+        provider: { type: [string, "null"] }
+        llm_suggestion:
+          # The raw `ai_artifacts.normalized_output` payload. Free-form because
+          # its inner shape evolves with prompt changes — frontends should treat
+          # this as best-effort debug content.
+          nullable: true
+          type: object
+          additionalProperties: true
+        per_field_outcomes:
+          type: array
+          items: { $ref: "#/components/schemas/MetadataFieldOutcome" }
+    MetadataFieldOutcome:
+      type: object
+      required: [field, outcome, warnings]
+      properties:
+        field:
+          type: string
+          enum: [title, correspondent, document_type, document_date, tags, fields]
+        outcome:
+          type: string
+          enum: [applied, review, skipped, dropped, rejected]
+        # Free-form because each field has its own value type (string, array,
+        # object). The frontend renders by field name.
+        value: true
+        confidence: { type: [number, "null"], format: float }
+        reason:
+          type: [string, "null"]
+          # Canonical machine strings — see docs/METADATA_TRACE_CONTRACT.md.
+          # Frontends translate these via inventory.diagnose.reason.* keys.
+        warnings:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
     DocumentChatSession:
       type: object
       required: [id, title, created_at, updated_at]
@@ -1237,6 +1299,22 @@ paths:
       responses:
         "200":
           description: Inventory page
+  /api/inventory/{document_id}/metadata-trace:
+    get:
+      summary: Diagnostic trace of the most recent metadata-stage run
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Trace found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MetadataTrace" }
+        "404":
+          description: No metadata run exists for this document
   /api/chat/sessions:
     get:
       responses:
