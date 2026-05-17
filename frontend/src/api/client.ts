@@ -123,6 +123,14 @@ export type RuntimeSettings = {
     allow_new_document_types: boolean;
     confidence_threshold: number;
     document_date_confidence_threshold: number;
+    title_confidence_threshold?: number;
+    correspondent_confidence_threshold?: number;
+    document_type_confidence_threshold?: number;
+    tags_confidence_threshold?: number;
+    fields_confidence_threshold?: number;
+    allowed_list_max?: number;
+    document_date_anchor_required?: boolean;
+    document_date_anchor_penalty?: number;
   };
   fields: {
     max_fields: number;

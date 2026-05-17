@@ -1777,6 +1777,18 @@ async fn process_metadata(
         Vec::new()
     };
 
+    // v1.5.12: pre-filter the closed-vocabulary lists by OCR-substring
+    // frequency so the LLM gets the most relevant candidates and the prompt
+    // stays under the token budget. Field names are typically a short curated
+    // list so they bypass filtering.
+    let allowed_list_max = settings.metadata.allowed_list_max;
+    let allowed_correspondents =
+        archivist_core::prefilter_allowed_list(&content, &allowed_correspondents, allowed_list_max);
+    let allowed_document_types =
+        archivist_core::prefilter_allowed_list(&content, &allowed_document_types, allowed_list_max);
+    let allowed_tags =
+        archivist_core::prefilter_allowed_list(&content, &allowed_tags, allowed_list_max);
+
     let mut request = prompt_for_metadata(
         &content,
         &allowed_correspondents,
@@ -1842,7 +1854,11 @@ async fn process_metadata(
     if enabled.title
         && let Some(title) = suggestion.title.clone()
     {
-        match validate_title_suggestion(title.clone(), 160, settings.tagging.confidence_threshold) {
+        match validate_title_suggestion(
+            title.clone(),
+            160,
+            settings.metadata.effective_title_threshold(),
+        ) {
             Ok(valid) => {
                 composite_patch.title = Some(valid.title.clone());
                 applied_fields.push("title");
@@ -1869,7 +1885,7 @@ async fn process_metadata(
             match validate_choice_suggestion(
                 choice.clone(),
                 &allowed_document_types,
-                settings.metadata.confidence_threshold,
+                settings.metadata.effective_document_type_threshold(),
             ) {
                 Ok(valid) => {
                     let id =
@@ -1911,7 +1927,7 @@ async fn process_metadata(
             match validate_choice_suggestion(
                 choice.clone(),
                 &allowed_correspondents,
-                settings.metadata.confidence_threshold,
+                settings.metadata.effective_correspondent_threshold(),
             ) {
                 Ok(valid) => {
                     let id =
@@ -1954,16 +1970,45 @@ async fn process_metadata(
         if already_set && !settings.metadata.overwrite_existing_document_date {
             skipped_fields.push("document_date");
         } else {
+            // v1.5.12: anchor-check the suggested date against the OCR text.
+            // If no anchor phrase (Rechnungsdatum, Issued on, …) is within
+            // ±80 chars of an occurrence of the date in the OCR text, drop
+            // the confidence by document_date_anchor_penalty before
+            // validating — this catches the common case where the model
+            // picks up a body-text date (delivery date, due date, reference
+            // to another invoice) instead of the actual document date.
+            let mut adjusted_date = date.clone();
+            let mut date_anchor_warning: Option<String> = None;
+            if settings.metadata.document_date_anchor_required
+                && !archivist_core::document_date_has_anchor(&date.date, &content)
+            {
+                let original = adjusted_date.confidence.unwrap_or(0.0);
+                let penalty = settings.metadata.document_date_anchor_penalty;
+                adjusted_date.confidence = Some((original - penalty).max(0.0));
+                date_anchor_warning = Some(format!(
+                    "document_date suggestion '{}' has no anchor phrase (Rechnungsdatum, Issued on, …) within {} chars in the OCR text; confidence reduced from {:.2} to {:.2}",
+                    date.date,
+                    80,
+                    original,
+                    adjusted_date.confidence.unwrap_or(0.0),
+                ));
+            }
             match validate_document_date_suggestion(
-                date.clone(),
-                settings.metadata.document_date_confidence_threshold,
+                adjusted_date,
+                settings.metadata.effective_document_date_threshold(),
             ) {
                 Ok(valid) => {
                     composite_patch.created = Some(valid.date.clone());
                     composite_warnings.extend(valid.warnings);
+                    if let Some(warning) = date_anchor_warning.clone() {
+                        composite_warnings.push(warning);
+                    }
                     applied_fields.push("document_date");
                 }
-                Err(errors) => {
+                Err(mut errors) => {
+                    if let Some(warning) = date_anchor_warning.clone() {
+                        errors.push(archivist_core::ValidationError::DataQuality(warning));
+                    }
                     review_items.push((
                         json!({
                             "created": date.date.clone(),
@@ -1974,6 +2019,7 @@ async fn process_metadata(
                                 "evidence": date.evidence,
                                 "warnings": date.warnings,
                                 "current_date": document.created,
+                                "anchor_warning": date_anchor_warning,
                             }
                         }),
                         json!(errors),
@@ -1987,11 +2033,17 @@ async fn process_metadata(
     if enabled.tags
         && let Some(tags) = suggestion.tags.clone()
     {
+        // v1.5.12: tags-confidence override for the consolidated stage. Clone
+        // TaggingSettings and bump the confidence_threshold to the per-field
+        // metadata override so process_metadata stays decoupled from how the
+        // legacy per-field tag stage thresholds work.
+        let mut tagging_for_meta = settings.tagging.clone();
+        tagging_for_meta.confidence_threshold = settings.metadata.effective_tags_threshold();
         match validate_tag_suggestion(
             tags.clone(),
             &allowed_tags,
             &settings.workflow.tags,
-            &settings.tagging,
+            &tagging_for_meta,
         ) {
             Ok(valid) => {
                 let selected_ids = tag_ids_for_names(pool, &valid.tags).await?;
@@ -2047,7 +2099,7 @@ async fn process_metadata(
             fields.clone(),
             &allowed_field_names,
             settings.fields.max_fields,
-            settings.fields.confidence_threshold,
+            settings.metadata.effective_fields_threshold(),
         ) {
             Ok(valid) => {
                 let names = valid

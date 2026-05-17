@@ -2,8 +2,91 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.11`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.12`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.12 — Bundle B: Process-quality improvements
+
+Second of four bundles in the v1.6.0 "Prompt & Process Quality" milestone.
+Three sub-issues from milestone 15: #112 (allowed-list pre-filter),
+#113 (date anchor hardening), #114 (per-field confidence thresholds).
+
+Backend-only release; matching UI surfaces for the new settings will
+land with Bundle C (v1.5.13).
+
+### 1. Per-field confidence thresholds (#114)
+
+`MetadataSettings.confidence_threshold` is now a fallback for five new
+per-field overrides: `title_confidence_threshold`,
+`correspondent_confidence_threshold`,
+`document_type_confidence_threshold`, `tags_confidence_threshold`,
+`fields_confidence_threshold`. `document_date_confidence_threshold`
+already existed and is now part of the same scheme. Defaults:
+
+| Field | Default |
+|---|---|
+| title | 0.60 |
+| correspondent | 0.80 |
+| document_type | 0.75 |
+| document_date | 0.90 |
+| tags | 0.65 |
+| fields | 0.80 |
+
+`effective_<field>_threshold()` accessors return the override when
+above zero, falling back to the global `confidence_threshold`. Old
+configs upgraded from v1.5.11 will see 0.0 for the new fields →
+graceful fall-through to the old global behavior. Operators can dial
+the per-field values in the Settings UI once Bundle C ships.
+
+### 2. Allowed-list pre-filter (#112)
+
+`process_metadata` now calls a new `prefilter_allowed_list` helper
+before building the prompt. The helper:
+
+* Returns the input as-is when `max == 0` (disabled) or `len <= max`.
+* Otherwise scores each entry by counting case-insensitive occurrences
+  of the entry name in the OCR text and keeps the top-`max` by score.
+* Falls back to alphabetical top-`max` if no entry has any substring
+  hit, so the LLM never receives an empty list.
+
+New setting `metadata.allowed_list_max` (default 20) controls the
+cap. Eliminates the "200+ correspondents inflate the prompt by 6 KB
+and dilute the model's attention" failure mode.
+
+### 3. Date-anchor hardening (#113)
+
+After the metadata LLM call, before validating the date suggestion,
+`process_metadata` checks whether the suggested ISO date appears in
+the OCR text within ±80 characters of a known anchor phrase
+(Rechnungsdatum, Ausgestellt am, Invoice date, Date of issue, Date de
+facturation, Data fattura, …). When it doesn't, the confidence is
+reduced by `metadata.document_date_anchor_penalty` (default 0.30)
+before the per-field threshold gate runs. Combined with the higher
+per-field threshold for dates (0.90), this kills the common
+"LLM picks up a delivery date or scan date instead of the actual
+document date" failure.
+
+Setting `metadata.document_date_anchor_required` (default true) gates
+the whole check so operators can opt out if their documents don't
+follow the anchor-phrase convention.
+
+The penalty event is surfaced two ways: it's added to the
+`composite_warnings` list when the date validates and applies, and as
+a `ValidationError::DataQuality` row when the date drops below the
+threshold and falls into review.
+
+### Test coverage
+
+Eight new unit tests in `archivist-core`:
+
+* `prefilter_allowed_list_returns_full_list_below_cap`
+* `prefilter_allowed_list_disabled_by_zero_max`
+* `prefilter_allowed_list_keeps_substring_hits_above_alphabetical`
+* `prefilter_allowed_list_falls_back_to_alphabetical_when_no_hit`
+* `document_date_anchor_matches_iso_near_rechnungsdatum`
+* `document_date_anchor_matches_de_format`
+* `document_date_anchor_misses_when_no_phrase_nearby`
+* `document_date_anchor_misses_when_date_not_present`
 
 ## v1.5.11 — Bundle A: Prompt-quality improvements
 

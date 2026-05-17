@@ -1476,8 +1476,96 @@ pub struct MetadataSettings {
     pub overwrite_existing_document_date: bool,
     pub allow_new_correspondents: bool,
     pub allow_new_document_types: bool,
+    /// Legacy global threshold. Kept for compatibility with v1.5.x configs; the
+    /// per-field overrides below take precedence when they are set above 0.
     pub confidence_threshold: f32,
+    /// Per-field minimum-confidence overrides (v1.5.12+). Each field's
+    /// `effective_*_threshold` accessor returns the override when it is above
+    /// zero, falling back to `confidence_threshold` otherwise. Defaults reflect
+    /// observed reliability per field on production traffic:
+    ///   * title — easy to phrase loosely so the bar is low.
+    ///   * correspondent / document_type — closed-vocabulary lookups, demand
+    ///     fairly strong evidence.
+    ///   * document_date — the most error-prone field; held at 0.90 since the
+    ///     same value was used as the old special-case constant.
+    ///   * tags — closed-vocabulary, multi-label, moderate.
+    ///   * fields — open-shape extraction, demand strong evidence.
+    #[serde(default)]
+    pub title_confidence_threshold: f32,
     pub document_date_confidence_threshold: f32,
+    #[serde(default)]
+    pub correspondent_confidence_threshold: f32,
+    #[serde(default)]
+    pub document_type_confidence_threshold: f32,
+    #[serde(default)]
+    pub tags_confidence_threshold: f32,
+    #[serde(default)]
+    pub fields_confidence_threshold: f32,
+    /// Cap on the size of each closed-vocabulary allowed-value list
+    /// (correspondents, document_types, tags) passed into the metadata
+    /// prompt. v1.5.12+ pre-filters by OCR-substring frequency.
+    /// `0` disables filtering (send the full list).
+    #[serde(default)]
+    pub allowed_list_max: usize,
+    /// When true, the worker checks whether the LLM-suggested document
+    /// date appears in the OCR text near an anchor phrase
+    /// (Rechnungsdatum, Date of issue, …). If not, the suggestion's
+    /// confidence is reduced by `document_date_anchor_penalty` before
+    /// validation. v1.5.12+ default is true.
+    #[serde(default = "default_true")]
+    pub document_date_anchor_required: bool,
+    /// Confidence penalty applied when the suggested date has no nearby
+    /// anchor phrase. Subtracted from the LLM-reported confidence
+    /// before the per-field threshold check. Default 0.30.
+    #[serde(default)]
+    pub document_date_anchor_penalty: f32,
+}
+
+/// Default cap on the size of each closed-vocabulary allowed-value list
+/// passed into the metadata prompt. v1.5.12+ pre-filters the lists down
+/// to the most relevant N entries by OCR-substring frequency so the LLM
+/// gets meaningful candidates instead of a giant flat list that dilutes
+/// attention and inflates token cost.
+pub const DEFAULT_METADATA_ALLOWED_LIST_MAX: usize = 20;
+
+impl MetadataSettings {
+    fn effective(&self, override_value: f32) -> f32 {
+        if override_value > 0.0 {
+            override_value
+        } else {
+            self.confidence_threshold
+        }
+    }
+
+    pub fn effective_title_threshold(&self) -> f32 {
+        self.effective(self.title_confidence_threshold)
+    }
+
+    pub fn effective_correspondent_threshold(&self) -> f32 {
+        self.effective(self.correspondent_confidence_threshold)
+    }
+
+    pub fn effective_document_type_threshold(&self) -> f32 {
+        self.effective(self.document_type_confidence_threshold)
+    }
+
+    pub fn effective_document_date_threshold(&self) -> f32 {
+        // document_date_confidence_threshold predates the per-field rollout in
+        // v1.5.12 so it already worked as an override — preserve that history.
+        if self.document_date_confidence_threshold > 0.0 {
+            self.document_date_confidence_threshold
+        } else {
+            self.confidence_threshold
+        }
+    }
+
+    pub fn effective_tags_threshold(&self) -> f32 {
+        self.effective(self.tags_confidence_threshold)
+    }
+
+    pub fn effective_fields_threshold(&self) -> f32 {
+        self.effective(self.fields_confidence_threshold)
+    }
 }
 
 impl Default for MetadataSettings {
@@ -1489,8 +1577,64 @@ impl Default for MetadataSettings {
             allow_new_correspondents: false,
             allow_new_document_types: false,
             confidence_threshold: 0.65,
-            document_date_confidence_threshold: 0.7,
+            title_confidence_threshold: 0.60,
+            document_date_confidence_threshold: 0.90,
+            correspondent_confidence_threshold: 0.80,
+            document_type_confidence_threshold: 0.75,
+            tags_confidence_threshold: 0.65,
+            fields_confidence_threshold: 0.80,
+            allowed_list_max: DEFAULT_METADATA_ALLOWED_LIST_MAX,
+            document_date_anchor_required: true,
+            document_date_anchor_penalty: 0.30,
         }
+    }
+}
+
+/// Pre-filter a closed-vocabulary allowed-value list down to the most
+/// relevant entries by OCR-substring frequency.
+///
+/// Returns the input as-is when `max == 0` (filtering disabled) or when
+/// the list is already at or below the cap. Otherwise scores each entry
+/// by counting case-insensitive occurrences of the entry name in the
+/// content text and keeps the top-`max` by score. Ties break
+/// alphabetically.
+///
+/// Fallback when no entry has a non-zero score: keeps the first `max`
+/// alphabetically, so the LLM always receives at least some candidates
+/// rather than an empty list (which would force a no-evidence answer
+/// even for documents the model could plausibly classify).
+pub fn prefilter_allowed_list(content: &str, allowed: &[String], max: usize) -> Vec<String> {
+    if max == 0 || allowed.len() <= max {
+        return allowed.to_vec();
+    }
+    let content_lower = content.to_lowercase();
+    let mut scored: Vec<(usize, String)> = allowed
+        .iter()
+        .map(|name| {
+            let needle = name.trim().to_lowercase();
+            if needle.is_empty() {
+                return (0, name.clone());
+            }
+            let count = content_lower.matches(&needle).count();
+            (count, name.clone())
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let any_hit = scored.iter().any(|(count, _)| *count > 0);
+    if any_hit {
+        scored
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .take(max)
+            .map(|(_, name)| name)
+            .collect()
+    } else {
+        // No substring hits — fall back to alphabetical top-N so the LLM
+        // still has a list to work from.
+        let mut alpha = allowed.to_vec();
+        alpha.sort();
+        alpha.truncate(max);
+        alpha
     }
 }
 
@@ -1590,6 +1734,12 @@ pub enum ValidationError {
     UnknownChoice(String),
     #[error("invalid document date: {0}")]
     InvalidDate(String),
+    /// Soft data-quality signal raised by the metadata stage when a
+    /// suggestion failed an out-of-band check (e.g. document date has no
+    /// nearby anchor phrase in the OCR text). Carries a free-text
+    /// explanation that the UI can show alongside the other errors.
+    #[error("data quality: {0}")]
+    DataQuality(String),
 }
 
 pub fn validate_tag_suggestion(
@@ -1773,6 +1923,101 @@ pub fn extract_issue_date_suggestion(
             warnings,
         },
     )
+}
+
+/// Anchor phrases that, when found near a date occurrence in the OCR text,
+/// give that date strong evidence of being the actual document date (vs.
+/// scan date, payment-due, or random other dates in the body). Kept as
+/// lowercase substrings; matching is case-insensitive. Phrases are
+/// multi-lingual on purpose because the production archive ingests
+/// German + English + French + Italian documents.
+const DOCUMENT_DATE_ANCHOR_PHRASES: &[&str] = &[
+    // German
+    "rechnungsdatum",
+    "ausgestellt am",
+    "ausstellungsdatum",
+    "datum:",
+    "vom ",
+    "bestelldatum",
+    "auftragsdatum",
+    "vertragsdatum",
+    "ausgestellt:",
+    // English
+    "invoice date",
+    "date of issue",
+    "issued on",
+    "issued:",
+    "issue date",
+    "date:",
+    "order date",
+    "contract date",
+    "statement date",
+    // French
+    "date de facturation",
+    "date d'émission",
+    "émis le",
+    "date de la facture",
+    // Italian
+    "data fattura",
+    "data emissione",
+    "emesso il",
+];
+
+/// Search window in characters around a date occurrence to look for an
+/// anchor phrase. Empirically 60-120 chars cover phrases like
+/// "Rechnungsdatum: 12.05.2026" or "Issued on May 12, 2026".
+const DOCUMENT_DATE_ANCHOR_WINDOW: usize = 80;
+
+/// Test whether the suggested document date appears in the OCR text within
+/// `DOCUMENT_DATE_ANCHOR_WINDOW` chars of any anchor phrase from
+/// `DOCUMENT_DATE_ANCHOR_PHRASES`.
+///
+/// Returns `true` when the suggested date is strongly anchored to a phrase
+/// that signals "this is the document's own date" (Rechnungsdatum, Issued
+/// on, Date of issue, …). Returns `false` when the date appears in the
+/// text but with no nearby anchor (likely a body-text date — scan date,
+/// payment-due, reference to another date) OR when the date doesn't
+/// appear in the text at all.
+///
+/// `date_iso` is the ISO `YYYY-MM-DD` string from the LLM suggestion.
+/// The function generates several plausible textual renderings of that
+/// date (ISO, `DD.MM.YYYY`, `DD/MM/YYYY`, `DD-MM-YYYY`) and looks for
+/// each in the OCR text. Spelled-out month names ("May 12 2026") are
+/// not currently matched — that's a known limitation.
+pub fn document_date_has_anchor(date_iso: &str, ocr_text: &str) -> bool {
+    let Ok(parsed) = NaiveDate::parse_from_str(date_iso, "%Y-%m-%d") else {
+        return false;
+    };
+    let renderings = [
+        parsed.format("%Y-%m-%d").to_string(),
+        parsed.format("%d.%m.%Y").to_string(),
+        parsed.format("%d/%m/%Y").to_string(),
+        parsed.format("%d-%m-%Y").to_string(),
+        parsed.format("%-d.%-m.%Y").to_string(),
+        parsed.format("%-d.%-m.%y").to_string(),
+    ];
+    let text_lower = ocr_text.to_lowercase();
+    for rendering in renderings.iter() {
+        let rendering_lower = rendering.to_lowercase();
+        let mut start = 0usize;
+        while let Some(pos) = text_lower[start..].find(&rendering_lower) {
+            let abs_pos = start + pos;
+            let window_start = abs_pos.saturating_sub(DOCUMENT_DATE_ANCHOR_WINDOW);
+            let window_end = (abs_pos + rendering_lower.len() + DOCUMENT_DATE_ANCHOR_WINDOW)
+                .min(text_lower.len());
+            let window = &text_lower[window_start..window_end];
+            for anchor in DOCUMENT_DATE_ANCHOR_PHRASES {
+                if window.contains(anchor) {
+                    return true;
+                }
+            }
+            start = abs_pos + rendering_lower.len();
+            if start >= text_lower.len() {
+                break;
+            }
+        }
+    }
+    false
 }
 
 pub fn validate_document_date_suggestion(
@@ -2925,6 +3170,71 @@ fn next_char_boundary(value: &str, mut index: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefilter_allowed_list_returns_full_list_below_cap() {
+        let list = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        assert_eq!(prefilter_allowed_list("any content", &list, 10), list);
+    }
+
+    #[test]
+    fn prefilter_allowed_list_disabled_by_zero_max() {
+        let list = vec!["a".to_owned(); 100];
+        assert_eq!(prefilter_allowed_list("any content", &list, 0).len(), 100);
+    }
+
+    #[test]
+    fn prefilter_allowed_list_keeps_substring_hits_above_alphabetical() {
+        let list = vec![
+            "Zypora".to_owned(),
+            "DITech".to_owned(),
+            "Apotheke Hoefner".to_owned(),
+            "Allianz".to_owned(),
+        ];
+        let content = "Rechnung DITech vom 12.02.2003, Lieferanschrift Apotheke Hoefner";
+        let result = prefilter_allowed_list(content, &list, 2);
+        assert!(result.contains(&"DITech".to_owned()));
+        assert!(result.contains(&"Apotheke Hoefner".to_owned()));
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn prefilter_allowed_list_falls_back_to_alphabetical_when_no_hit() {
+        let list = vec![
+            "Zypora".to_owned(),
+            "DITech".to_owned(),
+            "Apotheke".to_owned(),
+            "Allianz".to_owned(),
+        ];
+        let content = "completely unrelated content";
+        let result = prefilter_allowed_list(content, &list, 2);
+        // Alphabetical fallback puts Allianz + Apotheke first.
+        assert_eq!(result, vec!["Allianz".to_owned(), "Apotheke".to_owned()],);
+    }
+
+    #[test]
+    fn document_date_anchor_matches_iso_near_rechnungsdatum() {
+        let text = "Rechnung Nr. 4091\nRechnungsdatum: 2003-02-12\nKundennummer: 38381";
+        assert!(document_date_has_anchor("2003-02-12", text));
+    }
+
+    #[test]
+    fn document_date_anchor_matches_de_format() {
+        let text = "Rechnung Nr. 4091\nRechnungsdatum: 12.02.2003\nKundennummer: 38381";
+        assert!(document_date_has_anchor("2003-02-12", text));
+    }
+
+    #[test]
+    fn document_date_anchor_misses_when_no_phrase_nearby() {
+        let text = "Lieferadresse: 1190 Wien. Zahlbar bis 12.02.2003.";
+        assert!(!document_date_has_anchor("2003-02-12", text));
+    }
+
+    #[test]
+    fn document_date_anchor_misses_when_date_not_present() {
+        let text = "Rechnungsdatum: irgendwann im Februar 2003";
+        assert!(!document_date_has_anchor("2003-02-12", text));
+    }
 
     #[test]
     fn workflow_tags_map_process_to_all_business_stages() {
