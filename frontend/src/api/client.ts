@@ -1,5 +1,9 @@
 import createClient from 'openapi-fetch';
-import type { paths } from './schema';
+import type { components, paths } from './schema';
+
+export type MetadataTrace = components['schemas']['MetadataTrace'];
+export type MetadataTraceRun = components['schemas']['MetadataTraceRun'];
+export type MetadataFieldOutcome = components['schemas']['MetadataFieldOutcome'];
 
 export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
 export type Stage = 'ocr' | 'ocr_fix' | 'metadata' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'document_date' | 'fields';
@@ -734,6 +738,8 @@ export const api = {
       `/api/inventory?${qs.toString()}`
     );
   },
+  inventoryMetadataTrace: (documentId: number) =>
+    request<MetadataTrace>(`/api/inventory/${documentId}/metadata-trace`),
   queueOcr: () => request<{ queued: number }>('/api/batches/ocr', { method: 'POST' }),
   queueTags: () => request<{ queued: number }>('/api/batches/tags', { method: 'POST' }),
   queueFull: () => request<{ queued: number }>('/api/batches/full', { method: 'POST' }),
