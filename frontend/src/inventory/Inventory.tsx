@@ -1,10 +1,12 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
-import { FileText, RefreshCw, Sparkles } from 'lucide-react';
+import { FileText, RefreshCw, Sparkles, Tags } from 'lucide-react';
 import { api, InventoryItem } from '../api/client';
 import { languageOptions } from '../data/worldLanguages';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { ActionButton, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
 import { DebugContextDetails } from '../lib/DebugContextDetails';
+
+const PAGE_SIZE = 500;
 
 function formatLanguageDetection(item: InventoryItem, languages: ReturnType<typeof languageOptions>) {
   const tag = item.detected_language;
@@ -19,40 +21,73 @@ function formatLanguageDetection(item: InventoryItem, languages: ReturnType<type
 export function Inventory({ setError }: { setError: (error: string | null) => void }) {
   const { t, locale } = useI18n();
   const [items, setItems] = useState<InventoryItem[]>([]);
+  const [total, setTotal] = useState<number>(0);
   const [busy, setBusy] = useState(false);
   const languages = useMemo(() => languageOptions(locale), [locale]);
-  const load = useCallback(
-    () => api.inventory().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t))),
+
+  const loadFirst = useCallback(
+    () =>
+      api
+        .inventory(0, PAGE_SIZE)
+        .then((data) => {
+          setItems(data.items);
+          setTotal(data.total);
+        })
+        .catch((err) => setError(localizedErrorMessage(err, t))),
     [setError, t]
   );
 
+  const loadMore = useCallback(
+    () =>
+      api
+        .inventory(items.length, PAGE_SIZE)
+        .then((data) => {
+          setItems((prev) => [...prev, ...data.items]);
+          setTotal(data.total);
+        })
+        .catch((err) => setError(localizedErrorMessage(err, t))),
+    [items.length, setError, t]
+  );
+
   useEffect(() => {
-    void load();
-  }, [load]);
+    void loadFirst();
+  }, [loadFirst]);
 
   const triggerOcr = useCallback(
     (documentId: number) =>
       api
         .triggerDocument(documentId, ['ocr'], 'manual_review')
-        .then(load)
+        .then(loadFirst)
         .catch((err) => setError(localizedErrorMessage(err, t))),
-    [load, setError, t]
+    [loadFirst, setError, t]
+  );
+
+  const triggerMetadata = useCallback(
+    (documentId: number) =>
+      api
+        .triggerDocument(documentId, ['metadata'], 'manual_review')
+        .then(loadFirst)
+        .catch((err) => setError(localizedErrorMessage(err, t))),
+    [loadFirst, setError, t]
   );
 
   const triggerPipeline = useCallback(
     (documentId: number) =>
       api
         .triggerDocument(documentId, ['ocr', 'metadata'], 'manual_review')
-        .then(load)
+        .then(loadFirst)
         .catch((err) => setError(localizedErrorMessage(err, t))),
-    [load, setError, t]
+    [loadFirst, setError, t]
   );
+
+  const hasMore = items.length < total;
 
   return (
     <section className="page">
       <PageHeader title={t('inventory.title')} />
       <div className="toolbar">
-        <ActionButton icon={<RefreshCw />} label={t('generic.reload')} busy={busy} onClick={() => run(setBusy, setError, load, t)} />
+        <ActionButton icon={<RefreshCw />} label={t('generic.reload')} busy={busy} onClick={() => run(setBusy, setError, loadFirst, t)} />
+        <small className="field-hint">{t('inventory.count_label', { shown: items.length, total })}</small>
       </div>
       <div className="table-wrap">
         <table>
@@ -78,12 +113,23 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
                 languages={languages}
                 t={t}
                 onTriggerOcr={triggerOcr}
+                onTriggerMetadata={triggerMetadata}
                 onTriggerPipeline={triggerPipeline}
               />
             ))}
           </tbody>
         </table>
       </div>
+      {hasMore && (
+        <div className="toolbar">
+          <ActionButton
+            icon={<RefreshCw />}
+            label={t('inventory.load_more')}
+            busy={busy}
+            onClick={() => run(setBusy, setError, loadMore, t)}
+          />
+        </div>
+      )}
     </section>
   );
 }
@@ -93,11 +139,12 @@ type InventoryRowProps = {
   languages: ReturnType<typeof languageOptions>;
   t: TFunction;
   onTriggerOcr: (documentId: number) => void;
+  onTriggerMetadata: (documentId: number) => void;
   onTriggerPipeline: (documentId: number) => void;
 };
 
 const InventoryRow = memo(
-  function InventoryRow({ item, languages, t, onTriggerOcr, onTriggerPipeline }: InventoryRowProps) {
+  function InventoryRow({ item, languages, t, onTriggerOcr, onTriggerMetadata, onTriggerPipeline }: InventoryRowProps) {
     return (
       <tr>
         <td>{item.paperless_document_id}</td>
@@ -113,6 +160,9 @@ const InventoryRow = memo(
           <button title={t('inventory.trigger_ocr')} onClick={() => onTriggerOcr(item.paperless_document_id)}>
             <FileText size={16} />
           </button>
+          <button title={t('inventory.trigger_metadata')} onClick={() => onTriggerMetadata(item.paperless_document_id)}>
+            <Tags size={16} />
+          </button>
           <button title={t('inventory.trigger_pipeline')} onClick={() => onTriggerPipeline(item.paperless_document_id)}>
             <Sparkles size={16} />
           </button>
@@ -124,6 +174,7 @@ const InventoryRow = memo(
     if (prev.t !== next.t) return false;
     if (prev.languages !== next.languages) return false;
     if (prev.onTriggerOcr !== next.onTriggerOcr) return false;
+    if (prev.onTriggerMetadata !== next.onTriggerMetadata) return false;
     if (prev.onTriggerPipeline !== next.onTriggerPipeline) return false;
     const a = prev.item;
     const b = next.item;

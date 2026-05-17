@@ -21,16 +21,17 @@ use archivist_core::{
 };
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit,
-    backfill_metadata_stage_for_ocr_only_runs, claim_jobs, claim_notification_delivery,
-    claim_pending_review_for_autopilot_drain, complete_job, connect, create_review_item,
-    create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job, get_active_prompt,
-    get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
+    backfill_metadata_stage_for_ocr_only_runs, bump_vision_num_ctx_if_too_small, claim_jobs,
+    claim_notification_delivery, claim_pending_review_for_autopilot_drain, complete_job, connect,
+    create_review_item, create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job,
+    get_active_prompt, get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
     get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
     named_entity_id_for_name, queue_missing_pipeline, rebalance_backfilled_metadata_priorities,
     record_dashboard_snapshot, record_document_language, requeue_vision_crashed_jobs,
-    resolve_secret, revert_review_to_pending_after_failed_drain, selector_document_budget,
+    reset_stuck_running_pipeline_runs, resolve_secret,
+    revert_review_to_pending_after_failed_drain, selector_document_budget,
     tag_id_pairs_for_names, tag_ids_for_names, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
@@ -101,6 +102,21 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         Err(error) => warn!(error = %error, "failed to read Ollama num_ctx settings at startup"),
     }
 
+    // One-shot: lift the GGML_ASSERT recurrence ceiling that v1.5.1 set to
+    // 16384. Production observed 137 OCR jobs burning through their retry
+    // budget despite num_ctx=16384, so we bump the floor to 32768 for any
+    // deployment that hasn't already raised it manually. This runs BEFORE
+    // the vision-crash requeue so the requeued jobs run under the new num_ctx.
+    match bump_vision_num_ctx_if_too_small(&pool).await {
+        Ok(summary) if summary.bumped => info!(
+            previous = ?summary.previous,
+            current = summary.current,
+            "bumped ai.ollama_vision_num_ctx to 32768 to give vision model more headroom"
+        ),
+        Ok(_) => info!("ai.ollama_vision_num_ctx already at or above 32768; no bump"),
+        Err(error) => warn!(error = %error, "startup vision num_ctx bump failed"),
+    }
+
     // One-shot: lift failed OCR jobs killed by the GGML vision-runtime crash signature back
     // into the queue so they get a second chance under the new fallback machinery.
     // Idempotent — finding no matching rows is a no-op. Gated by the runtime setting so
@@ -139,6 +155,20 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         ),
         Ok(_) => info!("metadata-job priority rebalance found no mispriced rows"),
         Err(error) => warn!(error = %error, "startup metadata-priority rebalance failed"),
+    }
+
+    // One-shot: clean up pipeline_runs.status='running' rows whose jobs
+    // are all settled. Pre-v1.5.7 complete_job left intermediate stage
+    // successes on 'running' which surfaced as "N stuck run(s)" on the
+    // dashboard. v1.5.7 fixes complete_job for new runs; this catches
+    // the historical residue.
+    match reset_stuck_running_pipeline_runs(&pool).await {
+        Ok(summary) if summary.runs_reset > 0 => info!(
+            runs_reset = summary.runs_reset,
+            "reset historical pipeline_runs stuck on 'running' to their correct status"
+        ),
+        Ok(_) => info!("stuck-running pipeline_runs cleanup found no rows to reset"),
+        Err(error) => warn!(error = %error, "startup stuck-runs reset failed"),
     }
 
     loop {
@@ -632,7 +662,14 @@ fn is_vision_model_runtime_crash(error: &anyhow::Error) -> bool {
 /// public Ollama tags as of 2025; nothing experimental is included on purpose. If an entry
 /// becomes unsafe (e.g. a tag is retracted) drop it here rather than relying on operators.
 const VISION_FALLBACK_CHAIN: &[&str] = &[
+    // Smaller-than-the-primary fallbacks first — these have been the actual
+    // workhorses in production deployments and tend to be installed alongside
+    // glm-ocr / qwen3-vl primaries. Adding them as auto-discovery candidates
+    // lets the runtime fallback path fire without operators having to set
+    // `ai.fallback_vision_model` explicitly.
+    "qwen2.5vl:7b",
     "qwen2-vl:7b",
+    "qwen3-vl:32b",
     "llava-llama3:8b",
     "llava:13b",
     "llava:latest",
@@ -2066,14 +2103,22 @@ async fn process_metadata(
     );
 
     // Routing:
-    //   * If anything needs review, every field becomes a review item — the operator inspects
-    //     all suggestions atomically rather than seeing a half-applied document.
-    //   * Otherwise, in full_auto mode we apply one composite Paperless patch.
-    //   * If everything was skipped (already-set fields with overwrite disabled), we still
-    //     mark the job complete so the run drains.
-    if !review_items.is_empty() {
-        // Demote applied fields to review items too, so the operator can sign off on the full
-        // set rather than seeing partial application.
+    //   * full_auto: apply the validated composite_patch directly even if some
+    //     fields had validation warnings (UnknownTag, UnknownChoice, EmptyOutput
+    //     etc.). The warnings tell the operator WHICH per-field suggestion was
+    //     dropped, but the patch only carries fields that resolved. Creating
+    //     six review items per document in full_auto turns "hands-off mode"
+    //     into a manual-review queue and explodes Paperless API calls 6x.
+    //   * Otherwise (manual_review, auto_select_review, or full_auto + dry_run):
+    //     every field becomes a review item — operator inspects all
+    //     suggestions atomically rather than seeing a half-applied document.
+    //   * If everything was skipped (already-set fields with overwrite disabled),
+    //     we still mark the job complete so the run drains.
+    let review_warning_count = review_items.len();
+    if !review_items.is_empty() && !auto_apply {
+        // Manual / dry-run path: demote applied fields to review items too,
+        // so the operator can sign off on the full set rather than seeing
+        // partial application.
         if composite_patch.title.is_some() {
             review_items.push((
                 json!({
@@ -2152,6 +2197,7 @@ async fn process_metadata(
                     "applied": true,
                     "fields": applied_fields,
                     "warnings": composite_warnings,
+                    "dropped_field_count": review_warning_count,
                 }),
             )
             .await
@@ -2163,6 +2209,21 @@ async fn process_metadata(
                 .await?;
             Ok(())
         }
+    } else if auto_apply && review_warning_count > 0 {
+        // full_auto + every field had a validation warning, nothing applied. We
+        // record the warnings in the job result and mark the job complete so
+        // the run drains — Paperless gets nothing for this stage but neither
+        // does the operator get a useless review pile.
+        complete_job(
+            pool,
+            job,
+            json!({
+                "skipped": "all metadata fields had validation warnings — no resolvable patch in full_auto",
+                "warnings": composite_warnings,
+                "dropped_field_count": review_warning_count,
+            }),
+        )
+        .await
     } else {
         complete_job(
             pool,

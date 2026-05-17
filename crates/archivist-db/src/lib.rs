@@ -4508,6 +4508,37 @@ pub async fn complete_job(pool: &DbPool, job: &JobRecord, result: Value) -> Resu
         .bind(job.paperless_document_id)
         .execute(&mut *tx)
         .await?;
+    } else {
+        // Reset pipeline_runs.status back to 'queued' when stage-N succeeded
+        // but stage-N+1 is still pending. Without this, runs that went through
+        // a stage via the direct (non-review) full_auto path stay stuck on
+        // 'running' forever, which surfaces as "N stuck run(s) — pipeline runs
+        // have not progressed in the last 10 minutes" on the dashboard even
+        // though the next-stage jobs ARE waiting in the queue and will be
+        // claimed normally. Mirrors mark_review_auto_applied behavior.
+        sqlx::query(
+            r#"
+            update pipeline_runs
+               set status = 'queued', updated_at = now()
+             where id = $1
+               and status not in ('succeeded', 'failed', 'cancelled')
+            "#,
+        )
+        .bind(job.run_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'queued', updated_at = now()
+             where paperless_document_id = $1
+               and last_run_id = $2
+            "#,
+        )
+        .bind(job.paperless_document_id)
+        .bind(job.run_id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     append_audit_tx(
@@ -6463,6 +6494,195 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
         runs_updated: run_ids.len() as i64,
         jobs_inserted,
     })
+}
+
+/// Summary of a one-shot bump pass for the vision `num_ctx` runtime setting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VisionNumCtxBumpSummary {
+    pub previous: Option<i64>,
+    pub current: i64,
+    pub bumped: bool,
+}
+
+/// One-shot, idempotent helper that raises `ai.ollama_vision_num_ctx` from
+/// any value <= 16384 to 32768. v1.5.1 fixed glm-ocr GGML_ASSERT crashes by
+/// pinning num_ctx=16384 on Ollama vision calls — that floor worked for
+/// single-page renders but is still too small for some multi-page or
+/// high-DPI documents under realistic prod load (137 OCR jobs burned through
+/// their retry budget despite num_ctx=16384). Doubling to 32768 gives the
+/// vision model headroom for the page-token blow-up cases without forcing
+/// operators to dig through Settings to find the dial. Operators who have
+/// already set a higher value get left alone.
+pub async fn bump_vision_num_ctx_if_too_small(
+    pool: &DbPool,
+) -> Result<VisionNumCtxBumpSummary> {
+    const FLOOR: i64 = 32768;
+    const PREVIOUS_FIX_CEILING: i64 = 16384;
+
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        select (value #>> '{ai,ollama_vision_num_ctx}')::bigint as num_ctx
+          from settings
+         where key = 'runtime'
+         for update
+        "#,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let previous: Option<i64> = row.and_then(|r| r.try_get("num_ctx").ok());
+
+    // Only bump if the current value is <= the v1.5.1 fix ceiling. Don't
+    // touch operator overrides that already raised it past 16384.
+    let should_bump = match previous {
+        Some(v) => v <= PREVIOUS_FIX_CEILING,
+        None => true,
+    };
+
+    if !should_bump {
+        tx.commit().await?;
+        return Ok(VisionNumCtxBumpSummary {
+            previous,
+            current: previous.unwrap_or(FLOOR),
+            bumped: false,
+        });
+    }
+
+    sqlx::query(
+        r#"
+        update settings
+           set value = jsonb_set(
+                 value,
+                 '{ai,ollama_vision_num_ctx}',
+                 to_jsonb($1::bigint)
+               ),
+               updated_at = now()
+         where key = 'runtime'
+        "#,
+    )
+    .bind(FLOOR)
+    .execute(&mut *tx)
+    .await?;
+
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "worker.vision_num_ctx_bumped".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: previous.map(|v| json!({ "ollama_vision_num_ctx": v })),
+            after: Some(json!({ "ollama_vision_num_ctx": FLOOR })),
+            metadata: Some(json!({
+                "trigger": "startup_one_shot",
+                "reason": "ggml_assert_recurrence_at_16384",
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(VisionNumCtxBumpSummary {
+        previous,
+        current: FLOOR,
+        bumped: true,
+    })
+}
+
+/// Summary of a one-shot pass that resets stuck `pipeline_runs.status`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StuckRunStatusFixSummary {
+    pub runs_reset: i64,
+}
+
+/// One-shot, idempotent helper that fixes `pipeline_runs.status='running'`
+/// rows whose underlying jobs are all in a settled state (no `running` job
+/// for that run). v1.5.4+ left these behind because `complete_job` only
+/// flipped the run to `succeeded` when ALL stages were done; intermediate
+/// stage successes (e.g. OCR done with metadata still queued) silently
+/// stayed on `running`, surfacing as "N stuck run(s)" on the dashboard.
+///
+/// v1.5.7 fixes the live path in `complete_job` so new runs don't get
+/// trapped, AND this helper cleans up the historical residue. Targets:
+///   * runs with status='running' AND no jobs.status='running' for that
+///     run — flip to 'queued' if any queued job exists, else 'succeeded'.
+pub async fn reset_stuck_running_pipeline_runs(
+    pool: &DbPool,
+) -> Result<StuckRunStatusFixSummary> {
+    let mut tx = pool.begin().await?;
+    // Two phases: (a) flip to 'queued' if there's at least one queued job for
+    // the run that has no blocking prior-stage job; (b) otherwise (all jobs
+    // succeeded/failed/cancelled), flip to 'succeeded' and set finished_at.
+    let to_queued = sqlx::query(
+        r#"
+        update pipeline_runs pr
+           set status = 'queued', updated_at = now()
+         where pr.status = 'running'
+           and not exists (
+             select 1 from jobs j
+              where j.run_id = pr.id and j.status = 'running'
+           )
+           and exists (
+             select 1 from jobs j
+              where j.run_id = pr.id and j.status in ('queued', 'waiting_review')
+           )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let to_succeeded = sqlx::query(
+        r#"
+        update pipeline_runs pr
+           set status = 'succeeded', finished_at = now(), updated_at = now()
+         where pr.status = 'running'
+           and not exists (
+             select 1 from jobs j
+              where j.run_id = pr.id
+                and j.status in ('queued', 'running', 'waiting_review', 'failed')
+           )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let runs_reset = (to_queued.rows_affected() + to_succeeded.rows_affected()) as i64;
+
+    if runs_reset > 0 {
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "worker.stuck_running_runs_reset".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: None,
+                job_id: None,
+                paperless_document_id: None,
+                before: None,
+                after: Some(json!({
+                    "to_queued": to_queued.rows_affected(),
+                    "to_succeeded": to_succeeded.rows_affected(),
+                })),
+                metadata: Some(json!({
+                    "trigger": "startup_one_shot",
+                    "reason": "complete_job_status_bug_pre_v1.5.7",
+                })),
+                outcome: "success".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(StuckRunStatusFixSummary { runs_reset })
 }
 
 /// Summary of a one-shot rebalance pass for backfilled metadata jobs.

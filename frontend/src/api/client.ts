@@ -686,7 +686,10 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch)
     }),
-  inventory: () => request<{ items: InventoryItem[] }>('/api/inventory?limit=200'),
+  inventory: (offset: number = 0, limit: number = 500) =>
+    request<{ items: InventoryItem[]; total: number; offset: number; limit: number }>(
+      `/api/inventory?limit=${limit}&offset=${offset}`
+    ),
   queueOcr: () => request<{ queued: number }>('/api/batches/ocr', { method: 'POST' }),
   queueTags: () => request<{ queued: number }>('/api/batches/tags', { method: 'POST' }),
   queueFull: () => request<{ queued: number }>('/api/batches/full', { method: 'POST' }),

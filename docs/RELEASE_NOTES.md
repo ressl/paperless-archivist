@@ -2,8 +2,85 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.6`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.7`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.7 — Five fixes so `full_auto` is really hands-off
+
+Five separate fixes shipped together because production tracing showed they
+all needed to land before the autopilot promise actually held:
+
+### 1. `complete_job` resets `pipeline_runs.status` between stages
+
+When a stage succeeded inside a multi-stage run, `complete_job` only flipped
+`pipeline_runs.status` to `succeeded` if every stage was done. Intermediate
+successes (e.g. OCR done, metadata still queued in `["ocr", "metadata"]`
+runs) silently left the run on `running`, which the dashboard then flagged
+as "N stuck run(s) — pipeline runs have not progressed in the last 10
+minutes" — even though the next-stage job WAS waiting in the queue and got
+claimed normally. `complete_job` now mirrors `mark_review_auto_applied` and
+flips the run back to `queued` whenever there are pending jobs left.
+
+A one-shot startup helper `reset_stuck_running_pipeline_runs` cleans up the
+386 historical residue rows: any `pipeline_runs.status='running'` with no
+`jobs.status='running'` for that run is flipped to `queued` (if pending
+jobs remain) or `succeeded` (if every job has settled).
+
+### 2. `full_auto` no longer demotes one job into six review items
+
+The consolidated `Stage::Metadata` (`process_metadata`) had a routing rule:
+"if any field had a validation warning (UnknownTag, UnknownChoice,
+EmptyOutput, …), demote every validated field to its own review item so the
+operator inspects the full set atomically." That rule fires regardless of
+`workflow.mode`, so one metadata job for a single document produced six
+review items in 50ms whenever the LLM suggested a tag Paperless didn't know.
+For an operator running `full_auto`, this turns the Review queue into a
+manual-approval pile and explodes Paperless API calls 6×.
+
+The branch is now gated on `!auto_apply`: in `full_auto`, the partial
+`composite_patch` (whatever the validator resolved cleanly) is applied
+directly to Paperless and the warnings are recorded on the job result as a
+`dropped_field_count` audit trail. Manual and dry-run modes keep the
+six-review behaviour unchanged. A new explicit branch also handles the
+edge case of "every field had a warning, nothing resolved in `full_auto`":
+the job completes with a `skipped` result instead of dropping through the
+"all skipped (already-set)" branch with a misleading message.
+
+### 3. Vision-fallback runtime safety net widened, `num_ctx` raised to 32768
+
+Production observed 137 OCR jobs burning through their retry budget despite
+v1.5.1's `num_ctx=16384` floor — that ceiling is still too small for some
+multi-page or high-DPI renders, and the auto-discovered vision fallback
+chain only knew about `qwen2-vl:7b` / `llava-*` (not installed in this
+deployment).
+
+* `bump_vision_num_ctx_if_too_small` (one-shot, startup) raises
+  `ai.ollama_vision_num_ctx` from any value ≤ 16384 to 32768. Operators
+  who already manually raised it are left alone.
+* The auto-discovery chain (`VISION_FALLBACK_CHAIN`) now also includes
+  `qwen2.5vl:7b`, `qwen3-vl:32b`, so the runtime fallback fires for the
+  models actually installed in modern Ollama deployments without operators
+  having to set `ai.fallback_vision_model` manually.
+* The existing `requeue_vision_crashed_jobs` startup helper picks up the
+  137 burned-out OCR jobs at next worker boot and gives them another
+  attempt under the raised `num_ctx` ceiling.
+
+### 4. Inventory: separate "Trigger metadata" button
+
+The Inventory row now exposes three trigger buttons: **OCR** (FileText),
+**Metadata** (Tags), **Run full pipeline** (Sparkles). Previously
+metadata-only triggers required running the whole pipeline (which would
+redo OCR work). Useful when an operator wants to re-run only the LLM
+metadata extraction on a document whose OCR text is already cached.
+
+### 5. Inventory: pagination with "Load more"
+
+`/api/inventory` now returns `{items, total, offset, limit}` and the
+frontend defaults to fetching 500 at a time with a "Showing N of M
+documents" counter and a "Load more" button. Previously the page silently
+showed only the first 200 of the ~6000 production documents.
+
+UI sidebar reads `v1.5.7`.
 
 ## v1.5.6 — Hot-fix the backfilled metadata-job priority
 

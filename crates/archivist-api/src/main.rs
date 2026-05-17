@@ -2963,12 +2963,27 @@ async fn inventory(
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let offset = query.offset.unwrap_or(0).max(0);
     let settings = get_runtime_settings(&state.pool).await?;
-    let items = list_inventory(&state.pool, limit, offset)
-        .await?
-        .into_iter()
-        .map(|item| inventory_item_with_debug(item, &settings))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Json(json!({ "items": items })))
+    let (items, total) = tokio::try_join!(
+        async {
+            list_inventory(&state.pool, limit, offset)
+                .await?
+                .into_iter()
+                .map(|item| inventory_item_with_debug(item, &settings))
+                .collect::<Result<Vec<_>>>()
+        },
+        async {
+            let count: i64 = sqlx::query_scalar("select count(*)::bigint from document_inventory")
+                .fetch_one(&state.pool)
+                .await?;
+            Ok::<i64, anyhow::Error>(count)
+        }
+    )?;
+    Ok(Json(json!({
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    })))
 }
 
 fn inventory_item_with_debug(
