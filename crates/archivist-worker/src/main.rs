@@ -1040,7 +1040,9 @@ async fn process_ocr(
     let pages = render_document_pages(
         &original,
         document.original_file_name.as_deref(),
-        settings.effective_tuning_for_stage(Stage::Ocr).ocr_page_limit,
+        settings
+            .effective_tuning_for_stage(Stage::Ocr)
+            .ocr_page_limit,
     )
     .await?;
     if pages.is_empty() {
@@ -1122,7 +1124,9 @@ async fn process_ocr(
             temperature: 0.0,
             num_ctx: ollama_num_ctx_for_provider(
                 &provider,
-                settings.effective_tuning_for_stage(Stage::Ocr).vision_num_ctx,
+                settings
+                    .effective_tuning_for_stage(Stage::Ocr)
+                    .vision_num_ctx,
             ),
             prompt: page_prompt,
             images: vec![ImageInput {
@@ -2332,7 +2336,8 @@ async fn process_metadata(
         // metadata override so process_metadata stays decoupled from how the
         // legacy per-field tag stage thresholds work.
         let mut tagging_for_meta = settings.tagging.clone();
-        tagging_for_meta.confidence_threshold = settings.effective_tuning().tags_confidence_threshold;
+        tagging_for_meta.confidence_threshold =
+            settings.effective_tuning().tags_confidence_threshold;
         match validate_tag_suggestion(
             tags.clone(),
             &allowed_tags,

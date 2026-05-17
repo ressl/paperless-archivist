@@ -278,6 +278,73 @@ impl OllamaClient {
             .context("decode Ollama tags response")?;
         Ok(normalize_ollama_models(response.models))
     }
+
+    /// Calls Ollama's `/api/version`. Returns the version string (e.g.
+    /// "0.5.7"). Used by `GET /api/ai/runtime-hints` to surface the live
+    /// runtime version next to the loaded-models table.
+    pub async fn version(&self) -> Result<String> {
+        let url = format!("{}/api/version", self.base_url);
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .context("connect to Ollama")?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("Ollama returned {status}"));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .context("decode Ollama version response")?;
+        Ok(body
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned())
+    }
+
+    /// Calls Ollama's `/api/ps` (process status) and returns the currently
+    /// loaded models with their VRAM footprint. Used by the runtime-hints
+    /// endpoint so operators can see which model is hot in VRAM.
+    pub async fn loaded_models(&self) -> Result<Vec<OllamaLoadedModel>> {
+        let url = format!("{}/api/ps", self.base_url);
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .context("connect to Ollama")?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("Ollama returned {status}"));
+        }
+        let body: OllamaPsResponse = response.json().await.context("decode Ollama ps response")?;
+        Ok(body.models)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OllamaPsResponse {
+    #[serde(default)]
+    models: Vec<OllamaLoadedModel>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OllamaLoadedModel {
+    #[serde(default)]
+    pub name: String,
+    /// Ollama reports the VRAM footprint under `size_vram` (bytes). Older
+    /// builds may omit the field — keep as `Option<u64>` so we surface
+    /// "unknown" rather than a phantom zero.
+    #[serde(default, alias = "size_vram_bytes")]
+    pub size_vram: Option<u64>,
+    /// When Ollama is configured to keep models hot, this carries the
+    /// scheduled unload timestamp. Pass-through; the runtime-hints handler
+    /// does not interpret it.
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 fn normalize_ollama_models(raw_models: Vec<RawOllamaModel>) -> Vec<OllamaModel> {

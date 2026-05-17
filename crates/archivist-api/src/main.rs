@@ -6,10 +6,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
-    AiResponse, AnthropicClient, ChatRequest, OllamaClient, OllamaModel, OpenAiCompatibleClient,
-    PromptLanguageContext, TextProvider, parse_choice_suggestion, parse_field_suggestion,
-    parse_tag_suggestion, parse_title_suggestion, prompt_for_choice, prompt_for_fields,
-    prompt_for_tags, prompt_for_title,
+    AiResponse, AnthropicClient, ChatRequest, OllamaClient, OllamaLoadedModel, OllamaModel,
+    OpenAiCompatibleClient, PromptLanguageContext, TextProvider, parse_choice_suggestion,
+    parse_field_suggestion, parse_tag_suggestion, parse_title_suggestion, prompt_for_choice,
+    prompt_for_fields, prompt_for_tags, prompt_for_title,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
@@ -321,6 +321,7 @@ fn router(state: AppState) -> Router {
             "/model-providers/{name}/models",
             post(model_provider_models),
         )
+        .route("/ai/runtime-hints", get(ai_runtime_hints))
         .route("/secret-references", get(secret_references))
         .route(
             "/prompts",
@@ -2066,6 +2067,207 @@ impl From<OllamaModel> for OllamaInstalledModel {
             size_gb,
             modified_at: model.modified_at,
             digest: model.digest,
+        }
+    }
+}
+
+// ----- /api/ai/runtime-hints --------------------------------------------
+//
+// v1.6.2 issue #127: live runtime hints for the active (or queried) AI
+// provider. For Ollama this hits `/api/version` and `/api/ps` and exposes
+// the loaded-model VRAM footprint plus a hint about the env-only knobs
+// (NUM_PARALLEL, MAX_LOADED_MODELS, KEEP_ALIVE) that Ollama doesn't surface
+// in its HTTP API. For non-Ollama providers we return a stub so the
+// frontend can render a uniform card.
+
+#[derive(Debug, Deserialize)]
+struct AiRuntimeHintsQuery {
+    /// Optional explicit provider name. Defaults to
+    /// `ai.default_provider` when omitted.
+    provider: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AiRuntimeHintsResponse {
+    provider: String,
+    reachable: bool,
+    version: Option<String>,
+    loaded_models: Vec<AiLoadedModelResponse>,
+    /// Ollama-deploy-time-only knobs (env vars on the Ollama pod). Always
+    /// `None` — the `hint` field explains where to set them.
+    num_parallel: Option<i64>,
+    max_loaded_models: Option<i64>,
+    keep_alive: Option<String>,
+    hint: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct AiLoadedModelResponse {
+    name: String,
+    size_vram_bytes: Option<u64>,
+    /// Optional last-used timestamp; pass-through of Ollama's `expires_at`.
+    /// Always serialized so the frontend can show it when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<String>,
+}
+
+const OLLAMA_RUNTIME_HINT: &str = "NUM_PARALLEL, MAX_LOADED_MODELS, KEEP_ALIVE are set on the Ollama deployment, not in Archivist. Edit the Ollama k8s manifest to change them.";
+
+async fn ai_runtime_hints(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Query(query): Query<AiRuntimeHintsQuery>,
+) -> ApiResult<Json<AiRuntimeHintsResponse>> {
+    require(&auth.0, Permission::ReadSettings)?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    // Pick the requested provider, falling back to the active default.
+    let provider_name = query
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(settings.ai.default_provider.as_str())
+        .to_owned();
+    let provider = match provider_by_name(&settings, &provider_name) {
+        Ok(provider) => provider,
+        Err(error) => {
+            // Unknown provider name → return the stub shape rather than 4xx
+            // so the frontend can render an error card consistently.
+            return Ok(Json(AiRuntimeHintsResponse {
+                provider: provider_name,
+                reachable: false,
+                version: None,
+                loaded_models: Vec::new(),
+                num_parallel: None,
+                max_loaded_models: None,
+                keep_alive: None,
+                hint: Some(error.to_string()),
+            }));
+        }
+    };
+    let response = match provider.kind {
+        AiProviderKind::Ollama => fetch_ollama_runtime_hints(&state, &provider).await,
+        _ => non_ollama_runtime_hints(&provider),
+    };
+    Ok(Json(response))
+}
+
+async fn fetch_ollama_runtime_hints(
+    state: &AppState,
+    provider: &ApiProvider,
+) -> AiRuntimeHintsResponse {
+    let secret = match provider_secret(state, provider).await {
+        Ok(secret) => secret,
+        Err(error) => {
+            return AiRuntimeHintsResponse {
+                provider: provider.name.clone(),
+                reachable: false,
+                version: None,
+                loaded_models: Vec::new(),
+                num_parallel: None,
+                max_loaded_models: None,
+                keep_alive: None,
+                hint: Some(format!("Ollama secret resolution failed: {error}")),
+            };
+        }
+    };
+    let client = match OllamaClient::new_with_timeout(
+        &provider.base_url,
+        secret,
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            return AiRuntimeHintsResponse {
+                provider: provider.name.clone(),
+                reachable: false,
+                version: None,
+                loaded_models: Vec::new(),
+                num_parallel: None,
+                max_loaded_models: None,
+                keep_alive: None,
+                hint: Some(format!("failed to build Ollama client: {error}")),
+            };
+        }
+    };
+    fetch_ollama_runtime_hints_with_client(&provider.name, &client).await
+}
+
+/// Inner Ollama probe split out for testability. Takes an `OllamaClient`
+/// already wired to the runtime URL, hits `/api/version` and `/api/ps`,
+/// composes the response. Independent of `AppState` so unit tests can
+/// point a real `OllamaClient` at a mock HTTP server.
+async fn fetch_ollama_runtime_hints_with_client(
+    provider_name: &str,
+    client: &OllamaClient,
+) -> AiRuntimeHintsResponse {
+    let mut response = AiRuntimeHintsResponse {
+        provider: provider_name.to_owned(),
+        reachable: false,
+        version: None,
+        loaded_models: Vec::new(),
+        num_parallel: None,
+        max_loaded_models: None,
+        keep_alive: None,
+        hint: Some(OLLAMA_RUNTIME_HINT.to_owned()),
+    };
+    // `/api/version` first — gates `reachable`. If even the version probe
+    // fails we surface the error in `hint` and skip the loaded-models call.
+    match client.version().await {
+        Ok(version) => {
+            response.reachable = true;
+            response.version = Some(version);
+        }
+        Err(error) => {
+            response.reachable = false;
+            response.hint = Some(format!("Ollama unreachable: {error}"));
+            return response;
+        }
+    }
+    match client.loaded_models().await {
+        Ok(models) => {
+            response.loaded_models = models
+                .into_iter()
+                .map(AiLoadedModelResponse::from)
+                .collect();
+        }
+        Err(error) => {
+            // Reachable, but /api/ps failed — keep `reachable: true`, surface
+            // the partial failure in the hint so the UI can still show the
+            // version while explaining why loaded-models is blank.
+            response.hint = Some(format!("Ollama /api/ps failed: {error}"));
+        }
+    }
+    response
+}
+
+fn non_ollama_runtime_hints(provider: &ApiProvider) -> AiRuntimeHintsResponse {
+    let kind = match provider.kind {
+        AiProviderKind::Openai => "openai",
+        AiProviderKind::Anthropic => "anthropic",
+        AiProviderKind::OpenaiCompatible => "openai_compatible",
+        AiProviderKind::Ollama => "ollama",
+    };
+    AiRuntimeHintsResponse {
+        provider: provider.name.clone(),
+        reachable: true,
+        version: None,
+        loaded_models: Vec::new(),
+        num_parallel: None,
+        max_loaded_models: None,
+        keep_alive: None,
+        hint: Some(format!(
+            "{kind}-specific tuning is not server-side observable from Archivist."
+        )),
+    }
+}
+
+impl From<OllamaLoadedModel> for AiLoadedModelResponse {
+    fn from(model: OllamaLoadedModel) -> Self {
+        Self {
+            name: model.name,
+            size_vram_bytes: model.size_vram,
+            last_used_at: model.expires_at,
         }
     }
 }
@@ -6304,6 +6506,149 @@ mod tests {
             auth_rate_limit: 10,
             auth_rate_limit_window_seconds: 60,
         }
+    }
+
+    // ----- /api/ai/runtime-hints --------------------------------------
+    //
+    // The non-Ollama branch is a pure function — assert its shape
+    // directly. The Ollama branch goes through a real OllamaClient, so
+    // we spin up a one-shot axum mini-server bound to 127.0.0.1:0 to
+    // mock `/api/version` and `/api/ps`.
+
+    fn make_api_provider(kind: AiProviderKind) -> ApiProvider {
+        ApiProvider {
+            name: format!("{kind:?}").to_ascii_lowercase(),
+            kind,
+            base_url: "http://example.invalid".to_owned(),
+            model: "test-model".to_owned(),
+            secret_id: None,
+        }
+    }
+
+    #[test]
+    fn runtime_hints_non_ollama_returns_stub_with_provider_specific_hint() {
+        for (kind, expected_fragment) in [
+            (AiProviderKind::Openai, "openai-specific"),
+            (AiProviderKind::Anthropic, "anthropic-specific"),
+            (
+                AiProviderKind::OpenaiCompatible,
+                "openai_compatible-specific",
+            ),
+        ] {
+            let provider = make_api_provider(kind.clone());
+            let response = non_ollama_runtime_hints(&provider);
+            assert_eq!(response.provider, provider.name);
+            assert!(response.reachable);
+            assert!(response.version.is_none());
+            assert!(response.loaded_models.is_empty());
+            assert!(response.num_parallel.is_none());
+            assert!(response.max_loaded_models.is_none());
+            assert!(response.keep_alive.is_none());
+            let hint = response
+                .hint
+                .as_deref()
+                .expect("non-ollama hint must be populated");
+            assert!(
+                hint.contains(expected_fragment),
+                "hint for {kind:?} must mention '{expected_fragment}', got {hint:?}"
+            );
+        }
+    }
+
+    async fn spawn_mock_ollama(
+        version_response: Option<Value>,
+        ps_response: Option<Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::Json as AxumJson;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let version_handler = {
+            let version_response = version_response.clone();
+            move || async move {
+                match version_response {
+                    Some(body) => AxumJson(body).into_response(),
+                    None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                }
+            }
+        };
+        let ps_handler = {
+            let ps_response = ps_response.clone();
+            move || async move {
+                match ps_response {
+                    Some(body) => AxumJson(body).into_response(),
+                    None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                }
+            }
+        };
+        let router = Router::new()
+            .route("/api/version", get(version_handler))
+            .route("/api/ps", get(ps_handler));
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn runtime_hints_ollama_happy_path_collects_version_and_loaded_models() {
+        let (base_url, handle) = spawn_mock_ollama(
+            Some(serde_json::json!({ "version": "0.5.7" })),
+            Some(serde_json::json!({
+                "models": [
+                    {
+                        "name": "qwen3-paperless:8b",
+                        "size_vram": 6_396_411_904u64,
+                        "expires_at": "2026-05-17T12:00:00Z"
+                    }
+                ]
+            })),
+        )
+        .await;
+        let client =
+            OllamaClient::new_with_timeout(&base_url, None, std::time::Duration::from_secs(2))
+                .expect("client builds");
+        let response = fetch_ollama_runtime_hints_with_client("ollama", &client).await;
+        assert!(response.reachable, "Ollama mock should be reachable");
+        assert_eq!(response.provider, "ollama");
+        assert_eq!(response.version.as_deref(), Some("0.5.7"));
+        assert_eq!(response.loaded_models.len(), 1);
+        let model = &response.loaded_models[0];
+        assert_eq!(model.name, "qwen3-paperless:8b");
+        assert_eq!(model.size_vram_bytes, Some(6_396_411_904));
+        assert!(response.num_parallel.is_none());
+        assert!(response.max_loaded_models.is_none());
+        assert!(response.keep_alive.is_none());
+        let hint = response.hint.as_deref().expect("ollama hint string");
+        assert!(
+            hint.contains("NUM_PARALLEL"),
+            "happy-path hint must explain the env-only knobs, got {hint:?}"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_hints_ollama_unreachable_falls_back_with_error_hint() {
+        // Point the client at a port nothing listens on — the version
+        // probe must fail fast and surface `reachable: false`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = listener.local_addr().unwrap();
+        drop(listener); // close the socket so the next connect refuses
+
+        let client = OllamaClient::new_with_timeout(
+            &format!("http://{dead_addr}"),
+            None,
+            std::time::Duration::from_millis(500),
+        )
+        .expect("client builds");
+        let response = fetch_ollama_runtime_hints_with_client("ollama", &client).await;
+        assert!(!response.reachable);
+        assert!(response.version.is_none());
+        assert!(response.loaded_models.is_empty());
+        let hint = response.hint.as_deref().expect("hint populated");
+        assert!(
+            hint.contains("Ollama unreachable"),
+            "unreachable hint should explain the failure, got {hint:?}"
+        );
     }
 }
 

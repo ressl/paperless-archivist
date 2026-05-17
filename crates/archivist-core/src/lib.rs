@@ -4046,7 +4046,10 @@ mod tests {
         settings.ai.default_provider = "anthropic".to_owned();
         // anthropic_default() ships ProviderTuning::default() (all None) →
         // every resolved value must equal the global it shadows.
-        settings.ai.providers.push(AiProviderSettings::anthropic_default());
+        settings
+            .ai
+            .providers
+            .push(AiProviderSettings::anthropic_default());
         let tuning = settings.effective_tuning();
         assert_eq!(tuning.text_num_ctx, Some(settings.ai.ollama_text_num_ctx));
         assert_eq!(
@@ -4117,12 +4120,17 @@ mod tests {
         // OCR-stage exception → openai's 8 pages
         assert_eq!(ocr_tuning.ocr_page_limit, 8);
         // Every other field is identical (no OCR exception bleed):
-        assert_eq!(workflow_tuning.worker_concurrency, ocr_tuning.worker_concurrency);
+        assert_eq!(
+            workflow_tuning.worker_concurrency,
+            ocr_tuning.worker_concurrency
+        );
         assert_eq!(workflow_tuning.text_num_ctx, ocr_tuning.text_num_ctx);
         assert_eq!(workflow_tuning.max_tags, ocr_tuning.max_tags);
         // The other stages still see the workflow-wide value.
         assert_eq!(
-            settings.effective_tuning_for_stage(Stage::Metadata).ocr_page_limit,
+            settings
+                .effective_tuning_for_stage(Stage::Metadata)
+                .ocr_page_limit,
             2
         );
     }
