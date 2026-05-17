@@ -2819,45 +2819,66 @@ legend {
 .inventory-search-bar {
   gap: 12px;
   flex-wrap: wrap;
+  align-items: center;
 }
 .inventory-search-input {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  background: var(--surface, #fff);
-  border: 1px solid var(--border, #d0d7de);
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 4px 10px;
   flex: 1 1 320px;
   max-width: 480px;
+  color: var(--text);
+}
+.inventory-search-input:focus-within {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px var(--teal-soft);
+}
+.inventory-search-input svg {
+  color: var(--muted);
+  flex-shrink: 0;
 }
 .inventory-search-input input {
-  border: none;
-  outline: none;
+  border: 0;
+  outline: 0;
   flex: 1;
+  min-width: 0;
+  padding: 4px 0;
   font: inherit;
+  color: var(--text);
   background: transparent;
+  caret-color: var(--text);
+}
+.inventory-search-input input::placeholder {
+  color: var(--muted);
 }
 .inventory-chips {
   gap: 8px;
   flex-wrap: wrap;
 }
 .chip-button {
-  border: 1px solid var(--border, #d0d7de);
-  background: var(--surface, #fff);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
   border-radius: 999px;
-  padding: 4px 12px;
+  padding: 5px 12px;
   font-size: 13px;
   cursor: pointer;
 }
 .chip-button.active {
-  background: var(--accent-soft, #dbeafe);
-  border-color: var(--accent, #2563eb);
-  color: var(--accent, #2563eb);
+  background: var(--teal-soft);
+  border-color: var(--teal);
+  color: var(--teal);
   font-weight: 600;
 }
 .chip-button:hover {
-  border-color: var(--accent, #2563eb);
+  border-color: var(--teal);
 }
 .advanced-filter-panel {
   display: grid;
@@ -2865,14 +2886,20 @@ legend {
   gap: 12px;
   padding: 12px;
   margin: 8px 0 12px;
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface-muted, #f6f8fa);
+  background: var(--surface);
+  color: var(--text);
 }
 .advanced-filter-panel fieldset {
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 8px 12px;
+  color: var(--text);
+}
+.advanced-filter-panel legend {
+  color: var(--ink);
+  font-weight: 600;
 }
 .advanced-filter-panel .checkbox-row {
   display: flex;
@@ -2882,6 +2909,6 @@ legend {
 .empty-row {
   text-align: center;
   padding: 24px;
-  color: var(--muted, #57606a);
+  color: var(--muted);
   font-style: italic;
 }

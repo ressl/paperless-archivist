@@ -2,8 +2,24 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.9`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.10`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.10 — Inventory search-bar readability fixes
+
+Tiny CSS hotfix on top of v1.5.9 after operator feedback:
+
+* The search input field looked unusable — typing produced no visible
+  cursor or text because the rule set in v1.5.9 stripped the caret colour
+  and inherited an indeterminate text colour. v1.5.10 sets explicit
+  `color: var(--text)` and `caret-color: var(--text)` and gives the
+  wrapper a `:focus-within` highlight using the existing `--teal` /
+  `--teal-soft` theme tokens so it's obvious when the field is active.
+* The "Erweiterte Filter" and "Filter zurücksetzen" buttons used the
+  `.ghost-button` style, which is the very-light sidebar-button colour
+  on purpose — on the cream workspace background it was nearly
+  invisible. They now use `.chip-button` (same as the preset chips),
+  with the toggle reflected as the standard "active" state.
 
 ## v1.5.9 — Inventory search + filters
 

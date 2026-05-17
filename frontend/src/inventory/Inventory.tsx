@@ -259,7 +259,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
               if (event.key === 'Enter') commitSearch();
             }}
           />
-          <button className="ghost-button" onClick={commitSearch}>{t('inventory.search_apply')}</button>
+          <button className="chip-button" onClick={commitSearch}>{t('inventory.search_apply')}</button>
         </div>
         <ActionButton icon={<RefreshCw />} label={t('generic.reload')} busy={busy} onClick={() => run(setBusy, setError, loadFirst, t)} />
         <small className="field-hint">{t('inventory.count_label', { shown: items.length, total })}</small>
@@ -286,11 +286,11 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
           active={chipMissingMetadataActive}
           onClick={() => toggleChip({ metadata_status: ['queued', 'unknown'] }, chipMissingMetadataActive)}
         />
-        <button className="ghost-button" onClick={() => setAdvancedOpen((open) => !open)}>
+        <button className={`chip-button${advancedOpen ? ' active' : ''}`} onClick={() => setAdvancedOpen((open) => !open)}>
           <Filter size={14} /> {t('inventory.advanced_toggle')}
         </button>
         {filtersActive && (
-          <button className="ghost-button" onClick={clearAll}>
+          <button className="chip-button" onClick={clearAll}>
             <X size={14} /> {t('inventory.clear_filters')}
           </button>
         )}
