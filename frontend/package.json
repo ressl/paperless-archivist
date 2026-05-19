@@ -1,6 +1,6 @@
 {
   "name": "paperless-archivist-frontend",
-  "version": "1.5.22",
+  "version": "1.5.23",
   "private": true,
   "type": "module",
   "scripts": {

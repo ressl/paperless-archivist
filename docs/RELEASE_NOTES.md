@@ -2,8 +2,41 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.22`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.23`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.23 — Scalable worker pool + DB connection knob
+
+Operational follow-up to the v1.6.2 tuning work. The DB connection pool
+was previously hardcoded at 10 and the worker pod shipped with 1 GiB /
+2 cores — both became hard ceilings the moment an operator dialed
+`ARCHIVIST_WORKER_CONCURRENCY` past a handful, surfacing as
+`pool timed out while waiting for an open connection` errors and OOMKill
+events under load.
+
+### What changed
+
+* **`ARCHIVIST_DB_MAX_CONNECTIONS`** — new env var (default `10`,
+  preserves prior behavior). Should comfortably exceed
+  `ARCHIVIST_WORKER_CONCURRENCY`; documented inline in
+  `deploy/kubernetes/base/configmap.yaml`. Validated `> 0` at startup.
+* **Worker pod resources** bumped in `deploy/kubernetes/base/`: requests
+  `250m/512Mi → 500m/1Gi`, limits `2/1Gi → 4/4Gi`. The new headroom is
+  what makes high-concurrency OCR survive — rendered PDF pages live in
+  memory while jobs run.
+
+### Rollout
+
+Backwards compatible — old deployments keep their 10-connection pool
+unless they opt in. To raise concurrency in prod after this image rolls:
+
+```
+kubectl -n paperless-archivist set env deploy/paperless-archivist-worker \
+  ARCHIVIST_DB_MAX_CONNECTIONS=30 ARCHIVIST_WORKER_CONCURRENCY=8
+```
+
+Step up from there once Pod-memory, CPU throttling, and pool
+acquisition error counts look clean for an hour.
 
 ## v1.5.22 — Per-provider tuning profiles (milestone v1.6.2)
 
