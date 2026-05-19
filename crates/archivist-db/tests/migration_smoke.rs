@@ -7,7 +7,7 @@ use uuid::Uuid;
 async fn migrations_apply_on_fresh_postgresql_18_database() {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must point to a PostgreSQL 18 database");
-    let pool = connect(&database_url)
+    let pool = connect(&database_url, 10)
         .await
         .expect("connect to PostgreSQL 18 test database");
 

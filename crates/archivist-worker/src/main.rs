@@ -56,7 +56,11 @@ async fn main() -> Result<()> {
     config.validate()?;
     init_tracing(&config.log_level);
 
-    let pool = connect(config.database_url.expose_secret()).await?;
+    let pool = connect(
+        config.database_url.expose_secret(),
+        config.db_max_connections,
+    )
+    .await?;
     wait_for_schema(&pool).await?;
     run_worker(pool, Arc::new(config)).await
 }
@@ -4366,6 +4370,7 @@ mod tests {
             http_addr: "127.0.0.1:0".to_owned(),
             database_url: SecretString::new(String::new().into()),
             worker_concurrency: 4,
+            db_max_connections: 10,
             log_level: "info".to_owned(),
             cookie_secure: false,
             session_ttl_hours: 12,

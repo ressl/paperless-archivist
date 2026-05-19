@@ -9,7 +9,7 @@ use sqlx::{Executor, Row};
 
 async fn fresh_pool() -> Option<DbPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = connect(&url).await.expect("connect test database");
+    let pool = connect(&url, 10).await.expect("connect test database");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"

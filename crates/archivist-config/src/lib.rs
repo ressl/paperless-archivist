@@ -15,6 +15,15 @@ pub struct AppConfig {
     #[arg(long, env = "ARCHIVIST_WORKER_CONCURRENCY", default_value_t = 2)]
     pub worker_concurrency: usize,
 
+    /// Maximum size of the Postgres connection pool used by both the API and
+    /// the worker. The worker's effective parallelism is gated by this value:
+    /// each in-flight job acquires connections to run its queries, so the
+    /// pool must comfortably exceed `ARCHIVIST_WORKER_CONCURRENCY`. A pool
+    /// that is too small surfaces as `pool timed out while waiting for an
+    /// open connection` errors and bursts of failed jobs.
+    #[arg(long, env = "ARCHIVIST_DB_MAX_CONNECTIONS", default_value_t = 10)]
+    pub db_max_connections: u32,
+
     #[arg(long, env = "ARCHIVIST_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
 
@@ -98,6 +107,11 @@ impl AppConfig {
         if self.worker_concurrency == 0 {
             return Err(ConfigError::Invalid(
                 "worker_concurrency must be greater than zero",
+            ));
+        }
+        if self.db_max_connections == 0 {
+            return Err(ConfigError::Invalid(
+                "ARCHIVIST_DB_MAX_CONNECTIONS must be greater than zero",
             ));
         }
         if self.session_ttl_hours <= 0 {

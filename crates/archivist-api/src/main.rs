@@ -256,7 +256,11 @@ async fn main() -> Result<()> {
     config.validate()?;
     init_tracing(&config.log_level);
 
-    let pool = connect(config.database_url.expose_secret()).await?;
+    let pool = connect(
+        config.database_url.expose_secret(),
+        config.db_max_connections,
+    )
+    .await?;
     migrate(&pool).await?;
     ensure_bootstrap_admin(&pool, &config).await?;
 
@@ -6485,6 +6489,7 @@ mod tests {
             http_addr: "127.0.0.1:0".to_owned(),
             database_url: SecretString::from("postgres://localhost/archivist".to_owned()),
             worker_concurrency: 1,
+            db_max_connections: 10,
             log_level: "info".to_owned(),
             cookie_secure: false,
             session_ttl_hours: 12,

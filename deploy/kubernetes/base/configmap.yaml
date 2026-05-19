@@ -12,4 +12,8 @@ data:
   ARCHIVIST_OIDC_ADMIN_USERS: "admin@example.com"
   ARCHIVIST_OIDC_DEFAULT_ROLES: "viewer"
   ARCHIVIST_WORKER_CONCURRENCY: "2"
+  # Must comfortably exceed ARCHIVIST_WORKER_CONCURRENCY — each in-flight job
+  # holds Postgres connections during its query bursts. Pool too small =
+  # "pool timed out" errors under load.
+  ARCHIVIST_DB_MAX_CONNECTIONS: "10"
   ARCHIVIST_LOG_LEVEL: "info"

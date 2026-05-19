@@ -26,9 +26,9 @@ use uuid::Uuid;
 
 pub type DbPool = PgPool;
 
-pub async fn connect(database_url: &str) -> Result<DbPool> {
+pub async fn connect(database_url: &str, max_connections: u32) -> Result<DbPool> {
     PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(10))
         .connect(database_url)
         .await
