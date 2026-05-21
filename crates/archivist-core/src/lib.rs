@@ -2283,9 +2283,19 @@ pub fn document_date_has_anchor(date_iso: &str, ocr_text: &str) -> bool {
         let mut start = 0usize;
         while let Some(pos) = text_lower[start..].find(&rendering_lower) {
             let abs_pos = start + pos;
-            let window_start = abs_pos.saturating_sub(DOCUMENT_DATE_ANCHOR_WINDOW);
-            let window_end = (abs_pos + rendering_lower.len() + DOCUMENT_DATE_ANCHOR_WINDOW)
-                .min(text_lower.len());
+            // DOCUMENT_DATE_ANCHOR_WINDOW is in *bytes*, not chars — naive
+            // arithmetic lands inside a UTF-8 sequence (e.g. `ä` = 2 bytes)
+            // on multilingual OCR text and the slice below panics. Snap
+            // both ends to char boundaries before indexing.
+            let window_start = previous_char_boundary(
+                &text_lower,
+                abs_pos.saturating_sub(DOCUMENT_DATE_ANCHOR_WINDOW),
+            );
+            let window_end = next_char_boundary(
+                &text_lower,
+                (abs_pos + rendering_lower.len() + DOCUMENT_DATE_ANCHOR_WINDOW)
+                    .min(text_lower.len()),
+            );
             let window = &text_lower[window_start..window_end];
             for anchor in DOCUMENT_DATE_ANCHOR_PHRASES {
                 if window.contains(anchor) {
@@ -3515,6 +3525,21 @@ mod tests {
     fn document_date_anchor_misses_when_date_not_present() {
         let text = "Rechnungsdatum: irgendwann im Februar 2003";
         assert!(!document_date_has_anchor("2003-02-12", text));
+    }
+
+    #[test]
+    fn document_date_anchor_survives_umlauts_at_window_edge() {
+        // Regression for v1.5.25 panic: window_start / window_end were
+        // raw byte offsets, so subtracting DOCUMENT_DATE_ANCHOR_WINDOW
+        // off a real-world OCR position landed inside a UTF-8 sequence
+        // (`ä` = 2 bytes) and `&text_lower[window_start..window_end]`
+        // panicked with "byte index N is not a char boundary".
+        let umlaut_padding = "ä".repeat(60); // 120 bytes of 2-byte chars
+        let text = format!(
+            "{umlaut_padding} institut für labordiagnostik\
+             \nRechnungsdatum: 2003-02-12\nKundennummer 38381"
+        );
+        assert!(document_date_has_anchor("2003-02-12", &text));
     }
 
     #[test]

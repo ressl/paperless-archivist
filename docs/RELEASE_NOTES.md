@@ -2,8 +2,34 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.25`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.26`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.26 — Fix worker panic on multi-byte chars at the date-anchor window edge
+
+`document_date_has_anchor()` in `archivist-core` heuristically widens an
+80-byte window around each candidate date in the OCR text and checks
+that window for phrases like "Rechnungsdatum" before accepting the
+date. The window endpoints were computed as raw byte offsets — fine
+for ASCII text, but on German OCR (lab reports, invoices) the
+saturating subtraction landed inside a multi-byte UTF-8 sequence
+(`ä`, `ö`, `ü` are 2 bytes each) and `&text_lower[window_start..window_end]`
+panicked:
+
+```
+thread 'tokio-rt-worker' panicked at crates/archivist-core/src/lib.rs:2289:
+start byte index 649 is not a char boundary; it is inside 'ä' (bytes 648..650)
+```
+
+The panic killed the metadata stage for the affected document. Other
+in-flight jobs survived, but each affected document required manual
+review or a manual retry.
+
+Fix: snap both window endpoints to char boundaries via the existing
+`previous_char_boundary` / `next_char_boundary` helpers. Regression
+test added that builds an OCR text with 60× `ä` padding so the byte
+offset of the date anchor lands deep inside a multi-byte run — the
+test panics on `main` before this commit and passes after.
 
 ## v1.5.25 — Rebuild v1.5.24 on a real AMD64 runner
 
