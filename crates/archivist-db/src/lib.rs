@@ -3428,15 +3428,33 @@ async fn mttc_seconds_value(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Result<Option<f64>> {
+    // Previously this was `avg(finished_at - started_at)` over
+    // pipeline_runs, which dwarfed every other dashboard signal: a run can
+    // sit in `waiting_review`, in `applying` between user clicks, or pause
+    // entirely if the worker is offline, and that wall-clock latency has
+    // nothing to do with how long the system spent computing the answer.
+    // Real-world deployments saw values like "123 h 53 m" — accurate for
+    // wall clock, useless as a processing-time KPI.
+    //
+    // The honest measurement is the AI compute time per run: sum of
+    // `ai_artifacts.duration_ms` across the run, averaged across runs that
+    // finished in the window. This is what the user means by "how long
+    // does processing a document take" — it ignores human-paced gaps and
+    // tracks the actual work.
     let row = sqlx::query(
         r#"
-        select extract(epoch from avg(finished_at - started_at))::double precision as mttc
-          from pipeline_runs
-         where status = 'succeeded'
-           and started_at is not null
-           and finished_at is not null
-           and finished_at >= $1
-           and finished_at < $2
+        with per_run as (
+          select a.run_id, sum(a.duration_ms)::double precision / 1000.0 as seconds
+            from ai_artifacts a
+            join pipeline_runs r on r.id = a.run_id
+           where r.status = 'succeeded'
+             and r.finished_at is not null
+             and r.finished_at >= $1
+             and r.finished_at < $2
+             and a.duration_ms is not null
+           group by a.run_id
+        )
+        select avg(seconds)::double precision as mttc from per_run
         "#,
     )
     .bind(start)

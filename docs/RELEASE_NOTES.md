@@ -2,8 +2,27 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.23`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.24`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.24 — Honest "average processing time" on the operations dashboard
+
+The Operations dashboard's `Durchschn. Bearbeitungszeit` KPI was computed
+as `avg(finished_at - started_at)` over `pipeline_runs`. That's the
+wall-clock latency of a run, which on a real deployment is dominated by
+time the run sat in `waiting_review` (between human clicks), time in
+`applying`, and any wall-clock gap when the worker was offline. The KPI
+showed values like **`123 h 53 m`** — technically accurate as a "time
+the row was open" measure, completely useless as a processing-time
+signal.
+
+The query now sums `ai_artifacts.duration_ms` across each run (the
+actual AI compute time) and averages across runs that finished in the
+window. On prod, that immediately drops the displayed metric from
+~124 h to roughly **`37 s` per document** — the number an operator
+actually wants when asking "how long does processing take."
+
+No schema change, no migration; the dashboard KPI just stops lying.
 
 ## v1.5.23 — Scalable worker pool + DB connection knob
 
