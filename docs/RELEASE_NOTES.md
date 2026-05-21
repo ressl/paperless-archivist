@@ -2,8 +2,24 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.24`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.25`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.25 — Rebuild v1.5.24 on a real AMD64 runner
+
+No code changes vs. v1.5.24. The `v1.5.23` and `v1.5.24` container images
+were produced by a Kaniko build that ran on the `eyeofharmony` runner
+pool — the host advertised both `-amd64` and `-arm64` runner tags but
+underneath only had an ARM64 Docker daemon, so every build came out
+`aarch64` regardless of which tag the job picked. The resulting images
+crashed immediately on the AMD64 Talos nodes with
+`exec /usr/local/bin/archivist-api: exec format error`, and the rollouts
+stalled in `CrashLoopBackOff` before any new traffic was served (old
+v1.5.22 pods kept production healthy throughout).
+
+The `kali-docker-amd64` runner is a real x86 host. Tagging `v1.5.25`
+forces the deploy pipeline's `release:detect-source` to redo the build
+on that runner instead of treating v1.5.24 as already-promoted.
 
 ## v1.5.24 — Honest "average processing time" on the operations dashboard
 
