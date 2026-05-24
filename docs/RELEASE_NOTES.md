@@ -2,8 +2,137 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.30`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.31`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.31 — Constrained decoding for OpenAI-compatible and Anthropic providers
+
+Closes the v1.5.30 follow-up. The constrained-decoding work landed for
+Ollama in v1.5.30 but explicitly deferred OpenAI and Anthropic because
+their strict-mode contracts differ in subtle ways. v1.5.31 wires both
+of them up so the same `response_schema` field on `ChatRequest` now
+gives hard guarantees across all three providers the worker can talk
+to.
+
+### Schema shape: top-level keys now `required` + nullable
+
+`schema_for_metadata` was non-strict at the top level (no `required`)
+in v1.5.30 because Ollama's GBNF grammar doesn't need it. OpenAI's
+strict mode does: every property in `properties` MUST appear in
+`required`, otherwise the request is rejected with a 400. The schema
+now lists every enabled top-level key in `required`, and each
+property's `type` is the union `["object", "null"]` so the model
+satisfies the contract by emitting `null` for keys without evidence.
+This single shape works for all three providers:
+
+* Ollama doesn't care whether keys are required and accepts the
+  union type — the GBNF grammar generated from the schema enforces
+  enum constraints just as before.
+* OpenAI strict mode wants `required` + the union type, both
+  present.
+* Anthropic's tool input_schema accepts the same shape; the model
+  emits `null` for unknown values.
+
+The prompt's "It is always better to return null, [], or omit the
+key than to invent a value" wording stays — when the schema forces a
+key to be present, the model fills in `null` instead of omitting,
+which is functionally identical for the worker's parsers.
+
+### OpenAI-compatible wire support
+
+The `OpenAiCompatibleClient` now reads `response_schema` and wraps it
+in the canonical Structured Outputs envelope:
+
+```json
+{
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "metadata_extraction",
+      "strict": true,
+      "schema": <schema>
+    }
+  }
+}
+```
+
+`strict: true` activates the harder guarantees (every property in
+`required`, `additionalProperties: false` honoured at every level,
+no out-of-vocabulary enum values). The `name` field is a free-form
+identifier surfaced in OpenAI's dashboards — we use
+`metadata_extraction` so audit-log readers can grep for it. Wire-
+shape testing pins the envelope so a future refactor can't silently
+drop `strict: true` and degrade to plain JSON mode.
+
+### Anthropic wire support: forced tool-use
+
+Anthropic doesn't have OpenAI's Structured Outputs feature; the
+canonical equivalent is forced tool-use. When `response_schema` is
+set on a `ChatRequest`, the Anthropic client switches the payload
+from a plain `/messages` call to:
+
+```json
+{
+  "tools": [{
+    "name": "emit_metadata",
+    "description": "...",
+    "input_schema": <schema>
+  }],
+  "tool_choice": { "type": "tool", "name": "emit_metadata" }
+}
+```
+
+The model can then only respond by "calling" the tool, which means
+emitting a `tool_use` content block whose `input` matches the
+schema — Anthropic's structured-output equivalent.
+
+The response parser detects the structured mode and pulls
+`content[].tool_use.input` instead of `content[].text`,
+JSON-serialising it back to a string so the downstream
+`parse_metadata_suggestion` (and per-stage variants) work
+unchanged. Defensive: if the model somehow ignores `tool_choice`
+and produces a text block, the parser returns `""` and the
+worker translates that into "no fields recognised" rather than
+panicking.
+
+### Effect
+
+Every provider now sees the same closed-vocabulary constraints with
+sampler-level enforcement. The `UnknownChoice` cohort that
+triggered the v1.5.28 → v1.5.30 work is now blocked at the wire on
+all three: Ollama via GBNF, OpenAI via Structured Outputs strict
+mode, Anthropic via input_schema enum constraints in forced tool-
+use. A model that's never seen the document still can't emit a
+`fields[].name` that isn't in the allowlist.
+
+### Tests added
+
+* `openai_chat_payload_wraps_response_schema_in_strict_json_schema_envelope`
+  and `openai_chat_payload_omits_response_format_when_schema_unset`
+  pin the OpenAI wire shape (envelope structure + `strict: true`).
+* `anthropic_chat_payload_switches_to_forced_tool_use_with_schema` and
+  `anthropic_chat_payload_omits_tools_when_schema_unset` pin the
+  Anthropic wire shape (single tool, tool_choice forced).
+* `anthropic_response_parser_pulls_structured_input_from_tool_use_block`
+  and `anthropic_response_parser_returns_empty_string_when_no_tool_use_present`
+  pin the response-parsing path that turns Anthropic's tool_use into
+  a JSON string the worker can feed to its existing parsers.
+
+### Not yet (deliberate)
+
+* **Vision-stage constrained decoding** (`VisionRequest`) — OCR output
+  is free-form text by design; not a structured-output candidate.
+* **Other Anthropic models that don't support tool-use** (older claude
+  pre-1.0). Production runs on `claude-3-5-sonnet-latest` and similar
+  recent models that all support tool-use. If an operator configures
+  an older model the request still goes out — Anthropic will reject
+  it with a clear error which the worker classifies as permanent.
+* **Per-stage standalone prompts** (`prompt_for_fields`,
+  `prompt_for_tags`, etc.) — these don't currently set
+  `response_schema` either, so they continue on prompt-only steering
+  even on Ollama. A separate refactor pass can add per-stage
+  schema-builders parallel to `schema_for_metadata` if those paths
+  become hot.
 
 ## v1.5.30 — Constrained decoding for the consolidated metadata extractor (Ollama)
 

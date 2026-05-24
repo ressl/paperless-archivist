@@ -490,6 +490,48 @@ pub fn build_ollama_chat_payload(request: &ChatRequest) -> Value {
     payload
 }
 
+/// Builds the JSON payload posted to OpenAI / OpenAI-compatible
+/// `/chat/completions`. When `response_schema` is set on the request,
+/// the payload includes `response_format: {type: "json_schema",
+/// json_schema: {name, strict: true, schema}}` — OpenAI's Structured
+/// Outputs feature guarantees the response will match the schema (no
+/// out-of-vocabulary enum values, no missing required fields). Extracted
+/// as a free function so the wire shape is unit-testable without
+/// spinning up the HTTP client.
+pub fn build_openai_chat_payload(request: &ChatRequest) -> Value {
+    let mut payload = json!({
+        "model": request.model,
+        "temperature": request.temperature,
+        "messages": [
+            { "role": "system", "content": request.system_prompt },
+            { "role": "user", "content": request.user_prompt }
+        ]
+    });
+    if let Some(schema) = request.response_schema.as_ref() {
+        // OpenAI strict mode requires the wrapper shape
+        // {type: "json_schema", json_schema: {name, strict, schema}}.
+        // The `name` is a free-form identifier surfaced in OpenAI's
+        // dashboards; we use "metadata_extraction" so audit-log readers
+        // can grep for it. `strict: true` activates the harder
+        // guarantees: every property in `required`, no extra keys, etc.
+        payload
+            .as_object_mut()
+            .expect("payload is an object literal")
+            .insert(
+                "response_format".to_owned(),
+                json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "metadata_extraction",
+                        "strict": true,
+                        "schema": schema,
+                    }
+                }),
+            );
+    }
+    payload
+}
+
 /// Builds the JSON payload posted to Ollama's `/api/chat` for a vision call.
 /// Extracted as a free function for the same testability reason as
 /// [`build_ollama_chat_payload`].
@@ -620,14 +662,7 @@ impl OpenAiCompatibleClient {
 impl TextProvider for OpenAiCompatibleClient {
     async fn chat(&self, request: ChatRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let payload = json!({
-            "model": request.model,
-            "temperature": request.temperature,
-            "messages": [
-                { "role": "system", "content": request.system_prompt },
-                { "role": "user", "content": request.user_prompt }
-            ]
-        });
+        let payload = build_openai_chat_payload(&request);
         let response = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
@@ -761,6 +796,24 @@ impl AnthropicClient {
         model: String,
         started: Instant,
     ) -> Result<AiResponse> {
+        self.send_messages_with_mode(payload, model, started, false)
+            .await
+    }
+
+    /// Send a /messages call. When `structured` is true the caller has
+    /// switched the payload into forced tool-use mode (a single tool
+    /// with our response schema as input_schema); the response body
+    /// then contains a `tool_use` content block whose `input` is the
+    /// structured JSON. Pull that input out and serialise it back to
+    /// text so downstream parsers (`parse_metadata_suggestion` and the
+    /// per-stage variants) work unchanged.
+    async fn send_messages_with_mode(
+        &self,
+        payload: Value,
+        model: String,
+        started: Instant,
+        structured: bool,
+    ) -> Result<AiResponse> {
         let response = self
             .client
             .post(format!("{}/messages", self.base_url))
@@ -775,14 +828,17 @@ impl AnthropicClient {
             return Err(anyhow!("Anthropic messages returned {status}: {body}"));
         }
         let raw: Value = response.json().await.context("decode Anthropic response")?;
-        let text = raw
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("");
+        let text = if structured {
+            anthropic_extract_tool_input_text(&raw)
+        } else {
+            raw.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        };
         Ok(AiResponse {
             provider: self.provider_name.clone(),
             model,
@@ -793,20 +849,70 @@ impl AnthropicClient {
     }
 }
 
+/// Anthropic's `/messages` payload builder. When `response_schema` is
+/// set the payload switches to forced tool-use: we register a single
+/// tool whose `input_schema` is the response schema and force
+/// `tool_choice` to that tool. The model then can only respond by
+/// "calling" the tool with a `tool_use` content block whose `input`
+/// matches the schema — Anthropic's structured-output equivalent.
+///
+/// The tool description doubles as a prompt-level reminder of what
+/// the tool emits; useful because Anthropic models prioritise tool
+/// descriptions when deciding tool semantics.
+pub fn build_anthropic_chat_payload(request: &ChatRequest) -> Value {
+    let mut payload = json!({
+        "model": request.model,
+        "max_tokens": 2048,
+        "temperature": request.temperature,
+        "system": request.system_prompt,
+        "messages": [
+            { "role": "user", "content": request.user_prompt }
+        ]
+    });
+    if let Some(schema) = request.response_schema.as_ref() {
+        let obj = payload.as_object_mut().expect("payload is an object literal");
+        obj.insert(
+            "tools".to_owned(),
+            json!([{
+                "name": "emit_metadata",
+                "description": "Emit the consolidated document metadata as a structured object matching the input_schema. Closed-vocabulary fields (document_type, correspondent, tags, custom-field names) must use values from the enum constraints — no other names are valid. Return null for any key whose evidence is missing from the document.",
+                "input_schema": schema,
+            }]),
+        );
+        obj.insert(
+            "tool_choice".to_owned(),
+            json!({ "type": "tool", "name": "emit_metadata" }),
+        );
+    }
+    payload
+}
+
+/// Extract the structured payload from an Anthropic /messages response
+/// when forced tool-use was used. Walks `content[]` for the first
+/// `tool_use` block, serialises its `input` back to a JSON string so
+/// the downstream parsers (which expect `AiResponse.text` to contain
+/// the JSON-encoded response) work unchanged. Returns an empty string
+/// if no tool_use block is present — the worker's parsers translate
+/// that into "no fields recognised" rather than crashing.
+fn anthropic_extract_tool_input_text(raw: &Value) -> String {
+    raw.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .and_then(|item| item.get("input"))
+        .map(|input| serde_json::to_string(input).unwrap_or_default())
+        .unwrap_or_default()
+}
+
 #[async_trait]
 impl TextProvider for AnthropicClient {
     async fn chat(&self, request: ChatRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let payload = json!({
-            "model": request.model,
-            "max_tokens": 2048,
-            "temperature": request.temperature,
-            "system": request.system_prompt,
-            "messages": [
-                { "role": "user", "content": request.user_prompt }
-            ]
-        });
-        self.send_messages(payload, request.model, started).await
+        let payload = build_anthropic_chat_payload(&request);
+        let structured = request.response_schema.is_some();
+        self.send_messages_with_mode(payload, request.model, started, structured)
+            .await
     }
 }
 
@@ -1736,36 +1842,49 @@ pub fn schema_for_metadata(
         return None;
     }
     let mut properties = serde_json::Map::new();
+    let mut required: Vec<String> = Vec::new();
     if enabled_fields.title {
         properties.insert("title".to_owned(), title_schema());
+        required.push("title".to_owned());
     }
     if enabled_fields.document_date {
         properties.insert("document_date".to_owned(), document_date_schema());
+        required.push("document_date".to_owned());
     }
     if enabled_fields.document_type {
         properties.insert(
             "document_type".to_owned(),
             closed_vocab_object_schema("name", allowed_document_types),
         );
+        required.push("document_type".to_owned());
     }
     if enabled_fields.correspondent {
         properties.insert(
             "correspondent".to_owned(),
             closed_vocab_object_schema("name", allowed_correspondents),
         );
+        required.push("correspondent".to_owned());
     }
     if enabled_fields.tags {
         properties.insert("tags".to_owned(), tags_schema(allowed_tags, max_tags));
+        required.push("tags".to_owned());
     }
     if enabled_fields.fields {
         properties.insert(
             "fields".to_owned(),
             fields_schema(allowed_field_names, max_fields),
         );
+        required.push("fields".to_owned());
     }
+    // OpenAI strict mode requires every property to be listed in
+    // `required`. Each property's value type already includes `null` so
+    // the model fulfils its contract by emitting `null` for keys it
+    // can't ground in the document. Ollama / Anthropic accept the same
+    // shape, so one schema covers all three providers.
     Some(json!({
         "type": "object",
         "properties": properties,
+        "required": required,
         "additionalProperties": false,
     }))
 }
@@ -2220,11 +2339,29 @@ mod tests {
             10,
         )
         .expect("schema must be produced when any key is enabled");
-        // Top-level shape: an object, no extra keys, no required keys
-        // (the prompt allows the model to omit keys it can't ground).
+        // Top-level shape: an object, no extra keys. `required`
+        // lists every enabled top-level key (v1.5.31, for OpenAI
+        // strict-mode compatibility); the property values themselves
+        // are nullable via `type: ["object", "null"]` so the model
+        // still has a clean null-fallback path.
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
-        assert!(schema.get("required").is_none());
+        let required = schema["required"]
+            .as_array()
+            .expect("required must be an array of enabled keys");
+        for key in [
+            "title",
+            "document_date",
+            "document_type",
+            "correspondent",
+            "tags",
+            "fields",
+        ] {
+            assert!(
+                required.iter().any(|v| v == key),
+                "required must list every enabled key; missing {key}"
+            );
+        }
         // document_type.name carries the document_types enum.
         assert_eq!(
             schema["properties"]["document_type"]["properties"]["name"]["enum"],
@@ -2312,6 +2449,144 @@ mod tests {
         flags.fields = false;
         let schema = schema_for_metadata(&[], &[], &[], &[], &flags, 5, 10);
         assert!(schema.is_none());
+    }
+
+    #[test]
+    fn openai_chat_payload_wraps_response_schema_in_strict_json_schema_envelope() {
+        // OpenAI's Structured Outputs feature requires a specific
+        // wrapper shape: response_format.type = "json_schema",
+        // response_format.json_schema.{name,strict,schema}. The
+        // strict-mode flag activates the harder guarantees
+        // (every property in `required`, no extra keys at any level).
+        // Pin the exact wire shape so a refactor can't silently drop
+        // `strict: true` and degrade enforcement to non-strict JSON
+        // mode (which still constrains shape but not vocabularies).
+        let schema = json!({
+            "type": "object",
+            "properties": { "name": { "type": "string", "enum": ["A"] } },
+            "required": ["name"],
+            "additionalProperties": false,
+        });
+        let request = ChatRequest {
+            model: "gpt-4o-2024-08-06".to_owned(),
+            system_prompt: "you are".to_owned(),
+            user_prompt: "extract".to_owned(),
+            temperature: 0.0,
+            num_ctx: None,
+            response_schema: Some(schema.clone()),
+        };
+        let payload = build_openai_chat_payload(&request);
+        let response_format = payload.get("response_format").expect("response_format set");
+        assert_eq!(response_format["type"], "json_schema");
+        assert_eq!(response_format["json_schema"]["strict"], true);
+        assert_eq!(response_format["json_schema"]["name"], "metadata_extraction");
+        assert_eq!(response_format["json_schema"]["schema"], schema);
+    }
+
+    #[test]
+    fn openai_chat_payload_omits_response_format_when_schema_unset() {
+        let request = ChatRequest {
+            model: "gpt-4o-mini".to_owned(),
+            system_prompt: String::new(),
+            user_prompt: String::new(),
+            temperature: 0.0,
+            num_ctx: None,
+            response_schema: None,
+        };
+        let payload = build_openai_chat_payload(&request);
+        assert!(payload.get("response_format").is_none());
+    }
+
+    #[test]
+    fn anthropic_chat_payload_switches_to_forced_tool_use_with_schema() {
+        // Anthropic's structured-output story is "use a tool with an
+        // input_schema and force the model to call it". The model can
+        // only emit a tool_use content block whose `input` matches the
+        // schema. Pin the wire shape: a single `tools` entry, the
+        // schema embedded as input_schema, and tool_choice forced to
+        // that exact tool.
+        let schema = json!({
+            "type": "object",
+            "properties": { "name": { "type": "string", "enum": ["A"] } },
+            "required": ["name"],
+            "additionalProperties": false,
+        });
+        let request = ChatRequest {
+            model: "claude-3-5-sonnet-latest".to_owned(),
+            system_prompt: "you are".to_owned(),
+            user_prompt: "extract".to_owned(),
+            temperature: 0.0,
+            num_ctx: None,
+            response_schema: Some(schema.clone()),
+        };
+        let payload = build_anthropic_chat_payload(&request);
+        let tools = payload.get("tools").and_then(Value::as_array).expect("tools present");
+        assert_eq!(tools.len(), 1);
+        let tool = &tools[0];
+        assert_eq!(tool["name"], "emit_metadata");
+        assert_eq!(tool["input_schema"], schema);
+        let choice = payload.get("tool_choice").expect("tool_choice set");
+        assert_eq!(choice["type"], "tool");
+        assert_eq!(choice["name"], "emit_metadata");
+    }
+
+    #[test]
+    fn anthropic_chat_payload_omits_tools_when_schema_unset() {
+        let request = ChatRequest {
+            model: "claude-3-5-sonnet-latest".to_owned(),
+            system_prompt: String::new(),
+            user_prompt: String::new(),
+            temperature: 0.0,
+            num_ctx: None,
+            response_schema: None,
+        };
+        let payload = build_anthropic_chat_payload(&request);
+        assert!(payload.get("tools").is_none());
+        assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn anthropic_response_parser_pulls_structured_input_from_tool_use_block() {
+        // Real-world Anthropic response shape for a forced tool call:
+        // content[] holds a tool_use block whose `input` is the
+        // structured object the schema asked for. The helper extracts
+        // it, serialises it back to a JSON string, and returns that
+        // text — downstream parse_metadata_suggestion etc. work
+        // unchanged on the resulting string.
+        let raw = json!({
+            "content": [
+                { "type": "text", "text": "I'll call the tool." },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01ABCxyz",
+                    "name": "emit_metadata",
+                    "input": {
+                        "title": { "title": "Rechnung 4091", "confidence": 0.92 },
+                        "document_type": { "name": "Rechnung", "confidence": 0.98 }
+                    }
+                }
+            ]
+        });
+        let text = anthropic_extract_tool_input_text(&raw);
+        // Reparse the returned text and inspect.
+        let parsed: Value = serde_json::from_str(&text).expect("returned text must be JSON");
+        assert_eq!(parsed["title"]["title"], "Rechnung 4091");
+        assert_eq!(parsed["document_type"]["name"], "Rechnung");
+    }
+
+    #[test]
+    fn anthropic_response_parser_returns_empty_string_when_no_tool_use_present() {
+        // Defensive: if the model somehow ignored tool_choice and
+        // produced a text block instead, the parser returns "" rather
+        // than panicking. The worker's MetadataSuggestion::default()
+        // fallback then turns it into "no fields recognised".
+        let raw = json!({
+            "content": [
+                { "type": "text", "text": "{}" }
+            ]
+        });
+        let text = anthropic_extract_tool_input_text(&raw);
+        assert_eq!(text, "");
     }
 
     #[test]
