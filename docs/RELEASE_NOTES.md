@@ -2,8 +2,60 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.27`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.28`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.28 — Tighten the consolidated metadata prompt's custom-fields binding
+
+Follow-up to the v1.5.27 post-mortem. The dashboard surfaced dozens of
+`UnknownChoice` validation warnings on the fields branch: the LLM was
+pulling document labels (Rechnungsnummer, Kunde, Datum, Police Nr.,
+Versicherte(r), …) straight out of the OCR text as `fields[].name`,
+even though those labels were not in the configured `Allowed custom
+fields` list. A real prod artifact (run on a SCHRACK domain invoice)
+returned 18 such entries, all with confidence `0.95`. The validation
+correctly rejected them, but every such call wasted a metadata cycle
+and the operator saw a noisy review queue.
+
+Three prompt changes, no behaviour change for any other key:
+
+**System prompt now hard-binds `fields[].name`.** Adds two new
+sentences (after the closed-vocabulary general rule): one that the
+name MUST appear verbatim in the user-prompt's allowed list; one
+that names a specific set of common forbidden labels (Rechnungsnummer,
+Kunde, Datum, Police Nr., Versicherte(r)) so the model can't
+generalise its way out of the constraint. Plus an empty-list
+fallback: "If no allowed custom field has clear evidence, return an
+empty fields array rather than substituting document labels."
+
+**User-prompt allowed-list block restructured.** Was previously a
+newline-separated list under "Allowed custom fields, one per line:".
+Now framed as quoted bullets with an explicit "use ONLY these exact
+strings, copied verbatim" header and a repeated negative example
+("Document labels that look like field names … are NOT acceptable
+substitutes"). When the operator hasn't configured any custom
+fields, the block collapses to "(none configured)" + a direct
+instruction to return `"fields":[]` rather than dangling a confusing
+empty list.
+
+**New fields-specific few-shot examples**, sent only when fields is
+enabled (so the closed-vocabulary shape doesn't leak into responses
+for runs that disabled the fields stage). Example A: allowed list
+`["Invoice Number", "Total"]`, document has both "Rechnungsnummer"
+and "Gesamtbetrag" as labels — the right answer maps to the allowed
+names verbatim, ignoring the label strings. Example B: allowed list
+overlaps nothing in the document — the right answer is
+`{"fields":[],"confidence":0.95}`, not document labels.
+
+Schema-shape line for `fields` was also sharpened: `"name":"<must be
+one of the Allowed custom fields listed above, copied verbatim>"`
+plus an inline reminder that an empty list is a valid response.
+
+Four new unit tests pin (a) the system-prompt strict-vocabulary
+clause, (b) the user-prompt negative-example block, (c) the quoted
+bullet allowed-list formatting, (d) that the fields few-shot only
+appears when the fields branch is enabled, and (e) that an empty
+allowed list collapses to the safe `(none configured)` instruction.
 
 ## v1.5.27 — Quota-aware backoff for Ollama Cloud + operator unblock action
 
