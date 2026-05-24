@@ -8,7 +8,7 @@
 //! would send to the AI provider for a German invoice with all six keys
 //! enabled.
 
-use archivist_ai::{PromptLanguageContext, prompt_for_metadata};
+use archivist_ai::{PromptLanguageContext, prompt_for_metadata, schema_for_metadata};
 use archivist_core::MetadataFieldFlags;
 
 fn main() {
@@ -47,4 +47,22 @@ fn main() {
     println!("\n════ USER PROMPT ({} chars) ════", request.user_prompt.len());
     println!("{}", request.user_prompt);
     println!("\n════ TEMPERATURE: {} ════", request.temperature);
+    let schema = schema_for_metadata(
+        &[
+            "DITech".to_owned(),
+            "Stadtwerke Musterstadt".to_owned(),
+            "Telekom".to_owned(),
+        ],
+        &["Rechnung".to_owned(), "Vertrag".to_owned(), "Mahnung".to_owned()],
+        &["Finanzen".to_owned(), "IT".to_owned(), "Geschäftlich".to_owned()],
+        &["Invoice Number".to_owned(), "Total".to_owned()],
+        &MetadataFieldFlags::ALL,
+        5,
+        10,
+    )
+    .expect("schema present when any key enabled");
+    println!(
+        "\n════ RESPONSE SCHEMA (Ollama /api/chat format field) ════"
+    );
+    println!("{}", serde_json::to_string_pretty(&schema).unwrap());
 }

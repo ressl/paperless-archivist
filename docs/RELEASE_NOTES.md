@@ -2,8 +2,100 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.29`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.30`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.30 — Constrained decoding for the consolidated metadata extractor (Ollama)
+
+Closes the soft-constraint slippage that the v1.5.29 prompt redesign
+identified but couldn't eliminate. Even with the strongest XML-section
+markup, allowed-list framing, and few-shot reinforcement, soft prompt
+constraints leave 1–10% of responses outside the closed vocabularies
+(Anthropic + OpenAI + Gemini guides all flag this). Constrained
+decoding closes the gap entirely by enforcing the schema during token
+sampling.
+
+### What changed on the wire
+
+`ChatRequest` grows an optional `response_schema: Option<Value>` field.
+When set, the Ollama client forwards it as the `format` field of
+`/api/chat`; llama.cpp lowers the schema to a GBNF grammar and applies
+it during sampling, so out-of-vocabulary tokens become impossible to
+emit. The OpenAI-compatible and Anthropic clients ignore the field for
+now — they continue on prompt-only steering. Adding
+`response_format: json_schema` for OpenAI and forced tool-use for
+Anthropic is tracked as a follow-up; both are non-trivial because their
+strict-mode constraints don't match our "keys are optional / values
+may be null" contract verbatim.
+
+### Schema mirrors the prompt
+
+A new `schema_for_metadata` function consumes the same inputs as
+`prompt_for_metadata` and produces a JSON Schema matching the
+`<output_schema>` block exactly. The worker calls both in lockstep so
+the prompt's textual description and the sampler's hard constraint
+stay aligned. Soft prompt constraints stay in place (belt and
+suspenders): a model that understands *why* a value is allowed
+performs better than one that only finds out at the sampler.
+
+The schema is deliberately **non-strict on the top-level keys** — none
+of `title`, `document_date`, `document_type`, `correspondent`, `tags`,
+`fields` is listed in `required`, and every key allows `null` as a
+value. That matches the prompt's "omit any key whose evidence is
+missing" contract. Within each present key the inner objects ARE
+strict (`additionalProperties: false`, all inner shape fields
+required) so a malformed object can't sneak past.
+
+Closed-vocabulary fields carry `enum` constraints from the runtime
+allowlists:
+
+* `document_type.name` → `enum: [<allowed_document_types>]`
+* `correspondent.name` → `enum: [<allowed_correspondents>]`
+* `tags.tags[]` → `enum: [<allowed_tags>]` (items), `maxItems` cap
+* `fields.fields[].name` → `enum: [<allowed_custom_field_names>]`, `maxItems` cap
+* `tags.new_tags` → `maxItems: 0` (prompt already forbids new tags;
+  schema enforces it)
+
+Empty allowed lists collapse to `{"type": "null"}` for single-valued
+keys (the model can only emit `null`, never an invented value) and
+`maxItems: 0` for array-valued keys.
+
+`document_date.date` carries `pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"`
+so the model can't emit `12.02.2003`-style strings the validator
+would reject later. Confidence fields are constrained to
+`number, minimum: 0, maximum: 1`.
+
+### Tests added
+
+* `schema_for_metadata_binds_closed_vocabulary_via_enum` — verifies
+  each allowlist lands as an `enum` in the right place, plus
+  `maxItems` caps and the force-empty `new_tags` array.
+* `schema_for_metadata_empty_allowed_list_collapses_to_null_only` —
+  pins the empty-list fallback so a future refactor can't silently
+  let the sampler invent values.
+* `schema_for_metadata_returns_none_when_no_keys_enabled` — short-
+  circuits when there's nothing to produce.
+* `ollama_chat_payload_forwards_response_schema_to_format_field` and
+  `ollama_chat_payload_omits_format_when_schema_unset` — pin the wire
+  shape so the schema can't be silently moved elsewhere on the
+  Ollama payload.
+
+The `cargo run -p archivist-ai --example dump_metadata_prompt` target
+now also dumps the generated JSON Schema so operators can eyeball the
+full prompt + schema combination before rolling a change.
+
+### Effect on the prod incident pattern
+
+The `UnknownChoice` cohort (document-label-as-field-name) that
+triggered the v1.5.28 and v1.5.29 work is now blocked at the sampler:
+the model literally cannot emit `{"name": "Rechnungsnummer"}` if
+"Rechnungsnummer" is not in `<allowed_custom_field_names>`, because
+that token sequence is masked out of the logits at every position
+where `name` is being decoded.
+
+The prompt still describes the constraint in plain English because
+(a) the model understands and follows it better, and (b) the
+non-Ollama providers don't see the schema yet.
 
 ## v1.5.29 — Full prompt redesign for the consolidated metadata extractor
 

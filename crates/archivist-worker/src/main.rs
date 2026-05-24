@@ -2241,6 +2241,25 @@ async fn process_metadata(
         settings.fields.max_fields,
         doc_type_hint,
     );
+    // v1.5.30: attach a JSON Schema that mirrors the prompt's
+    // <output_schema> block. The Ollama client forwards it via the
+    // `format` field of /api/chat, which lowers the schema to a GBNF
+    // grammar and applies it during sampling — out-of-vocabulary tokens
+    // become impossible to emit, so the closed-vocabulary
+    // (document_type, correspondent, tags, custom-field names) gets
+    // hard guarantees on top of the soft prompt constraints.
+    // OpenAI-compatible and Anthropic clients ignore this field today;
+    // their wire-level enforcement (response_format json_schema /
+    // tool-use) is tracked as future work.
+    request.response_schema = archivist_ai::schema_for_metadata(
+        &allowed_correspondents,
+        &allowed_document_types,
+        &allowed_tags,
+        &allowed_field_names,
+        &enabled,
+        settings.effective_tuning().max_tags as usize,
+        settings.fields.max_fields,
+    );
     let (prompt_id, prompt_experiment_group) =
         apply_active_prompt_with_experiment(pool, Stage::Metadata, job.run_id, &mut request)
             .await?;

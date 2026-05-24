@@ -1577,6 +1577,7 @@ async fn build_prompt_test_chat_request(
             ),
             temperature: 0.0,
             num_ctx: None,
+            response_schema: None,
         }),
         Stage::Ocr => Ok(ChatRequest {
             model: String::new(),
@@ -1587,6 +1588,7 @@ async fn build_prompt_test_chat_request(
             ),
             temperature: 0.0,
             num_ctx: None,
+            response_schema: None,
         }),
         Stage::OcrFix => Ok(ChatRequest {
             model: String::new(),
@@ -1597,6 +1599,7 @@ async fn build_prompt_test_chat_request(
             ),
             temperature: 0.0,
             num_ctx: None,
+            response_schema: None,
         }),
         // Stage::Metadata uses the consolidated prompt builder added alongside the worker
         // handler. The builder is registered in archivist-ai in a follow-up commit; until
@@ -2400,6 +2403,7 @@ async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Va
                     user_prompt: "Return OK.".to_owned(),
                     temperature: 0.0,
                     num_ctx: None,
+                    response_schema: None,
                 })
                 .await?;
             Ok(
@@ -2418,6 +2422,7 @@ async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Va
                     user_prompt: "Return OK.".to_owned(),
                     temperature: 0.0,
                     num_ctx: None,
+                    response_schema: None,
                 })
                 .await?;
             Ok(
@@ -4002,6 +4007,7 @@ async fn post_chat_message(
             user_prompt: prompt.user_prompt,
             temperature: 0.1,
             num_ctx: None,
+            response_schema: None,
         },
     )
     .await?;
