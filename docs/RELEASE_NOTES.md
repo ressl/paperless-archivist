@@ -2,8 +2,122 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.28`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.29`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.29 — Full prompt redesign for the consolidated metadata extractor
+
+Builds on v1.5.28's narrowly-scoped custom-fields tightening and applies
+a deeper redesign grounded in the prompt-engineering literature (Anthropic
+prompt-engineering guide, OpenAI structured-outputs guide, Google Gemini
+structured-output guide) and a survey of comparable open-source projects
+(paperless-gpt, paperless-ai). The contract the worker emits is now
+structured for long-context reading instead of dense prose, and every
+section is wrapped in named XML tags so the model can disambiguate
+instructions from variable inputs.
+
+### What changed in the wire format
+
+**System prompt** is rewritten as a numbered `<rules>` block of eight
+single-sentence rules, ordered with anti-hallucination first
+(*"It is always better to omit a key, return null, or return [] than
+to invent a value"*) and the untrusted-evidence guardrail last. Each
+rule addresses one concern; the previous `concat!` of run-on sentences
+is gone.
+
+**User prompt** now follows a fixed section order chosen for both
+long-context recall and the recency-effect on the final instruction:
+
+```
+{language context}
+<doc_type_hint>...</doc_type_hint>          # only if non-empty
+<requested_keys>...</requested_keys>
+<output_schema>{...}</output_schema>
+<examples>...</examples>                    # static, 4 examples
+<examples key="fields">...</examples>       # only if fields enabled
+<allowed_document_types>...</allowed_document_types>
+<allowed_correspondents>...</allowed_correspondents>
+<allowed_tags>...</allowed_tags>
+<allowed_custom_field_names>...</allowed_custom_field_names>
+<document>{OCR text, ≤16 000 chars}</document>
+Return the single JSON object now. ...
+```
+
+The document block sits immediately after the allowlists (so the
+closed-vocabulary constraints frame how the model reads it) and the
+final "Return the JSON object now" trigger is the last thing on the
+wire (recency effect).
+
+**Allowlists** for every closed-vocabulary key (document_type,
+correspondent, tags, custom-field names) are now rendered uniformly:
+a one-sentence header that names the constraint, then quoted-bullet
+entries (`  - "Value"`), wrapped in a matching `<allowed_*>` XML tag.
+Empty lists collapse to `(none configured)` with the matching
+empty-array / omit-key instruction. Backslashes and quotes inside
+values are escaped so an allowed value with embedded punctuation
+doesn't break the wire format.
+
+**Output schema** keys are ordered identifying-first
+(title, document_date) and classification-last
+(document_type, correspondent, tags, fields). JSON property order
+acts as a chain-of-thought scaffold: the model reasons about the
+identifying fields before committing to a closed-vocabulary class.
+`parse_metadata_suggestion` uses unordered key lookups, so the wire
+order is a pure prompt-engineering knob with no parsing risk.
+
+**Few-shot examples** are wrapped in `<example>` / `<examples>` tags
+per Anthropic's recommendation. A fourth simple-keys example was
+added: a partially-OCR'd handwritten note where no allowed
+document_type matches, no correspondent is identifiable, and no
+explicit date is present — the right output is a title only and
+the other keys omitted entirely. This demonstrates the null-fallback
+contract from rule 2 of the system prompt by example rather than by
+explicit negation.
+
+The fields-specific few-shot pair from v1.5.28 was reformatted to
+the same XML structure and is appended only when the fields branch
+is enabled.
+
+### Same treatment applied to `prompt_for_fields`
+
+The standalone fields prompt (used when an operator runs the Fields
+stage independently of the consolidated metadata stage) received
+the same XML-section + numbered-rules treatment. Same wording for
+the anti-hallucination directive, same `<allowed_custom_field_names>`
+block, same final "Return the JSON object now" trigger. Keeps the
+two paths visually identical so an operator reading prompts in the
+audit log doesn't have to context-switch between formats.
+
+### Tests added
+
+Three structural tests that pin the design so future refactors can't
+silently collapse it:
+
+* `metadata_prompt_uses_xml_section_markup_for_long_context_models` —
+  verifies every required XML tag appears and the anti-hallucination
+  directive is present verbatim.
+* `metadata_prompt_document_block_lives_below_allowlists_and_above_final_trigger` —
+  verifies the section order (allowlists → document → trigger,
+  schema before document).
+* `metadata_prompt_output_schema_lists_identifying_keys_before_classification_keys` —
+  verifies title and document_date precede document_type, correspondent,
+  tags, fields in the wire schema.
+
+A new `cargo run -p archivist-ai --example dump_metadata_prompt`
+target renders the consolidated prompt with a representative
+German invoice payload so an operator can eyeball the full wire
+format end-to-end without spinning up the worker.
+
+### Not yet (deliberate)
+
+Decoder-side enforcement (Ollama `format: <json-schema>` /
+OpenAI `response_format: json_schema` / Anthropic tool-use enums)
+remains future work. The literature is unanimous that soft prompt
+constraints leave 1–10% slippage even with the best wording; only
+constrained decoding closes the gap entirely. Adding it requires
+per-provider client changes plus a JSON-schema generator from the
+runtime allowlists, which is a bigger surface than fits in this
+release.
 
 ## v1.5.28 — Tighten the consolidated metadata prompt's custom-fields binding
 
