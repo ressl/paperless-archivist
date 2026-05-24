@@ -2,8 +2,48 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.33`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.34`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.34 — Refresh the seeded metadata system prompt to the v1.5.29 redesign
+
+The v1.5.29 prompt redesign rewrote `DEFAULT_METADATA_SYSTEM_PROMPT`
+into a clean XML-structured form with a numbered `<rules>` block, an
+explicit null-fallback directive, and named negative examples for the
+custom-fields binding. The new constant was live in the binary from
+v1.5.29 onwards (and especially from v1.5.33 when the deploy chain
+finally unblocked), but production wasn't using it.
+
+The reason: migration `0021_metadata_prompt_seed.sql` seeded the
+v1.5.11-era system prompt into the `prompts` table on every fresh
+deploy so operators can edit it via the Prompts UI without a backend
+change. The seed runs `ON CONFLICT (stage, name, version) DO NOTHING`,
+so on every cluster that had ever taken the v1.5.11 migration the
+seeded row was already there with the old text — frozen since
+2026-05-17 on this prod cluster — and the v1.5.29 code redesign never
+made it into the wire payload. `apply_active_prompt_with_experiment`
+hard-overwrites `request.system_prompt` with the DB content; the code
+constant is only the seed value.
+
+Migration 0026 selectively updates the seeded row when its content
+still matches the v1.5.11 verbatim text (the active prompt is keyed by
+`stage='metadata' AND name='default' AND version=1` and only refreshed
+if `content LIKE 'You are the consolidated metadata extractor for a
+Paperless-ngx archive.%'`). Operator-customised prompts — different
+name, different version, or content already edited away from the
+v1.5.11 baseline — are untouched. Idempotent on re-runs.
+
+The full v1.5.27–v1.5.31 stack is finally complete in production:
+quota-aware backoff, dashboard unblock action, prompt redesign
+(user-prompt half was already live, this completes the system-prompt
+half), and constrained decoding across Ollama / OpenAI / Anthropic.
+
+### Follow-up
+
+A future release should add a "Reset to current default" affordance
+in the Prompts UI so operators can pull in a new in-code default
+without an SQL migration. Out of scope here — this release converges
+the running cluster, future fresh installs converge automatically.
 
 ## v1.5.33 — Drop non-IMMUTABLE partial index in migration 0025
 
