@@ -2,8 +2,58 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.34`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.35`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.35 — Refresh the seeded `fields` system prompt to the v1.5.28 redesign
+
+Second instance of the same drift v1.5.34 fixed for metadata: the
+seeded `fields`-stage system prompt in the `prompts` table was frozen
+at the v1.5.x run-on-sentence baseline, so my v1.5.28 tightening
+(numbered `<rules>` block, explicit "document labels are not
+substitutes" negation, named negative-example labels like
+"Rechnungsnummer" / "Police Nr." / "Versicherte(r)") was dead code on
+every cluster that had ever taken the original seed migration.
+
+A hash-compare across all stored prompts after v1.5.34 turned up:
+
+```
+ocr            OK    (DB matches code)
+ocr_fix        OK
+tags           OK
+title          OK
+correspondent  OK
+document_type  OK
+fields         DRIFT — DB has v1.5.x baseline, code has v1.5.29
+metadata       OK    (just fixed by v1.5.34)
+```
+
+Migration 0027 selectively refreshes the seeded `fields` / `default`
+row when its content still starts with the v1.5.x baseline. Operator-
+customised prompts and any other versions are untouched. Idempotent on
+re-runs.
+
+Production was patched in-place via direct SQL UPDATE before the tag
+to converge the running cluster immediately; the migration ships so
+fresh installs and DB restores converge automatically.
+
+OCR / OCR-fix / tags / title / correspondent / document_type prompts
+all match between code and DB — no further drift to chase.
+
+### Architectural follow-up
+
+This is the second time in two days that a code-side prompt
+improvement landed without changing what the worker actually emits.
+The root cause is real: `apply_active_prompt_with_experiment`
+overwrites `request.system_prompt` with the DB content, and the seed
+migrations are `ON CONFLICT DO NOTHING` so any row that exists
+freezes. A future release should add either:
+
+* a Prompts-UI button "Reset to current default" that overwrites
+  the active row with `DEFAULT_*_SYSTEM_PROMPT` at click time, or
+* a startup check that logs a warning when the active prompt for a
+  stage doesn't match the code default (so the drift is visible
+  before it becomes a six-day-old bug).
 
 ## v1.5.34 — Refresh the seeded metadata system prompt to the v1.5.29 redesign
 
