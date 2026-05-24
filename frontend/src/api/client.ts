@@ -539,6 +539,13 @@ export type RecoverySummary = {
   stuck_runs_completed: number;
 };
 
+export type ProviderCooldown = {
+  provider_name: string;
+  cooldown_until: string;
+  reason: string;
+  set_at: string;
+};
+
 export type DocumentChatSource = {
   paperless_document_id: number;
   title?: string | null;
@@ -834,6 +841,24 @@ export const api = {
     request<{ older_than_seconds: number; summary: RecoverySummary }>('/api/operations/recovery/stuck-runs', {
       method: 'POST',
       body: JSON.stringify({ older_than_seconds: olderThanSeconds })
+    }),
+  unblockJobs: (input: { error_substring?: string | null; clear_provider_cooldowns?: boolean } = {}) =>
+    request<{ predecessors_requeued: number; runs_unblocked: number; cooldowns_cleared: number }>(
+      '/api/operations/unblock-jobs',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          error_substring: input.error_substring ?? null,
+          clear_provider_cooldowns: input.clear_provider_cooldowns ?? true,
+        }),
+      }
+    ),
+  listProviderCooldowns: () =>
+    request<{ cooldowns: ProviderCooldown[] }>('/api/operations/provider-cooldowns'),
+  clearProviderCooldown: (providerName?: string) =>
+    request<{ cleared: number }>('/api/operations/provider-cooldowns/clear', {
+      method: 'POST',
+      body: JSON.stringify({ provider_name: providerName ?? null }),
     }),
   audit: () => request<{ items: AuditEvent[] }>('/api/audit'),
   auditIntegrity: () => request<AuditIntegrityReport>('/api/audit/integrity'),

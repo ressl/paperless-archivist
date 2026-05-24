@@ -1166,6 +1166,26 @@ export function Dashboard({
     await api.recoverStuckRuns(recovery?.older_than_seconds ?? 600);
     await Promise.all([load(), loadLive(), loadRecovery()]);
   };
+  const unblockBlockedJobs = async () => {
+    const summary = await api.unblockJobs({ clear_provider_cooldowns: true });
+    // Show a one-shot success message reused via setError; tone is
+    // controlled by the existing message-banner styling.
+    setError(
+      t('dashboard.alert.unblock_success', {
+        predecessors: String(summary.predecessors_requeued),
+        runs: String(summary.runs_unblocked),
+        cooldowns: String(summary.cooldowns_cleared),
+      })
+    );
+    await Promise.all([load(), loadLive()]);
+  };
+  const clearProviderCooldowns = async () => {
+    const result = await api.clearProviderCooldown();
+    setError(
+      t('dashboard.alert.cooldown_cleared', { count: String(result.cleared) })
+    );
+    await loadLive();
+  };
   const checkPaperlessConsistency = async () => {
     const result = await api.paperlessConsistency();
     setConsistency(result);
@@ -1251,6 +1271,12 @@ export function Dashboard({
         break;
       case 'stale_leases':
         void run(setRecoveryBusy, setError, recoverStaleLeases, t);
+        break;
+      case 'blocked_jobs':
+        void run(setRecoveryBusy, setError, unblockBlockedJobs, t);
+        break;
+      case 'provider_cooldown':
+        void run(setRecoveryBusy, setError, clearProviderCooldowns, t);
         break;
       default:
         setError(t('dashboard.alert.unknown_kind', { kind: item.kind }));

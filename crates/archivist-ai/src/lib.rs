@@ -35,6 +35,23 @@ pub enum AiProviderError {
     #[error("ai provider client error: status={status}, body={body}")]
     Client { status: u16, body: String },
 
+    /// Provider returned 429 with a clear "usage limit" / "quota" signal —
+    /// the user has hit a per-period cap (Ollama Cloud weekly, OpenAI
+    /// tier, …) and retrying within seconds is pointless. The worker
+    /// treats this as **non-transient and not subject to the per-job
+    /// retry budget**: it persists a cooldown for the provider and lets
+    /// other jobs that don't depend on it keep flowing. `retry_after`
+    /// reflects the `Retry-After` header if the provider sent one, in
+    /// seconds.
+    #[error(
+        "ai provider quota exhausted (provider={provider}, retry_after={retry_after:?}): {message}"
+    )]
+    QuotaExhausted {
+        provider: String,
+        message: String,
+        retry_after: Option<u64>,
+    },
+
     /// Provider responded but the body did not match the expected shape.
     /// Permanent — usually a model/prompt regression.
     #[error("ai provider invalid response: {0}")]
@@ -54,9 +71,58 @@ impl AiProviderError {
             | Self::Timeout(_)
             | Self::Server { .. }
             | Self::RunnerUnavailable(_) => true,
-            Self::Client { .. } | Self::InvalidResponse(_) => false,
+            Self::Client { .. } | Self::InvalidResponse(_) | Self::QuotaExhausted { .. } => false,
         }
     }
+
+    /// Heuristic for whether a 429 body is a provider-side quota signal
+    /// (vs. a transient rate-limit that will clear in seconds). Tuned
+    /// against Ollama Cloud's "weekly usage limit" copy plus generic
+    /// "quota"/"usage limit" wording so OpenAI / Anthropic 429s with
+    /// hard-cap messaging route to the same backoff path.
+    pub fn is_quota_signal(body: &str) -> bool {
+        let lower = body.to_ascii_lowercase();
+        lower.contains("usage limit")
+            || lower.contains("quota exceeded")
+            || lower.contains("quota")
+            || lower.contains("monthly limit")
+            || lower.contains("weekly limit")
+            || lower.contains("daily limit")
+    }
+}
+
+/// Parse a `Retry-After` header value (seconds form only; HTTP-date form
+/// is comparatively rare for AI APIs and not worth the chrono dep here).
+fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+/// Inspect a non-success HTTP response: if it looks like a provider quota
+/// signal (429 + "usage limit" / "quota" in the body), surface
+/// `AiProviderError::QuotaExhausted` so the worker can pause the
+/// provider instead of burning per-job retries. Otherwise return
+/// `(status, body)` so the caller can keep producing its previous
+/// `anyhow!`-formatted error and downstream substring classification
+/// continues to work.
+async fn check_quota_then_take_body(
+    provider: &str,
+    response: reqwest::Response,
+) -> Result<(reqwest::StatusCode, String)> {
+    let status = response.status();
+    let retry_after = parse_retry_after_header(response.headers());
+    let body = response.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS && AiProviderError::is_quota_signal(&body) {
+        return Err(AiProviderError::QuotaExhausted {
+            provider: provider.to_owned(),
+            message: body,
+            retry_after,
+        }
+        .into());
+    }
+    Ok((status, body))
 }
 
 impl From<reqwest::Error> for AiProviderError {
@@ -438,7 +504,7 @@ impl TextProvider for OllamaClient {
             .context("call Ollama chat")?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let (status, body) = check_quota_then_take_body("ollama", response).await?;
             return Err(anyhow!("Ollama chat returned {status}: {body}"));
         }
         let raw: Value = response
@@ -475,7 +541,7 @@ impl VisionProvider for OllamaClient {
             .context("call Ollama vision")?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let (status, body) = check_quota_then_take_body("ollama", response).await?;
             return Err(anyhow!("Ollama vision returned {status}: {body}"));
         }
         let raw: Value = response
@@ -545,7 +611,8 @@ impl TextProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible chat")?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let (status, body) =
+                check_quota_then_take_body(&self.provider_name, response).await?;
             return Err(anyhow!("OpenAI-compatible chat returned {status}: {body}"));
         }
         let raw: Value = response
@@ -604,7 +671,8 @@ impl VisionProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible vision")?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let (status, body) =
+                check_quota_then_take_body(&self.provider_name, response).await?;
             return Err(anyhow!(
                 "OpenAI-compatible vision returned {status}: {body}"
             ));
@@ -676,7 +744,8 @@ impl AnthropicClient {
             .context("call Anthropic messages API")?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let (status, body) =
+                check_quota_then_take_body(&self.provider_name, response).await?;
             return Err(anyhow!("Anthropic messages returned {status}: {body}"));
         }
         let raw: Value = response.json().await.context("decode Anthropic response")?;
@@ -1389,6 +1458,47 @@ pub fn prompt_for_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_signal_detects_ollama_cloud_weekly_limit() {
+        // Exact copy from a real Ollama Cloud 429 body the prod worker
+        // saw 2 298 times in May 2026.
+        let body = "{\"error\":\"you (objective_einstein) have reached your weekly usage limit, upgrade for higher limits: https://ollama.com/upgrade\"}";
+        assert!(AiProviderError::is_quota_signal(body));
+    }
+
+    #[test]
+    fn quota_signal_detects_generic_phrasings() {
+        for body in [
+            "{\"error\":\"quota exceeded\"}",
+            "Rate limit hit; please slow down — monthly limit reached",
+            "Daily limit reached, retry tomorrow",
+            "Your account quota is depleted",
+        ] {
+            assert!(
+                AiProviderError::is_quota_signal(body),
+                "expected quota signal in body: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn quota_signal_does_not_fire_on_plain_429_throttle() {
+        // A bare 429 from a rate-limiter (which the worker should still
+        // retry transiently) must NOT be classified as a quota cap.
+        let body = "{\"error\":\"too many requests, please retry shortly\"}";
+        assert!(!AiProviderError::is_quota_signal(body));
+    }
+
+    #[test]
+    fn quota_exhausted_is_not_transient() {
+        let err = AiProviderError::QuotaExhausted {
+            provider: "ollama".to_owned(),
+            message: "weekly usage limit".to_owned(),
+            retry_after: None,
+        };
+        assert!(!err.is_transient());
+    }
 
     #[test]
     fn parses_tag_json_inside_text() {

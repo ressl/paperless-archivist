@@ -387,6 +387,18 @@ fn router(state: AppState) -> Router {
             "/operations/recovery/stuck-runs",
             post(recover_stuck_runs_endpoint),
         )
+        .route(
+            "/operations/unblock-jobs",
+            post(unblock_jobs_endpoint),
+        )
+        .route(
+            "/operations/provider-cooldowns",
+            get(provider_cooldowns_endpoint),
+        )
+        .route(
+            "/operations/provider-cooldowns/clear",
+            post(clear_provider_cooldowns_endpoint),
+        )
         .route("/audit", get(audit_events))
         .route("/audit/export.csv", get(audit_export))
         .route("/audit/integrity", get(audit_integrity))
@@ -4799,6 +4811,153 @@ async fn recover_stuck_runs_endpoint(
         "older_than_seconds": older_than_seconds,
         "summary": summary
     })))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct UnblockJobsRequest {
+    /// Optional ILIKE pattern; when set, only failed predecessor jobs
+    /// whose `error_message` contains the substring are re-queued.
+    /// Useful for unblocking only the post-quota cohort while leaving
+    /// genuine code-bug failures pinned.
+    #[serde(default)]
+    error_substring: Option<String>,
+    /// When true (default), also drop every active provider cooldown
+    /// so the next claim cycle retries the providers immediately.
+    /// Set to false to unblock the queue but keep cooldowns in place
+    /// (e.g. operator knows the provider is still rate-limited).
+    #[serde(default = "default_true")]
+    clear_provider_cooldowns: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[tracing::instrument(skip(state, auth, request), fields(user_id = tracing::field::Empty))]
+async fn unblock_jobs_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<UnblockJobsRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteRuns)?;
+    let actor_id = require_user_session(&auth.0, "unblock requires a user session")?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
+    let summary = archivist_db::unblock_jobs_from_failed_predecessors(
+        &state.pool,
+        request.error_substring.as_deref(),
+    )
+    .await?;
+    let cooldowns_cleared = if request.clear_provider_cooldowns {
+        archivist_db::clear_all_provider_cooldowns(&state.pool).await?
+    } else {
+        0
+    };
+    info!(
+        %actor_id,
+        predecessors_requeued = summary.predecessors_requeued,
+        runs_unblocked = summary.runs_unblocked,
+        cooldowns_cleared,
+        error_substring = ?request.error_substring,
+        "operator unblocked queued jobs"
+    );
+    let _ = archivist_db::append_audit(
+        &state.pool,
+        archivist_core::AuditEventInput {
+            event_type: "operations.jobs_unblocked".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({
+                "predecessors_requeued": summary.predecessors_requeued,
+                "runs_unblocked": summary.runs_unblocked,
+                "cooldowns_cleared": cooldowns_cleared,
+            })),
+            metadata: Some(json!({
+                "error_substring": request.error_substring,
+                "clear_provider_cooldowns": request.clear_provider_cooldowns,
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await;
+    Ok(Json(json!({
+        "predecessors_requeued": summary.predecessors_requeued,
+        "runs_unblocked": summary.runs_unblocked,
+        "cooldowns_cleared": cooldowns_cleared,
+    })))
+}
+
+async fn provider_cooldowns_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadDashboard)?;
+    let cooldowns = archivist_db::list_active_provider_cooldowns(&state.pool).await?;
+    let payload = cooldowns
+        .into_iter()
+        .map(|c| {
+            json!({
+                "provider_name": c.provider_name,
+                "cooldown_until": c.cooldown_until,
+                "reason": c.reason,
+                "set_at": c.set_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "cooldowns": payload })))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ClearProviderCooldownRequest {
+    /// Optional — clear only this provider's cooldown. When None, all
+    /// active cooldowns are cleared.
+    #[serde(default)]
+    provider_name: Option<String>,
+}
+
+#[tracing::instrument(skip(state, auth, request), fields(user_id = tracing::field::Empty))]
+async fn clear_provider_cooldowns_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<ClearProviderCooldownRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteSettings)?;
+    let actor_id =
+        require_user_session(&auth.0, "clearing cooldowns requires a user session")?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
+    let cleared = match request.provider_name.as_deref() {
+        Some(name) => archivist_db::clear_provider_cooldown(&state.pool, name).await?,
+        None => archivist_db::clear_all_provider_cooldowns(&state.pool).await?,
+    };
+    let _ = archivist_db::append_audit(
+        &state.pool,
+        archivist_core::AuditEventInput {
+            event_type: "ai.provider_cooldown_cleared".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({
+                "provider_name": request.provider_name,
+                "cleared": cleared,
+            })),
+            metadata: None,
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await;
+    Ok(Json(json!({ "cleared": cleared })))
 }
 
 async fn audit_events(

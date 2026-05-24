@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use archivist_ai::{
     AiProviderError, AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT,
     ImageInput, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext, TextProvider,
@@ -462,6 +463,21 @@ async fn process_available_jobs(
                     process_job(&pool, &config, settings.as_ref(), paperless.as_ref(), &job).await;
                 if let Err(error) = &result {
                     let failure_class = classify_processing_failure(error);
+                    if failure_class == ProcessingFailureClass::ProviderQuota {
+                        // The provider replied with a usage-cap signal.
+                        // Persist a cooldown so subsequent claims of jobs
+                        // routed to the same provider release their lease
+                        // immediately rather than burning through the per-job
+                        // retry budget against a quota that resets in days.
+                        if let Err(cooldown_err) =
+                            record_quota_cooldown_for_failure(&pool, &settings, &job, error).await
+                        {
+                            warn!(
+                                error = %cooldown_err,
+                                "failed to persist provider cooldown after quota-exhausted failure"
+                            );
+                        }
+                    }
                     let vision_model_crash = is_vision_model_runtime_crash(error);
                     if vision_model_crash {
                         // GGML_ASSERT / "llama runner process no longer running" come from the
@@ -652,6 +668,11 @@ async fn send_notification_webhook(
 enum ProcessingFailureClass {
     Transient,
     Permanent,
+    /// Provider replied with a hard usage-cap signal (Ollama Cloud weekly,
+    /// OpenAI tier monthly, …). Not retryable — the worker writes a
+    /// per-provider cooldown so subsequent claims of jobs that would route
+    /// to the same provider are short-circuited until the cap resets.
+    ProviderQuota,
 }
 
 impl ProcessingFailureClass {
@@ -663,6 +684,7 @@ impl ProcessingFailureClass {
         match self {
             Self::Transient => "transient",
             Self::Permanent => "permanent",
+            Self::ProviderQuota => "provider_quota",
         }
     }
 }
@@ -684,10 +706,10 @@ fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass 
             };
         }
         if let Some(ai_error) = cause.downcast_ref::<AiProviderError>() {
-            return if ai_error.is_transient() {
-                ProcessingFailureClass::Transient
-            } else {
-                ProcessingFailureClass::Permanent
+            return match ai_error {
+                AiProviderError::QuotaExhausted { .. } => ProcessingFailureClass::ProviderQuota,
+                e if e.is_transient() => ProcessingFailureClass::Transient,
+                _ => ProcessingFailureClass::Permanent,
             };
         }
     }
@@ -731,6 +753,162 @@ fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass 
     } else {
         ProcessingFailureClass::Permanent
     }
+}
+
+/// Default cooldown applied when a provider returns a quota-exhausted
+/// signal without a `Retry-After` header. Ollama Cloud's weekly cap and
+/// most "monthly tier" quotas don't reset in single-digit hours, so the
+/// default is deliberately long — the cost of being wrong (a few hours
+/// of idle worker) is much smaller than burning the queue against an
+/// upgrade-or-wait quota. Operators can lift it early via the dashboard
+/// "Entsperren" action.
+const DEFAULT_PROVIDER_QUOTA_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Walk `error` for an `AiProviderError::QuotaExhausted` and persist a
+/// cooldown row keyed on its `provider` field. The cooldown end is
+/// `max(now + retry_after_seconds, now + DEFAULT_PROVIDER_QUOTA_COOLDOWN)`
+/// so a server-supplied `Retry-After: 30` doesn't shorten the operator's
+/// intent of "back off for a while". Falls back to the job's stage
+/// provider name if no typed quota error is found in the chain (shouldn't
+/// happen with the v1.5.27 typed surface but keeps the helper robust).
+async fn record_quota_cooldown_for_failure(
+    pool: &DbPool,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let (provider_name, retry_after_secs, message) =
+        extract_quota_signal(error).unwrap_or_else(|| {
+            (
+                provider_name_for_stage(settings, job.stage).unwrap_or_else(|_| "unknown".into()),
+                None,
+                error.to_string(),
+            )
+        });
+    let retry_after = retry_after_secs
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_PROVIDER_QUOTA_COOLDOWN);
+    let cooldown = retry_after.max(DEFAULT_PROVIDER_QUOTA_COOLDOWN);
+    let cooldown_until = Utc::now() + ChronoDuration::from_std(cooldown).unwrap_or_default();
+    let reason = format!(
+        "{} (job {}, stage {})",
+        truncate_for_audit(&message, 240),
+        job.id,
+        job.stage
+    );
+    archivist_db::upsert_provider_cooldown(pool, &provider_name, cooldown_until, &reason).await?;
+    warn!(
+        provider = %provider_name,
+        until = %cooldown_until,
+        retry_after_secs,
+        "provider quota exhausted; persisted cooldown — claim cycles will skip this provider until expiry"
+    );
+    let _ = archivist_db::append_audit(
+        pool,
+        AuditEventInput {
+            event_type: "ai.provider_quota_exhausted".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: Some(job.run_id),
+            job_id: Some(job.id),
+            paperless_document_id: Some(job.paperless_document_id),
+            before: None,
+            after: Some(json!({
+                "provider": provider_name,
+                "cooldown_until": cooldown_until,
+                "retry_after_secs": retry_after_secs,
+            })),
+            metadata: None,
+            outcome: "failed".to_owned(),
+            error_message: Some(truncate_for_audit(&message, 1024)),
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await;
+    Ok(())
+}
+
+fn extract_quota_signal(error: &anyhow::Error) -> Option<(String, Option<u64>, String)> {
+    for cause in error.chain() {
+        if let Some(AiProviderError::QuotaExhausted {
+            provider,
+            retry_after,
+            message,
+        }) = cause.downcast_ref::<AiProviderError>()
+        {
+            return Some((provider.clone(), *retry_after, message.clone()));
+        }
+    }
+    None
+}
+
+fn provider_name_for_stage(settings: &RuntimeSettings, stage: Stage) -> Result<String> {
+    let provider = provider_for_stage(settings, stage, false)?;
+    Ok(provider.name)
+}
+
+fn truncate_for_audit(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in value.chars().enumerate() {
+        if idx >= max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Resolve the active provider for a stage and look up its cooldown row.
+/// Returns the cooldown record only if it is still active (cooldown_until
+/// in the future). On stage configuration errors we log and return None
+/// rather than failing — a misconfigured stage should fall through to the
+/// existing error path, not get masked as a cooldown.
+async fn active_cooldown_for_stage(
+    pool: &DbPool,
+    settings: &RuntimeSettings,
+    stage: Stage,
+) -> Result<Option<archivist_db::AiProviderCooldown>> {
+    let provider = match provider_name_for_stage(settings, stage) {
+        Ok(name) => name,
+        Err(error) => {
+            warn!(error = %error, "could not resolve provider for stage cooldown check");
+            return Ok(None);
+        }
+    };
+    archivist_db::get_active_provider_cooldown(pool, &provider).await
+}
+
+/// Release a claimed lease back to the queue without burning an attempt
+/// — used when the worker discovers the active provider for the job's
+/// stage is in cooldown. `attempts` is decremented to undo the increment
+/// performed by `claim_jobs`, so the per-job retry budget is preserved
+/// for the next cycle. `run_after` is set to the cooldown expiry so the
+/// job is not re-claimed before the provider is plausibly back.
+async fn release_lease_for_cooldown(
+    pool: &DbPool,
+    job: &JobRecord,
+    cooldown_until: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update jobs
+           set status      = 'queued',
+               run_after   = $2,
+               attempts    = greatest(attempts - 1, 0),
+               lease_owner = null,
+               lease_until = null,
+               updated_at  = now()
+         where id = $1
+        "#,
+    )
+    .bind(job.id)
+    .bind(cooldown_until)
+    .execute(pool)
+    .await
+    .context("release lease for provider cooldown")?;
+    Ok(())
 }
 
 /// Detect Ollama vision runtime crashes (GGML_ASSERT, llama runner aborts). These keep their
@@ -991,6 +1169,22 @@ async fn process_job(
     job: &JobRecord,
 ) -> Result<()> {
     info!(job_id = %job.id, run_id = %job.run_id, document_id = job.paperless_document_id, stage = %job.stage, "processing job");
+
+    // Provider cooldown short-circuit. If the active provider for this
+    // stage was previously flagged with a usage-limit 429, the worker
+    // released the cooldown row and we'd just burn an attempt against
+    // the same wall. Release the lease back to the queue with
+    // `run_after = cooldown_until` so the job comes back when the
+    // provider can plausibly answer again.
+    if let Some(active) = active_cooldown_for_stage(pool, settings, job.stage).await? {
+        info!(
+            provider = %active.provider_name,
+            until = %active.cooldown_until,
+            "provider cooldown active; releasing lease without burning an attempt"
+        );
+        release_lease_for_cooldown(pool, job, active.cooldown_until).await?;
+        return Ok(());
+    }
 
     match job.stage {
         Stage::Ocr => process_ocr(pool, config, paperless, settings, job).await,

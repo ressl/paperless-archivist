@@ -3580,12 +3580,16 @@ async fn needs_attention_items(
     .fetch_one(pool)
     .await
     .context("count stale leases")?;
+    let blocked = count_blocked_queued_jobs(pool).await?;
+    let active_cooldowns = list_active_provider_cooldowns(pool).await?;
 
     Ok(compose_needs_attention_items(
         stuck_runs,
         stale_leases,
         safety,
         recent_failures,
+        &blocked,
+        &active_cooldowns,
     ))
 }
 
@@ -3597,6 +3601,8 @@ fn compose_needs_attention_items(
     stale_leases: i64,
     safety: &WorkflowSafetyStatus,
     recent_failures: &[DashboardLiveFailure],
+    blocked: &BlockedQueuedCounts,
+    active_cooldowns: &[AiProviderCooldown],
 ) -> Vec<NeedsAttentionItem> {
     let mut items = Vec::new();
 
@@ -3621,6 +3627,57 @@ fn compose_needs_attention_items(
                     .to_owned(),
             action_key: Some("dashboard.alerts.action.requeue_leases".to_owned()),
             count: Some(stale_leases),
+        });
+    }
+
+    // Blocked queued jobs: the claim_jobs filter refuses these because
+    // an earlier-stage job in the same run is failed or waiting_review.
+    // Surface count + offer the operator-side "unblock" action, which
+    // re-queues failed predecessors with attempts=0 so subsequent ticks
+    // can pick them up again.
+    if blocked.total > 0 {
+        items.push(NeedsAttentionItem {
+            kind: "blocked_jobs".to_owned(),
+            severity: if blocked.blocked_by_failed > 0 {
+                "critical".to_owned()
+            } else {
+                "warning".to_owned()
+            },
+            title: format!("{} blockierte Job(s)", blocked.total),
+            description: format!(
+                "{} durch fehlgeschlagene Vorgänger-Stages, {} durch laufende Reviews. \
+                 Entsperren stellt die Vorgänger zurück in die Queue, ohne den Run zu verwerfen.",
+                blocked.blocked_by_failed, blocked.blocked_by_review
+            ),
+            action_key: Some("dashboard.alerts.action.unblock_jobs".to_owned()),
+            count: Some(blocked.total),
+        });
+    }
+
+    // Active provider cooldown: the worker hit a usage-cap 429 and
+    // suspended the provider. While the cooldown holds, claims for jobs
+    // routed to that provider release the lease without burning a retry
+    // — so this is mostly informational, unless the operator just
+    // upgraded the plan and wants to lift the cooldown manually.
+    if !active_cooldowns.is_empty() {
+        let provider_list = active_cooldowns
+            .iter()
+            .map(|c| c.provider_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        items.push(NeedsAttentionItem {
+            kind: "provider_cooldown".to_owned(),
+            severity: "critical".to_owned(),
+            title: format!(
+                "{} provider quota cooldown",
+                active_cooldowns.len()
+            ),
+            description: format!(
+                "AI providers paused due to usage-cap 429: {provider_list}. \
+                 Worker will skip jobs routed to these providers until cooldown expires."
+            ),
+            action_key: Some("dashboard.alerts.action.clear_provider_cooldown".to_owned()),
+            count: Some(active_cooldowns.len() as i64),
         });
     }
 
@@ -7349,6 +7406,250 @@ pub async fn latest_apply_audit_for_run(
     .transpose()
 }
 
+// ---------------------------------------------------------------------------
+// AI provider cooldowns (v1.5.27 — quota-aware backoff).
+//
+// When a provider replies 429 with a `usage limit` / `quota` signal in the
+// body, the worker writes a cooldown record so subsequent claim cycles
+// requeue jobs whose stage would route to that provider rather than burn
+// per-job retries. The dashboard reads `list_active_provider_cooldowns` to
+// surface "provider X paused until Y" warnings.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct AiProviderCooldown {
+    pub provider_name: String,
+    pub cooldown_until: DateTime<Utc>,
+    pub reason: String,
+    pub set_at: DateTime<Utc>,
+}
+
+/// Upsert a cooldown for `provider_name`. If a cooldown row already exists,
+/// the longer of (existing, new) wins — operator-set or quota-derived
+/// cooldowns shouldn't be silently shortened by a follow-up 429 that
+/// arrived with a smaller Retry-After.
+pub async fn upsert_provider_cooldown(
+    pool: &DbPool,
+    provider_name: &str,
+    cooldown_until: DateTime<Utc>,
+    reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into ai_provider_cooldowns (provider_name, cooldown_until, reason)
+        values ($1, $2, $3)
+        on conflict (provider_name) do update
+          set cooldown_until = greatest(ai_provider_cooldowns.cooldown_until, excluded.cooldown_until),
+              reason = excluded.reason,
+              updated_at = now()
+        "#,
+    )
+    .bind(provider_name)
+    .bind(cooldown_until)
+    .bind(reason)
+    .execute(pool)
+    .await
+    .context("upsert ai_provider_cooldowns")?;
+    Ok(())
+}
+
+/// Returns the cooldown end timestamp for `provider_name` if the cooldown
+/// is still active (`cooldown_until > now()`). `None` means "fire away" —
+/// either no cooldown was ever set or the cooldown has elapsed.
+pub async fn get_active_provider_cooldown(
+    pool: &DbPool,
+    provider_name: &str,
+) -> Result<Option<AiProviderCooldown>> {
+    let row = sqlx::query(
+        r#"
+        select provider_name, cooldown_until, reason, set_at
+          from ai_provider_cooldowns
+         where provider_name = $1
+           and cooldown_until > now()
+        "#,
+    )
+    .bind(provider_name)
+    .fetch_optional(pool)
+    .await
+    .context("query ai_provider_cooldowns")?;
+    row.map(|row| {
+        Ok(AiProviderCooldown {
+            provider_name: row.try_get("provider_name")?,
+            cooldown_until: row.try_get("cooldown_until")?,
+            reason: row.try_get("reason")?,
+            set_at: row.try_get("set_at")?,
+        })
+    })
+    .transpose()
+}
+
+/// Drop a single provider's cooldown row early. Used by the operator
+/// "Cooldown aufheben" action when they've just upgraded a plan / paid
+/// for headroom and want the next claim cycle to retry immediately.
+/// Idempotent — no error if no row matches.
+pub async fn clear_provider_cooldown(pool: &DbPool, provider_name: &str) -> Result<u64> {
+    let res = sqlx::query("delete from ai_provider_cooldowns where provider_name = $1")
+        .bind(provider_name)
+        .execute(pool)
+        .await
+        .context("delete ai_provider_cooldown")?;
+    Ok(res.rows_affected())
+}
+
+/// Drop *all* provider cooldowns at once. The dashboard "Entsperren"
+/// action calls this alongside `unblock_jobs_from_failed_predecessors`
+/// so a one-click recovery clears both the dead-queue blockers and the
+/// quota-cooldowns that caused them.
+pub async fn clear_all_provider_cooldowns(pool: &DbPool) -> Result<u64> {
+    let res = sqlx::query("delete from ai_provider_cooldowns")
+        .execute(pool)
+        .await
+        .context("delete all ai_provider_cooldowns")?;
+    Ok(res.rows_affected())
+}
+
+/// All currently-active cooldowns, ordered by remaining time (longest
+/// first). Used by the dashboard to surface "provider X paused" warnings.
+pub async fn list_active_provider_cooldowns(
+    pool: &DbPool,
+) -> Result<Vec<AiProviderCooldown>> {
+    let rows = sqlx::query(
+        r#"
+        select provider_name, cooldown_until, reason, set_at
+          from ai_provider_cooldowns
+         where cooldown_until > now()
+         order by cooldown_until desc
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("list ai_provider_cooldowns")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(AiProviderCooldown {
+                provider_name: row.try_get("provider_name")?,
+                cooldown_until: row.try_get("cooldown_until")?,
+                reason: row.try_get("reason")?,
+                set_at: row.try_get("set_at")?,
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Operator unblock (v1.5.27).
+//
+// When a cascade of permanent failures (typically: provider quota
+// exhausted, every retry burned) leaves a run with a `failed` predecessor
+// stage, every subsequent queued job in that run is gated by the
+// `claim_jobs` "NOT EXISTS earlier-stage in (failed, …)" filter. The
+// queue silently stops draining. `unblock_jobs_from_failed_predecessors`
+// finds those failed predecessors, resets them to `queued` with
+// `attempts = 0`, and returns the count so the dashboard can report
+// "N jobs unblocked".
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct UnblockSummary {
+    /// How many `failed` predecessor jobs were reset back to queued.
+    pub predecessors_requeued: i64,
+    /// How many distinct runs are now eligible to make progress again.
+    pub runs_unblocked: i64,
+}
+
+/// Reset every `failed` job that has at least one downstream `queued`
+/// sibling (same run, higher `stage_priority`) back to `queued` with
+/// `attempts = 0`. Optional `error_substring` filters to failures whose
+/// `error_message ILIKE '%' || substring || '%'` — useful for unblocking
+/// only the post-quota-exhaustion cohort while leaving genuine code-bug
+/// failures pinned. Pass `None` to retry every blocking failure.
+pub async fn unblock_jobs_from_failed_predecessors(
+    pool: &DbPool,
+    error_substring: Option<&str>,
+) -> Result<UnblockSummary> {
+    let row = sqlx::query(
+        r#"
+        with predecessors as (
+            select j.id, j.run_id
+              from jobs j
+             where j.status = 'failed'
+               and ($1::text is null or j.error_message ilike '%' || $1 || '%')
+               and exists (
+                   select 1 from jobs later
+                    where later.run_id = j.run_id
+                      and later.stage_priority > j.stage_priority
+                      and later.status = 'queued'
+               )
+        ),
+        updated as (
+            update jobs j
+               set status = 'queued',
+                   attempts = 0,
+                   error_message = null,
+                   run_after = now(),
+                   updated_at = now()
+              from predecessors p
+             where j.id = p.id
+            returning j.run_id
+        )
+        select
+            count(*)::bigint                  as predecessors_requeued,
+            count(distinct run_id)::bigint    as runs_unblocked
+          from updated
+        "#,
+    )
+    .bind(error_substring)
+    .fetch_one(pool)
+    .await
+    .context("unblock failed predecessors")?;
+    Ok(UnblockSummary {
+        predecessors_requeued: row.try_get("predecessors_requeued")?,
+        runs_unblocked: row.try_get("runs_unblocked")?,
+    })
+}
+
+/// Count queued jobs that the `claim_jobs` filter currently refuses to
+/// hand out because an earlier-stage sibling is in (`failed`,
+/// `waiting_review`). Surfaced on the dashboard so an operator sees the
+/// dead-queue size and can decide to unblock.
+pub async fn count_blocked_queued_jobs(pool: &DbPool) -> Result<BlockedQueuedCounts> {
+    let row = sqlx::query(
+        r#"
+        select
+            sum(case when blocker_status = 'failed'         then 1 else 0 end)::bigint as blocked_by_failed,
+            sum(case when blocker_status = 'waiting_review' then 1 else 0 end)::bigint as blocked_by_review,
+            count(*)::bigint as total
+          from (
+              select (
+                  select prev.status from jobs prev
+                   where prev.run_id = j.run_id
+                     and prev.stage_priority < j.stage_priority
+                     and prev.status in ('queued','running','waiting_review','failed')
+                   limit 1
+              ) as blocker_status
+                from jobs j
+               where j.status = 'queued'
+          ) t
+         where blocker_status is not null
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("count blocked queued jobs")?;
+    Ok(BlockedQueuedCounts {
+        blocked_by_failed: row.try_get::<Option<i64>, _>("blocked_by_failed")?.unwrap_or(0),
+        blocked_by_review: row.try_get::<Option<i64>, _>("blocked_by_review")?.unwrap_or(0),
+        total: row.try_get::<Option<i64>, _>("total")?.unwrap_or(0),
+    })
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BlockedQueuedCounts {
+    pub blocked_by_failed: i64,
+    pub blocked_by_review: i64,
+    pub total: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7538,7 +7839,14 @@ mod tests {
             live_failure("failed"),
             live_failure("retry_scheduled"),
         ];
-        let items = compose_needs_attention_items(2, 1, &safety, &failures);
+        let items = compose_needs_attention_items(
+            2,
+            1,
+            &safety,
+            &failures,
+            &BlockedQueuedCounts::default(),
+            &[],
+        );
         let kinds: Vec<&str> = items.iter().map(|i| i.kind.as_str()).collect();
         assert!(kinds.contains(&"stuck_runs"));
         assert!(kinds.contains(&"stale_leases"));
@@ -7558,6 +7866,8 @@ mod tests {
                 live_failure("failed"),
                 live_failure("failed"),
             ],
+            &BlockedQueuedCounts::default(),
+            &[],
         );
         let severities: Vec<&str> = items.iter().map(|i| i.severity.as_str()).collect();
         // stuck_runs (critical) must come before stale_leases (warning),
@@ -7598,9 +7908,61 @@ mod tests {
             0,
             &unrestricted_safety(false),
             &[live_failure("failed"), live_failure("failed")],
+            &BlockedQueuedCounts::default(),
+            &[],
         );
         let has_provider_error = items.iter().any(|i| i.kind == "provider_error");
         assert!(!has_provider_error);
+    }
+
+    #[test]
+    fn needs_attention_items_emit_blocked_jobs_when_present() {
+        let items = compose_needs_attention_items(
+            0,
+            0,
+            &unrestricted_safety(false),
+            &[],
+            &BlockedQueuedCounts {
+                blocked_by_failed: 69,
+                blocked_by_review: 24,
+                total: 93,
+            },
+            &[],
+        );
+        let blocked = items
+            .iter()
+            .find(|i| i.kind == "blocked_jobs")
+            .expect("expected a blocked_jobs alert when total > 0");
+        assert_eq!(blocked.severity, "critical"); // any failed predecessor → critical
+        assert_eq!(blocked.count, Some(93));
+        assert_eq!(
+            blocked.action_key.as_deref(),
+            Some("dashboard.alerts.action.unblock_jobs"),
+        );
+    }
+
+    #[test]
+    fn needs_attention_items_emit_provider_cooldown_when_active() {
+        let cooldown = AiProviderCooldown {
+            provider_name: "ollama".to_owned(),
+            cooldown_until: Utc::now() + chrono::Duration::hours(6),
+            reason: "weekly usage limit".to_owned(),
+            set_at: Utc::now(),
+        };
+        let items = compose_needs_attention_items(
+            0,
+            0,
+            &unrestricted_safety(false),
+            &[],
+            &BlockedQueuedCounts::default(),
+            &[cooldown],
+        );
+        let item = items
+            .iter()
+            .find(|i| i.kind == "provider_cooldown")
+            .expect("expected provider_cooldown alert");
+        assert_eq!(item.severity, "critical");
+        assert!(item.description.contains("ollama"));
     }
 
     #[test]

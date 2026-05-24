@@ -2,8 +2,77 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.26`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.27`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.27 — Quota-aware backoff for Ollama Cloud + operator unblock action
+
+Driven by the 33-hour processing stall on 2026-05-22, when Ollama Cloud's
+weekly cap hit and the worker burned 2 298 retries against a 429 that
+the provider was never going to clear until the following Monday. Two
+related fixes ship together.
+
+### Quota-aware backoff
+
+A 429 response whose body matches a "usage limit" / "quota" / "weekly
+limit" / "monthly limit" / "daily limit" signal is now surfaced as a
+**typed `AiProviderError::QuotaExhausted`** by every provider client
+(Ollama, OpenAI-compatible, Anthropic). The worker classifier maps this
+to a new `ProcessingFailureClass::ProviderQuota` which:
+
+* **Is not retryable** — single attempt, the job is marked failed
+  immediately rather than burning through the per-job retry budget.
+* **Persists a cooldown row** in the new `ai_provider_cooldowns` table.
+  Cooldown end is `max(now + Retry-After, now + 24 h)` so a provider's
+  optimistic `Retry-After: 30` doesn't shorten the operator's intent.
+* **Short-circuits subsequent claims**: at the top of `process_job` the
+  worker checks whether the active provider for the stage is in
+  cooldown; if so it releases the lease back to the queue with
+  `attempts = max(attempts - 1, 0)` and `run_after = cooldown_until`.
+  Other jobs whose stage routes to a different (uncooled) provider keep
+  flowing — no global pause.
+
+### Operator unblock action on the dashboard
+
+When a permanent failure (quota cohort or otherwise) leaves a run with a
+`failed` predecessor stage, `claim_jobs` refuses to hand out the later
+queued stage. Before this release the only recovery path was direct SQL.
+Two new dashboard alerts surface this state:
+
+* **Blockierte Jobs** (`blocked_jobs`) — count split by failed
+  predecessor (critical) vs. waiting_review (warning). Action button
+  "Jobs entsperren" calls `POST /api/operations/unblock-jobs`, which
+  resets the failed predecessors back to `queued` with `attempts = 0`
+  and (by default) drops every active provider cooldown so the next
+  claim retries immediately.
+* **Provider-Cooldown** (`provider_cooldown`) — lists currently-paused
+  providers with reason + expiry. Action button "Cooldown aufheben"
+  calls `POST /api/operations/provider-cooldowns/clear`.
+
+Both actions audit-log `operations.jobs_unblocked` and
+`ai.provider_cooldown_cleared` so post-hoc you can see who triggered the
+recovery.
+
+### Internal surface changes
+
+* `AiProviderError` gains the `QuotaExhausted { provider, message, retry_after }` variant.
+* Migration `0025_ai_provider_cooldowns.sql` creates the cooldown table.
+* New DB helpers: `upsert_provider_cooldown`, `get_active_provider_cooldown`,
+  `list_active_provider_cooldowns`, `clear_provider_cooldown`,
+  `clear_all_provider_cooldowns`, `unblock_jobs_from_failed_predecessors`,
+  `count_blocked_queued_jobs`.
+* New API endpoints: `POST /api/operations/unblock-jobs`,
+  `GET /api/operations/provider-cooldowns`,
+  `POST /api/operations/provider-cooldowns/clear`.
+* New audit event types: `ai.provider_quota_exhausted`,
+  `ai.provider_cooldown_cleared`, `operations.jobs_unblocked`.
+
+### Not in this release (deliberate)
+
+* **Prompt-quality issues** that surfaced during the v1.5.26 post-mortem
+  — `UnknownChoice` validation warnings on the custom-fields branch of
+  the metadata prompt (the model returns field NAMES as VALUES) — are a
+  separate prompt-engineering investigation, not bundled here.
 
 ## v1.5.26 — Fix worker panic on multi-byte chars at the date-anchor window edge
 
