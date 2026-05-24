@@ -387,10 +387,7 @@ fn router(state: AppState) -> Router {
             "/operations/recovery/stuck-runs",
             post(recover_stuck_runs_endpoint),
         )
-        .route(
-            "/operations/unblock-jobs",
-            post(unblock_jobs_endpoint),
-        )
+        .route("/operations/unblock-jobs", post(unblock_jobs_endpoint))
         .route(
             "/operations/provider-cooldowns",
             get(provider_cooldowns_endpoint),
@@ -4934,8 +4931,7 @@ async fn clear_provider_cooldowns_endpoint(
     Json(request): Json<ClearProviderCooldownRequest>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteSettings)?;
-    let actor_id =
-        require_user_session(&auth.0, "clearing cooldowns requires a user session")?;
+    let actor_id = require_user_session(&auth.0, "clearing cooldowns requires a user session")?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     let cleared = match request.provider_name.as_deref() {
         Some(name) => archivist_db::clear_provider_cooldown(&state.pool, name).await?,

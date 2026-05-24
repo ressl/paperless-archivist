@@ -33,8 +33,16 @@ fn main() {
             "Stadtwerke Musterstadt".to_owned(),
             "Telekom".to_owned(),
         ],
-        &["Rechnung".to_owned(), "Vertrag".to_owned(), "Mahnung".to_owned()],
-        &["Finanzen".to_owned(), "IT".to_owned(), "Geschäftlich".to_owned()],
+        &[
+            "Rechnung".to_owned(),
+            "Vertrag".to_owned(),
+            "Mahnung".to_owned(),
+        ],
+        &[
+            "Finanzen".to_owned(),
+            "IT".to_owned(),
+            "Geschäftlich".to_owned(),
+        ],
         &["Invoice Number".to_owned(), "Total".to_owned()],
         &MetadataFieldFlags::ALL,
         &language,
@@ -42,9 +50,15 @@ fn main() {
         10,
         "This document is an invoice. Pay special attention to: invoice number (Rechnungsnummer / Rechnung Nr. / Invoice #), the GROSS total (Bruttobetrag / Gesamtbetrag / Total), and the issue date labeled as 'Rechnungsdatum' / 'Invoice date'. The correspondent is the issuer.",
     );
-    println!("════ SYSTEM PROMPT ({} chars) ════", request.system_prompt.len());
+    println!(
+        "════ SYSTEM PROMPT ({} chars) ════",
+        request.system_prompt.len()
+    );
     println!("{}", request.system_prompt);
-    println!("\n════ USER PROMPT ({} chars) ════", request.user_prompt.len());
+    println!(
+        "\n════ USER PROMPT ({} chars) ════",
+        request.user_prompt.len()
+    );
     println!("{}", request.user_prompt);
     println!("\n════ TEMPERATURE: {} ════", request.temperature);
     let schema = schema_for_metadata(
@@ -53,16 +67,22 @@ fn main() {
             "Stadtwerke Musterstadt".to_owned(),
             "Telekom".to_owned(),
         ],
-        &["Rechnung".to_owned(), "Vertrag".to_owned(), "Mahnung".to_owned()],
-        &["Finanzen".to_owned(), "IT".to_owned(), "Geschäftlich".to_owned()],
+        &[
+            "Rechnung".to_owned(),
+            "Vertrag".to_owned(),
+            "Mahnung".to_owned(),
+        ],
+        &[
+            "Finanzen".to_owned(),
+            "IT".to_owned(),
+            "Geschäftlich".to_owned(),
+        ],
         &["Invoice Number".to_owned(), "Total".to_owned()],
         &MetadataFieldFlags::ALL,
         5,
         10,
     )
     .expect("schema present when any key enabled");
-    println!(
-        "\n════ RESPONSE SCHEMA (Ollama /api/chat format field) ════"
-    );
+    println!("\n════ RESPONSE SCHEMA (Ollama /api/chat format field) ════");
     println!("{}", serde_json::to_string_pretty(&schema).unwrap());
 }

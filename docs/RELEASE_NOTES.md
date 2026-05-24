@@ -2,8 +2,22 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.31`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.32`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.32 — Rustfmt drift fix that unblocks v1.5.27–v1.5.31 deploys
+
+No functional change. The five tags v1.5.27 through v1.5.31 all failed
+the `rust:fmt` CI gate (`cargo fmt --all -- --check`) because of
+formatting drift introduced in those changesets — long `try_get` chains
+and a misplaced `use chrono` import line. Production therefore stayed
+on v1.5.26 for three days while five feature releases sat unbuilt:
+quota-aware backoff for Ollama Cloud, the dashboard "Entsperren"
+action, the full prompt redesign, constrained decoding for Ollama, and
+constrained decoding for OpenAI + Anthropic. v1.5.32 is the
+single-commit `cargo fmt --all` fix that gets all of them through CI
+in one go. Re-verify the deploy on this tag; everything else listed
+below from v1.5.27 onward ships with it.
 
 ## v1.5.31 — Constrained decoding for OpenAI-compatible and Anthropic providers
 

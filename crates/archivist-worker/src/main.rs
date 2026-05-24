@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use archivist_ai::{
     AiProviderError, AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT,
     ImageInput, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext, TextProvider,
@@ -40,6 +39,7 @@ use archivist_paperless::{
     PaperlessClient, PaperlessDocumentDetail, PaperlessDocumentSummary, PaperlessError,
     PaperlessTag,
 };
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest::Client as HttpClient;
 use secrecy::{ExposeSecret, SecretString};

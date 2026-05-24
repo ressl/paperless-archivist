@@ -3668,10 +3668,7 @@ fn compose_needs_attention_items(
         items.push(NeedsAttentionItem {
             kind: "provider_cooldown".to_owned(),
             severity: "critical".to_owned(),
-            title: format!(
-                "{} provider quota cooldown",
-                active_cooldowns.len()
-            ),
+            title: format!("{} provider quota cooldown", active_cooldowns.len()),
             description: format!(
                 "AI providers paused due to usage-cap 429: {provider_list}. \
                  Worker will skip jobs routed to these providers until cooldown expires."
@@ -7510,9 +7507,7 @@ pub async fn clear_all_provider_cooldowns(pool: &DbPool) -> Result<u64> {
 
 /// All currently-active cooldowns, ordered by remaining time (longest
 /// first). Used by the dashboard to surface "provider X paused" warnings.
-pub async fn list_active_provider_cooldowns(
-    pool: &DbPool,
-) -> Result<Vec<AiProviderCooldown>> {
+pub async fn list_active_provider_cooldowns(pool: &DbPool) -> Result<Vec<AiProviderCooldown>> {
     let rows = sqlx::query(
         r#"
         select provider_name, cooldown_until, reason, set_at
@@ -7637,8 +7632,12 @@ pub async fn count_blocked_queued_jobs(pool: &DbPool) -> Result<BlockedQueuedCou
     .await
     .context("count blocked queued jobs")?;
     Ok(BlockedQueuedCounts {
-        blocked_by_failed: row.try_get::<Option<i64>, _>("blocked_by_failed")?.unwrap_or(0),
-        blocked_by_review: row.try_get::<Option<i64>, _>("blocked_by_review")?.unwrap_or(0),
+        blocked_by_failed: row
+            .try_get::<Option<i64>, _>("blocked_by_failed")?
+            .unwrap_or(0),
+        blocked_by_review: row
+            .try_get::<Option<i64>, _>("blocked_by_review")?
+            .unwrap_or(0),
         total: row.try_get::<Option<i64>, _>("total")?.unwrap_or(0),
     })
 }

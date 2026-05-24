@@ -672,8 +672,7 @@ impl TextProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible chat")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) =
-                check_quota_then_take_body(&self.provider_name, response).await?;
+            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
             return Err(anyhow!("OpenAI-compatible chat returned {status}: {body}"));
         }
         let raw: Value = response
@@ -732,8 +731,7 @@ impl VisionProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible vision")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) =
-                check_quota_then_take_body(&self.provider_name, response).await?;
+            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
             return Err(anyhow!(
                 "OpenAI-compatible vision returned {status}: {body}"
             ));
@@ -823,8 +821,7 @@ impl AnthropicClient {
             .context("call Anthropic messages API")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) =
-                check_quota_then_take_body(&self.provider_name, response).await?;
+            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
             return Err(anyhow!("Anthropic messages returned {status}: {body}"));
         }
         let raw: Value = response.json().await.context("decode Anthropic response")?;
@@ -870,7 +867,9 @@ pub fn build_anthropic_chat_payload(request: &ChatRequest) -> Value {
         ]
     });
     if let Some(schema) = request.response_schema.as_ref() {
-        let obj = payload.as_object_mut().expect("payload is an object literal");
+        let obj = payload
+            .as_object_mut()
+            .expect("payload is an object literal");
         obj.insert(
             "tools".to_owned(),
             json!([{
@@ -1744,7 +1743,10 @@ pub fn prompt_for_metadata(
     let hint_block = if doc_type_hint.trim().is_empty() {
         String::new()
     } else {
-        format!("<doc_type_hint>\n{}\n</doc_type_hint>\n\n", doc_type_hint.trim())
+        format!(
+            "<doc_type_hint>\n{}\n</doc_type_hint>\n\n",
+            doc_type_hint.trim()
+        )
     };
     let examples = if enabled_fields.fields {
         format!("{METADATA_FEW_SHOT_EXAMPLES}\n\n{METADATA_FIELDS_FEW_SHOT_EXAMPLES}")
@@ -2252,9 +2254,7 @@ mod tests {
         // (a) system prompt names a specific subset of forbidden labels
         // so the model can't generalise away from the constraint.
         assert!(
-            request
-                .system_prompt
-                .contains("Rechnungsnummer"),
+            request.system_prompt.contains("Rechnungsnummer"),
             "system prompt should call out forbidden document labels"
         );
         assert!(
@@ -2389,8 +2389,7 @@ mod tests {
         );
         // fields.fields[].name carries the custom-fields enum + maxItems.
         assert_eq!(
-            schema["properties"]["fields"]["properties"]["fields"]["items"]["properties"]["name"]
-                ["enum"],
+            schema["properties"]["fields"]["properties"]["fields"]["items"]["properties"]["name"]["enum"],
             json!(["Invoice Number"])
         );
         assert_eq!(
@@ -2399,10 +2398,22 @@ mod tests {
         );
         // Every value is nullable so the model can return null for
         // unobserved keys (matches prompt's null-fallback contract).
-        for key in ["title", "document_date", "document_type", "correspondent", "tags", "fields"] {
+        for key in [
+            "title",
+            "document_date",
+            "document_type",
+            "correspondent",
+            "tags",
+            "fields",
+        ] {
             let ty = &schema["properties"][key]["type"];
-            let arr = ty.as_array().unwrap_or_else(|| panic!("{key} should have array type"));
-            assert!(arr.contains(&json!("null")), "{key} must allow null in type");
+            let arr = ty
+                .as_array()
+                .unwrap_or_else(|| panic!("{key} should have array type"));
+            assert!(
+                arr.contains(&json!("null")),
+                "{key} must allow null in type"
+            );
         }
     }
 
@@ -2423,8 +2434,14 @@ mod tests {
             10,
         )
         .unwrap();
-        assert_eq!(schema["properties"]["document_type"], json!({ "type": "null" }));
-        assert_eq!(schema["properties"]["correspondent"], json!({ "type": "null" }));
+        assert_eq!(
+            schema["properties"]["document_type"],
+            json!({ "type": "null" })
+        );
+        assert_eq!(
+            schema["properties"]["correspondent"],
+            json!({ "type": "null" })
+        );
         // fields key still allows the object shape but caps items at 0
         // (model can return {fields:[],confidence:N} but cannot add
         // entries with arbitrary names).
@@ -2479,7 +2496,10 @@ mod tests {
         let response_format = payload.get("response_format").expect("response_format set");
         assert_eq!(response_format["type"], "json_schema");
         assert_eq!(response_format["json_schema"]["strict"], true);
-        assert_eq!(response_format["json_schema"]["name"], "metadata_extraction");
+        assert_eq!(
+            response_format["json_schema"]["name"],
+            "metadata_extraction"
+        );
         assert_eq!(response_format["json_schema"]["schema"], schema);
     }
 
@@ -2520,7 +2540,10 @@ mod tests {
             response_schema: Some(schema.clone()),
         };
         let payload = build_anthropic_chat_payload(&request);
-        let tools = payload.get("tools").and_then(Value::as_array).expect("tools present");
+        let tools = payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("tools present");
         assert_eq!(tools.len(), 1);
         let tool = &tools[0];
         assert_eq!(tool["name"], "emit_metadata");
