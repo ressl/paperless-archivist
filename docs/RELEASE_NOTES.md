@@ -2,8 +2,30 @@
 
 > Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
 > `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.32`). The Rust workspace `Cargo.toml` files remain at the pre-GA
+> `1.5.33`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
+
+## v1.5.33 — Drop non-IMMUTABLE partial index in migration 0025
+
+Second CI-gate fix on top of v1.5.32. After `rust:fmt` passed, the
+`rust:migration-smoke` test failed against a fresh PostgreSQL 18
+database with `functions in index predicate must be marked IMMUTABLE`.
+The offending index was the partial `ai_provider_cooldowns_active_idx`
+introduced in v1.5.27's migration 0025: `WHERE cooldown_until > now()`.
+`now()` is STABLE, not IMMUTABLE, and Postgres rejects index
+predicates that aren't deterministic at index-creation time.
+
+The index is dropped from the migration. The `ai_provider_cooldowns`
+table holds one row per configured AI provider (typically ≤5), so the
+primary-key lookup covers the hot path (`get_active_provider_cooldown`
+for a given provider) and the sequential scan in
+`list_active_provider_cooldowns` is cheaper than maintaining a
+secondary index would have been. No functional change to the
+quota-aware backoff feature.
+
+Migration 0025 was edited rather than overlaid with a new 0026 because
+no production deployment ever successfully applied it — every tag from
+v1.5.27 through v1.5.31 failed CI before reaching the deploy step.
 
 ## v1.5.32 — Rustfmt drift fix that unblocks v1.5.27–v1.5.31 deploys
 

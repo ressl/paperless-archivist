@@ -19,6 +19,12 @@ CREATE TABLE IF NOT EXISTS ai_provider_cooldowns (
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS ai_provider_cooldowns_active_idx
-    ON ai_provider_cooldowns (cooldown_until)
-    WHERE cooldown_until > now();
+-- No secondary index: the primary-key lookup by `provider_name` covers
+-- the hot path (`get_active_provider_cooldown` for a given provider),
+-- and the row count is one per configured AI provider — typically ≤5
+-- — so the sequential scan in `list_active_provider_cooldowns` is
+-- cheaper than maintaining an index. A partial index keyed on
+-- `cooldown_until > now()` would have been ideal but Postgres rejects
+-- it: `functions in index predicate must be marked IMMUTABLE`, and
+-- `now()` is STABLE. A full b-tree on `cooldown_until` is also not
+-- worth the write cost given the table size.
