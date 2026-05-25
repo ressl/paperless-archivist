@@ -552,6 +552,10 @@ th {
   grid-template-columns: minmax(260px, 1.2fr) repeat(3, minmax(200px, 1fr));
   gap: 12px;
   min-width: 0;
+  /* Size each card to its own content instead of stretching the compact
+     status cards (Selector/LLM/Paperless) to match the taller autopilot
+     control card, which left them as long, half-empty boxes. */
+  align-items: start;
 }
 
 @media (max-width: 1400px) {
@@ -576,7 +580,7 @@ th {
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
-  gap: 14px;
+  gap: 10px;
   padding: 16px;
 }
 
@@ -615,14 +619,17 @@ th {
 .mode-button-group {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  /* 2-up at the autopilot card's typical width (~300px) so the four mode
+     buttons sit side by side over two rows instead of a tall single column,
+     keeping the control card close in height to the status cards. */
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 6px;
   width: 100%;
 }
 
 .mode-button-group button {
   justify-content: flex-start;
-  min-height: 34px;
+  min-height: 30px;
   border-color: var(--line);
   background: #fff;
   color: var(--ink);
