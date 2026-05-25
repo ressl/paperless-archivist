@@ -888,6 +888,9 @@ impl RuntimeSettings {
             vision_num_ctx: tuning
                 .and_then(|tuning| tuning.vision_num_ctx)
                 .or(Some(self.ai.ollama_vision_num_ctx)),
+            reasoning_effort: tuning
+                .and_then(|tuning| tuning.reasoning_effort)
+                .unwrap_or_default(),
             ocr_page_limit: tuning
                 .and_then(|tuning| tuning.ocr_page_limit)
                 .unwrap_or(self.ocr.page_limit),
@@ -1330,6 +1333,29 @@ pub struct AiProviderSettings {
 /// `docs/PROVIDER_TUNING_PLAN.md` — every field is `Option<_>` so the active
 /// provider can override individual values while leaving the rest inherited
 /// from the global settings.
+/// Reasoning / thinking effort applied to capable models. `Off` is the safe
+/// default: it leaves requests unchanged so non-reasoning models (local
+/// gemma/llava on Ollama, pre-3.7 Claude, plain chat models) keep working.
+/// Operators opt in per provider; the request builders only apply it to
+/// providers/models that support it (OpenAI reasoning models, Anthropic
+/// extended thinking, Ollama thinking models).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    /// True for any level other than `Off`.
+    pub fn is_on(self) -> bool {
+        !matches!(self, ReasoningEffort::Off)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderTuning {
     // --- Performance ---
@@ -1351,6 +1377,9 @@ pub struct ProviderTuning {
     /// Ollama vision num_ctx override. Cloud providers ignore this.
     #[serde(default)]
     pub vision_num_ctx: Option<i64>,
+    /// Reasoning / thinking effort for capable models. None = inherit (Off).
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 
     // --- Resource caps ---
     /// OCR pages to extract per document. None = inherit `ocr.page_limit`.
@@ -1392,6 +1421,7 @@ pub struct EffectiveTuning {
     pub consensus_date_tolerance_days: i64,
     pub text_num_ctx: Option<i64>,
     pub vision_num_ctx: Option<i64>,
+    pub reasoning_effort: ReasoningEffort,
     pub ocr_page_limit: u16,
     pub hourly_document_limit: Option<i64>,
     pub daily_document_limit: Option<i64>,
@@ -1438,6 +1468,7 @@ impl AiProviderSettings {
                 consensus_date_tolerance_days: None,
                 text_num_ctx: Some(4096),
                 vision_num_ctx: Some(4096),
+                reasoning_effort: None,
                 ocr_page_limit: Some(2),
                 hourly_document_limit: Some(200),
                 daily_document_limit: Some(2000),
@@ -1465,7 +1496,14 @@ impl AiProviderSettings {
             cost_per_1m_output_tokens_usd: None,
             secret_id: None,
             enabled: true,
-            tuning: ProviderTuning::default(),
+            // The recommended Ollama Cloud text models (glm-5.1, deepseek-v4-*,
+            // kimi-k2-thinking) are thinking-capable, so the cloud preset opts
+            // into medium reasoning by default. Local Ollama stays Off because
+            // non-thinking models (gemma/llava) reject `think`.
+            tuning: ProviderTuning {
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                ..ProviderTuning::default()
+            },
         }
     }
 
@@ -1489,6 +1527,7 @@ impl AiProviderSettings {
                 consensus_date_tolerance_days: None,
                 text_num_ctx: None,
                 vision_num_ctx: None,
+                reasoning_effort: None,
                 ocr_page_limit: Some(8),
                 hourly_document_limit: None,
                 daily_document_limit: None,
@@ -4135,9 +4174,18 @@ mod tests {
     }
 
     #[test]
-    fn ollama_cloud_default_constructor_ships_blank_tuning() {
+    fn ollama_cloud_default_constructor_ships_medium_reasoning_tuning() {
+        // The cloud preset's recommended text models are thinking-capable, so
+        // it opts into medium reasoning; everything else stays at the blank
+        // default (inherits globals).
         let provider = AiProviderSettings::ollama_cloud_default();
-        assert_eq!(provider.tuning, ProviderTuning::default());
+        assert_eq!(
+            provider.tuning,
+            ProviderTuning {
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                ..ProviderTuning::default()
+            }
+        );
     }
 
     #[test]

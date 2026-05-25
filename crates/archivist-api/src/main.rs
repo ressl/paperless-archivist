@@ -1516,6 +1516,7 @@ async fn build_prompt_test_chat_request(
             temperature: 0.0,
             num_ctx: None,
             response_schema: None,
+            reasoning_effort: None,
         }),
         // Stage::Metadata uses the consolidated prompt builder added alongside the worker
         // handler. The builder is registered in archivist-ai in a follow-up commit; until
@@ -2169,6 +2170,7 @@ async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Va
                     temperature: 0.0,
                     num_ctx: None,
                     response_schema: None,
+                    reasoning_effort: None,
                 })
                 .await?;
             Ok(
@@ -2188,6 +2190,7 @@ async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Va
                     temperature: 0.0,
                     num_ctx: None,
                     response_schema: None,
+                    reasoning_effort: None,
                 })
                 .await?;
             Ok(
@@ -3773,6 +3776,7 @@ async fn post_chat_message(
             temperature: 0.1,
             num_ctx: None,
             response_schema: None,
+            reasoning_effort: None,
         },
     )
     .await?;

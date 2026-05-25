@@ -17,6 +17,7 @@ import {
   AiRuntimeHints,
   OllamaInstalledModel,
   ProviderTuning,
+  ReasoningEffort,
   RuntimeSettings
 } from '../api/client';
 import {
@@ -186,7 +187,8 @@ const PERFORMANCE_FIELDS = [
   'consensus_secondary_text_model',
   'consensus_date_tolerance_days',
   'text_num_ctx',
-  'vision_num_ctx'
+  'vision_num_ctx',
+  'reasoning_effort'
 ] as const satisfies readonly (keyof ProviderTuning)[];
 
 const CAPS_FIELDS = [
@@ -1467,6 +1469,14 @@ function TuningDisclosure({
             step={1024}
             onChange={(value) => onChangeTuning({ vision_num_ctx: value })}
           />
+          <TuningSelectField
+            field="reasoning_effort"
+            value={tuning.reasoning_effort}
+            options={REASONING_EFFORT_OPTIONS}
+            defaultLabel={t('settings.tuning.default.reasoning_effort')}
+            hint={provider.kind === 'anthropic' ? t('settings.tuning.hint.reasoning_anthropic') : undefined}
+            onChange={(value) => onChangeTuning({ reasoning_effort: value })}
+          />
         </TuningSection>
         <TuningSection
           titleKey="settings.tuning.section.caps"
@@ -1687,6 +1697,52 @@ function TuningTextField({
     </label>
   );
 }
+
+function TuningSelectField({
+  field,
+  value,
+  options,
+  defaultLabel,
+  hint,
+  onChange
+}: {
+  field: TuningField;
+  value: string | null | undefined;
+  options: readonly { value: string; labelKey: Parameters<ReturnType<typeof useI18n>['t']>[0] }[];
+  defaultLabel: string;
+  hint?: string;
+  onChange: (next: ReasoningEffort | null) => void;
+}) {
+  const { t } = useI18n();
+  const labelKey = (`settings.tuning.field.${field}`) as Parameters<typeof t>[0];
+  return (
+    <label className="provider-tuning-field">
+      <span>{t(labelKey)}</span>
+      <select
+        value={value ?? ''}
+        onChange={(event) => {
+          const next = event.target.value;
+          onChange(next === '' ? null : (next as ReasoningEffort));
+        }}
+      >
+        <option value="">{defaultLabel}</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {t(option.labelKey)}
+          </option>
+        ))}
+      </select>
+      <small className="field-hint">{hint ?? defaultLabel}</small>
+    </label>
+  );
+}
+
+const REASONING_EFFORT_OPTIONS = [
+  { value: 'off', labelKey: 'settings.tuning.reasoning.off' },
+  { value: 'low', labelKey: 'settings.tuning.reasoning.low' },
+  { value: 'medium', labelKey: 'settings.tuning.reasoning.medium' },
+  { value: 'high', labelKey: 'settings.tuning.reasoning.high' }
+] as const;
 
 function OllamaServerHints({ providerName }: { providerName: string }) {
   const { t } = useI18n();

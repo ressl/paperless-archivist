@@ -10,12 +10,15 @@ export type AiLoadedModel = components['schemas']['AiLoadedModel'];
 // Per-provider tuning block (v1.6.2). Mirrors archivist_core::ProviderTuning.
 // All fields are optional: when null/undefined, the global setting in
 // workflow / ocr / metadata / tagging applies. See docs/PROVIDER_TUNING_PLAN.md.
+export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high';
+
 export type ProviderTuning = {
   worker_concurrency?: number | null;
   consensus_secondary_text_model?: string | null;
   consensus_date_tolerance_days?: number | null;
   text_num_ctx?: number | null;
   vision_num_ctx?: number | null;
+  reasoning_effort?: ReasoningEffort | null;
   ocr_page_limit?: number | null;
   hourly_document_limit?: number | null;
   daily_document_limit?: number | null;

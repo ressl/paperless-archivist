@@ -12,7 +12,7 @@ use archivist_ai::{
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, DocumentPatch, LanguageDetection, MetadataFieldFlags,
-    MetadataSuggestion, OldTagStrategy, ProcessingMode, RuntimeSettings, Stage,
+    MetadataSuggestion, OldTagStrategy, ProcessingMode, ReasoningEffort, RuntimeSettings, Stage,
     detect_document_language, validate_choice_suggestion, validate_document_date_suggestion,
     validate_field_suggestion, validate_tag_suggestion, validate_title_suggestion,
 };
@@ -2332,6 +2332,7 @@ async fn run_consensus_check(
     provider.model = secondary_model.clone();
     request.model = secondary_model.clone();
     request.num_ctx = ollama_num_ctx_for_provider(&provider, tuning.text_num_ctx);
+    request.reasoning_effort = Some(provider.reasoning_effort);
 
     let response = match chat_with_provider(pool, config, &provider, request).await {
         Ok(r) => r,
@@ -3262,6 +3263,7 @@ struct StageProvider {
     base_url: String,
     model: String,
     secret_id: Option<Uuid>,
+    reasoning_effort: ReasoningEffort,
 }
 
 fn provider_for_stage(
@@ -3298,12 +3300,14 @@ fn provider_for_stage(
         .ai
         .model_for_stage_provider(&provider, stage, vision);
     let base_url = provider_base_url(&provider.kind, &provider.base_url);
+    let reasoning_effort = provider.tuning.reasoning_effort.unwrap_or_default();
     Ok(StageProvider {
         name: provider.name,
         kind: provider.kind,
         base_url,
         model,
         secret_id: provider.secret_id,
+        reasoning_effort,
     })
 }
 
@@ -3378,6 +3382,7 @@ async fn chat_for_stage(
     // with comfortable headroom over Ollama's 4096-token default.
     request.num_ctx =
         ollama_num_ctx_for_provider(&provider, settings.effective_tuning().text_num_ctx);
+    request.reasoning_effort = Some(provider.reasoning_effort);
     chat_with_provider(pool, config, &provider, request).await
 }
 
