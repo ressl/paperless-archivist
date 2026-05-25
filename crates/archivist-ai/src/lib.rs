@@ -707,6 +707,29 @@ impl OpenAiCompatibleClient {
             provider_name: provider_name.to_owned(),
         })
     }
+
+    /// Lists model IDs from the OpenAI-compatible `GET /models` endpoint.
+    /// Returns the raw `data[].id` strings; callers filter as needed (e.g.
+    /// OpenAI mixes in embedding/audio/image models). Also used for Ollama
+    /// Cloud, whose catalog is exposed at `ollama.com/v1/models`.
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .send()
+            .await
+            .context("call OpenAI-compatible models listing")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("models listing returned {status}: {body}"));
+        }
+        let raw: Value = response
+            .json()
+            .await
+            .context("decode OpenAI-compatible models listing")?;
+        Ok(extract_model_ids(&raw))
+    }
 }
 
 #[async_trait]
@@ -810,6 +833,19 @@ impl VisionProvider for OpenAiCompatibleClient {
     }
 }
 
+/// Extracts model IDs from an OpenAI-/Anthropic-style models listing
+/// (`{ "data": [ { "id": "..." }, ... ] }`). Both providers — and Ollama
+/// Cloud's `/v1/models` — share this envelope.
+fn extract_model_ids(raw: &Value) -> Vec<String> {
+    raw.get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct AnthropicClient {
     base_url: String,
@@ -837,6 +873,28 @@ impl AnthropicClient {
             client,
             provider_name: provider_name.to_owned(),
         })
+    }
+
+    /// Lists model IDs from the Anthropic Models API (`GET /v1/models`).
+    /// The `x-api-key` + `anthropic-version` headers are already configured on
+    /// the client, so this reuses them. Returns the `data[].id` strings.
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .send()
+            .await
+            .context("call Anthropic models API")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Anthropic models listing returned {status}: {body}"));
+        }
+        let raw: Value = response
+            .json()
+            .await
+            .context("decode Anthropic models listing")?;
+        Ok(extract_model_ids(&raw))
     }
 
     async fn send_messages(
@@ -1952,6 +2010,19 @@ fn confidence_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_model_ids_reads_data_id_envelope() {
+        let raw = json!({
+            "data": [
+                { "id": "glm-5.1" },
+                { "id": "deepseek-v4-pro", "object": "model" },
+                { "object": "model" }
+            ]
+        });
+        assert_eq!(extract_model_ids(&raw), vec!["glm-5.1", "deepseek-v4-pro"]);
+        assert!(extract_model_ids(&json!({})).is_empty());
+    }
 
     #[test]
     fn quota_signal_detects_ollama_cloud_weekly_limit() {

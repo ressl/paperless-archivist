@@ -1914,25 +1914,24 @@ function ProviderModelSelect({
   onRefresh: () => void;
 }) {
   const { t } = useI18n();
+  // Local Ollama discovers *installed* models (/api/tags); every other provider
+  // (Ollama Cloud, OpenAI, Anthropic, OpenAI-compatible) discovers its *catalog*
+  // via /v1/models. Both flow through the same sync button + status.
   const usesInstalledModels = provider.kind === 'ollama' && !isOllamaCloudProvider(provider);
-  const hasReliableInstalledList = Boolean(ollamaState?.loaded && !ollamaState.error);
+  const hasReliableList = Boolean(ollamaState?.loaded && !ollamaState.error);
+  const syncedModels = hasReliableList ? (ollamaState?.models ?? []) : null;
   const options = usesInstalledModels
     ? installedOllamaModelOptions(
       ollamaState?.models ?? [],
       value,
-      hasReliableInstalledList,
+      hasReliableList,
       ollamaSelectPlaceholder(ollamaState, t),
       t
     )
-    : modelOptions(provider, capability, value).map((option) => ({
-      value: option.value,
-      label: modelOptionLabel(option)
-    }));
+    : catalogModelOptions(provider, capability, value, syncedModels, t);
+  const liveNames = syncedModels?.map((model) => model.name) ?? [];
   const currentIsMissing =
-    usesInstalledModels &&
-    Boolean(value) &&
-    hasReliableInstalledList &&
-    !(ollamaState?.models ?? []).some((model) => model.name === value);
+    Boolean(value) && hasReliableList && !liveNames.some((name) => name === value);
 
   return (
     <div className="model-select-block">
@@ -1949,27 +1948,54 @@ function ProviderModelSelect({
           ))}
         </select>
         {usesInstalledModels && <HardwareRecommendationInfo />}
-        {usesInstalledModels && (
-          <button
-            className="icon-button"
-            title={t('settings.ollama.reload_models')}
-            aria-label={t('settings.ollama.reload_models')}
-            type="button"
-            disabled={ollamaState?.loading}
-            onClick={onRefresh}
-          >
-            <RefreshCw size={16} />
-          </button>
-        )}
+        <button
+          className="icon-button"
+          title={t('settings.ollama.reload_models')}
+          aria-label={t('settings.ollama.reload_models')}
+          type="button"
+          disabled={ollamaState?.loading}
+          onClick={onRefresh}
+        >
+          <RefreshCw size={16} />
+        </button>
       </div>
-      {usesInstalledModels && (
-        <OllamaModelStatus
-          state={ollamaState}
-          currentIsMissing={currentIsMissing}
-        />
-      )}
+      <OllamaModelStatus state={ollamaState} currentIsMissing={currentIsMissing} />
     </div>
   );
+}
+
+/// Builds the dropdown options for catalog-driven providers (everything except
+/// local Ollama), merging the curated catalog with a live `/v1/models` sync:
+/// catalog entries keep their recommendation label; entries absent from the
+/// live list are flagged; live IDs not in the catalog are appended.
+function catalogModelOptions(
+  provider: ModelProviderDescriptor,
+  capability: ModelCapability,
+  value: string,
+  syncedModels: OllamaInstalledModel[] | null,
+  t: TFunction
+): { value: string; label: string }[] {
+  const catalog = modelOptions(provider, capability, value);
+  if (!syncedModels) {
+    return catalog.map((option) => ({ value: option.value, label: modelOptionLabel(option) }));
+  }
+  const liveNames = new Set(syncedModels.map((model) => model.name));
+  const catalogValues = new Set(catalog.map((option) => option.value));
+  const merged = catalog.map((option) => ({
+    value: option.value,
+    label: liveNames.has(option.value)
+      ? modelOptionLabel(option)
+      : `${modelOptionLabel(option)} · ⚠ ${t('settings.ollama.not_listed')}`
+  }));
+  for (const model of syncedModels) {
+    if (!catalogValues.has(model.name)) {
+      merged.push({ value: model.name, label: model.name });
+    }
+  }
+  if (value && !catalogValues.has(value) && !liveNames.has(value)) {
+    merged.unshift({ value, label: value });
+  }
+  return merged;
 }
 
 function installedOllamaModelOptions(

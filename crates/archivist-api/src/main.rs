@@ -1808,32 +1808,126 @@ async fn model_provider_models(
     let settings = get_runtime_settings(&state.pool).await?;
     let provider = provider_by_name(&settings, &name)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    if provider.kind != AiProviderKind::Ollama {
-        return Err(ApiError::bad_request(
-            "installed model discovery is only available for Ollama providers",
-        ));
-    }
     validate_outbound_url(&provider.base_url)
         .await
         .map_err(|error| {
-            ApiError::bad_request(format!(
-                "Ollama provider base URL rejected: {}",
-                error.message
-            ))
+            ApiError::bad_request(format!("provider base URL rejected: {}", error.message))
         })?;
-    let client = OllamaClient::new_with_timeout(
-        &provider.base_url,
-        provider_secret(&state, &provider).await?,
-        std::time::Duration::from_secs(10),
-    )?;
-    let models = client
-        .list_models()
-        .await
-        .map_err(|error| ApiError::internal(format!("Ollama model discovery failed: {error}")))?;
+    let secret = provider_secret(&state, &provider).await?;
+    let models = discover_provider_models(&provider, secret).await?;
     Ok(Json(OllamaInstalledModelsResponse {
         provider: provider.name,
-        models: models.into_iter().map(OllamaInstalledModel::from).collect(),
+        models,
     }))
+}
+
+/// True for an Ollama provider that points at the hosted cloud (ollama.com),
+/// whose model catalog is exposed through the OpenAI-compatible
+/// `/v1/models` endpoint rather than the local-runner `/api/tags`.
+fn is_ollama_cloud(base_url: &str) -> bool {
+    base_url.to_ascii_lowercase().contains("ollama.com")
+}
+
+/// Heuristic filter for OpenAI's noisy `/models` list: keep the chat/vision
+/// families (gpt-*, chatgpt-*, o-series) and drop embeddings, audio, image,
+/// moderation, and search models that can't drive the metadata/OCR stages.
+fn openai_id_is_chat_capable(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    let keep = id.starts_with("gpt-")
+        || id.starts_with("chatgpt")
+        || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4");
+    let drop = id.contains("embedding")
+        || id.contains("whisper")
+        || id.contains("tts")
+        || id.contains("audio")
+        || id.contains("realtime")
+        || id.contains("transcribe")
+        || id.contains("image")
+        || id.contains("dall-e")
+        || id.contains("moderation")
+        || id.contains("search");
+    keep && !drop
+}
+
+/// Runs a provider model-listing future under a short timeout so the
+/// interactive "sync" button never hangs the settings page.
+async fn list_with_timeout<F>(fut: F) -> ApiResult<Vec<String>>
+where
+    F: std::future::Future<Output = anyhow::Result<Vec<String>>>,
+{
+    let ids = tokio::time::timeout(std::time::Duration::from_secs(12), fut)
+        .await
+        .map_err(|_| ApiError::bad_request("model discovery timed out"))??;
+    Ok(ids)
+}
+
+/// Discovers the available models for any provider kind. Ollama local uses
+/// `/api/tags`; Ollama Cloud, OpenAI, OpenAI-compatible and Anthropic all use
+/// their `/v1/models`-style listing (Anthropic via its Models API). The result
+/// is normalised to the `OllamaInstalledModel` shape — remote providers fill
+/// only `name`, since their listings carry no size/quant metadata.
+async fn discover_provider_models(
+    provider: &ApiProvider,
+    secret: Option<SecretString>,
+) -> ApiResult<Vec<OllamaInstalledModel>> {
+    let base = provider.base_url.trim_end_matches('/');
+    match provider.kind {
+        AiProviderKind::Ollama if !is_ollama_cloud(base) => {
+            let client =
+                OllamaClient::new_with_timeout(base, secret, std::time::Duration::from_secs(12))?;
+            let models = client.list_models().await.map_err(|error| {
+                ApiError::internal(format!("Ollama model discovery failed: {error}"))
+            })?;
+            Ok(models.into_iter().map(OllamaInstalledModel::from).collect())
+        }
+        AiProviderKind::Ollama => {
+            // Ollama Cloud: the catalog lives at ollama.com/v1/models.
+            let client =
+                OpenAiCompatibleClient::new(&provider.name, &format!("{base}/v1"), secret)?;
+            let ids = list_with_timeout(client.list_models()).await?;
+            Ok(ids.into_iter().map(OllamaInstalledModel::from_id).collect())
+        }
+        AiProviderKind::Openai => {
+            let client = OpenAiCompatibleClient::new(&provider.name, base, secret)?;
+            let ids = list_with_timeout(client.list_models()).await?;
+            Ok(ids
+                .into_iter()
+                .filter(|id| openai_id_is_chat_capable(id))
+                .map(OllamaInstalledModel::from_id)
+                .collect())
+        }
+        AiProviderKind::OpenaiCompatible => {
+            let client = OpenAiCompatibleClient::new(&provider.name, base, secret)?;
+            let ids = list_with_timeout(client.list_models()).await?;
+            Ok(ids.into_iter().map(OllamaInstalledModel::from_id).collect())
+        }
+        AiProviderKind::Anthropic => {
+            let key = secret.ok_or_else(|| {
+                ApiError::bad_request("Anthropic model discovery requires an API key")
+            })?;
+            let client = AnthropicClient::new(&provider.name, base, key)?;
+            let ids = list_with_timeout(client.list_models()).await?;
+            Ok(ids.into_iter().map(OllamaInstalledModel::from_id).collect())
+        }
+    }
+}
+
+impl OllamaInstalledModel {
+    /// Builds an entry from a bare model id (remote providers' listings carry
+    /// no size/quantisation metadata).
+    fn from_id(id: String) -> Self {
+        Self {
+            name: id,
+            parameter_size: None,
+            quantization_level: None,
+            size_bytes: None,
+            size_gb: None,
+            modified_at: None,
+            digest: None,
+        }
+    }
 }
 
 impl From<OllamaModel> for OllamaInstalledModel {
@@ -6041,6 +6135,32 @@ fn verify_password(user: &AuthUser, password: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ollama_cloud_detection_matches_hosted_endpoint() {
+        assert!(is_ollama_cloud("https://ollama.com"));
+        assert!(is_ollama_cloud("https://OLLAMA.com/"));
+        assert!(!is_ollama_cloud("http://ollama:11434"));
+        assert!(!is_ollama_cloud("http://localhost:11434"));
+    }
+
+    #[test]
+    fn openai_model_filter_keeps_chat_drops_non_chat() {
+        for keep in ["gpt-4o", "gpt-4o-mini", "gpt-5.5", "chatgpt-4o-latest", "o3", "o4-mini"] {
+            assert!(openai_id_is_chat_capable(keep), "should keep {keep}");
+        }
+        for drop in [
+            "text-embedding-3-large",
+            "whisper-1",
+            "tts-1",
+            "dall-e-3",
+            "gpt-image-1",
+            "gpt-4o-audio-preview",
+            "omni-moderation-latest",
+        ] {
+            assert!(!openai_id_is_chat_capable(drop), "should drop {drop}");
+        }
+    }
 
     #[test]
     fn validates_password_strength() {
