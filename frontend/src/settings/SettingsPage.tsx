@@ -256,14 +256,18 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           }
         }));
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        // Surface the real server error (e.g. "… requires an API key", a 401,
+        // or an unreachable host) instead of always blaming Ollama — model
+        // discovery now covers OpenAI/Anthropic/OpenAI-compatible too.
+        const message = err instanceof Error && err.message ? err.message : t('settings.ollama.load_error');
         setOllamaModels((current) => ({
           ...current,
           [providerName]: {
             loading: false,
             loaded: true,
             models: current[providerName]?.models ?? [],
-            error: t('settings.ollama.load_error')
+            error: message
           }
         }));
       });

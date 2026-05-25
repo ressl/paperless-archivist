@@ -1889,6 +1889,11 @@ async fn discover_provider_models(
             Ok(ids.into_iter().map(OllamaInstalledModel::from_id).collect())
         }
         AiProviderKind::Openai => {
+            if secret.is_none() {
+                return Err(ApiError::bad_request(
+                    "OpenAI model discovery requires an API key — enter and save the provider's API key first.",
+                ));
+            }
             let client = OpenAiCompatibleClient::new(&provider.name, base, secret)?;
             let ids = list_with_timeout(client.list_models()).await?;
             Ok(ids
