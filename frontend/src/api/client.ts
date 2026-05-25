@@ -12,6 +12,22 @@ export type AiLoadedModel = components['schemas']['AiLoadedModel'];
 // workflow / ocr / metadata / tagging applies. See docs/PROVIDER_TUNING_PLAN.md.
 export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high';
 
+export type ModelUsageTier = 'low' | 'medium' | 'high' | 'extra_high';
+
+// Editable model-picker catalog entry (v1.6.3). Mirrors
+// archivist_core::ModelCatalogEntry; persisted in runtime_settings.
+export type ModelCatalogEntry = {
+  provider_kind: AiProviderKind;
+  capability: 'text' | 'vision';
+  model_id: string;
+  label?: string | null;
+  recommended: boolean;
+  usage_tier?: ModelUsageTier | null;
+  context?: string | null;
+  modality?: string | null;
+  best_for?: string | null;
+};
+
 export type ProviderTuning = {
   worker_concurrency?: number | null;
   consensus_secondary_text_model?: string | null;
@@ -105,6 +121,7 @@ export type RuntimeSettings = {
     requeue_vision_crashes_on_startup?: boolean;
     ollama_vision_num_ctx?: number;
     ollama_text_num_ctx?: number;
+    model_catalog: ModelCatalogEntry[];
   };
   security: {
     audit_retention_days: number;

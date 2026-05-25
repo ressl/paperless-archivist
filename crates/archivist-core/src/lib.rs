@@ -1204,6 +1204,14 @@ pub struct AiSettings {
     /// 0 = require exact-day match.
     #[serde(default)]
     pub consensus_date_tolerance_days: i64,
+    /// Editable model catalog driving the provider model pickers. Carries the
+    /// editorial metadata (recommendation, usage tier, context, modality,
+    /// best-for) that a live `/v1/models` sync can't return. Seeded from the
+    /// curated defaults; operators edit it in Settings. Local Ollama ignores
+    /// it (it lists installed models instead), so `kind == Ollama` entries are
+    /// the Ollama Cloud catalog.
+    #[serde(default = "default_model_catalog")]
+    pub model_catalog: Vec<ModelCatalogEntry>,
 }
 
 impl Default for AiSettings {
@@ -1222,8 +1230,335 @@ impl Default for AiSettings {
             ollama_text_num_ctx: default_ollama_text_num_ctx(),
             consensus_secondary_text_model: None,
             consensus_date_tolerance_days: 1,
+            model_catalog: default_model_catalog(),
         }
     }
+}
+
+/// Capability a catalog entry applies to. Mirrors the per-provider
+/// `default_text_model` / `default_vision_model` split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapability {
+    Text,
+    Vision,
+}
+
+/// Ollama Cloud usage tier (GPU/cloud-burn class) shown as a picker badge.
+/// Editorial — not returned by any provider API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelUsageTier {
+    Low,
+    Medium,
+    High,
+    ExtraHigh,
+}
+
+/// One curated model-picker entry. Editable in Settings and persisted in
+/// `runtime_settings`. The live `/v1/models` sync reconciles availability;
+/// this carries the editorial metadata an API can't return.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelCatalogEntry {
+    pub provider_kind: AiProviderKind,
+    pub capability: ModelCapability,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub recommended: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_tier: Option<ModelUsageTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_for: Option<String>,
+}
+
+/// Seed catalog. Ollama Cloud entries come from the 2026-05-25 model matrix
+/// (`docs/LLM_PROVIDER_SETTINGS_PLAN.md`); the remote providers carry their
+/// recommended picks. Local Ollama is intentionally absent — it lists
+/// installed models live.
+fn default_model_catalog() -> Vec<ModelCatalogEntry> {
+    use AiProviderKind::{Anthropic, Ollama, Openai, OpenaiCompatible};
+    use ModelCapability::{Text, Vision};
+    use ModelUsageTier::{ExtraHigh, High, Medium};
+
+    #[allow(clippy::too_many_arguments)]
+    fn entry(
+        provider_kind: AiProviderKind,
+        capability: ModelCapability,
+        model_id: &str,
+        recommended: bool,
+        usage_tier: Option<ModelUsageTier>,
+        context: Option<&str>,
+        modality: Option<&str>,
+        best_for: Option<&str>,
+    ) -> ModelCatalogEntry {
+        ModelCatalogEntry {
+            provider_kind,
+            capability,
+            model_id: model_id.to_owned(),
+            label: None,
+            recommended,
+            usage_tier,
+            context: context.map(str::to_owned),
+            modality: modality.map(str::to_owned),
+            best_for: best_for.map(str::to_owned),
+        }
+    }
+
+    vec![
+        // --- Ollama Cloud (text) — from the matrix ---
+        entry(
+            Ollama,
+            Text,
+            "glm-5.1",
+            true,
+            Some(High),
+            Some("198K"),
+            Some("text"),
+            Some("Agentic coding / software engineering"),
+        ),
+        entry(
+            Ollama,
+            Text,
+            "deepseek-v4-pro",
+            false,
+            Some(ExtraHigh),
+            Some("1M"),
+            Some("text"),
+            Some("Heavy reasoning / long analysis"),
+        ),
+        entry(
+            Ollama,
+            Text,
+            "deepseek-v4-flash",
+            false,
+            Some(Medium),
+            Some("1M"),
+            Some("text"),
+            Some("1M context at a better usage trade-off"),
+        ),
+        entry(
+            Ollama,
+            Text,
+            "qwen3-coder:480b",
+            false,
+            Some(High),
+            Some("256K"),
+            Some("text"),
+            Some("Large codebases / repo understanding"),
+        ),
+        entry(
+            Ollama,
+            Text,
+            "kimi-k2-thinking",
+            false,
+            Some(High),
+            Some("256K"),
+            Some("text"),
+            Some("Long tool agents / browsing"),
+        ),
+        entry(
+            Ollama,
+            Text,
+            "qwen3.5:397b",
+            false,
+            Some(Medium),
+            Some("256K"),
+            Some("text+image"),
+            Some("Multimodal allrounder"),
+        ),
+        entry(
+            Ollama,
+            Text,
+            "minimax-m2.7",
+            false,
+            Some(Medium),
+            Some("200K"),
+            Some("text"),
+            Some("Office / productivity / workflows"),
+        ),
+        // --- Ollama Cloud (vision) ---
+        entry(
+            Ollama,
+            Vision,
+            "qwen3-vl:235b",
+            true,
+            Some(High),
+            Some("256K"),
+            Some("text+image"),
+            Some("Vision / OCR / screenshots / GUI"),
+        ),
+        entry(
+            Ollama,
+            Vision,
+            "qwen3-vl:235b-instruct",
+            false,
+            Some(High),
+            Some("256K"),
+            Some("text+image"),
+            Some("Vision / OCR (instruct)"),
+        ),
+        entry(
+            Ollama,
+            Vision,
+            "qwen3.5:397b",
+            false,
+            Some(Medium),
+            Some("256K"),
+            Some("text+image"),
+            Some("Multimodal allrounder"),
+        ),
+        entry(
+            Ollama,
+            Vision,
+            "kimi-k2.6",
+            false,
+            Some(High),
+            Some("256K"),
+            Some("text+image"),
+            Some("Design-to-code / visual coding"),
+        ),
+        // --- OpenAI ---
+        entry(Openai, Text, "gpt-5.5", true, None, None, None, None),
+        entry(Openai, Text, "gpt-5", false, None, None, None, None),
+        entry(
+            Openai,
+            Text,
+            "o3",
+            false,
+            None,
+            None,
+            None,
+            Some("Reasoning"),
+        ),
+        entry(
+            Openai,
+            Text,
+            "o4-mini",
+            false,
+            None,
+            None,
+            None,
+            Some("Fast reasoning"),
+        ),
+        entry(
+            Openai,
+            Text,
+            "gpt-4o",
+            false,
+            None,
+            None,
+            Some("text+image"),
+            None,
+        ),
+        entry(
+            Openai,
+            Vision,
+            "gpt-5.5",
+            true,
+            None,
+            None,
+            Some("text+image"),
+            None,
+        ),
+        entry(
+            Openai,
+            Vision,
+            "gpt-4o",
+            false,
+            None,
+            None,
+            Some("text+image"),
+            None,
+        ),
+        // --- Anthropic ---
+        entry(
+            Anthropic,
+            Text,
+            "claude-sonnet-4-6",
+            true,
+            None,
+            None,
+            None,
+            None,
+        ),
+        entry(
+            Anthropic,
+            Text,
+            "claude-opus-4-6",
+            false,
+            None,
+            None,
+            None,
+            Some("Highest quality"),
+        ),
+        entry(
+            Anthropic,
+            Text,
+            "claude-haiku-4-5",
+            false,
+            None,
+            None,
+            None,
+            Some("Fast / cheap"),
+        ),
+        entry(
+            Anthropic,
+            Vision,
+            "claude-sonnet-4-6",
+            true,
+            None,
+            None,
+            Some("text+image"),
+            None,
+        ),
+        // --- OpenAI-compatible (generic self-hosted) ---
+        entry(
+            OpenaiCompatible,
+            Text,
+            "qwen3:8b",
+            true,
+            None,
+            None,
+            None,
+            None,
+        ),
+        entry(
+            OpenaiCompatible,
+            Text,
+            "gpt-oss:120b",
+            false,
+            None,
+            None,
+            None,
+            None,
+        ),
+        entry(
+            OpenaiCompatible,
+            Text,
+            "llama3.3:70b",
+            false,
+            None,
+            None,
+            None,
+            None,
+        ),
+        entry(
+            OpenaiCompatible,
+            Vision,
+            "qwen2.5vl:7b",
+            true,
+            None,
+            None,
+            Some("text+image"),
+            None,
+        ),
+    ]
 }
 
 impl AiSettings {
@@ -4171,6 +4506,30 @@ mod tests {
     fn anthropic_default_constructor_ships_blank_tuning() {
         let provider = AiProviderSettings::anthropic_default();
         assert_eq!(provider.tuning, ProviderTuning::default());
+    }
+
+    #[test]
+    fn default_model_catalog_seeds_recommended_entries() {
+        let catalog = default_model_catalog();
+        assert!(!catalog.is_empty());
+        // glm-5.1 is the recommended Ollama Cloud text pick (kind == Ollama).
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.model_id == "glm-5.1" && entry.recommended)
+        );
+        // Exactly one recommended entry per seeded (kind, capability) pair.
+        let ollama_text_recommended = catalog
+            .iter()
+            .filter(|entry| {
+                entry.provider_kind == AiProviderKind::Ollama
+                    && entry.capability == ModelCapability::Text
+                    && entry.recommended
+            })
+            .count();
+        assert_eq!(ollama_text_recommended, 1);
+        // The default AiSettings ships this catalog.
+        assert_eq!(AiSettings::default().model_catalog, catalog);
     }
 
     #[test]

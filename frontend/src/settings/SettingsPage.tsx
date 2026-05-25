@@ -15,6 +15,8 @@ import {
   api,
   AiProviderKind,
   AiRuntimeHints,
+  ModelCatalogEntry,
+  ModelUsageTier,
   OllamaInstalledModel,
   ProviderTuning,
   ReasoningEffort,
@@ -294,6 +296,8 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
   if (!settings) return <section className="page"><PageHeader title={t('settings.loading_title')} /></section>;
 
   const update = (updater: (settings: RuntimeSettings) => RuntimeSettings) => setSettings((current) => (current ? updater(current) : current));
+  const updateCatalog = (next: ModelCatalogEntry[]) =>
+    update((s) => ({ ...s, ai: { ...s.ai, model_catalog: next } }));
   const updateProvider = (index: number, patch: Partial<RuntimeSettings['ai']['providers'][number]>) =>
     update((s) => {
       const providers = [...s.ai.providers];
@@ -522,6 +526,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
               capability="text"
               provider={selectedDefaultProvider}
               value={settings.ai.default_text_model}
+              catalog={settings.ai.model_catalog}
               ollamaState={ollamaModels[selectedDefaultProvider.name]}
               onChange={(value) => update((s) => ({ ...s, ai: { ...s.ai, default_text_model: value } }))}
               onRefresh={() => loadOllamaModels(selectedDefaultProvider.name)}
@@ -533,6 +538,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
               capability="vision"
               provider={selectedDefaultProvider}
               value={settings.ai.default_vision_model}
+              catalog={settings.ai.model_catalog}
               ollamaState={ollamaModels[selectedDefaultProvider.name]}
               onChange={(value) => update((s) => ({ ...s, ai: { ...s.ai, default_vision_model: value } }))}
               onRefresh={() => loadOllamaModels(selectedDefaultProvider.name)}
@@ -544,6 +550,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
               capability="vision"
               provider={selectedDefaultProvider}
               value={settings.ai.fallback_vision_model ?? ''}
+              catalog={settings.ai.model_catalog}
               ollamaState={ollamaModels[selectedDefaultProvider.name]}
               onChange={(value) =>
                 update((s) => ({
@@ -967,6 +974,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
                 capability="text"
                 provider={provider}
                 value={provider.default_text_model ?? ''}
+                catalog={settings.ai.model_catalog}
                 ollamaState={ollamaModels[provider.name]}
                 onChange={(value) => updateProvider(index, { default_text_model: value })}
                 onRefresh={() => loadOllamaModels(provider.name)}
@@ -978,6 +986,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
                 capability="vision"
                 provider={provider}
                 value={provider.default_vision_model ?? ''}
+                catalog={settings.ai.model_catalog}
                 ollamaState={ollamaModels[provider.name]}
                 onChange={(value) => updateProvider(index, { default_vision_model: value })}
                 onRefresh={() => loadOllamaModels(provider.name)}
@@ -1005,6 +1014,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           </fieldset>
         ))}
       </div>
+      <ModelCatalogEditor catalog={settings.ai.model_catalog} onChange={updateCatalog} />
       <div className="toolbar">
         <button title={t('settings.provider.add')} onClick={addProvider}>
           <UserPlus size={16} /> {t('settings.provider.add')}
@@ -1898,10 +1908,165 @@ function parseFieldMappings(value: string): RuntimeSettings['fields']['mappings'
     .filter((mapping) => mapping.field_name);
 }
 
+const CATALOG_PROVIDER_KINDS: AiProviderKind[] = [
+  'ollama',
+  'openai',
+  'anthropic',
+  'openai_compatible'
+];
+const CATALOG_USAGE_TIERS: ModelUsageTier[] = ['low', 'medium', 'high', 'extra_high'];
+
+function ModelCatalogEditor({
+  catalog,
+  onChange
+}: {
+  catalog: ModelCatalogEntry[];
+  onChange: (next: ModelCatalogEntry[]) => void;
+}) {
+  const { t } = useI18n();
+  const entries = catalog ?? [];
+  const updateAt = (index: number, patch: Partial<ModelCatalogEntry>) =>
+    onChange(entries.map((entry, idx) => (idx === index ? { ...entry, ...patch } : entry)));
+  const removeAt = (index: number) => onChange(entries.filter((_, idx) => idx !== index));
+  const add = () =>
+    onChange([
+      ...entries,
+      { provider_kind: 'ollama', capability: 'text', model_id: '', recommended: false }
+    ]);
+  return (
+    <details className="provider-tuning model-catalog">
+      <summary>{t('settings.catalog.title')}</summary>
+      <div className="provider-tuning-body">
+        <p className="field-hint">{t('settings.catalog.hint')}</p>
+        <table className="catalog-table">
+          <thead>
+            <tr>
+              <th>{t('settings.catalog.col.provider')}</th>
+              <th>{t('settings.catalog.col.capability')}</th>
+              <th>{t('settings.catalog.col.model')}</th>
+              <th>{t('settings.catalog.col.recommended')}</th>
+              <th>{t('settings.catalog.col.usage')}</th>
+              <th>{t('settings.catalog.col.context')}</th>
+              <th>{t('settings.catalog.col.best_for')}</th>
+              <th aria-label={t('settings.catalog.col.actions')} />
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map((entry, index) => (
+              <tr key={index}>
+                <td>
+                  <select
+                    value={entry.provider_kind}
+                    aria-label={t('settings.catalog.col.provider')}
+                    onChange={(event) =>
+                      updateAt(index, { provider_kind: event.target.value as AiProviderKind })
+                    }
+                  >
+                    {CATALOG_PROVIDER_KINDS.map((kind) => (
+                      <option key={kind} value={kind}>
+                        {kind}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  <select
+                    value={entry.capability}
+                    aria-label={t('settings.catalog.col.capability')}
+                    onChange={(event) =>
+                      updateAt(index, { capability: event.target.value as 'text' | 'vision' })
+                    }
+                  >
+                    <option value="text">text</option>
+                    <option value="vision">vision</option>
+                  </select>
+                </td>
+                <td>
+                  <input
+                    value={entry.model_id}
+                    aria-label={t('settings.catalog.col.model')}
+                    onChange={(event) => updateAt(index, { model_id: event.target.value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={entry.recommended}
+                    aria-label={t('settings.catalog.col.recommended')}
+                    onChange={(event) => updateAt(index, { recommended: event.target.checked })}
+                  />
+                </td>
+                <td>
+                  <select
+                    value={entry.usage_tier ?? ''}
+                    aria-label={t('settings.catalog.col.usage')}
+                    onChange={(event) =>
+                      updateAt(index, {
+                        usage_tier:
+                          event.target.value === ''
+                            ? null
+                            : (event.target.value as ModelUsageTier)
+                      })
+                    }
+                  >
+                    <option value="">—</option>
+                    {CATALOG_USAGE_TIERS.map((tier) => (
+                      <option key={tier} value={tier}>
+                        {usageTierLabel(tier)}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  <input
+                    value={entry.context ?? ''}
+                    aria-label={t('settings.catalog.col.context')}
+                    onChange={(event) =>
+                      updateAt(index, {
+                        context: event.target.value.trim() === '' ? null : event.target.value
+                      })
+                    }
+                  />
+                </td>
+                <td>
+                  <input
+                    value={entry.best_for ?? ''}
+                    aria-label={t('settings.catalog.col.best_for')}
+                    onChange={(event) =>
+                      updateAt(index, {
+                        best_for: event.target.value.trim() === '' ? null : event.target.value
+                      })
+                    }
+                  />
+                </td>
+                <td>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={t('settings.catalog.remove')}
+                    title={t('settings.catalog.remove')}
+                    onClick={() => removeAt(index)}
+                  >
+                    <X size={16} />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <button type="button" className="secondary" onClick={add}>
+          {t('settings.catalog.add')}
+        </button>
+      </div>
+    </details>
+  );
+}
+
 function ProviderModelSelect({
   capability,
   provider,
   value,
+  catalog,
   ollamaState,
   onChange,
   onRefresh
@@ -1909,6 +2074,7 @@ function ProviderModelSelect({
   capability: ModelCapability;
   provider: ModelProviderDescriptor;
   value: string;
+  catalog: ModelCatalogEntry[];
   ollamaState?: OllamaModelLoadState;
   onChange: (value: string) => void;
   onRefresh: () => void;
@@ -1928,7 +2094,7 @@ function ProviderModelSelect({
       ollamaSelectPlaceholder(ollamaState, t),
       t
     )
-    : catalogModelOptions(provider, capability, value, syncedModels, t);
+    : catalogModelOptions(provider, capability, value, catalog ?? [], syncedModels, t);
   const liveNames = syncedModels?.map((model) => model.name) ?? [];
   const currentIsMissing =
     Boolean(value) && hasReliableList && !liveNames.some((name) => name === value);
@@ -1968,31 +2134,65 @@ function ProviderModelSelect({
 /// local Ollama), merging the curated catalog with a live `/v1/models` sync:
 /// catalog entries keep their recommendation label; entries absent from the
 /// live list are flagged; live IDs not in the catalog are appended.
+function usageTierLabel(tier: ModelUsageTier): string {
+  switch (tier) {
+    case 'low':
+      return 'Low';
+    case 'medium':
+      return 'Medium';
+    case 'high':
+      return 'High';
+    case 'extra_high':
+      return 'Extra High';
+  }
+}
+
+function catalogEntryLabel(entry: ModelCatalogEntry): string {
+  const parts = [entry.label || entry.model_id];
+  if (entry.recommended) parts.push('★');
+  if (entry.usage_tier) parts.push(usageTierLabel(entry.usage_tier));
+  if (entry.context) parts.push(entry.context);
+  return parts.join(' · ');
+}
+
 function catalogModelOptions(
   provider: ModelProviderDescriptor,
   capability: ModelCapability,
   value: string,
+  catalogEntries: ModelCatalogEntry[],
   syncedModels: OllamaInstalledModel[] | null,
   t: TFunction
 ): { value: string; label: string }[] {
-  const catalog = modelOptions(provider, capability, value);
+  // The editable settings catalog is the source of truth. Fall back to the
+  // static modelCatalog.ts only when the settings catalog has no entry for
+  // this provider kind + capability (so the dropdown is never empty).
+  const entries = catalogEntries.filter(
+    (entry) => entry.provider_kind === provider.kind && entry.capability === capability
+  );
+  const base =
+    entries.length > 0
+      ? entries.map((entry) => ({ value: entry.model_id, label: catalogEntryLabel(entry) }))
+      : modelOptions(provider, capability, value).map((option) => ({
+        value: option.value,
+        label: modelOptionLabel(option)
+      }));
   if (!syncedModels) {
-    return catalog.map((option) => ({ value: option.value, label: modelOptionLabel(option) }));
+    return base;
   }
   const liveNames = new Set(syncedModels.map((model) => model.name));
-  const catalogValues = new Set(catalog.map((option) => option.value));
-  const merged = catalog.map((option) => ({
+  const baseValues = new Set(base.map((option) => option.value));
+  const merged = base.map((option) => ({
     value: option.value,
     label: liveNames.has(option.value)
-      ? modelOptionLabel(option)
-      : `${modelOptionLabel(option)} · ⚠ ${t('settings.ollama.not_listed')}`
+      ? option.label
+      : `${option.label} · ⚠ ${t('settings.ollama.not_listed')}`
   }));
   for (const model of syncedModels) {
-    if (!catalogValues.has(model.name)) {
+    if (!baseValues.has(model.name)) {
       merged.push({ value: model.name, label: model.name });
     }
   }
-  if (value && !catalogValues.has(value) && !liveNames.has(value)) {
+  if (value && !baseValues.has(value) && !liveNames.has(value)) {
     merged.unshift({ value, label: value });
   }
   return merged;

@@ -27,9 +27,8 @@ use archivist_db::{
     has_any_user, hash_token, insert_document_chat_message, insert_document_chat_sources,
     latest_apply_audit_for_run, latest_metadata_artifact_for_run, latest_metadata_run_for_document,
     list_audit_events, list_document_chat_messages, list_document_chat_sessions, list_inventory,
-    list_prompt_usage,
-    list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
-    metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
+    list_prompt_usage, list_prompts, list_reviews, list_secret_references, list_sessions,
+    list_users, metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
     paperless_sync_cursor, provider_bucket_entries, queue_missing_pipeline, queue_missing_stage,
     record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
     recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
@@ -6146,7 +6145,14 @@ mod tests {
 
     #[test]
     fn openai_model_filter_keeps_chat_drops_non_chat() {
-        for keep in ["gpt-4o", "gpt-4o-mini", "gpt-5.5", "chatgpt-4o-latest", "o3", "o4-mini"] {
+        for keep in [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-5.5",
+            "chatgpt-4o-latest",
+            "o3",
+            "o4-mini",
+        ] {
             assert!(openai_id_is_chat_capable(keep), "should keep {keep}");
         }
         for drop in [

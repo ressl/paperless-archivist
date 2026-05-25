@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use archivist_core::{
-    LanguageDetection, MetadataFieldFlags, MetadataSuggestion, ReasoningEffort, normalize_model_json,
+    LanguageDetection, MetadataFieldFlags, MetadataSuggestion, ReasoningEffort,
+    normalize_model_json,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -888,7 +889,9 @@ impl AnthropicClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Anthropic models listing returned {status}: {body}"));
+            return Err(anyhow!(
+                "Anthropic models listing returned {status}: {body}"
+            ));
         }
         let raw: Value = response
             .json()
@@ -2460,7 +2463,10 @@ mod tests {
             response_schema: None,
             reasoning_effort: Some(ReasoningEffort::Medium),
         };
-        assert_eq!(build_ollama_chat_payload(&request).get("think"), Some(&json!(true)));
+        assert_eq!(
+            build_ollama_chat_payload(&request).get("think"),
+            Some(&json!(true))
+        );
         request.reasoning_effort = Some(ReasoningEffort::Off);
         assert!(build_ollama_chat_payload(&request).get("think").is_none());
         request.reasoning_effort = None;

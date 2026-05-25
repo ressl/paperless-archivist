@@ -3281,3 +3281,29 @@ legend {
   color: var(--muted);
   font-style: italic;
 }
+
+/* v1.6.3 editable model catalog */
+.model-catalog .catalog-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0;
+  display: block;
+  overflow-x: auto;
+}
+.model-catalog .catalog-table th,
+.model-catalog .catalog-table td {
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--line);
+}
+.model-catalog .catalog-table input,
+.model-catalog .catalog-table select {
+  width: 100%;
+  min-width: 80px;
+}
+.model-catalog .catalog-table input[type='checkbox'] {
+  width: auto;
+  min-width: 0;
+}
