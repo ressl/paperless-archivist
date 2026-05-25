@@ -1477,39 +1477,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/batches/tags": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Queued missing tagging jobs */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/batches/full": {
         parameters: {
             query?: never;
@@ -2340,7 +2307,7 @@ export interface components {
         /** @enum {string} */
         Role: "viewer" | "reviewer" | "operator" | "admin" | "auditor";
         /** @enum {string} */
-        Stage: "ocr" | "ocr_fix" | "tags" | "title" | "correspondent" | "document_type" | "document_date" | "fields" | "apply";
+        Stage: "ocr" | "metadata" | "apply";
         /** @enum {string} */
         ProcessingMode: "manual_review" | "auto_select_review" | "full_auto";
         /** @enum {string} */

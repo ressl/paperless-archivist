@@ -31,7 +31,7 @@ export type ProviderTuning = {
 };
 
 export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
-export type Stage = 'ocr' | 'ocr_fix' | 'metadata' | 'tags' | 'title' | 'correspondent' | 'document_type' | 'document_date' | 'fields';
+export type Stage = 'ocr' | 'metadata';
 export type PipelineStage = Stage | 'apply';
 export type ProcessingMode = 'manual_review' | 'auto_select_review' | 'full_auto';
 export type AiProviderKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible';
@@ -778,7 +778,6 @@ export const api = {
   inventoryMetadataTrace: (documentId: number) =>
     request<MetadataTrace>(`/api/inventory/${documentId}/metadata-trace`),
   queueOcr: () => request<{ queued: number }>('/api/batches/ocr', { method: 'POST' }),
-  queueTags: () => request<{ queued: number }>('/api/batches/tags', { method: 'POST' }),
   queueFull: () => request<{ queued: number }>('/api/batches/full', { method: 'POST' }),
   triggerDocument: (paperless_document_id: number, stages: Stage[], mode: ProcessingMode) =>
     request<{ run_id: string }>(`/api/documents/${paperless_document_id}/trigger`, {

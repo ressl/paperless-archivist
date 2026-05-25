@@ -56,7 +56,7 @@ function settingsFixture(): RuntimeSettings {
       daily_document_limit: null,
       tags: {},
       rules: { include_tags: [], exclude_tags: [] },
-      enabled_stages: ['ocr', 'tags', 'title'],
+      enabled_stages: ['ocr', 'metadata'],
       fallback_to_review_on_validation_failure: true
     },
     ocr: {

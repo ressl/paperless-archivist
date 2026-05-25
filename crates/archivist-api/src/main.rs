@@ -7,19 +7,14 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
     AiResponse, AnthropicClient, ChatRequest, OllamaClient, OllamaLoadedModel, OllamaModel,
-    OpenAiCompatibleClient, PromptLanguageContext, TextProvider, parse_choice_suggestion,
-    parse_field_suggestion, parse_tag_suggestion, parse_title_suggestion, prompt_for_choice,
-    prompt_for_fields, prompt_for_tags, prompt_for_title,
+    OpenAiCompatibleClient, TextProvider,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, DashboardProviderCostSummary, DashboardRange, DashboardStats,
     DocumentChatSource, DocumentInventoryItem, DocumentPatch, Permission, ProcessingMode,
     ProviderUsageStats, Role, RuntimeSettings, Stage, WorkflowRules, build_document_chat_prompt,
-    detect_document_language, document_chat_snippet, document_chat_terms,
-    extract_issue_date_suggestion, roles_have_permission, score_document_chat_source,
-    validate_choice_suggestion, validate_document_date_suggestion, validate_field_suggestion,
-    validate_tag_suggestion, validate_title_suggestion,
+    document_chat_snippet, document_chat_terms, roles_have_permission, score_document_chat_source,
 };
 use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, MetadataApplyAudit, MetadataArtifact,
@@ -31,8 +26,8 @@ use archivist_db::{
     get_backlog_counts, get_dashboard_live_status, get_dashboard_stats, get_runtime_settings,
     has_any_user, hash_token, insert_document_chat_message, insert_document_chat_sources,
     latest_apply_audit_for_run, latest_metadata_artifact_for_run, latest_metadata_run_for_document,
-    list_allowed_named_entities, list_allowed_tag_names, list_audit_events, list_custom_fields,
-    list_document_chat_messages, list_document_chat_sessions, list_inventory, list_prompt_usage,
+    list_audit_events, list_document_chat_messages, list_document_chat_sessions, list_inventory,
+    list_prompt_usage,
     list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
     metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
     paperless_sync_cursor, provider_bucket_entries, queue_missing_pipeline, queue_missing_stage,
@@ -368,7 +363,6 @@ fn router(state: AppState) -> Router {
             post(trigger_document),
         )
         .route("/batches/ocr", post(queue_ocr_batch))
-        .route("/batches/tags", post(queue_tags_batch))
         .route("/batches/full", post(queue_full_batch))
         .route("/reviews", get(reviews))
         .route("/reviews/batch", post(batch_review))
@@ -1395,10 +1389,9 @@ async fn test_prompt_endpoint(
 
     let settings = get_runtime_settings(&state.pool).await?;
     let sample_text = prompt_test_sample_text(&state, &settings, &request).await?;
-    let mut chat_request =
-        build_prompt_test_chat_request(&state, &settings, &request, &sample_text)
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let mut chat_request = build_prompt_test_chat_request(&request, &sample_text)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     chat_request.system_prompt = request.content.trim().to_owned();
 
     let mut provider = if let Some(provider_name) = request
@@ -1422,7 +1415,7 @@ async fn test_prompt_endpoint(
     chat_request.model = provider.model.clone();
 
     let response = chat_with_default_provider(&state, &provider, chat_request.clone()).await?;
-    let parsed = parse_prompt_test_output(&state, &settings, request.stage, &response.text).await;
+    let parsed = parse_prompt_test_output(request.stage, &response.text);
     append_audit(
         &state.pool,
         AuditEventInput {
@@ -1509,89 +1502,15 @@ async fn prompt_test_sample_text(
 }
 
 async fn build_prompt_test_chat_request(
-    state: &AppState,
-    settings: &RuntimeSettings,
     request: &TestPromptRequest,
     sample_text: &str,
 ) -> Result<ChatRequest> {
-    let language = PromptLanguageContext::new(
-        &detect_document_language(sample_text),
-        &settings.tagging.tag_output_language,
-    );
     match request.stage {
-        Stage::Tags => {
-            let allowed = list_allowed_tag_names(&state.pool).await?;
-            Ok(prompt_for_tags(
-                sample_text,
-                &allowed,
-                settings.effective_tuning().max_tags as usize,
-                &language,
-            ))
-        }
-        Stage::Title => Ok(prompt_for_title(sample_text, &language)),
-        Stage::Correspondent => {
-            let allowed =
-                list_allowed_named_entities(&state.pool, "paperless_correspondents").await?;
-            Ok(prompt_for_choice(
-                sample_text,
-                "correspondent",
-                &allowed,
-                &language,
-            ))
-        }
-        Stage::DocumentType => {
-            let allowed =
-                list_allowed_named_entities(&state.pool, "paperless_document_types").await?;
-            Ok(prompt_for_choice(
-                sample_text,
-                "document type",
-                &allowed,
-                &language,
-            ))
-        }
-        Stage::Fields => {
-            let allowed = list_custom_fields(&state.pool)
-                .await?
-                .into_iter()
-                .filter(|field| settings.fields.field_enabled(&field.name))
-                .map(|field| field.name)
-                .collect::<Vec<_>>();
-            Ok(prompt_for_fields(
-                sample_text,
-                &allowed,
-                settings.fields.max_fields,
-                &language,
-            ))
-        }
-        Stage::DocumentDate => Ok(ChatRequest {
-            model: String::new(),
-            system_prompt: "Extract the Paperless document date from explicit issue/invoice/letter date evidence. Return JSON only.".to_owned(),
-            user_prompt: format!(
-                "Language context: {} ({:.2}).\nDocument text:\n{}\n\nReturn JSON: {{\"date\":\"YYYY-MM-DD\",\"confidence\":0.0,\"evidence\":\"short source snippet\",\"warnings\":[]}}.",
-                language.document_language,
-                language.document_language_confidence,
-                sample_text.chars().take(12_000).collect::<String>()
-            ),
-            temperature: 0.0,
-            num_ctx: None,
-            response_schema: None,
-        }),
         Stage::Ocr => Ok(ChatRequest {
             model: String::new(),
             system_prompt: String::new(),
             user_prompt: format!(
                 "Test this OCR prompt against sample text. Return the best OCR text only.\n\nSample text:\n{}",
-                sample_text.chars().take(12_000).collect::<String>()
-            ),
-            temperature: 0.0,
-            num_ctx: None,
-            response_schema: None,
-        }),
-        Stage::OcrFix => Ok(ChatRequest {
-            model: String::new(),
-            system_prompt: String::new(),
-            user_prompt: format!(
-                "Test this OCR post-processing prompt against sample OCR text. Return corrected text only.\n\nOCR text:\n{}",
                 sample_text.chars().take(12_000).collect::<String>()
             ),
             temperature: 0.0,
@@ -1611,160 +1530,9 @@ async fn build_prompt_test_chat_request(
     }
 }
 
-async fn parse_prompt_test_output(
-    state: &AppState,
-    settings: &RuntimeSettings,
-    stage: Stage,
-    text: &str,
-) -> PromptTestParsed {
+fn parse_prompt_test_output(stage: Stage, text: &str) -> PromptTestParsed {
     match stage {
-        Stage::Tags => match parse_tag_suggestion(text) {
-            Ok(suggestion) => match validate_tag_suggestion(
-                suggestion.clone(),
-                &list_allowed_tag_names(&state.pool)
-                    .await
-                    .unwrap_or_default(),
-                &settings.workflow.tags,
-                &settings.tagging,
-            ) {
-                Ok(validated) => PromptTestParsed {
-                    parsed: serde_json::to_value(validated).ok(),
-                    validation_errors: Vec::new(),
-                    warnings: Vec::new(),
-                },
-                Err(errors) => PromptTestParsed {
-                    parsed: serde_json::to_value(suggestion).ok(),
-                    validation_errors: errors.into_iter().map(|error| error.to_string()).collect(),
-                    warnings: Vec::new(),
-                },
-            },
-            Err(error) => PromptTestParsed {
-                parsed: None,
-                validation_errors: vec![error.to_string()],
-                warnings: Vec::new(),
-            },
-        },
-        Stage::Title => match parse_title_suggestion(text) {
-            Ok(suggestion) => match validate_title_suggestion(suggestion.clone(), 160, 0.4) {
-                Ok(validated) => PromptTestParsed {
-                    parsed: serde_json::to_value(validated).ok(),
-                    validation_errors: Vec::new(),
-                    warnings: Vec::new(),
-                },
-                Err(errors) => PromptTestParsed {
-                    parsed: serde_json::to_value(suggestion).ok(),
-                    validation_errors: errors.into_iter().map(|error| error.to_string()).collect(),
-                    warnings: Vec::new(),
-                },
-            },
-            Err(error) => PromptTestParsed {
-                parsed: None,
-                validation_errors: vec![error.to_string()],
-                warnings: Vec::new(),
-            },
-        },
-        Stage::Correspondent | Stage::DocumentType => {
-            let table = if stage == Stage::Correspondent {
-                "paperless_correspondents"
-            } else {
-                "paperless_document_types"
-            };
-            match parse_choice_suggestion(text) {
-                Ok(suggestion) => match validate_choice_suggestion(
-                    suggestion.clone(),
-                    &list_allowed_named_entities(&state.pool, table)
-                        .await
-                        .unwrap_or_default(),
-                    0.4,
-                ) {
-                    Ok(validated) => PromptTestParsed {
-                        parsed: serde_json::to_value(validated).ok(),
-                        validation_errors: Vec::new(),
-                        warnings: Vec::new(),
-                    },
-                    Err(errors) => PromptTestParsed {
-                        parsed: serde_json::to_value(suggestion).ok(),
-                        validation_errors: errors
-                            .into_iter()
-                            .map(|error| error.to_string())
-                            .collect(),
-                        warnings: Vec::new(),
-                    },
-                },
-                Err(error) => PromptTestParsed {
-                    parsed: None,
-                    validation_errors: vec![error.to_string()],
-                    warnings: Vec::new(),
-                },
-            }
-        }
-        Stage::Fields => match parse_field_suggestion(text) {
-            Ok(suggestion) => {
-                let allowed = list_custom_fields(&state.pool)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|field| settings.fields.field_enabled(&field.name))
-                    .map(|field| field.name)
-                    .collect::<Vec<_>>();
-                match validate_field_suggestion(
-                    suggestion.clone(),
-                    &allowed,
-                    settings.fields.max_fields,
-                    settings.fields.confidence_threshold,
-                ) {
-                    Ok(validated) => PromptTestParsed {
-                        parsed: serde_json::to_value(validated).ok(),
-                        validation_errors: Vec::new(),
-                        warnings: Vec::new(),
-                    },
-                    Err(errors) => PromptTestParsed {
-                        parsed: serde_json::to_value(suggestion).ok(),
-                        validation_errors: errors
-                            .into_iter()
-                            .map(|error| error.to_string())
-                            .collect(),
-                        warnings: Vec::new(),
-                    },
-                }
-            }
-            Err(error) => PromptTestParsed {
-                parsed: None,
-                validation_errors: vec![error.to_string()],
-                warnings: Vec::new(),
-            },
-        },
-        Stage::DocumentDate => {
-            let language = detect_document_language(text);
-            match extract_issue_date_suggestion(text, &language) {
-                Some(suggestion) => match validate_document_date_suggestion(
-                    suggestion.clone(),
-                    settings
-                        .effective_tuning()
-                        .document_date_confidence_threshold,
-                ) {
-                    Ok(validated) => PromptTestParsed {
-                        parsed: serde_json::to_value(validated).ok(),
-                        validation_errors: Vec::new(),
-                        warnings: suggestion.warnings,
-                    },
-                    Err(errors) => PromptTestParsed {
-                        parsed: serde_json::to_value(suggestion).ok(),
-                        validation_errors: errors
-                            .into_iter()
-                            .map(|error| error.to_string())
-                            .collect(),
-                        warnings: Vec::new(),
-                    },
-                },
-                None => PromptTestParsed {
-                    parsed: None,
-                    validation_errors: vec!["no document date candidate found".to_owned()],
-                    warnings: Vec::new(),
-                },
-            }
-        }
-        Stage::Ocr | Stage::OcrFix => PromptTestParsed {
+        Stage::Ocr => PromptTestParsed {
             parsed: Some(json!({ "content": text })),
             validation_errors: Vec::new(),
             warnings: Vec::new(),
@@ -4171,33 +3939,6 @@ async fn queue_ocr_batch(
     .await?;
     Span::current().record("queued", created);
     info!(queued = created, "queued missing OCR documents");
-    Ok(Json(json!({ "queued": created })))
-}
-
-#[tracing::instrument(
-    skip(state, auth),
-    fields(user_id = tracing::field::Empty, queued = tracing::field::Empty)
-)]
-async fn queue_tags_batch(
-    State(state): State<AppState>,
-    auth: Authenticated,
-) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteBatches)?;
-    if let Some(user_id) = auth.0.user_id {
-        Span::current().record("user_id", tracing::field::display(user_id));
-    }
-    let settings = get_runtime_settings(&state.pool).await?;
-    let created = queue_missing_stage(
-        &state.pool,
-        Stage::Tags,
-        settings.workflow.mode,
-        &auth.0.actor_type,
-        &settings.workflow.rules,
-        None,
-    )
-    .await?;
-    Span::current().record("queued", created);
-    info!(queued = created, "queued missing tagging documents");
     Ok(Json(json!({ "queued": created })))
 }
 

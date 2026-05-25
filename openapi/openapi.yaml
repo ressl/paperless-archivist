@@ -22,7 +22,7 @@ components:
       enum: [viewer, reviewer, operator, admin, auditor]
     Stage:
       type: string
-      enum: [ocr, ocr_fix, tags, title, correspondent, document_type, document_date, fields, apply]
+      enum: [ocr, metadata, apply]
     ProcessingMode:
       type: string
       enum: [manual_review, auto_select_review, full_auto]
@@ -1444,10 +1444,6 @@ paths:
     post:
       responses:
         "200": { description: Queued missing OCR jobs }
-  /api/batches/tags:
-    post:
-      responses:
-        "200": { description: Queued missing tagging jobs }
   /api/batches/full:
     post:
       responses:

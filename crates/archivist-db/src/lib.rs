@@ -4564,15 +4564,7 @@ fn missing_pipeline_stages_for_inventory(
                         || stage_needs_work(&state.document_date_status)
                         || stage_needs_work(&state.fields_status))
             }
-            Stage::Tags => {
-                !state.has_tagging_completion_tag && stage_needs_work(&state.tagging_status)
-            }
-            Stage::Title => stage_needs_work(&state.title_status),
-            Stage::Correspondent => stage_needs_work(&state.correspondent_status),
-            Stage::DocumentType => stage_needs_work(&state.document_type_status),
-            Stage::DocumentDate => stage_needs_work(&state.document_date_status),
-            Stage::Fields => stage_needs_work(&state.fields_status),
-            Stage::OcrFix | Stage::Apply => false,
+            Stage::Apply => false,
         })
         .collect()
 }
@@ -7678,7 +7670,6 @@ mod tests {
                 "column for {stage} must end with _status, got {column}"
             );
         }
-        assert!(status_column_for_stage(Stage::OcrFix).is_err());
         assert!(status_column_for_stage(Stage::Apply).is_err());
     }
 
@@ -8036,7 +8027,7 @@ mod tests {
             run_id: Uuid::now_v7(),
             trace_id: Uuid::now_v7(),
             paperless_document_id: 42,
-            stage: Stage::Tags,
+            stage: Stage::Metadata,
             status: "running".to_owned(),
             attempts: 1,
             max_attempts: 3,

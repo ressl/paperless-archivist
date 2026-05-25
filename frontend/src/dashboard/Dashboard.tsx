@@ -68,11 +68,9 @@ const defaultDashboardRanges: Array<{ key: DashboardRange; label: string }> = [
   { key: 'all', label: 'All' }
 ];
 
-// v1.4.0: the consolidated `metadata` stage replaces the six per-field stages on the
-// stage-matrix dashboard. The legacy stages stay in this seed array so in-flight runs
-// queued under v1.3.x still render rows; the API will fold them down to zero counts
-// once those runs drain.
-const defaultStageStatus = ['ocr', 'metadata', 'title', 'document_type', 'correspondent', 'document_date', 'tags', 'fields'].map((stage) => ({
+// The consolidated `metadata` stage replaces the six legacy per-field stages on the
+// stage-matrix dashboard; only `ocr` and `metadata` run on current pipelines.
+const defaultStageStatus = ['ocr', 'metadata'].map((stage) => ({
   stage,
   complete: 0,
   pending: 0,
@@ -581,7 +579,6 @@ function MaintenanceDrawer({
   queueBusy,
   onQueueSync,
   onQueueOcr,
-  onQueueTags,
   onQueueFull
 }: {
   open: boolean;
@@ -600,7 +597,6 @@ function MaintenanceDrawer({
   queueBusy: boolean;
   onQueueSync: () => void;
   onQueueOcr: () => void;
-  onQueueTags: () => void;
   onQueueFull: () => void;
 }) {
   const { t } = useI18n();
@@ -643,7 +639,6 @@ function MaintenanceDrawer({
           <div className="toolbar">
             <ActionButton icon={<RefreshCw />} label={t('dashboard.action.sync')} busy={queueBusy} onClick={onQueueSync} />
             <ActionButton icon={<FileText />} label={t('dashboard.action.queue_ocr')} busy={queueBusy} onClick={onQueueOcr} />
-            <ActionButton icon={<Tags />} label={t('dashboard.action.queue_tags')} busy={queueBusy} onClick={onQueueTags} />
             <ActionButton icon={<Play />} label={t('dashboard.action.queue_full')} busy={queueBusy} onClick={onQueueFull} />
           </div>
         </section>
@@ -1370,7 +1365,6 @@ export function Dashboard({
           queueBusy={busy}
           onQueueSync={() => void run(setBusy, setError, api.syncPaperless, t).then(load)}
           onQueueOcr={() => void run(setBusy, setError, api.queueOcr, t).then(load)}
-          onQueueTags={() => void run(setBusy, setError, api.queueTags, t).then(load)}
           onQueueFull={() => void run(setBusy, setError, api.queueFull, t).then(load)}
         />
       )}

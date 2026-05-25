@@ -272,18 +272,10 @@ const LATIN_LANGUAGE_PROFILES: &[LatinLanguageProfile] = &[
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     Ocr,
-    OcrFix,
-    /// Consolidated metadata stage introduced in v1.4.0. Replaces the six legacy per-field stages
-    /// (`Title`, `DocumentType`, `Correspondent`, `DocumentDate`, `Tags`, `Fields`) with one LLM
-    /// round-trip that yields up to six review items — one per populated field. Legacy variants
-    /// stay in the enum so in-flight runs queued before v1.4.0 keep draining.
+    /// Consolidated metadata stage introduced in v1.4.0. A single LLM round-trip yields up to six
+    /// review items — one per populated field (title, document type, correspondent, date, tags,
+    /// custom fields). The six legacy per-field stages it replaced were removed in v1.5.x.
     Metadata,
-    Tags,
-    Title,
-    Correspondent,
-    DocumentType,
-    DocumentDate,
-    Fields,
     Apply,
 }
 
@@ -296,31 +288,10 @@ impl Stage {
         vec![Self::Ocr, Self::Metadata]
     }
 
-    /// Legacy per-field stage sequence for callers that still need to reference individual
-    /// fields (prompt management UI, in-flight-run support). Kept as a separate function so
-    /// the v1.4.0 default selector path stays small and the legacy contract stays explicit.
-    pub fn legacy_per_field_stages() -> Vec<Self> {
-        vec![
-            Self::Title,
-            Self::DocumentType,
-            Self::Correspondent,
-            Self::DocumentDate,
-            Self::Tags,
-            Self::Fields,
-        ]
-    }
-
     pub fn completion_key(self) -> &'static str {
         match self {
             Self::Ocr => "ocr",
-            Self::OcrFix => "ocr_fix",
             Self::Metadata => "metadata",
-            Self::Tags => "tagging",
-            Self::Title => "title",
-            Self::Correspondent => "correspondent",
-            Self::DocumentType => "document_type",
-            Self::DocumentDate => "document_date",
-            Self::Fields => "fields",
             Self::Apply => "processed",
         }
     }
@@ -328,19 +299,13 @@ impl Stage {
     /// Maps a stage to its `document_inventory.<column>` status column name.
     ///
     /// Returns `None` for stages that do not have a dedicated inventory status column
-    /// (currently `Stage::OcrFix` and `Stage::Apply`). The returned strings are static
-    /// literals — callers may safely interpolate them into SQL.
+    /// (currently `Stage::Apply`). The returned strings are static literals — callers may
+    /// safely interpolate them into SQL.
     pub fn inventory_status_column(self) -> Option<&'static str> {
         match self {
             Self::Ocr => Some("ocr_status"),
             Self::Metadata => Some("metadata_status"),
-            Self::Tags => Some("tagging_status"),
-            Self::Title => Some("title_status"),
-            Self::Correspondent => Some("correspondent_status"),
-            Self::DocumentType => Some("document_type_status"),
-            Self::DocumentDate => Some("document_date_status"),
-            Self::Fields => Some("fields_status"),
-            Self::OcrFix | Self::Apply => None,
+            Self::Apply => None,
         }
     }
 }
@@ -349,14 +314,7 @@ impl Display for Stage {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let value = match self {
             Self::Ocr => "ocr",
-            Self::OcrFix => "ocr_fix",
             Self::Metadata => "metadata",
-            Self::Tags => "tags",
-            Self::Title => "title",
-            Self::Correspondent => "correspondent",
-            Self::DocumentType => "document_type",
-            Self::DocumentDate => "document_date",
-            Self::Fields => "fields",
             Self::Apply => "apply",
         };
         f.write_str(value)
@@ -369,14 +327,7 @@ impl FromStr for Stage {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "ocr" => Ok(Self::Ocr),
-            "ocr_fix" => Ok(Self::OcrFix),
             "metadata" => Ok(Self::Metadata),
-            "tags" | "tagging" => Ok(Self::Tags),
-            "title" => Ok(Self::Title),
-            "correspondent" => Ok(Self::Correspondent),
-            "document_type" => Ok(Self::DocumentType),
-            "document_date" | "issue_date" => Ok(Self::DocumentDate),
-            "fields" => Ok(Self::Fields),
             "apply" => Ok(Self::Apply),
             _ => Err(ParseEnumError {
                 kind: "stage",
@@ -747,27 +698,14 @@ impl WorkflowTags {
         match stage {
             Stage::Ocr => Some(&self.completion_ocr),
             Stage::Metadata => Some(&self.completion_metadata),
-            Stage::Tags => Some(&self.completion_tagging),
-            Stage::Title => Some(&self.completion_title),
-            Stage::Correspondent => Some(&self.completion_correspondent),
-            Stage::DocumentType => Some(&self.completion_document_type),
-            Stage::DocumentDate => Some(&self.completion_document_date),
-            Stage::Fields => Some(&self.completion_fields),
             Stage::Apply => Some(&self.completion_processed),
-            Stage::OcrFix => None,
         }
     }
 
     pub fn trigger_tag_for_stage(&self, stage: Stage) -> Option<&str> {
         match stage {
             Stage::Ocr => Some(&self.trigger_ocr),
-            Stage::Tags => Some(&self.trigger_tags),
-            Stage::Title => Some(&self.trigger_title),
-            Stage::Correspondent => Some(&self.trigger_correspondent),
-            Stage::DocumentType => Some(&self.trigger_document_type),
-            Stage::DocumentDate => Some(&self.trigger_document_date),
-            Stage::Fields => Some(&self.trigger_fields),
-            Stage::Metadata | Stage::OcrFix | Stage::Apply => None,
+            Stage::Metadata | Stage::Apply => None,
         }
     }
 
@@ -896,7 +834,7 @@ impl RuntimeSettings {
     /// limits apply to my pipeline."
     pub fn effective_tuning_for_stage(&self, stage: Stage) -> EffectiveTuning {
         let mut resolved = self.effective_tuning();
-        if matches!(stage, Stage::Ocr | Stage::OcrFix) {
+        if matches!(stage, Stage::Ocr) {
             let stage_provider_name = self
                 .ai
                 .stage_models
@@ -2686,11 +2624,10 @@ pub fn validate_choice_suggestion(
     }
 }
 
-/// Flags controlling which of the six legacy per-field stages the consolidated
-/// `Stage::Metadata` should request from the LLM. The flags are derived from
-/// `WorkflowSettings::enabled_stages`: if a legacy stage is in `enabled_stages`,
-/// the matching flag is true. This lets operators keep per-field opt-outs without
-/// having to re-introduce six separate prompts.
+/// Flags controlling which fields the consolidated `Stage::Metadata` should request from the
+/// LLM. Derived from `WorkflowSettings::enabled_stages`: enabling the metadata stage requests
+/// every field. The struct keeps one flag per field so prompt construction and output
+/// validation can gate individual fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataFieldFlags {
     pub title: bool,
@@ -2726,25 +2663,15 @@ impl MetadataFieldFlags {
         fields: false,
     };
 
-    /// Builds the flag set from `enabled_stages`. Any legacy per-field stage present in the
-    /// slice (and either `Stage::Metadata` or the matching legacy variant) enables that field.
-    /// `Stage::Metadata` on its own enables every field — operators who explicitly add Metadata
-    /// without listing the legacy stages get the full consolidated extraction.
+    /// Builds the flag set from `enabled_stages`. Since the consolidated `Stage::Metadata` stage
+    /// replaced the six per-field stages, its presence enables every field; otherwise no metadata
+    /// fields are requested.
     pub fn from_enabled_stages(enabled: &[Stage]) -> Self {
-        let mut flags = Self::NONE;
-        for stage in enabled {
-            match stage {
-                Stage::Metadata => return Self::ALL,
-                Stage::Title => flags.title = true,
-                Stage::DocumentType => flags.document_type = true,
-                Stage::Correspondent => flags.correspondent = true,
-                Stage::DocumentDate => flags.document_date = true,
-                Stage::Tags => flags.tags = true,
-                Stage::Fields => flags.fields = true,
-                Stage::Ocr | Stage::OcrFix | Stage::Apply => {}
-            }
+        if enabled.contains(&Stage::Metadata) {
+            Self::ALL
+        } else {
+            Self::NONE
         }
-        flags
     }
 
     pub fn any(self) -> bool {
@@ -3563,21 +3490,10 @@ mod tests {
     fn stage_inventory_status_columns_cover_all_business_stages_and_skip_orchestration_stages() {
         // Every variant produces a deterministic answer — exhaustive match guards against
         // drift if a new Stage variant is added.
-        for stage in [
-            Stage::Ocr,
-            Stage::OcrFix,
-            Stage::Metadata,
-            Stage::Tags,
-            Stage::Title,
-            Stage::Correspondent,
-            Stage::DocumentType,
-            Stage::DocumentDate,
-            Stage::Fields,
-            Stage::Apply,
-        ] {
+        for stage in [Stage::Ocr, Stage::Metadata, Stage::Apply] {
             let column = stage.inventory_status_column();
             match stage {
-                Stage::OcrFix | Stage::Apply => assert!(
+                Stage::Apply => assert!(
                     column.is_none(),
                     "{stage} should not have an inventory status column"
                 ),
@@ -3590,12 +3506,9 @@ mod tests {
                 }
             }
         }
-        // Every stage with an inventory column must have a unique column name across both
-        // the consolidated metadata column and the legacy per-field columns.
-        let business_with_legacy = Stage::all_business_stages()
+        // Every business stage with an inventory column must have a unique column name.
+        let mut columns: Vec<&'static str> = Stage::all_business_stages()
             .into_iter()
-            .chain(Stage::legacy_per_field_stages());
-        let mut columns: Vec<&'static str> = business_with_legacy
             .map(|stage| stage.inventory_status_column().unwrap())
             .collect();
         columns.sort();
@@ -3609,19 +3522,13 @@ mod tests {
     }
 
     #[test]
-    fn metadata_field_flags_from_enabled_stages_understands_consolidated_and_legacy() {
-        // Legacy enabled_stages list resolves to the matching per-field flags.
-        let flags =
-            MetadataFieldFlags::from_enabled_stages(&[Stage::Title, Stage::Tags, Stage::Fields]);
-        assert!(flags.title && flags.tags && flags.fields);
-        assert!(!flags.correspondent && !flags.document_type && !flags.document_date);
-
-        // Stage::Metadata alone enables every field.
+    fn metadata_field_flags_from_enabled_stages_understands_consolidated() {
+        // Stage::Metadata enables every field.
         let all = MetadataFieldFlags::from_enabled_stages(&[Stage::Metadata]);
         assert_eq!(all, MetadataFieldFlags::ALL);
 
-        // Orchestration stages do not contribute flags.
-        let none = MetadataFieldFlags::from_enabled_stages(&[Stage::Ocr, Stage::OcrFix]);
+        // Without the metadata stage, no metadata fields are requested.
+        let none = MetadataFieldFlags::from_enabled_stages(&[Stage::Ocr]);
         assert!(!none.any());
     }
 
