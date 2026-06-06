@@ -14,14 +14,14 @@
     "dev": "vite --host 0.0.0.0"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.0.0",
+    "@vitejs/plugin-react": "^6.0.0",
     "lucide-react": "^0.561.0",
     "openapi-fetch": "^0.15.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "recharts": "^3.8.1",
     "typescript": "^5.9.0",
-    "vite": "^7.2.0"
+    "vite": "^8.0.0"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",
@@ -31,8 +31,8 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.0",
     "jest-axe": "^9.0.0",
-    "jsdom": "^25.0.1",
+    "jsdom": "^29.0.0",
     "openapi-typescript": "^7.10.0",
-    "vitest": "^2.1.9"
+    "vitest": "^4.0.0"
   }
 }
