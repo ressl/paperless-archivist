@@ -3,6 +3,7 @@
   "version": "1.8.1",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.34.1",
   "scripts": {
     "generate:client": "openapi-typescript ../openapi/openapi.yaml -o src/api/schema.ts",
     "accessibility:check": "node ../scripts/verify/accessibility_static_check.mjs",
@@ -15,9 +16,9 @@
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
     "lucide-react": "^0.561.0",
-    "openapi-fetch": "^0.15.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "openapi-fetch": "^0.15.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "recharts": "^3.8.1",
     "typescript": "^5.9.0",
     "vite": "^7.2.0"
@@ -27,7 +28,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/jest-axe": "^3.5.9",
-    "@types/react": "^19.2.0",
+    "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.0",
     "jest-axe": "^9.0.0",
     "jsdom": "^25.0.1",
