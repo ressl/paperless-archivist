@@ -34,7 +34,7 @@ const checks = [
   ['tooltip closes outside pointer/touch', inAnySource("document.addEventListener('mousedown'") && inAnySource("document.addEventListener('touchstart'")],
   ['global focus visible styles', css.includes('button:focus-visible') && css.includes('input:focus-visible') && css.includes('textarea:focus-visible')],
   ['icon reload button has aria-label', settings.includes("aria-label={t('settings.ollama.reload_models')}")],
-  ['user admin controls have labels', users.includes('aria-label="username"') && users.includes('aria-label="token name"')],
+  ['user admin controls have labels', users.includes("aria-label={t('auth.username')}") && users.includes("aria-label={t('auth.password')}")],
   ['prefers-reduced-motion respected', css.includes('@media (prefers-reduced-motion: reduce)')],
 ];
 

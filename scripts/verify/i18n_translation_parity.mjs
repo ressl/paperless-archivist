@@ -40,15 +40,23 @@ if (locales.length === 0) {
 // for the rest. Both blocks use the same `'key': 'value'` shape with no nested
 // objects. A few values use double-quoted TS strings to avoid escaping inner
 // apostrophes; we handle both quote styles.
-function blockFor(name) {
-  const marker = `export const ${name}Messages`;
-  const start = source.indexOf(marker);
+const localesDir = resolve(repoRoot, 'frontend', 'src', 'i18n', 'locales');
+async function blockFor(name) {
+  // English lives in messages.ts as `export const enMessages`; every other
+  // locale was split out (#191) into src/i18n/locales/<name>.ts as
+  // `const <name>Messages: Record<MessageKey, string> = { ... }`.
+  const isEn = name === 'en';
+  const text = isEn
+    ? source
+    : await readFile(resolve(localesDir, `${name}.ts`), 'utf8').catch(() => '');
+  const marker = `${isEn ? 'export const' : 'const'} ${name}Messages`;
+  const start = text.indexOf(marker);
   if (start < 0) return null;
-  // Capture up to the next `export const`/`export function`/`export type`
-  // declaration, or to the end of the file.
-  const tail = source.slice(start + marker.length);
-  const next = tail.search(/\nexport (?:const|function|type) /);
-  return next < 0 ? source.slice(start) : source.slice(start, start + marker.length + next);
+  // Capture up to the next top-level export (including `export default` that
+  // closes a locale module), or to the end of the file.
+  const tail = text.slice(start + marker.length);
+  const next = tail.search(/\nexport (?:const|function|type|default) /);
+  return next < 0 ? text.slice(start) : text.slice(start, start + marker.length + next);
 }
 
 const entryPattern = /'([^'\\]+)'\s*:\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g;
@@ -66,7 +74,7 @@ function parseBlock(block) {
   return entries;
 }
 
-const enBlock = blockFor('en');
+const enBlock = await blockFor('en');
 const en = parseBlock(enBlock);
 if (en.size === 0) {
   console.error('i18n_translation_parity: failed to parse enMessages');
@@ -96,7 +104,7 @@ const detailSections = [];
 
 for (const locale of locales) {
   if (locale === 'en') continue;
-  const block = blockFor(locale);
+  const block = await blockFor(locale);
   const parsed = parseBlock(block);
   const missing = [];
   const identical = [];
