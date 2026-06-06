@@ -312,8 +312,26 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                         }
                     });
                 }
+                // Liveness heartbeat: touch a file with the current unix timestamp
+                // at the end of every successful tick. The worker exposes no HTTP
+                // server, so the Kubernetes livenessProbe checks the staleness of
+                // this file — a hung tick-loop (which keeps the binary present)
+                // stops updating it and is restarted. Cheap and non-fatal.
+                write_liveness_heartbeat().await;
             }
         }
+    }
+}
+
+/// Write the current unix timestamp to the heartbeat file read by the
+/// Kubernetes liveness probe. Path comes from `ARCHIVIST_WORKER_HEARTBEAT_FILE`
+/// (default `/tmp/archivist-worker.heartbeat`). Failures are logged, never fatal.
+async fn write_liveness_heartbeat() {
+    let path = std::env::var("ARCHIVIST_WORKER_HEARTBEAT_FILE")
+        .unwrap_or_else(|_| "/tmp/archivist-worker.heartbeat".to_string());
+    let now = Utc::now().timestamp();
+    if let Err(error) = tokio::fs::write(&path, now.to_string()).await {
+        warn!(error = %error, path, "failed to write liveness heartbeat file");
     }
 }
 
@@ -486,6 +504,7 @@ async fn process_available_jobs(
         let config = Arc::clone(config);
         let settings = Arc::clone(&settings);
         let paperless = Arc::clone(&paperless);
+        let lease_owner = worker_id.to_owned();
         let trace_id = job.run_id;
         let span = info_span!(
             "archivist_job",
@@ -499,8 +518,15 @@ async fn process_available_jobs(
         pending.push(tokio::spawn(
             async move {
                 let started = std::time::Instant::now();
-                let result =
-                    process_job(&pool, &config, settings.as_ref(), paperless.as_ref(), &job).await;
+                let result = process_job(
+                    &pool,
+                    &config,
+                    settings.as_ref(),
+                    paperless.as_ref(),
+                    &job,
+                    &lease_owner,
+                )
+                .await;
                 if let Err(error) = &result {
                     let failure_class = classify_processing_failure(error);
                     if failure_class == ProcessingFailureClass::ProviderQuota {
@@ -718,6 +744,7 @@ async fn send_notification_webhook(
 ) -> Result<()> {
     let response = HttpClient::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?
         .post(webhook_url.expose_secret())
         .json(&payload)
@@ -1241,6 +1268,7 @@ async fn process_job(
     settings: &RuntimeSettings,
     paperless: &PaperlessClient,
     job: &JobRecord,
+    lease_owner: &str,
 ) -> Result<()> {
     info!(job_id = %job.id, run_id = %job.run_id, document_id = job.paperless_document_id, stage = %job.stage, "processing job");
 
@@ -1261,7 +1289,7 @@ async fn process_job(
     }
 
     match job.stage {
-        Stage::Ocr => process_ocr(pool, config, paperless, settings, job).await,
+        Stage::Ocr => process_ocr(pool, config, paperless, settings, job, lease_owner).await,
         Stage::Metadata => process_metadata(pool, config, paperless, settings, job).await,
         Stage::Apply => Err(anyhow!(
             "stage {} is not directly executable by the worker",
@@ -1276,6 +1304,7 @@ async fn process_ocr(
     paperless: &PaperlessClient,
     settings: &RuntimeSettings,
     job: &JobRecord,
+    lease_owner: &str,
 ) -> Result<()> {
     // Independent GETs — fetch the original bytes and the document detail
     // concurrently instead of serially.
@@ -1434,6 +1463,22 @@ async fn process_ocr(
         models_used.push(model_used);
         texts.push(response.text);
         raw_responses.push(response.raw_response);
+
+        // Heartbeat the lease after each page. Multi-page vision OCR can run
+        // far longer than the lease window `claim_jobs` grants (300s), so
+        // without this a second replica would reclaim the "stale" lease and
+        // re-OCR the same document concurrently. Push `lease_until` forward by
+        // the same window; if the bump finds no matching row our lease was lost
+        // (another replica took over), so stop instead of double-applying.
+        if !archivist_db::bump_job_lease(pool, job.id, lease_owner, 300).await? {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                page_index = index,
+                "OCR lease lost mid-document; stopping so a replica isn't double-applied"
+            );
+            return Ok(());
+        }
     }
     let text = normalize_ocr_pages(&texts);
     validate_ocr_text(&text, settings.ocr.min_chars)?;

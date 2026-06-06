@@ -4258,11 +4258,37 @@ pub async fn create_run_with_jobs_with_priority(
     actor: &str,
     priority: Option<i64>,
 ) -> Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    let run_id = create_run_with_jobs_on_tx(
+        &mut tx,
+        paperless_document_id,
+        stages,
+        mode,
+        trigger_tag,
+        actor,
+        priority,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(run_id)
+}
+
+/// Per-document run/job creation against an existing transaction. Callers own the begin/commit so
+/// batch backfills can amortise one transaction across many documents instead of paying a full
+/// begin+commit per doc. The active-run guard and idempotent inventory upsert are unchanged.
+async fn create_run_with_jobs_on_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    paperless_document_id: i32,
+    stages: &[Stage],
+    mode: ProcessingMode,
+    trigger_tag: &str,
+    actor: &str,
+    priority: Option<i64>,
+) -> Result<Uuid> {
     if stages.is_empty() {
         return Err(anyhow!("cannot create a run without stages"));
     }
 
-    let mut tx = pool.begin().await?;
     if let Some(row) = sqlx::query(
         r#"
         select id from pipeline_runs
@@ -4273,7 +4299,7 @@ pub async fn create_run_with_jobs_with_priority(
         "#,
     )
     .bind(paperless_document_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     {
         return Ok(row.try_get("id")?);
@@ -4294,7 +4320,7 @@ pub async fn create_run_with_jobs_with_priority(
     .bind(mode.to_string())
     .bind(trigger_tag)
     .bind(stages_json)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?
     .try_get("id")?;
 
@@ -4312,7 +4338,7 @@ pub async fn create_run_with_jobs_with_priority(
             "priority": cross_run_priority,
             "stage_priority": ((index as i32) + 1) * 10,
         }))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -4328,11 +4354,11 @@ pub async fn create_run_with_jobs_with_priority(
     )
     .bind(paperless_document_id)
     .bind(run_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     append_audit_tx(
-        &mut tx,
+        tx,
         AuditEventInput {
             event_type: "run.created".to_owned(),
             actor_type: actor.to_owned(),
@@ -4351,7 +4377,6 @@ pub async fn create_run_with_jobs_with_priority(
     )
     .await?;
 
-    tx.commit().await?;
     Ok(run_id)
 }
 
@@ -4390,14 +4415,16 @@ pub async fn queue_missing_stage(
     }
     let rows = builder.fetch_all(pool).await?;
 
+    // Amortise one transaction across the whole batch instead of a begin+commit per document.
+    let mut tx = pool.begin().await?;
     let mut created = 0;
     for row in rows {
         let document_id: i32 = row.try_get("paperless_document_id")?;
         // Age-derived priority — newer documents jump ahead of older ones in claim_jobs.
         // "manual-batch" is the operator-initiated bulk path, but we still rank by age so
         // a fresh scan doesn't get blocked behind a backfill triggered minutes earlier.
-        create_run_with_jobs_with_priority(
-            pool,
+        create_run_with_jobs_on_tx(
+            &mut tx,
             document_id,
             &[stage],
             mode,
@@ -4408,6 +4435,7 @@ pub async fn queue_missing_stage(
         .await?;
         created += 1;
     }
+    tx.commit().await?;
     Ok(created)
 }
 
@@ -4427,6 +4455,10 @@ pub async fn queue_missing_pipeline(
     // a brittle predicate into SQL. When the budget is None, fetch everything in one shot.
     let chunk_size = max_documents.map(|limit| limit.saturating_mul(2).max(16));
 
+    // Amortise one transaction across every chunk + per-doc insert instead of a begin+commit per
+    // document. Pagination SELECTs run on the same tx so just-queued rows stay consistently
+    // excluded, mirroring the previous per-doc-commit behaviour.
+    let mut tx = pool.begin().await?;
     let mut created: i64 = 0;
     let mut last_seen: i32 = i32::MIN;
     loop {
@@ -4467,7 +4499,7 @@ pub async fn queue_missing_pipeline(
         if let Some(size) = chunk_size {
             builder = builder.bind(size);
         }
-        let rows = builder.fetch_all(pool).await?;
+        let rows = builder.fetch_all(&mut *tx).await?;
         if rows.is_empty() {
             break;
         }
@@ -4500,8 +4532,8 @@ pub async fn queue_missing_pipeline(
 
             // Age-derived priority — newer Paperless documents drain through the full
             // pipeline (OCR -> Metadata) before older queued documents.
-            create_run_with_jobs_with_priority(
-                pool,
+            create_run_with_jobs_on_tx(
+                &mut tx,
                 document_id,
                 &stages,
                 mode,
@@ -4521,6 +4553,7 @@ pub async fn queue_missing_pipeline(
             break;
         }
     }
+    tx.commit().await?;
     Ok(created)
 }
 
@@ -4587,6 +4620,9 @@ pub async fn claim_jobs(
     // outer ORDER BY claims newer documents first (smaller priority), then earlier stages
     // (smaller stage_priority), then FIFO as a tiebreaker. The retry bias (failed jobs first)
     // stays first in the order so a stuck retry never starves out.
+    // Both `priority` and `stage_priority` are STORED generated columns (0019/0030), so the
+    // partial `idx_jobs_claim` (priority, stage_priority, run_after, created_at) where
+    // status='queued' backs this ordering — the column names and values are unchanged.
     // The claim and its run/inventory follow-ups run in one TX so a crash between them can't
     // leave jobs `running` while their run/inventory rows stay `queued`.
     let mut tx = pool.begin().await?;
@@ -4749,6 +4785,37 @@ pub async fn claim_jobs(
     }
     tx.commit().await?;
     Ok(jobs)
+}
+
+/// Extend the lease on a job we are actively processing. Long multi-page OCR
+/// jobs can outlive the lease window granted by `claim_jobs`, which would let a
+/// second replica reclaim the stale lease and double-apply the work. The
+/// processing worker calls this after each unit of progress to push
+/// `lease_until` forward by the same window. Returns `true` when our lease was
+/// still held (a row matched) and `false` when the lease was lost — the caller
+/// should stop in that case so it can't fight a replica that already took over.
+pub async fn bump_job_lease(
+    pool: &DbPool,
+    job_id: Uuid,
+    lease_owner: &str,
+    lease_seconds: i64,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        update jobs
+           set lease_until = now() + make_interval(secs => $3),
+               updated_at = now()
+         where id = $1
+           and lease_owner = $2
+           and status = 'running'
+        "#,
+    )
+    .bind(job_id)
+    .bind(lease_owner)
+    .bind(lease_seconds as f64)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Mark a single run + inventory row as running. `claim_jobs` issues equivalent updates in bulk;
@@ -5956,6 +6023,8 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
           (select count(*)::bigint from jobs where status = 'succeeded') as jobs_succeeded,
           (select count(*)::bigint from review_items where status = 'pending') as reviews_pending,
           (select count(*)::bigint from pipeline_runs where status in ('queued', 'running', 'waiting_review', 'applying')) as runs_active,
+          -- Total event count keeps an exact count(*); switch to a pg_class
+          -- reltuples estimate if this scan ever becomes a hot spot.
           (select count(*)::bigint from audit_events) as audit_events,
           (select count(*)::bigint from audit_events where event_type = 'workflow.selector_ran') as selector_runs_total,
           coalesce((
@@ -5971,22 +6040,28 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
           ) as model_errors_total,
           (select count(*)::bigint from audit_events where event_type = 'document.patch_applied' and outcome = 'success') as apply_success_total,
           (select count(*)::bigint from audit_events where event_type = 'document.patch_apply_failed' and outcome = 'failed') as apply_failure_total,
+          -- Latency aggregates are scoped to a recent window so they no longer
+          -- scan the entire unbounded audit_events table; the
+          -- (event_type, created_at) index covers this access path.
           coalesce((
             select count(*)::bigint
               from audit_events
              where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and created_at > now() - interval '24 hours'
                and metadata ? 'duration_ms'
           ), 0) as apply_latency_ms_count,
           coalesce((
             select sum((metadata ->> 'duration_ms')::bigint)::bigint
               from audit_events
              where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and created_at > now() - interval '24 hours'
                and metadata ? 'duration_ms'
           ), 0) as apply_latency_ms_sum,
           coalesce((
             select (percentile_disc(0.95) within group (order by (metadata ->> 'duration_ms')::bigint))::bigint
               from audit_events
              where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and created_at > now() - interval '24 hours'
                and metadata ? 'duration_ms'
           ), 0) as apply_latency_ms_p95
         "#,

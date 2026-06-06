@@ -2092,12 +2092,16 @@ pub struct MetadataSettings {
     pub allow_new_correspondents: bool,
     pub allow_new_document_types: bool,
     /// Legacy global threshold. Kept for compatibility with v1.5.x configs; the
-    /// per-field overrides below take precedence when they are set above 0.
+    /// per-field overrides below take precedence when they are set (`Some`).
     pub confidence_threshold: f32,
     /// Per-field minimum-confidence overrides (v1.5.12+). Each field's
-    /// `effective_*_threshold` accessor returns the override when it is above
-    /// zero, falling back to `confidence_threshold` otherwise. Defaults reflect
-    /// observed reliability per field on production traffic:
+    /// `effective_*_threshold` accessor returns the override when it is set
+    /// (`Some`), falling back to `confidence_threshold` when it is `None`
+    /// (inherit). `None` means inherit; `Some(x)` is a literal threshold.
+    /// Note: `normalized()` collapses a persisted `Some(0.0)` back to `None`
+    /// because pre-`Option` configs stored `0.0` to mean "inherit"; this keeps
+    /// existing settings behaving identically. Defaults reflect observed
+    /// reliability per field on production traffic:
     ///   * title — easy to phrase loosely so the bar is low.
     ///   * correspondent / document_type — closed-vocabulary lookups, demand
     ///     fairly strong evidence.
@@ -2106,17 +2110,17 @@ pub struct MetadataSettings {
     ///   * tags — closed-vocabulary, multi-label, moderate.
     ///   * fields — open-shape extraction, demand strong evidence.
     #[serde(default)]
-    pub title_confidence_threshold: f32,
+    pub title_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub document_date_confidence_threshold: f32,
+    pub document_date_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub correspondent_confidence_threshold: f32,
+    pub correspondent_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub document_type_confidence_threshold: f32,
+    pub document_type_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub tags_confidence_threshold: f32,
+    pub tags_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub fields_confidence_threshold: f32,
+    pub fields_confidence_threshold: Option<f32>,
     /// Cap on the size of each closed-vocabulary allowed-value list
     /// (correspondents, document_types, tags) passed into the metadata
     /// prompt. v1.5.12+ pre-filters by OCR-substring frequency.
@@ -2144,18 +2148,35 @@ pub struct MetadataSettings {
 /// attention and inflates token cost.
 pub const DEFAULT_METADATA_ALLOWED_LIST_MAX: usize = 20;
 
+/// Normalize a per-field confidence-threshold override.
+///
+/// `None` stays `None` (inherit the global threshold). `Some(0.0)` is mapped
+/// to `None` because persisted configs predating the `Option` switch stored a
+/// literal `0.0` to mean "inherit"; collapsing it preserves that behavior for
+/// existing settings. Any other `Some(x)` is clamped into `0.0..=1.0`.
+fn normalize_override_threshold(value: Option<f32>) -> Option<f32> {
+    match value {
+        Some(x) if x <= 0.0 => None,
+        Some(x) => Some(x.clamp(0.0, 1.0)),
+        None => None,
+    }
+}
+
 impl MetadataSettings {
     pub fn normalized(mut self) -> Self {
         self.confidence_threshold = self.confidence_threshold.clamp(0.0, 1.0);
-        self.title_confidence_threshold = self.title_confidence_threshold.clamp(0.0, 1.0);
+        self.title_confidence_threshold =
+            normalize_override_threshold(self.title_confidence_threshold);
         self.document_date_confidence_threshold =
-            self.document_date_confidence_threshold.clamp(0.0, 1.0);
+            normalize_override_threshold(self.document_date_confidence_threshold);
         self.correspondent_confidence_threshold =
-            self.correspondent_confidence_threshold.clamp(0.0, 1.0);
+            normalize_override_threshold(self.correspondent_confidence_threshold);
         self.document_type_confidence_threshold =
-            self.document_type_confidence_threshold.clamp(0.0, 1.0);
-        self.tags_confidence_threshold = self.tags_confidence_threshold.clamp(0.0, 1.0);
-        self.fields_confidence_threshold = self.fields_confidence_threshold.clamp(0.0, 1.0);
+            normalize_override_threshold(self.document_type_confidence_threshold);
+        self.tags_confidence_threshold =
+            normalize_override_threshold(self.tags_confidence_threshold);
+        self.fields_confidence_threshold =
+            normalize_override_threshold(self.fields_confidence_threshold);
         self.document_date_anchor_penalty = self.document_date_anchor_penalty.clamp(0.0, 1.0);
         // `0` disables prefiltering (send the full list); above that, cap to a
         // sane upper bound so a persisted absurd value can't blow up prompts.
@@ -2163,12 +2184,11 @@ impl MetadataSettings {
         self
     }
 
-    fn effective(&self, override_value: f32) -> f32 {
-        if override_value > 0.0 {
-            override_value
-        } else {
-            self.confidence_threshold
-        }
+    fn effective(&self, override_value: Option<f32>) -> f32 {
+        // `None` inherits the global threshold; `Some(x)` is a literal value
+        // (including `Some(0.0)`). Persisted `Some(0.0)` is mapped to `None`
+        // in `normalized()` to preserve the legacy "0.0 means inherit" meaning.
+        override_value.unwrap_or(self.confidence_threshold)
     }
 
     pub fn effective_title_threshold(&self) -> f32 {
@@ -2186,11 +2206,7 @@ impl MetadataSettings {
     pub fn effective_document_date_threshold(&self) -> f32 {
         // document_date_confidence_threshold predates the per-field rollout in
         // v1.5.12 so it already worked as an override — preserve that history.
-        if self.document_date_confidence_threshold > 0.0 {
-            self.document_date_confidence_threshold
-        } else {
-            self.confidence_threshold
-        }
+        self.effective(self.document_date_confidence_threshold)
     }
 
     pub fn effective_tags_threshold(&self) -> f32 {
@@ -2211,12 +2227,12 @@ impl Default for MetadataSettings {
             allow_new_correspondents: false,
             allow_new_document_types: false,
             confidence_threshold: 0.65,
-            title_confidence_threshold: 0.60,
-            document_date_confidence_threshold: 0.90,
-            correspondent_confidence_threshold: 0.80,
-            document_type_confidence_threshold: 0.75,
-            tags_confidence_threshold: 0.65,
-            fields_confidence_threshold: 0.80,
+            title_confidence_threshold: Some(0.60),
+            document_date_confidence_threshold: Some(0.90),
+            correspondent_confidence_threshold: Some(0.80),
+            document_type_confidence_threshold: Some(0.75),
+            tags_confidence_threshold: Some(0.65),
+            fields_confidence_threshold: Some(0.80),
             allowed_list_max: DEFAULT_METADATA_ALLOWED_LIST_MAX,
             document_date_anchor_required: true,
             document_date_anchor_penalty: 0.30,

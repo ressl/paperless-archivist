@@ -91,13 +91,22 @@ impl AiProviderError {
     }
 }
 
-/// Parse a `Retry-After` header value (seconds form only; HTTP-date form
-/// is comparatively rare for AI APIs and not worth the chrono dep here).
+/// Parse a `Retry-After` header value. Supports both the delay-seconds form
+/// (e.g. `120`) and the RFC-7231 HTTP-date form (e.g.
+/// `Wed, 21 Oct 2015 07:28:00 GMT`); for the latter we return the number of
+/// seconds from now until that date, clamped at 0.
 fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
+    let value = headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(str::trim)?;
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds);
+    }
+    chrono::DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|date| (date.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds())
+        .map(|seconds| seconds.max(0) as u64)
 }
 
 /// Inspect a non-success HTTP response: if it looks like a provider quota
@@ -303,6 +312,7 @@ impl OllamaClient {
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("build Ollama HTTP client")?;
         Ok(Self {
@@ -727,6 +737,7 @@ impl OpenAiCompatibleClient {
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(180))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -894,6 +905,7 @@ impl AnthropicClient {
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(180))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -2130,6 +2142,32 @@ mod tests {
                 "expected quota signal in body: {body}"
             );
         }
+    }
+
+    #[test]
+    fn parse_retry_after_header_handles_seconds_and_http_date() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+        // Delay-seconds form.
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("120"));
+        assert_eq!(parse_retry_after_header(&headers), Some(120));
+
+        // RFC-7231 HTTP-date form: a date ~1 hour in the future should yield
+        // roughly 3600 seconds; a past date clamps to 0.
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc2822();
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_str(&future).unwrap());
+        let seconds = parse_retry_after_header(&headers).expect("date form should parse");
+        assert!(
+            (3500..=3600).contains(&seconds),
+            "expected ~3600s, got {seconds}"
+        );
+
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc2822();
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_str(&past).unwrap());
+        assert_eq!(parse_retry_after_header(&headers), Some(0));
     }
 
     #[test]

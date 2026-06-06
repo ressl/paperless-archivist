@@ -114,6 +114,11 @@ impl PaperlessClient {
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_seconds))
+            // Defense-in-depth against SSRF: never follow redirects. Paperless API
+            // calls all use trailing-slash URLs so DRF does not 301 them; refusing
+            // redirects stops a 3xx to a loopback/metadata address from being
+            // chased after the base URL was validated (#177).
+            .redirect(reqwest::redirect::Policy::none())
             .default_headers(headers)
             .build()
             .context("build Paperless HTTP client")?;
