@@ -1769,7 +1769,9 @@ pub async fn resolve_secret(
             } else {
                 path.to_owned()
             };
-            std::fs::read_to_string(resolved)?.trim().to_owned()
+            // File-backed secrets sit on the async hot path; use tokio's non-blocking read so we
+            // never stall an executor thread on disk I/O.
+            tokio::fs::read_to_string(resolved).await?.trim().to_owned()
         }
         other => return Err(anyhow!("unsupported secret reference kind: {other}")),
     };
@@ -4585,10 +4587,16 @@ pub async fn claim_jobs(
     // outer ORDER BY claims newer documents first (smaller priority), then earlier stages
     // (smaller stage_priority), then FIFO as a tiebreaker. The retry bias (failed jobs first)
     // stays first in the order so a stuck retry never starves out.
+    // The claim and its run/inventory follow-ups run in one TX so a crash between them can't
+    // leave jobs `running` while their run/inventory rows stay `queued`.
+    let mut tx = pool.begin().await?;
     let rows = sqlx::query(
         r#"
         with claimed as (
-          select id
+          select id,
+                 status as prior_status,
+                 lease_owner as prior_lease_owner,
+                 attempts as prior_attempts
             from jobs
            where ((status = 'queued' and run_after <= now())
               or (status = 'running' and lease_until < now()))
@@ -4617,10 +4625,12 @@ pub async fn claim_jobs(
             from claimed
            where j.id = claimed.id
           returning j.id, j.run_id, j.paperless_document_id, j.stage, j.status,
-                    j.attempts, j.max_attempts, j.payload
+                    j.attempts, j.max_attempts, j.payload,
+                    claimed.prior_status, claimed.prior_lease_owner, claimed.prior_attempts
         )
         select u.id, u.run_id, u.paperless_document_id, u.stage, r.mode, u.status,
-               u.attempts, u.max_attempts, u.payload
+               u.attempts, u.max_attempts, u.payload,
+               u.prior_status, u.prior_lease_owner, u.prior_attempts
           from updated u
           join pipeline_runs r on r.id = u.run_id
         "#,
@@ -4628,13 +4638,16 @@ pub async fn claim_jobs(
     .bind(limit)
     .bind(lease_owner)
     .bind(lease_seconds as f64)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     let mut jobs = Vec::new();
+    // (job_id, run_id, document_id, prior_lease_owner, prior_attempts) for stale-lease reclaims.
+    let mut reclaimed: Vec<(Uuid, Uuid, i32, Option<String>, i32)> = Vec::new();
     for row in rows {
         let stage: String = row.try_get("stage")?;
         let mode: String = row.try_get("mode")?;
+        let prior_status: String = row.try_get("prior_status")?;
         let job = JobRecord {
             id: row.try_get("id")?,
             run_id: row.try_get("run_id")?,
@@ -4646,7 +4659,55 @@ pub async fn claim_jobs(
             max_attempts: row.try_get("max_attempts")?,
             payload: row.try_get("payload")?,
         };
+        // A prior status of `running` means we reclaimed a job whose lease expired (worker
+        // crash/OOM). The `attempts + 1` above silently burns one of `max_attempts` with no
+        // terminal outcome, so leave a breadcrumb to keep that lost attempt attributable.
+        if prior_status == "running" {
+            let prior_lease_owner: Option<String> = row.try_get("prior_lease_owner")?;
+            let prior_attempts: i32 = row.try_get("prior_attempts")?;
+            tracing::warn!(
+                job_id = %job.id,
+                run_id = %job.run_id,
+                stage = %job.stage,
+                prior_lease_owner = prior_lease_owner.as_deref().unwrap_or("<unknown>"),
+                attempts = job.attempts,
+                "reclaiming job with expired lease; previous attempt consumed without a terminal outcome"
+            );
+            reclaimed.push((
+                job.id,
+                job.run_id,
+                job.paperless_document_id,
+                prior_lease_owner,
+                prior_attempts,
+            ));
+        }
         jobs.push(job);
+    }
+
+    for (job_id, run_id, document_id, prior_lease_owner, prior_attempts) in &reclaimed {
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "job.lease_reclaimed".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: Some(lease_owner.to_owned()),
+                run_id: Some(*run_id),
+                job_id: Some(*job_id),
+                paperless_document_id: Some(*document_id),
+                before: None,
+                after: None,
+                metadata: Some(json!({
+                    "prior_lease_owner": prior_lease_owner,
+                    "prior_attempts": prior_attempts,
+                    "new_lease_owner": lease_owner,
+                })),
+                outcome: "warning".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
     }
 
     if !jobs.is_empty() {
@@ -4670,7 +4731,7 @@ pub async fn claim_jobs(
             "#,
         )
         .bind(&run_ids)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
         sqlx::query(
@@ -4679,12 +4740,14 @@ pub async fn claim_jobs(
                set current_run_status = 'running',
                    updated_at = now()
              where paperless_document_id = any($1::int[])
+               and current_run_status in ('queued', 'running', 'waiting_review')
             "#,
         )
         .bind(&document_ids)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(jobs)
 }
 
@@ -4890,6 +4953,26 @@ pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bo
         )
         .bind(job.run_id)
         .bind(error)
+        .execute(&mut *tx)
+        .await?;
+        // A permanent failure aborts the whole run, so cancel the sibling jobs in the same TX.
+        // Mirrors the reject path: leaving them `queued` makes them unclaimable (the claim guard
+        // blocks them behind the failed stage) yet still scanned on every poll, inflating
+        // `jobs_queued` forever.
+        sqlx::query(
+            r#"
+            update jobs
+               set status = 'cancelled',
+                   lease_owner = null,
+                   lease_until = null,
+                   updated_at = now()
+             where run_id = $1
+               and id <> $2
+               and status in ('queued', 'running', 'waiting_review')
+            "#,
+        )
+        .bind(job.run_id)
+        .bind(job.id)
         .execute(&mut *tx)
         .await?;
     }
