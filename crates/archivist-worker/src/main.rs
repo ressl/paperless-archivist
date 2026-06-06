@@ -71,6 +71,19 @@ fn init_tracing(filter: &str) {
         .init();
 }
 
+/// Resets an `Arc<AtomicBool>` re-entry guard to `false` on drop, so a panic
+/// inside a spawned periodic task (job processing / trigger-poll / autopilot
+/// drain) cannot leak the guard `true` and silently wedge that tick slot for
+/// the rest of the process lifetime. Constructed right after a successful
+/// `compare_exchange`, dropped when the spawned future unwinds or completes.
+struct ReentryGuard(Arc<AtomicBool>);
+
+impl Drop for ReentryGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
     info!(%worker_id, "paperless archivist worker started");
@@ -78,14 +91,24 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     let trigger_poll_running = Arc::new(AtomicBool::new(false));
     // Live-reload concurrency: tracks the value used on the previous claim
     // cycle so we can emit `workflow.concurrency_changed` only on transitions
-    // rather than once per tick. Seeded from the env cap so the first cycle
-    // logs a transition only if the operator changed settings.
-    let last_observed_concurrency = Arc::new(AtomicU32::new(env_concurrency_cap(&config)));
+    // rather than once per tick. Seeded with the sentinel `0` ("not yet
+    // observed"): the resolver always returns a concurrency ≥1, so the first
+    // claim cycle seeds the real value without emitting a spurious transition
+    // on startup (previously seeding from the env cap logged a bogus
+    // transition on every start whenever the configured concurrency was lower).
+    let last_observed_concurrency = Arc::new(AtomicU32::new(0));
     // Re-entry guard so a long-running autopilot drain tick does not block
     // subsequent worker ticks. Drains can run minutes when Paperless is slow
     // or the pending backlog is large; we want OCR job processing to keep
     // happening in the meantime.
     let autopilot_drain_running = Arc::new(AtomicBool::new(false));
+    // Re-entry guard for job processing. Spawning (rather than awaiting) the
+    // claim+process batch keeps the wall-clock `tick % 12` maintenance
+    // schedule (trigger-poll, drain, snapshots) firing on time even while a
+    // long OCR batch is in flight — previously the loop blocked on
+    // `process_available_jobs().await` until the whole batch finished, so
+    // those maintenance checks fired far less often than the intended 5s.
+    let job_processing_running = Arc::new(AtomicBool::new(false));
 
     // Write a fresh dashboard snapshot near startup so the read path has something current
     // before the periodic tick fires (snapshots used to be written on every /dashboard read).
@@ -188,11 +211,28 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
             }
             _ = sleep(Duration::from_secs(5)) => {
                 tick += 1;
-                if let Err(error) =
-                    process_available_jobs(&pool, &config, &worker_id, &last_observed_concurrency)
-                        .await
+                if job_processing_running
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
                 {
-                    error!(error = %error, "job processing tick failed");
+                    let pool = pool.clone();
+                    let config = Arc::clone(&config);
+                    let worker_id = worker_id.clone();
+                    let last_observed_concurrency = Arc::clone(&last_observed_concurrency);
+                    let job_processing_running = Arc::clone(&job_processing_running);
+                    tokio::spawn(async move {
+                        let _guard = ReentryGuard(job_processing_running);
+                        if let Err(error) = process_available_jobs(
+                            &pool,
+                            &config,
+                            &worker_id,
+                            &last_observed_concurrency,
+                        )
+                        .await
+                        {
+                            error!(error = %error, "job processing tick failed");
+                        }
+                    });
                 }
                 if tick % 12 == 3
                     && let Err(error) = timeout(
@@ -232,12 +272,12 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                     let config = Arc::clone(&config);
                     let autopilot_drain_running = Arc::clone(&autopilot_drain_running);
                     tokio::spawn(async move {
+                        let _guard = ReentryGuard(autopilot_drain_running);
                         if let Err(error) =
                             drain_pending_reviews_if_autopilot_tick(&pool, &config).await
                         {
                             warn!(error = %error, "autopilot review drain tick failed");
                         }
-                        autopilot_drain_running.store(false, Ordering::Release);
                     });
                 }
                 if tick % 12 == 1
@@ -249,12 +289,14 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                     let config = Arc::clone(&config);
                     let trigger_poll_running = Arc::clone(&trigger_poll_running);
                     tokio::spawn(async move {
+                        let _guard = ReentryGuard(trigger_poll_running);
                         let trace_id = Uuid::now_v7();
                         let started = std::time::Instant::now();
                         info!(%trace_id, "trigger polling started");
                         let result = timeout(
                             Duration::from_secs(300),
-                            poll_paperless_triggers(&pool, &config),
+                            poll_paperless_triggers(&pool, &config)
+                                .instrument(info_span!("trigger_poll", %trace_id)),
                         )
                         .await;
                         match result {
@@ -268,7 +310,6 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                                 warn!(%trace_id, duration_ms = started.elapsed().as_millis() as u64, "trigger polling timed out");
                             }
                         }
-                        trigger_poll_running.store(false, Ordering::Release);
                     });
                 }
             }
@@ -382,7 +423,9 @@ async fn process_available_jobs(
     let env_cap = env_concurrency_cap(config);
     let target_concurrency = resolve_target_concurrency(env_cap, &settings);
     let previous_concurrency = last_observed_concurrency.swap(target_concurrency, Ordering::AcqRel);
-    if previous_concurrency != target_concurrency {
+    // `previous_concurrency == 0` is the startup sentinel — the first observed
+    // value is not a transition, so don't log/audit it.
+    if previous_concurrency != 0 && previous_concurrency != target_concurrency {
         info!(
             from = previous_concurrency,
             to = target_concurrency,
@@ -466,13 +509,45 @@ async fn process_available_jobs(
                         // routed to the same provider release their lease
                         // immediately rather than burning through the per-job
                         // retry budget against a quota that resets in days.
-                        if let Err(cooldown_err) =
-                            record_quota_cooldown_for_failure(&pool, &settings, &job, error).await
+                        match record_quota_cooldown_for_failure(&pool, &settings, &job, error).await
                         {
-                            warn!(
-                                error = %cooldown_err,
-                                "failed to persist provider cooldown after quota-exhausted failure"
-                            );
+                            Ok(cooldown_until) => {
+                                // The triggering job must NOT be permanently
+                                // failed: ProviderQuota is non-retryable, so
+                                // `fail_job(..., false)` would sacrifice this
+                                // document even after the quota resets. Instead
+                                // release the lease exactly like the cooldown
+                                // short-circuit — decrement the attempt and set
+                                // `run_after = cooldown_until` so the job comes
+                                // back once the provider is plausibly available.
+                                match release_lease_for_cooldown(&pool, &job, cooldown_until).await {
+                                    Ok(()) => {
+                                        warn!(
+                                            error = %error,
+                                            failure_class = failure_class.as_str(),
+                                            until = %cooldown_until,
+                                            duration_ms = started.elapsed().as_millis() as u64,
+                                            "provider quota exhausted; released lease without burning an attempt instead of failing the job"
+                                        );
+                                        return result;
+                                    }
+                                    Err(release_err) => {
+                                        // Releasing failed — fall through to the
+                                        // normal fail path so the job does not
+                                        // silently stay leased.
+                                        warn!(
+                                            error = %release_err,
+                                            "failed to release lease after quota-exhausted failure; falling back to fail_job"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(cooldown_err) => {
+                                warn!(
+                                    error = %cooldown_err,
+                                    "failed to persist provider cooldown after quota-exhausted failure"
+                                );
+                            }
                         }
                     }
                     let vision_model_crash = is_vision_model_runtime_crash(error);
@@ -773,7 +848,7 @@ async fn record_quota_cooldown_for_failure(
     settings: &RuntimeSettings,
     job: &JobRecord,
     error: &anyhow::Error,
-) -> Result<()> {
+) -> Result<DateTime<Utc>> {
     let (provider_name, retry_after_secs, message) =
         extract_quota_signal(error).unwrap_or_else(|| {
             (
@@ -823,7 +898,7 @@ async fn record_quota_cooldown_for_failure(
         },
     )
     .await;
-    Ok(())
+    Ok(cooldown_until)
 }
 
 fn extract_quota_signal(error: &anyhow::Error) -> Option<(String, Option<u64>, String)> {
@@ -1074,9 +1149,11 @@ async fn installed_ollama_models_for_provider(
 /// This function does NOT consume the job's attempt slot — both calls happen within the
 /// same worker tick. The orchestrator-driven retry budget only kicks in if the fallback
 /// also fails (transient classification keeps current retry+jitter behaviour intact).
+#[allow(clippy::too_many_arguments)]
 async fn run_vision_with_fallback(
     pool: &DbPool,
     config: &AppConfig,
+    client: &VisionClient,
     provider: &StageProvider,
     settings: &RuntimeSettings,
     job: &JobRecord,
@@ -1086,7 +1163,7 @@ async fn run_vision_with_fallback(
     let primary_model = provider.model.clone();
     let mut request_with_primary = request.clone();
     request_with_primary.model = primary_model.clone();
-    match vision_with_provider(pool, config, provider, request_with_primary).await {
+    match client.vision(request_with_primary).await {
         Ok(response) => Ok((response, primary_model, false)),
         Err(error) => {
             if !is_vision_model_runtime_crash(&error) {
@@ -1142,7 +1219,7 @@ async fn run_vision_with_fallback(
             }
             let mut fallback_request = request;
             fallback_request.model = choice.model.clone();
-            let response = vision_with_provider(pool, config, provider, fallback_request).await?;
+            let response = client.vision(fallback_request).await?;
             info!(
                 primary_model = %primary_model,
                 fallback_model = %choice.model,
@@ -1200,10 +1277,12 @@ async fn process_ocr(
     settings: &RuntimeSettings,
     job: &JobRecord,
 ) -> Result<()> {
-    let original = paperless
-        .download_original(job.paperless_document_id)
-        .await?;
-    let document = paperless.get_document(job.paperless_document_id).await?;
+    // Independent GETs — fetch the original bytes and the document detail
+    // concurrently instead of serially.
+    let (original, document) = tokio::try_join!(
+        paperless.download_original(job.paperless_document_id),
+        paperless.get_document(job.paperless_document_id),
+    )?;
     let pages = render_document_pages(
         &original,
         document.original_file_name.as_deref(),
@@ -1226,6 +1305,10 @@ async fn process_ocr(
 
     let provider = provider_for_stage(settings, Stage::Ocr, true)?;
     let prompt = get_active_prompt(pool, Stage::Ocr).await?;
+    // Build the vision client once for the whole document: resolves+decrypts
+    // the provider secret a single time and keeps one keep-alive/TLS-warm
+    // connection pool across every page and the crash fallback.
+    let vision_client = build_vision_client(pool, config, &provider).await?;
     let mut texts = Vec::new();
     let mut raw_responses = Vec::new();
     let mut models_used: Vec<String> = Vec::new();
@@ -1301,9 +1384,29 @@ async fn process_ocr(
                 bytes: page.bytes.clone(),
             }],
         };
-        let (response, model_used, fallback_used) =
-            run_vision_with_fallback(pool, config, &provider, settings, job, index, request)
-                .await?;
+        let page_started = std::time::Instant::now();
+        let (response, model_used, fallback_used) = run_vision_with_fallback(
+            pool,
+            config,
+            &vision_client,
+            &provider,
+            settings,
+            job,
+            index,
+            request,
+        )
+        .await?;
+        // Progress breadcrumb for the slow per-page vision calls — without this
+        // the worker went silent for the whole OCR duration (only cache hits
+        // logged), so a document stuck mid-OCR was invisible.
+        info!(
+            document_id = job.paperless_document_id,
+            page_index = index,
+            model = %model_used,
+            fallback_used,
+            duration_ms = page_started.elapsed().as_millis() as u64,
+            "ocr page complete"
+        );
         any_fallback_used |= fallback_used;
 
         // Cache the successful page-level OCR so a future retry / re-trigger
@@ -1477,9 +1580,16 @@ async fn resolve_tag_names_to_ids(
     // which names are unknown (need creation or dropping).
     let known_pairs = tag_id_pairs_for_names(pool, names).await?;
     let (mut ids, unknown) = diff_known_tag_names(names, &known_pairs);
-    for name in unknown {
-        if allow_new_tags {
-            match paperless.ensure_tag(&name).await {
+    if !unknown.is_empty() && allow_new_tags {
+        // Fetch the Paperless tag catalog ONCE and reuse it via
+        // `ensure_tag_cached`. Calling `paperless.ensure_tag()` per unknown
+        // name re-paginated the entire catalog every time — O(N × all_tags)
+        // per document — which is the same waste the drain path already fixed
+        // (worker:ensure_tag_cached). `ensure_tag_cached` checks the local
+        // snapshot first and only creates genuinely missing names.
+        let mut tag_cache = paperless.list_tags().await?;
+        for name in unknown {
+            match ensure_tag_cached(paperless, &mut tag_cache, &name).await {
                 Ok(tag) => {
                     if !ids.contains(&tag.id) {
                         ids.push(tag.id);
@@ -1493,7 +1603,9 @@ async fn resolve_tag_names_to_ids(
                     );
                 }
             }
-        } else {
+        }
+    } else {
+        for name in unknown {
             warn!(
                 unknown_tag = %name,
                 "dropping unknown tag from review_item suggested_patch (allow_new_tags is false)"
@@ -2661,24 +2773,23 @@ async fn drain_pending_reviews_if_autopilot(
     for review in pending {
         let review_id = review.id;
         let paperless_document_id = review.paperless_document_id;
-        // Per-item timeout: keep one slow Paperless call from holding up
-        // the whole batch. The PATCH itself rarely blocks for more than a
-        // second or two; 45s gives even a sluggish or rate-limited
-        // Paperless time to respond before we move on and let the row
-        // retry on the next tick.
-        let result = timeout(
-            Duration::from_secs(45),
-            apply_one_autopilot_drain_review(
-                pool,
-                &paperless,
-                settings,
-                review,
-                &mut tag_cache,
-                completion_full.clone(),
-            ),
+        // Per-item timeout lives INSIDE apply_one_autopilot_drain_review,
+        // wrapping only the Paperless patch. Wrapping the whole call here was
+        // unsafe: the row is committed `pending→approved` before the slow
+        // patch runs, so an outer timeout dropped the future at an await point
+        // — no `Err`, so the revert never ran and the row was stranded in
+        // `approved` forever (never applied, never retried). With the timeout
+        // around just the patch, a timeout becomes an `Err` and the existing
+        // revert-to-pending path fires.
+        let result = apply_one_autopilot_drain_review(
+            pool,
+            &paperless,
+            settings,
+            review,
+            &mut tag_cache,
+            completion_full.clone(),
         )
-        .await
-        .unwrap_or_else(|_| Err(anyhow!("per-item drain timeout after 45s")));
+        .await;
         match result {
             Ok(true) => {
                 applied += 1;
@@ -2737,16 +2848,27 @@ async fn apply_one_autopilot_drain_review(
         // Raced — the row is no longer pending.
         return Ok(false);
     };
-    if let Err(error) = apply_autopilot_drain_patch(
-        pool,
-        paperless,
-        settings,
-        &claimed,
-        tag_cache,
-        &completion_full,
+    // Bound only the patch (the row is already claimed `approved` at this
+    // point). A timeout here surfaces as `Err`, which drives the revert below
+    // so the row returns to `pending` and retries on the next tick — rather
+    // than being silently stranded in `approved` if the future were dropped
+    // by an outer timeout. The PATCH itself rarely blocks for more than a
+    // second or two; 45s gives even a sluggish or rate-limited Paperless time
+    // to respond before we move on.
+    let patch_result = timeout(
+        Duration::from_secs(45),
+        apply_autopilot_drain_patch(
+            pool,
+            paperless,
+            settings,
+            &claimed,
+            tag_cache,
+            &completion_full,
+        ),
     )
     .await
-    {
+    .unwrap_or_else(|_| Err(anyhow!("per-item drain patch timeout after 45s")));
+    if let Err(error) = patch_result {
         // Roll the row back to pending so the next tick can retry. We
         // deliberately don't audit a failure event here — Paperless errors
         // already get an `document.patch_apply_failed` audit inside
@@ -3170,10 +3292,16 @@ async fn sync_metadata(
     for workflow_tag in settings.workflow.tags.all() {
         ensure_tag_cached(paperless, &mut tags, workflow_tag).await?;
     }
-    let correspondents = paperless.list_correspondents().await?;
-    let document_types = paperless.list_document_types().await?;
-    let custom_fields = paperless.list_custom_fields().await.unwrap_or_default();
-    let documents = paperless.list_documents().await?;
+    // These four catalog fetches are independent GETs against Paperless; run
+    // them concurrently rather than serially. The tag list above must stay
+    // sequential because `ensure_tag_cached` mutates it in place. custom_fields
+    // keeps its best-effort `unwrap_or_default` semantics inside the join.
+    let (correspondents, document_types, custom_fields, documents) = tokio::try_join!(
+        paperless.list_correspondents(),
+        paperless.list_document_types(),
+        async { anyhow::Ok(paperless.list_custom_fields().await.unwrap_or_default()) },
+        paperless.list_documents(),
+    )?;
 
     let mut tx = pool.begin().await?;
     for tag in &tags {
@@ -3199,12 +3327,17 @@ async fn sync_metadata(
         upsert_paperless_custom_field(&mut tx, field.id, &field.name, field.data_type.as_deref())
             .await?;
     }
+    // O(1) id→name lookups: building this map once avoids the previous
+    // O(documents × tags) nested linear scan, which was pure CPU burned inside
+    // the sync transaction on instances with many tags/documents.
+    let tag_names_by_id: HashMap<i32, &str> =
+        tags.iter().map(|tag| (tag.id, tag.name.as_str())).collect();
     for document in &documents {
         let tag_names = document
             .tags
             .iter()
-            .filter_map(|id| tags.iter().find(|tag| tag.id == *id))
-            .map(|tag| tag.name.clone())
+            .filter_map(|id| tag_names_by_id.get(id).copied())
+            .map(|name| name.to_owned())
             .collect::<Vec<_>>();
         upsert_inventory_item(
             &mut tx,
@@ -3435,27 +3568,46 @@ async fn chat_with_provider(
     }
 }
 
-async fn vision_with_provider(
+/// A vision client built ONCE per OCR job and reused across every page (and
+/// the crash fallback). Previously the worker constructed a brand-new reqwest
+/// client and re-resolved+decrypted the provider secret (Postgres roundtrip +
+/// AES-256-GCM) on every page — discarding the connection pool / TLS session
+/// each time even though the provider and secret are fixed for the document.
+/// Holding the typed client keeps the keep-alive pool and TLS session warm
+/// across pages. The fallback only swaps the model (carried on the request),
+/// not the provider, so a single client covers primary and fallback.
+enum VisionClient {
+    Ollama(OllamaClient),
+    OpenAiCompatible(OpenAiCompatibleClient),
+    Anthropic(AnthropicClient),
+}
+
+impl VisionClient {
+    async fn vision(&self, request: VisionRequest) -> Result<AiResponse> {
+        match self {
+            VisionClient::Ollama(client) => client.vision(request).await,
+            VisionClient::OpenAiCompatible(client) => client.vision(request).await,
+            VisionClient::Anthropic(client) => client.vision(request).await,
+        }
+    }
+}
+
+async fn build_vision_client(
     pool: &DbPool,
     config: &AppConfig,
     provider: &StageProvider,
-    request: VisionRequest,
-) -> Result<AiResponse> {
+) -> Result<VisionClient> {
     match provider.kind {
-        AiProviderKind::Ollama => {
-            let client = OllamaClient::new(
-                &provider.base_url,
-                provider_secret(pool, config, provider).await?,
-            )?;
-            client.vision(request).await
-        }
+        AiProviderKind::Ollama => Ok(VisionClient::Ollama(OllamaClient::new(
+            &provider.base_url,
+            provider_secret(pool, config, provider).await?,
+        )?)),
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
-            let client = OpenAiCompatibleClient::new(
+            Ok(VisionClient::OpenAiCompatible(OpenAiCompatibleClient::new(
                 &provider.name,
                 &provider.base_url,
                 provider_secret(pool, config, provider).await?,
-            )?;
-            client.vision(request).await
+            )?))
         }
         AiProviderKind::Anthropic => {
             let secret = provider_secret(pool, config, provider)
@@ -3463,8 +3615,11 @@ async fn vision_with_provider(
                 .ok_or_else(|| {
                     anyhow!("AI provider '{}' requires an API key secret", provider.name)
                 })?;
-            let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
-            client.vision(request).await
+            Ok(VisionClient::Anthropic(AnthropicClient::new(
+                &provider.name,
+                &provider.base_url,
+                secret,
+            )?))
         }
     }
 }
