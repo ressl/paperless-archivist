@@ -22,7 +22,7 @@ use archivist_db::{
     claim_notification_delivery, claim_pending_review_for_autopilot_drain, complete_job, connect,
     create_review_item, create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job,
     get_active_prompt, get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
-    get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
+    get_workflow_safety_status, increment_metric_counter, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
     named_entity_id_for_name, paperless_sync_cursor, queue_missing_pipeline,
@@ -495,7 +495,7 @@ async fn process_available_jobs(
         Err(error) => {
             warn!(error = ?error, "failed to construct Paperless client for batch; failing claimed jobs");
             for job in &jobs {
-                let _ = fail_job(pool, job, &format!("{:#}", error), true).await;
+                let _ = fail_job(pool, job, worker_id, &format!("{:#}", error), true).await;
             }
             return Ok(());
         }
@@ -608,6 +608,7 @@ async fn process_available_jobs(
                     let _ = fail_job(
                         &pool,
                         &job,
+                        &lease_owner,
                         &format!("{:#}", error),
                         failure_class.is_retryable(),
                     )
@@ -748,6 +749,9 @@ async fn send_notification_webhook(
     let response = HttpClient::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
+        // Pin the validated IP at connect time to close the DNS-rebinding
+        // TOCTOU on the operator-configured webhook host (#183).
+        .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
         .build()?
         .post(webhook_url.expose_secret())
         .json(&payload)
@@ -1293,7 +1297,9 @@ async fn process_job(
 
     match job.stage {
         Stage::Ocr => process_ocr(pool, config, paperless, settings, job, lease_owner).await,
-        Stage::Metadata => process_metadata(pool, config, paperless, settings, job).await,
+        Stage::Metadata => {
+            process_metadata(pool, config, paperless, settings, job, lease_owner).await
+        }
         Stage::Apply => Err(anyhow!(
             "stage {} is not directly executable by the worker",
             job.stage
@@ -1545,6 +1551,23 @@ async fn process_ocr(
         );
     }
 
+    // #217: persist the OCR body locally so chat search can full-text
+    // rank against it. NUL bytes are stripped because Postgres `text`
+    // cannot store them; the body is otherwise the same text sent to
+    // Paperless. Best-effort write — a failure here doesn't fail OCR, it
+    // only means this document won't surface via body FTS until re-OCR'd.
+    let ocr_body = text.replace('\0', "");
+    if let Err(error) =
+        archivist_db::set_document_inventory_ocr_body(pool, job.paperless_document_id, &ocr_body)
+            .await
+    {
+        warn!(
+            document_id = job.paperless_document_id,
+            error = %error,
+            "set_document_inventory_ocr_body failed; body full-text search will not apply"
+        );
+    }
+
     let patch = DocumentPatch {
         content: Some(text),
         title: None,
@@ -1554,7 +1577,17 @@ async fn process_ocr(
         created: None,
         custom_fields: None,
     };
-    handle_patch_result(pool, paperless, settings, job, patch, Vec::new(), None).await
+    handle_patch_result(
+        pool,
+        paperless,
+        settings,
+        job,
+        patch,
+        Vec::new(),
+        None,
+        lease_owner,
+    )
+    .await
 }
 
 async fn language_context_for_content(
@@ -1735,15 +1768,24 @@ async fn process_metadata(
     paperless: &PaperlessClient,
     settings: &RuntimeSettings,
     job: &JobRecord,
+    lease_owner: &str,
 ) -> Result<()> {
     let enabled = MetadataFieldFlags::from_enabled_stages(&settings.workflow.enabled_stages);
     if !enabled.any() {
-        complete_job(
+        if !complete_job(
             pool,
             job,
+            lease_owner,
             json!({ "skipped": "no metadata fields are enabled in workflow settings" }),
         )
-        .await?;
+        .await?
+        {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                "lease lost before completion; another worker owns this job — skipping"
+            );
+        }
         return Ok(());
     }
 
@@ -2410,9 +2452,10 @@ async fn process_metadata(
                 final_run_stage,
             )
             .await?;
-            complete_job(
+            if !complete_job(
                 pool,
                 job,
+                lease_owner,
                 json!({
                     "applied": true,
                     "fields": applied_fields,
@@ -2420,7 +2463,15 @@ async fn process_metadata(
                     "dropped_field_count": review_warning_count,
                 }),
             )
-            .await
+            .await?
+            {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    "lease lost before completion; another worker owns this job — skipping"
+                );
+            }
+            Ok(())
         } else {
             // manual_review (or dry_run): a single composite review item with all validated
             // suggestions so the operator approves the whole set atomically.
@@ -2434,26 +2485,44 @@ async fn process_metadata(
         // record the warnings in the job result and mark the job complete so
         // the run drains — Paperless gets nothing for this stage but neither
         // does the operator get a useless review pile.
-        complete_job(
+        if !complete_job(
             pool,
             job,
+            lease_owner,
             json!({
                 "skipped": "all metadata fields had validation warnings — no resolvable patch in full_auto",
                 "warnings": composite_warnings,
                 "dropped_field_count": review_warning_count,
             }),
         )
-        .await
+        .await?
+        {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                "lease lost before completion; another worker owns this job — skipping"
+            );
+        }
+        Ok(())
     } else {
-        complete_job(
+        if !complete_job(
             pool,
             job,
+            lease_owner,
             json!({
                 "skipped": "all metadata fields skipped (already-set or model omitted)",
                 "skipped_fields": skipped_fields,
             }),
         )
-        .await
+        .await?
+        {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                "lease lost before completion; another worker owns this job — skipping"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -2616,6 +2685,7 @@ async fn run_consensus_check(
     Ok(outcome)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_patch_result(
     pool: &DbPool,
     paperless: &PaperlessClient,
@@ -2624,6 +2694,7 @@ async fn handle_patch_result(
     patch: DocumentPatch,
     warnings: Vec<String>,
     review_metadata: Option<serde_json::Value>,
+    lease_owner: &str,
 ) -> Result<()> {
     // Effective routing policy is the live runtime workflow mode, not the per-run mode that was
     // stamped onto pipeline_runs at queue time. Per-run mode is captured at queue time from the
@@ -2672,7 +2743,21 @@ async fn handle_patch_result(
     }
     let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
     apply_patch_with_workflow_tags(pool, paperless, settings, job, patch, final_run_stage).await?;
-    complete_job(pool, job, json!({ "applied": true, "warnings": warnings })).await
+    if !complete_job(
+        pool,
+        job,
+        lease_owner,
+        json!({ "applied": true, "warnings": warnings }),
+    )
+    .await?
+    {
+        warn!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            "lease lost before completion; another worker owns this job — skipping"
+        );
+    }
+    Ok(())
 }
 
 async fn apply_patch_with_workflow_tags(
@@ -2754,6 +2839,7 @@ async fn apply_patch_with_workflow_tags(
             },
         )
         .await?;
+        increment_metric_counter(pool, "apply_failure_total", 1).await?;
         return Err(error);
     }
     let duration_ms = apply_started.elapsed().as_millis() as u64;
@@ -2776,6 +2862,7 @@ async fn apply_patch_with_workflow_tags(
         },
     )
     .await?;
+    increment_metric_counter(pool, "apply_success_total", 1).await?;
     Ok(())
 }
 
@@ -3078,6 +3165,7 @@ async fn apply_autopilot_drain_patch(
             },
         )
         .await?;
+        increment_metric_counter(pool, "apply_failure_total", 1).await?;
         return Err(error);
     }
     let duration_ms = apply_started.elapsed().as_millis() as u64;
@@ -3105,6 +3193,7 @@ async fn apply_autopilot_drain_patch(
         },
     )
     .await?;
+    increment_metric_counter(pool, "apply_success_total", 1).await?;
     Ok(())
 }
 
@@ -3444,6 +3533,8 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
             },
         )
         .await?;
+        increment_metric_counter(pool, "selector_runs_total", 1).await?;
+        increment_metric_counter(pool, "selector_documents_queued_total", auto_selected).await?;
         info!(
             auto_selected,
             mode = %settings.workflow.mode,

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -24,13 +24,14 @@ use archivist_db::{
     create_runs_for_documents, create_session, create_user_with_roles, dashboard_bucket_labels,
     dashboard_range_start, document_chat_session_visible, find_api_token, find_session,
     find_user_for_login, get_backlog_counts, get_dashboard_live_status, get_dashboard_stats,
-    get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
-    insert_document_chat_sources, latest_apply_audit_for_run, latest_metadata_artifact_for_run,
-    latest_metadata_run_for_document, list_audit_events, list_document_chat_messages,
-    list_document_chat_sessions, list_inventory, list_prompt_experiments, list_prompt_usage,
-    list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
-    metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
-    paperless_sync_cursor, provider_bucket_entries, queue_missing_pipeline, queue_missing_stage,
+    get_runtime_settings, has_any_user, hash_token, increment_metric_counter,
+    insert_document_chat_message, insert_document_chat_sources, latest_apply_audit_for_run,
+    latest_metadata_artifact_for_run, latest_metadata_run_for_document, list_audit_events,
+    list_document_chat_messages, list_document_chat_sessions, list_inventory,
+    list_prompt_experiments, list_prompt_usage, list_prompts, list_reviews, list_secret_references,
+    list_sessions, list_users, metadata_review_items_for_run,
+    metrics_snapshot as db_metrics_snapshot, migrate, paperless_sync_cursor,
+    provider_bucket_entries, queue_missing_pipeline, queue_missing_stage, read_metric_counters,
     record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
     recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
     rotate_api_token, search_document_chat_candidates, set_user_enabled, set_user_roles,
@@ -513,6 +514,13 @@ async fn readyz(State(state): State<AppState>) -> ApiResult<&'static str> {
 
 async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
     let snapshot = db_metrics_snapshot(&state.pool).await?;
+    // Migrated series now live in `metrics_counters` (real monotone counters that
+    // survive audit retention). Read them here and serve them as `# TYPE counter`
+    // below; anything not migrated keeps its `audit_events`-derived gauge value
+    // from `snapshot`. Missing keys default to 0 (the migration seeds them, so in
+    // practice they are always present once `migrate()` has run at startup).
+    let counters = read_metric_counters(&state.pool).await?;
+    let counter = |name: &str| counters.get(name).copied().unwrap_or(0);
     let body = format!(
         concat!(
             "# HELP paperless_archivist_jobs_queued Queued jobs\n",
@@ -540,25 +548,30 @@ async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
             "# HELP paperless_archivist_audit_events Audit events currently retained\n",
             "# TYPE paperless_archivist_audit_events gauge\n",
             "paperless_archivist_audit_events {}\n",
-            "# HELP paperless_archivist_selector_runs_total Automatic selector runs currently retained in audit log\n",
-            "# TYPE paperless_archivist_selector_runs_total gauge\n",
+            // selector_* and job_retries_* are now real monotone counters backed
+            // by `metrics_counters`, so they survive audit retention pruning and
+            // are safe for rate(). See migration 0031.
+            "# HELP paperless_archivist_selector_runs_total Automatic selector runs (monotone counter)\n",
+            "# TYPE paperless_archivist_selector_runs_total counter\n",
             "paperless_archivist_selector_runs_total {}\n",
-            "# HELP paperless_archivist_selector_documents_queued_total Documents queued by automatic selector (retained in audit log)\n",
-            "# TYPE paperless_archivist_selector_documents_queued_total gauge\n",
+            "# HELP paperless_archivist_selector_documents_queued_total Documents queued by automatic selector (monotone counter)\n",
+            "# TYPE paperless_archivist_selector_documents_queued_total counter\n",
             "paperless_archivist_selector_documents_queued_total {}\n",
-            "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures (retained in audit log)\n",
-            "# TYPE paperless_archivist_job_retries_scheduled_total gauge\n",
+            "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures (monotone counter)\n",
+            "# TYPE paperless_archivist_job_retries_scheduled_total counter\n",
             "paperless_archivist_job_retries_scheduled_total {}\n",
+            // model_errors_total is a live COUNT over the (non-prunable) `jobs`
+            // table; it can decrease as rows are reprocessed, so it stays a gauge.
             "# HELP paperless_archivist_model_errors_total Jobs with model-stage error messages\n",
             "# TYPE paperless_archivist_model_errors_total gauge\n",
             "paperless_archivist_model_errors_total {}\n",
-            // apply_* are also live aggregates over the prunable `audit_events`
-            // table, so they are gauges rather than monotone counters.
-            "# HELP paperless_archivist_apply_success_total Successful Paperless apply operations (retained in audit log)\n",
-            "# TYPE paperless_archivist_apply_success_total gauge\n",
+            // apply_* totals are now real monotone counters backed by
+            // `metrics_counters`, incremented once at each apply event.
+            "# HELP paperless_archivist_apply_success_total Successful Paperless apply operations (monotone counter)\n",
+            "# TYPE paperless_archivist_apply_success_total counter\n",
             "paperless_archivist_apply_success_total {}\n",
-            "# HELP paperless_archivist_apply_failure_total Failed Paperless apply operations (retained in audit log)\n",
-            "# TYPE paperless_archivist_apply_failure_total gauge\n",
+            "# HELP paperless_archivist_apply_failure_total Failed Paperless apply operations (monotone counter)\n",
+            "# TYPE paperless_archivist_apply_failure_total counter\n",
             "paperless_archivist_apply_failure_total {}\n",
             "# HELP paperless_archivist_apply_latency_ms_sum Sum of observed Paperless apply latency in milliseconds (retained in audit log)\n",
             "# TYPE paperless_archivist_apply_latency_ms_sum gauge\n",
@@ -568,7 +581,25 @@ async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
             "paperless_archivist_apply_latency_ms_count {}\n",
             "# HELP paperless_archivist_apply_latency_ms_p95 Lifetime p95 of observed Paperless apply latency in milliseconds (over retained audit events)\n",
             "# TYPE paperless_archivist_apply_latency_ms_p95 gauge\n",
-            "paperless_archivist_apply_latency_ms_p95 {}\n"
+            "paperless_archivist_apply_latency_ms_p95 {}\n",
+            // Per-stage latency gauges sourced from ai_artifacts.duration_ms over
+            // a recent 24h window (see metrics_snapshot). They can decrease as the
+            // window rolls forward, so they are gauges, not counters.
+            "# HELP paperless_archivist_ocr_latency_ms_count Count of OCR-stage latency samples observed in the last 24h\n",
+            "# TYPE paperless_archivist_ocr_latency_ms_count gauge\n",
+            "paperless_archivist_ocr_latency_ms_count {}\n",
+            "# HELP paperless_archivist_ocr_latency_ms_p95 p95 of OCR-stage latency in milliseconds over the last 24h\n",
+            "# TYPE paperless_archivist_ocr_latency_ms_p95 gauge\n",
+            "paperless_archivist_ocr_latency_ms_p95 {}\n",
+            "# HELP paperless_archivist_metadata_latency_ms_count Count of metadata-stage latency samples observed in the last 24h\n",
+            "# TYPE paperless_archivist_metadata_latency_ms_count gauge\n",
+            "paperless_archivist_metadata_latency_ms_count {}\n",
+            "# HELP paperless_archivist_metadata_latency_ms_p95 p95 of metadata-stage latency in milliseconds over the last 24h\n",
+            "# TYPE paperless_archivist_metadata_latency_ms_p95 gauge\n",
+            "paperless_archivist_metadata_latency_ms_p95 {}\n",
+            "# HELP paperless_archivist_oldest_queued_age_seconds Age in seconds of the oldest queued job (now() - min(run_after) over status='queued')\n",
+            "# TYPE paperless_archivist_oldest_queued_age_seconds gauge\n",
+            "paperless_archivist_oldest_queued_age_seconds {}\n"
         ),
         snapshot.jobs_queued,
         snapshot.jobs_running,
@@ -577,15 +608,20 @@ async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
         snapshot.reviews_pending,
         snapshot.runs_active,
         snapshot.audit_events,
-        snapshot.selector_runs_total,
-        snapshot.selector_documents_queued_total,
-        snapshot.job_retries_scheduled_total,
+        counter("selector_runs_total"),
+        counter("selector_documents_queued_total"),
+        counter("job_retries_scheduled_total"),
         snapshot.model_errors_total,
-        snapshot.apply_success_total,
-        snapshot.apply_failure_total,
+        counter("apply_success_total"),
+        counter("apply_failure_total"),
         snapshot.apply_latency_ms_sum,
         snapshot.apply_latency_ms_count,
-        snapshot.apply_latency_ms_p95
+        snapshot.apply_latency_ms_p95,
+        snapshot.ocr_latency_ms_count,
+        snapshot.ocr_latency_ms_p95,
+        snapshot.metadata_latency_ms_count,
+        snapshot.metadata_latency_ms_p95,
+        snapshot.oldest_queued_age_seconds
     );
     let mut response = body.into_response();
     response.headers_mut().insert(
@@ -1096,6 +1132,9 @@ async fn verify_paperless_credentials(
         // request to an internal address after the SSRF guard validated only
         // the originally supplied URL.
         .redirect(reqwest::redirect::Policy::none())
+        // Pin the validated IP at connect time to close the DNS-rebinding
+        // TOCTOU on the operator-configured Paperless host.
+        .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
         .build()
         .context("build Paperless login HTTP client")?;
     let response = client
@@ -1693,13 +1732,19 @@ async fn notification_webhook_url(state: &AppState, settings: &RuntimeSettings) 
 /// Parse a URL provided by an administrator and reject targets that would
 /// allow Server-Side Request Forgery (SSRF) against the host network. The
 /// caller is expected to use this on every outbound "tester" endpoint where
-/// an admin can supply an arbitrary URL.
+/// an admin can supply an arbitrary URL, for an early, friendly rejection.
+///
+/// This is the up-front check only. The connection-time guard that actually
+/// closes the DNS-rebinding TOCTOU lives in `archivist_core::ssrf` and is
+/// installed on every outbound client (webhook, Paperless, AI providers) via
+/// `SsrfGuardResolver`, so the protection also covers the worker data path
+/// (download / AI calls), not just these test handlers.
 ///
 /// Rejections:
 ///  * non-http/https schemes
 ///  * URLs containing `user:pass@` userinfo
-///  * URLs whose host resolves (DNS) to a loopback, link-local, private
-///    (RFC1918), shared-address (RFC6598), or unique-local (RFC4193) address
+///  * URLs whose host resolves (DNS) to a loopback, link-local, unspecified,
+///    broadcast, or multicast address
 ///
 /// Returns the parsed `Url` on success.
 async fn validate_outbound_url(raw: &str) -> Result<Url, ApiError> {
@@ -1730,84 +1775,13 @@ async fn validate_outbound_url(raw: &str) -> Result<Url, ApiError> {
         return Err(ApiError::bad_request("host did not resolve to any address"));
     }
     for ip in &ips {
-        if is_ssrf_dangerous_ip(*ip) {
+        if archivist_core::ssrf::is_ssrf_dangerous_ip(*ip) {
             return Err(ApiError::bad_request(
                 "URL resolves to a loopback, link-local, or otherwise unroutable address",
             ));
         }
     }
     Ok(parsed)
-}
-
-/// Decide whether an IP must be hard-rejected for admin-supplied "test"
-/// URLs (Paperless health probe, Ollama provider test, generic notification
-/// webhook test).
-///
-/// The threat model here is narrow on purpose:
-///
-/// - These endpoints require `ReadSettings`; the operator who can call them
-///   already controls the settings document and is trusted to point the
-///   integration at real internal services.
-/// - Paperless Archivist is routinely deployed inside Kubernetes / Docker
-///   Compose / on-prem networks where Paperless-ngx and Ollama live on
-///   private addresses (10/8, 172.16/12, 192.168/16, RFC6598 100.64/10,
-///   RFC4193 fc00::/7). Rejecting those would make the in-UI "Test" buttons
-///   unusable in every realistic deployment.
-///
-/// What we DO still reject — the addresses that have no legitimate operator
-/// use case and that an attacker who briefly steals a session could abuse:
-///
-/// - Loopback (127.0.0.0/8, ::1)
-/// - Link-local incl. cloud metadata IMDS (169.254.0.0/16, fe80::/10)
-/// - Unspecified (0.0.0.0, ::)
-/// - Broadcast (255.255.255.255)
-/// - Multicast
-///
-/// See `docs/SECURITY_DESIGN.md` section 4.3 for the full rationale.
-fn is_ssrf_dangerous_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_ssrf_dangerous_ipv4(v4),
-        IpAddr::V6(v6) => is_ssrf_dangerous_ipv6(v6),
-    }
-}
-
-fn is_ssrf_dangerous_ipv4(ip: Ipv4Addr) -> bool {
-    // Hard reject — no legitimate operator target.
-    if ip.is_loopback() || ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
-        return true;
-    }
-    // Link-local 169.254/16 includes the cloud-metadata IMDS endpoint
-    // (169.254.169.254). Keep rejecting — leaking cloud IAM creds via a
-    // ghost "test" request would be catastrophic, and no real integration
-    // target lives there.
-    if ip.is_link_local() {
-        return true;
-    }
-    false
-}
-
-fn is_ssrf_dangerous_ipv6(ip: Ipv6Addr) -> bool {
-    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-        return true;
-    }
-    // Mapped IPv4: re-evaluate the embedded v4 so an attacker can't smuggle
-    // 127.0.0.1 as ::ffff:127.0.0.1 / ::127.0.0.1 past the loopback check.
-    if let Some(v4) = ip.to_ipv4_mapped()
-        && is_ssrf_dangerous_ipv4(v4)
-    {
-        return true;
-    }
-    if let Some(v4) = ip.to_ipv4()
-        && is_ssrf_dangerous_ipv4(v4)
-    {
-        return true;
-    }
-    let segments = ip.segments();
-    // Link-local fe80::/10 — same metadata/IMDS reasoning as v4.
-    if (segments[0] & 0xffc0) == 0xfe80 {
-        return true;
-    }
-    false
 }
 
 async fn send_notification_webhook(webhook_url: &str, payload: Value) -> Result<()> {
@@ -1817,6 +1791,10 @@ async fn send_notification_webhook(webhook_url: &str, payload: Value) -> Result<
         // 169.254.169.254 / loopback) can't bypass the SSRF guard that only
         // validated the originally supplied URL.
         .redirect(reqwest::redirect::Policy::none())
+        // Pin the validated IP at connect time: the SSRF resolver re-checks the
+        // resolved address right before dialing, closing the DNS-rebinding
+        // TOCTOU between `validate_outbound_url` and the actual request.
+        .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
         .build()?
         .post(webhook_url)
         .json(&payload)
@@ -5466,6 +5444,7 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
             },
         )
         .await?;
+        increment_metric_counter(&state.pool, "apply_failure_total", 1).await?;
         return Err(error);
     }
     let duration_ms = apply_started.elapsed().as_millis() as u64;
@@ -5492,6 +5471,7 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
         },
     )
     .await?;
+    increment_metric_counter(&state.pool, "apply_success_total", 1).await?;
     archivist_db::mark_review_applied(&state.pool, review_id, actor_id).await?;
     info!(
         %review_id,
@@ -5700,27 +5680,37 @@ async fn sync_paperless_inventory(
             tags.push(client.ensure_tag(workflow_tag).await?);
         }
     }
-    let correspondents = client.list_correspondents().await?;
-    let document_types = client.list_document_types().await?;
-    let custom_fields = client.list_custom_fields().await.unwrap_or_default();
     let cursor = paperless_sync_cursor(pool, &archive_name).await?;
     let delta_cursor = cursor
         .map(|cursor| cursor - Duration::minutes(settings.paperless.delta_sync_overlap_minutes));
-    let (sync_mode, documents) = if settings.paperless.delta_sync_enabled {
-        if let Some(cursor) = delta_cursor {
-            match client
-                .list_documents_modified_since(&cursor.to_rfc3339())
-                .await
-            {
-                Ok(documents) => ("delta", documents),
-                Err(_) => ("full_after_delta_error", client.list_documents().await?),
+    // These four catalog fetches are independent GETs against Paperless; run
+    // them concurrently rather than serially. The tag list above must stay
+    // sequential because the workflow-tag loop mutates it in place. custom_fields
+    // keeps its best-effort `unwrap_or_default` semantics inside the join.
+    let (correspondents, document_types, custom_fields, (sync_mode, documents)) = tokio::try_join!(
+        client.list_correspondents(),
+        client.list_document_types(),
+        async { anyhow::Ok(client.list_custom_fields().await.unwrap_or_default()) },
+        async {
+            if settings.paperless.delta_sync_enabled {
+                if let Some(cursor) = delta_cursor {
+                    match client
+                        .list_documents_modified_since(&cursor.to_rfc3339())
+                        .await
+                    {
+                        Ok(documents) => anyhow::Ok(("delta", documents)),
+                        Err(_) => {
+                            anyhow::Ok(("full_after_delta_error", client.list_documents().await?))
+                        }
+                    }
+                } else {
+                    anyhow::Ok(("full_initial", client.list_documents().await?))
+                }
+            } else {
+                anyhow::Ok(("full", client.list_documents().await?))
             }
-        } else {
-            ("full_initial", client.list_documents().await?)
-        }
-    } else {
-        ("full", client.list_documents().await?)
-    };
+        },
+    )?;
 
     let mut tx = pool.begin().await?;
     for tag in &tags {
@@ -5747,12 +5737,17 @@ async fn sync_paperless_inventory(
             .await?;
     }
 
+    // O(1) id→name lookups: building this map once avoids the previous
+    // O(documents × tags) nested linear scan, which was pure CPU burned inside
+    // the sync transaction on instances with many tags/documents.
+    let tag_names_by_id: HashMap<i32, &str> =
+        tags.iter().map(|tag| (tag.id, tag.name.as_str())).collect();
     for document in &documents {
         let tag_names = document
             .tags
             .iter()
-            .filter_map(|id| tags.iter().find(|tag| tag.id == *id))
-            .map(|tag| tag.name.clone())
+            .filter_map(|id| tag_names_by_id.get(id).copied())
+            .map(|name| name.to_owned())
             .collect::<Vec<_>>();
         upsert_inventory_item(
             &mut tx,
