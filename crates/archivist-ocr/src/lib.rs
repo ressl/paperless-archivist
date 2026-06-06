@@ -1,10 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use tokio::process::Command;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const PDF_RENDER_DPI: u16 = 120;
+/// Base wall-clock budget for a `pdftoppm` invocation.
+const PDF_RENDER_BASE_BUDGET: Duration = Duration::from_secs(30);
+/// Additional budget granted per requested page to allow large documents to render.
+const PDF_RENDER_PER_PAGE_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
@@ -59,7 +64,10 @@ async fn render_pdf_with_pdftoppm(
         .await
         .context("write OCR input PDF")?;
 
-    let status = Command::new("pdftoppm")
+    let render_budget =
+        PDF_RENDER_BASE_BUDGET + PDF_RENDER_PER_PAGE_BUDGET.saturating_mul(u32::from(page_limit));
+
+    let mut child = Command::new("pdftoppm")
         .arg("-png")
         .arg("-r")
         .arg(PDF_RENDER_DPI.to_string())
@@ -69,9 +77,23 @@ async fn render_pdf_with_pdftoppm(
         .arg(page_limit.to_string())
         .arg(&input)
         .arg(&output_prefix)
-        .status()
-        .await
+        .kill_on_drop(true)
+        .spawn()
         .context("run pdftoppm; install poppler-utils in the runtime image")?;
+
+    let status = match tokio::time::timeout(render_budget, child.wait()).await {
+        Ok(result) => result.context("wait for pdftoppm")?,
+        Err(_) => {
+            // Budget exceeded (e.g. corrupt/encrypted/bomb PDF). Kill the child so it
+            // does not linger as an orphan and surface a transient error for retry.
+            if let Err(error) = child.kill().await {
+                warn!(%error, "failed to kill pdftoppm after render timeout");
+            }
+            return Err(anyhow!(
+                "pdftoppm exceeded render budget of {render_budget:?}"
+            ));
+        }
+    };
 
     if !status.success() {
         return Err(anyhow!("pdftoppm exited with {status}"));
