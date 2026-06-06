@@ -23,17 +23,17 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
     .catch((err) => setError(localizedErrorMessage(err, t)));
   return (
     <section className="page">
-      <PageHeader title="Audit Log" />
+      <PageHeader title={t('audit.title')} />
       <div className="toolbar">
         <a className="button-link" href="/api/audit/export.csv">
-          <FileText size={16} /> Export CSV
+          <FileText size={16} /> {t('audit.export_csv')}
         </a>
         <button onClick={refreshIntegrity}>
-          <Shield size={16} /> Verify chain
+          <Shield size={16} /> {t('audit.verify_chain')}
         </button>
         <ActionButton
           icon={<Archive />}
-          label="Apply retention"
+          label={t('audit.apply_retention')}
           busy={busy}
           onClick={() => run(setBusy, setError, () => api.applyAuditRetention().then((result) => {
             setRetentionResult(result);
@@ -48,27 +48,30 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
         <div className={`connection-feedback ${integrity.ok ? 'success' : 'error'}`}>
           <header>
             {integrity.ok ? <Check size={16} /> : <X size={16} />}
-            <strong>{integrity.ok ? 'Audit chain verified' : 'Audit chain problem'}</strong>
+            <strong>{integrity.ok ? t('audit.chain_verified') : t('audit.chain_problem')}</strong>
           </header>
           <p>
-            Checked {formatNumber(integrity.checked_events)} hashed events.
-            {integrity.legacy_events > 0 ? ` ${formatNumber(integrity.legacy_events)} legacy events predate hash-chain tracking.` : ''}
+            {t('audit.checked_events', { count: formatNumber(integrity.checked_events) })}
+            {integrity.legacy_events > 0 ? ` ${t('audit.legacy_events', { count: formatNumber(integrity.legacy_events) })}` : ''}
             {integrity.broken_reason ? ` ${integrity.broken_reason}` : ''}
           </p>
         </div>
       )}
       {retentionResult && (
         <div className="connection-feedback success">
-          <header><Check size={16} /><strong>Retention applied</strong></header>
+          <header><Check size={16} /><strong>{t('audit.retention_applied')}</strong></header>
           <p>
-            Deleted {formatNumber(retentionResult.ai_artifacts_deleted)} AI artifacts and {formatNumber(retentionResult.audit_events_deleted)} audit events outside retention.
+            {t('audit.retention_summary', {
+              artifacts: formatNumber(retentionResult.ai_artifacts_deleted),
+              events: formatNumber(retentionResult.audit_events_deleted)
+            })}
           </p>
         </div>
       )}
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>Time</th><th>Event</th><th>Actor</th><th>Document</th><th>Outcome</th><th>Hash</th></tr>
+            <tr><th>{t('audit.col_time')}</th><th>{t('audit.col_event')}</th><th>{t('audit.col_actor')}</th><th>{t('audit.col_document')}</th><th>{t('audit.col_outcome')}</th><th>{t('audit.col_hash')}</th></tr>
           </thead>
           <tbody>
             {items.map((item) => (
@@ -78,7 +81,7 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
                 <td>{item.actor_type}</td>
                 <td>{item.paperless_document_id || '-'}</td>
                 <td><Status value={item.outcome} /></td>
-                <td>{item.event_hash ? `${item.event_hash.slice(0, 12)}...` : 'legacy'}</td>
+                <td>{item.event_hash ? `${item.event_hash.slice(0, 12)}...` : t('audit.hash_legacy')}</td>
               </tr>
             ))}
           </tbody>

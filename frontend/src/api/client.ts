@@ -513,6 +513,16 @@ export type InventoryItem = {
   debug_context?: WorkflowDebugContext | null;
 };
 
+export type DuplicateDocument = {
+  paperless_document_id: number;
+  title?: string | null;
+};
+
+export type DuplicateGroup = {
+  hash: string;
+  documents: DuplicateDocument[];
+};
+
 export type WorkflowDebugContext = {
   selector_reason?: string | null;
   workflow_mode?: ProcessingMode | string | null;
@@ -651,6 +661,16 @@ export type PromptUsage = {
   avg_duration_ms: number;
   last_provider?: string | null;
   last_model?: string | null;
+};
+
+export type PromptExperiment = {
+  group: string;
+  total: number;
+  approved: number;
+  rejected: number;
+  edited: number;
+  applied: number;
+  mean_confidence?: number | null;
 };
 
 export type PromptTestResponse = {
@@ -795,10 +815,17 @@ export const api = {
       `/api/inventory?${qs.toString()}`
     );
   },
+  inventoryDuplicates: () =>
+    request<{ groups: DuplicateGroup[]; paperless_base: string }>('/api/inventory/duplicates'),
   inventoryMetadataTrace: (documentId: number) =>
     request<MetadataTrace>(`/api/inventory/${documentId}/metadata-trace`),
   queueOcr: () => request<{ queued: number }>('/api/batches/ocr', { method: 'POST' }),
   queueFull: () => request<{ queued: number }>('/api/batches/full', { method: 'POST' }),
+  bulkRerun: (document_ids: number[], stages: Stage[]) =>
+    request<{ queued: number }>('/api/batches/rerun', {
+      method: 'POST',
+      body: JSON.stringify({ document_ids, stages })
+    }),
   triggerDocument: (paperless_document_id: number, stages: Stage[], mode: ProcessingMode) =>
     request<{ run_id: string }>(`/api/documents/${paperless_document_id}/trigger`, {
       method: 'POST',
@@ -822,7 +849,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input)
     }),
-  reviews: () => request<{ items: ReviewItem[] }>('/api/reviews?status=pending&limit=100'),
+  reviews: (limit = 100) =>
+    request<{ items: ReviewItem[]; total: number; has_more: boolean }>(
+      `/api/reviews?status=pending&limit=${encodeURIComponent(String(limit))}`
+    ),
   approveReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/approve`, { method: 'POST' }),
   rejectReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/reject`, { method: 'POST' }),
   autoFixReviewPreview: (limit?: number) =>
@@ -884,6 +914,7 @@ export const api = {
   applyAuditRetention: () => request<RetentionResult>('/api/audit/retention/apply', { method: 'POST' }),
   prompts: () => request<{ items: Prompt[] }>('/api/prompts'),
   promptUsage: () => request<{ items: PromptUsage[] }>('/api/prompts/usage'),
+  promptExperiments: () => request<{ items: PromptExperiment[] }>('/api/prompts/experiments'),
   createPrompt: (input: { stage: Stage; name: string; content: string; output_schema?: unknown; activate?: boolean }) =>
     request<{ id: string }>('/api/prompts', {
       method: 'POST',

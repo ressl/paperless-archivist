@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Check, ListChecks, Save, Wrench, X } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ListChecks, Save, Wrench, X } from 'lucide-react';
 import { api, ReviewItem, Stage } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
@@ -17,19 +17,42 @@ export type ReviewEditState = {
   created?: string;
 };
 
+// One Load-More step. The backend clamps `limit` to 500, so beyond that we cannot
+// reach further pending items without a paginated (offset) endpoint.
+const REVIEW_PAGE_SIZE = 100;
+const REVIEW_MAX_LIMIT = 500;
+
 export function Reviews({ setError }: { setError: (error: string | null) => void }) {
   const { t } = useI18n();
   const [items, setItems] = useState<ReviewItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [serverHasMore, setServerHasMore] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [limit, setLimit] = useState(REVIEW_PAGE_SIZE);
   const load = useCallback(
-    () => api.reviews().then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t))),
-    [setError, t]
+    () =>
+      api
+        .reviews(limit)
+        .then((data) => {
+          setItems(data.items);
+          setTotal(data.total);
+          setServerHasMore(data.has_more);
+        })
+        .catch((err) => setError(localizedErrorMessage(err, t))),
+    [limit, setError, t]
   );
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The server reports whether more pending items exist beyond this page; we can
+  // only keep loading until we hit the backend's hard cap on `limit`.
+  const hasMore = serverHasMore && limit < REVIEW_MAX_LIMIT;
+  const loadMore = useCallback(() => {
+    setLimit((current) => Math.min(current + REVIEW_PAGE_SIZE, REVIEW_MAX_LIMIT));
+  }, []);
 
   const toggleSelected = useCallback((id: string) => {
     setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
@@ -100,6 +123,7 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
         <button disabled={busy || items.length === 0} onClick={() => void autoFixAll()} title={t('review.auto_fix_all')}>
           <Wrench size={16} /> {t('review.auto_fix_all')}
         </button>
+        <small className="field-hint">{t('reviews.count', { shown: items.length, total })}</small>
       </div>
       <div className="review-list">
         {items.map((item) => (
@@ -115,6 +139,13 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
           />
         ))}
       </div>
+      {hasMore && (
+        <div className="toolbar">
+          <button disabled={busy} onClick={loadMore}>
+            <ChevronDown size={16} /> {t('inventory.load_more')}
+          </button>
+        </div>
+      )}
     </section>
   );
 }

@@ -37,10 +37,14 @@ spec:
                 name: paperless-archivist-secrets
           livenessProbe:
             exec:
-              command: ["/bin/sh", "-c", "test -x /usr/local/bin/archivist-worker"]
+              command:
+                - /bin/sh
+                - -c
+                - "test $(( $(date +%s) - $(cat /tmp/archivist-worker.heartbeat 2>/dev/null || echo 0) )) -lt 120"
             initialDelaySeconds: 20
             periodSeconds: 30
             timeoutSeconds: 3
+            failureThreshold: 3
           resources:
             requests:
               cpu: 500m

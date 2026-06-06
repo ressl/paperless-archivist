@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, GitCompare, History, Info, Play, RotateCcw, Save } from 'lucide-react';
-import { api, Prompt, PromptTestResponse, PromptUsage, Stage } from '../api/client';
+import { api, Prompt, PromptExperiment, PromptTestResponse, PromptUsage, Stage } from '../api/client';
 import { promptStageHelp, promptStageOrder, type PromptStageHelp } from '../data/promptHelp';
 import { useI18n } from '../i18n/I18nProvider';
 import { PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
@@ -10,6 +10,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const { t, formatDateTime } = useI18n();
   const [items, setItems] = useState<Prompt[]>([]);
   const [usage, setUsage] = useState<PromptUsage[]>([]);
+  const [experiments, setExperiments] = useState<PromptExperiment[]>([]);
   const [selectedStage, setSelectedStage] = useState<Stage>('ocr');
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [comparePromptId, setComparePromptId] = useState<string | null>(null);
@@ -59,12 +60,14 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const load = async () => {
     setLoading(true);
     try {
-      const [promptData, usageData] = await Promise.all([
+      const [promptData, usageData, experimentData] = await Promise.all([
         api.prompts(),
-        api.promptUsage().catch(() => ({ items: [] as PromptUsage[] }))
+        api.promptUsage().catch(() => ({ items: [] as PromptUsage[] })),
+        api.promptExperiments().catch(() => ({ items: [] as PromptExperiment[] }))
       ]);
       setItems(promptData.items);
       setUsage(usageData.items);
+      setExperiments(experimentData.items);
     } catch (err) {
       setError(localizedErrorMessage(err, t, 'Could not load prompts'));
     } finally {
@@ -400,8 +403,52 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
           )}
         </section>
       </div>
+      <section className="prompt-experiment-card">
+        <header className="prompt-section-title">
+          <strong>{t('prompts.ab.title')}</strong>
+          <GitCompare size={16} />
+        </header>
+        <p className="field-hint">{t('prompts.ab.description')}</p>
+        {experiments.length === 0 ? (
+          <p className="field-hint">{t('prompts.ab.empty')}</p>
+        ) : (
+          <table className="prompt-experiment-table">
+            <thead>
+              <tr>
+                <th>{t('prompts.ab.group')}</th>
+                <th>{t('prompts.ab.total')}</th>
+                <th>{t('prompts.ab.approved')}</th>
+                <th>{t('prompts.ab.rejected')}</th>
+                <th>{t('prompts.ab.edited')}</th>
+                <th>{t('prompts.ab.applied')}</th>
+                <th>{t('prompts.ab.approval_rate')}</th>
+                <th>{t('prompts.ab.mean_confidence')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {experiments.map((row) => (
+                <tr key={row.group}>
+                  <td><strong>{row.group}</strong></td>
+                  <td>{row.total}</td>
+                  <td>{row.approved}</td>
+                  <td>{row.rejected}</td>
+                  <td>{row.edited}</td>
+                  <td>{row.applied}</td>
+                  <td>{formatRate(row.approved, row.total)}</td>
+                  <td>{row.mean_confidence == null ? '-' : `${(row.mean_confidence * 100).toFixed(1)}%`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
     </section>
   );
+}
+
+function formatRate(part: number, total: number) {
+  if (total <= 0) return '-';
+  return `${((part / total) * 100).toFixed(1)}%`;
 }
 
 function promptOptionLabel(prompt: Prompt) {

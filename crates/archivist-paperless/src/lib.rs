@@ -45,6 +45,18 @@ impl PaperlessError {
             Self::Client { .. } | Self::Protocol(_) => false,
         }
     }
+
+    /// Build a typed error from an unsuccessful HTTP status. Any `5xx` —
+    /// including non-standard codes such as Cloudflare 520/521/525 or
+    /// 507/508 — is treated as a transient server error so the worker
+    /// retries instead of mis-classifying it as permanent.
+    fn from_status(status: u16, body: String) -> Self {
+        if (500..600).contains(&status) {
+            Self::Server { status, body }
+        } else {
+            Self::Client { status, body }
+        }
+    }
 }
 
 impl From<reqwest::Error> for PaperlessError {
@@ -72,10 +84,17 @@ impl From<reqwest::Error> for PaperlessError {
     }
 }
 
+/// Multiplier applied to the configured (JSON-tuned) request timeout to derive
+/// the per-request budget for full-body original downloads. The base timeout is
+/// sized for small JSON calls; a large scanned PDF streamed over a slow link
+/// needs considerably more headroom before it should be considered transient.
+const DOWNLOAD_TIMEOUT_MULTIPLIER: u32 = 10;
+
 #[derive(Clone)]
 pub struct PaperlessClient {
     base_url: Url,
     client: reqwest::Client,
+    download_timeout: Duration,
 }
 
 impl PaperlessClient {
@@ -95,11 +114,23 @@ impl PaperlessClient {
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_seconds))
+            // Defense-in-depth against SSRF: never follow redirects. Paperless API
+            // calls all use trailing-slash URLs so DRF does not 301 them; refusing
+            // redirects stops a 3xx to a loopback/metadata address from being
+            // chased after the base URL was validated (#177).
+            .redirect(reqwest::redirect::Policy::none())
             .default_headers(headers)
             .build()
             .context("build Paperless HTTP client")?;
 
-        Ok(Self { base_url, client })
+        let download_timeout =
+            Duration::from_secs(timeout_seconds.saturating_mul(DOWNLOAD_TIMEOUT_MULTIPLIER as u64));
+
+        Ok(Self {
+            base_url,
+            client,
+            download_timeout,
+        })
     }
 
     pub async fn test_connection(&self) -> Result<PaperlessStatus> {
@@ -164,20 +195,25 @@ impl PaperlessClient {
 
     pub async fn download_original(&self, id: i32) -> Result<Bytes> {
         let url = self.url(&format!("api/documents/{id}/download/"))?;
+        // Override the JSON-tuned client timeout with a larger budget so big
+        // originals streamed over slow links are not aborted prematurely.
         let response = self
             .client
             .get(url)
+            .timeout(self.download_timeout)
             .send()
             .await
-            .context("download Paperless document")?;
+            .map_err(PaperlessError::from)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(anyhow!("Paperless download returned {status}"));
+            let body = response.text().await.unwrap_or_default();
+            return Err(PaperlessError::from_status(status.as_u16(), body).into());
         }
         response
             .bytes()
             .await
-            .context("read Paperless document bytes")
+            .map_err(PaperlessError::from)
+            .map_err(Into::into)
     }
 
     pub async fn patch_document(
@@ -195,11 +231,11 @@ impl PaperlessClient {
             .json(patch)
             .send()
             .await
-            .context("patch Paperless document")?;
+            .map_err(PaperlessError::from)?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Paperless patch returned {status}: {body}"));
+            return Err(PaperlessError::from_status(status.as_u16(), body).into());
         }
         response
             .json()
@@ -208,10 +244,13 @@ impl PaperlessClient {
     }
 
     pub async fn ensure_tag(&self, name: &str) -> Result<PaperlessTag> {
+        // Unicode-aware case folding so e.g. "Ärzte" and "ärzte" collapse to the
+        // same tag instead of creating a near-duplicate in the German catalog.
+        let wanted = name.to_lowercase();
         let tags = self.list_tags().await?;
         if let Some(tag) = tags
             .into_iter()
-            .find(|tag| tag.name.eq_ignore_ascii_case(name))
+            .find(|tag| tag.name.to_lowercase() == wanted)
         {
             return Ok(tag);
         }
@@ -222,11 +261,23 @@ impl PaperlessClient {
             .json(&serde_json::json!({ "name": name }))
             .send()
             .await
-            .context("create Paperless tag")?;
+            .map_err(PaperlessError::from)?;
         let status = response.status();
         if !status.is_success() {
+            // A concurrent worker may have created the tag between our list and
+            // POST, in which case Paperless rejects the duplicate name with a
+            // 4xx. Refetch and reuse the existing tag instead of failing.
+            if status.is_client_error()
+                && let Some(tag) = self
+                    .list_tags()
+                    .await?
+                    .into_iter()
+                    .find(|tag| tag.name.to_lowercase() == wanted)
+            {
+                return Ok(tag);
+            }
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Paperless tag create returned {status}: {body}"));
+            return Err(PaperlessError::from_status(status.as_u16(), body).into());
         }
         response
             .json()
@@ -278,24 +329,43 @@ impl PaperlessClient {
     where
         T: for<'de> Deserialize<'de>,
     {
+        // Hard cap on pages followed. Paperless paginates at <= 100 items/page,
+        // so this tolerates millions of objects while still bounding a server
+        // that hands out a cyclic or never-terminating `next` cursor.
+        const MAX_PAGES: usize = 100_000;
+
         let mut items = Vec::new();
 
-        loop {
+        for _ in 0..MAX_PAGES {
             let page: PaperlessPage<T> = self.get_json(url.clone()).await?;
             items.extend(page.results);
             let Some(next) = page.next else {
-                break;
+                return Ok(items);
             };
             let next_url = Url::parse(&next)
                 .or_else(|_| self.base_url.join(&next))
                 .context("parse Paperless next page URL")?;
             if next_url.origin() != self.base_url.origin() {
-                return Err(anyhow!("Paperless pagination next URL changed origin"));
+                return Err(PaperlessError::Protocol(
+                    "Paperless pagination next URL changed origin".to_owned(),
+                )
+                .into());
+            }
+            // Guard against a non-advancing cursor that would otherwise loop
+            // forever while `items` grows without bound.
+            if next_url == url {
+                return Err(PaperlessError::Protocol(
+                    "Paperless pagination next URL did not advance".to_owned(),
+                )
+                .into());
             }
             url = next_url;
         }
 
-        Ok(items)
+        Err(
+            PaperlessError::Protocol(format!("Paperless pagination exceeded {MAX_PAGES} pages"))
+                .into(),
+        )
     }
 
     async fn get_json<T>(&self, url: Url) -> Result<T>
@@ -307,11 +377,11 @@ impl PaperlessClient {
             .get(url)
             .send()
             .await
-            .context("Paperless GET request")?;
+            .map_err(PaperlessError::from)?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Paperless GET returned {status}: {body}"));
+            return Err(PaperlessError::from_status(status.as_u16(), body).into());
         }
         response.json().await.context("decode Paperless JSON")
     }

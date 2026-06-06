@@ -9,9 +9,10 @@ use archivist_core::{
     DashboardComparison, DashboardCostBucket, DashboardLiveFailure, DashboardLiveJob,
     DashboardLiveLlmEvent, DashboardLiveRun, DashboardLiveStatus, DashboardRange,
     DashboardStageStatus, DashboardStats, DashboardStatusCount, DashboardTimeBucket,
-    DocumentChatSource, DocumentInventoryItem, LanguageDetection, NeedsAttentionItem,
-    ProcessingMode, ProviderUsageStats, QualityStats, Role, RuntimeSettings,
-    ServiceProcessingStatus, Stage, WorkflowRules, WorkflowSafetyStatus, redact_sensitive_json,
+    DocumentChatSource, DocumentInventoryItem, DuplicateDocument, DuplicateGroup,
+    LanguageDetection, NeedsAttentionItem, ProcessingMode, ProviderUsageStats, QualityStats, Role,
+    RuntimeSettings, ServiceProcessingStatus, Stage, WorkflowRules, WorkflowSafetyStatus,
+    redact_sensitive_json,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -225,6 +226,20 @@ pub struct PromptUsageRecord {
     pub avg_duration_ms: f64,
     pub last_provider: Option<String>,
     pub last_model: Option<String>,
+}
+
+/// One row of the prompt A/B experiment evaluation: the review-outcome
+/// breakdown for all metadata artifacts stamped with a given
+/// `prompt_experiment_group` (see [`get_active_prompt_with_experiment`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptExperimentRecord {
+    pub group: String,
+    pub total: i64,
+    pub approved: i64,
+    pub rejected: i64,
+    pub edited: i64,
+    pub applied: i64,
+    pub mean_confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1532,6 +1547,87 @@ pub async fn list_prompt_usage(pool: &DbPool) -> Result<Vec<PromptUsageRecord>> 
         .collect()
 }
 
+/// Aggregate prompt A/B-experiment outcomes by `prompt_experiment_group`.
+///
+/// The group label is stamped into `ai_artifacts.normalized_output ->>
+/// 'prompt_experiment_group'` by the metadata worker. We dedupe to the latest
+/// artifact per (run, job) — guarding against retries — and join those jobs to
+/// their `review_items` to count review statuses per group. `mean_confidence`
+/// is the average of the per-artifact mean over the available sub-suggestion
+/// confidences (title, document_type, correspondent, document_date, tags,
+/// fields). Read-only; no migration.
+pub async fn list_prompt_experiments(pool: &DbPool) -> Result<Vec<PromptExperimentRecord>> {
+    let rows = sqlx::query(
+        r#"
+        with art_groups as (
+            select distinct on (run_id, job_id)
+                   run_id,
+                   job_id,
+                   normalized_output->>'prompt_experiment_group' as grp,
+                   (
+                     select avg(c)
+                       from (values
+                         ((normalized_output#>>'{title,confidence}')::double precision),
+                         ((normalized_output#>>'{document_type,confidence}')::double precision),
+                         ((normalized_output#>>'{correspondent,confidence}')::double precision),
+                         ((normalized_output#>>'{document_date,confidence}')::double precision),
+                         ((normalized_output#>>'{tags,confidence}')::double precision),
+                         ((normalized_output#>>'{fields,confidence}')::double precision)
+                       ) as t(c)
+                      where c is not null
+                   ) as conf
+              from ai_artifacts
+             where normalized_output ? 'prompt_experiment_group'
+               and normalized_output->>'prompt_experiment_group' is not null
+             order by run_id, job_id, created_at desc
+        ),
+        counts as (
+            select ag.grp,
+                   count(ri.id) as total,
+                   count(ri.id) filter (where ri.status = 'approved') as approved,
+                   count(ri.id) filter (where ri.status = 'rejected') as rejected,
+                   count(ri.id) filter (where ri.status = 'edited') as edited,
+                   count(ri.id) filter (where ri.status = 'applied') as applied
+              from art_groups ag
+              left join review_items ri
+                on ri.run_id = ag.run_id and ri.job_id = ag.job_id
+             group by ag.grp
+        ),
+        conf as (
+            select grp, avg(conf)::double precision as mean_confidence
+              from art_groups
+             group by grp
+        )
+        select c.grp as grp,
+               c.total as total,
+               c.approved as approved,
+               c.rejected as rejected,
+               c.edited as edited,
+               c.applied as applied,
+               cf.mean_confidence as mean_confidence
+          from counts c
+          join conf cf using (grp)
+         order by c.grp
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PromptExperimentRecord {
+                group: row.try_get("grp")?,
+                total: row.try_get("total")?,
+                approved: row.try_get("approved")?,
+                rejected: row.try_get("rejected")?,
+                edited: row.try_get("edited")?,
+                applied: row.try_get("applied")?,
+                mean_confidence: row.try_get("mean_confidence")?,
+            })
+        })
+        .collect()
+}
+
 pub async fn create_prompt(
     pool: &DbPool,
     stage: Stage,
@@ -1769,7 +1865,9 @@ pub async fn resolve_secret(
             } else {
                 path.to_owned()
             };
-            std::fs::read_to_string(resolved)?.trim().to_owned()
+            // File-backed secrets sit on the async hot path; use tokio's non-blocking read so we
+            // never stall an executor thread on disk I/O.
+            tokio::fs::read_to_string(resolved).await?.trim().to_owned()
         }
         other => return Err(anyhow!("unsupported secret reference kind: {other}")),
     };
@@ -4256,11 +4354,76 @@ pub async fn create_run_with_jobs_with_priority(
     actor: &str,
     priority: Option<i64>,
 ) -> Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    let run_id = create_run_with_jobs_on_tx(
+        &mut tx,
+        paperless_document_id,
+        stages,
+        mode,
+        trigger_tag,
+        actor,
+        priority,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(run_id)
+}
+
+/// Bulk re-run: create one run (with the given stages) per document in a single transaction.
+///
+/// Used by the `/api/batches/rerun` endpoint so operators can re-trigger a hand-picked set of
+/// "succeeded-but-wrong" documents in one shot instead of one trigger at a time. The active-run
+/// guard inside [`create_run_with_jobs_on_tx`] still applies per document, so ids that already
+/// have an in-flight run are silently reused (no duplicate run). Returns the number of documents
+/// processed (the size of the input set; each contributes exactly one run, new or reused).
+pub async fn create_runs_for_documents(
+    pool: &DbPool,
+    document_ids: &[i32],
+    stages: &[Stage],
+    mode: ProcessingMode,
+    trigger_tag: &str,
+    actor: &str,
+    priority: Option<i64>,
+) -> Result<i64> {
+    if document_ids.is_empty() {
+        return Ok(0);
+    }
+    // Amortise one transaction across the whole batch instead of a begin+commit per document.
+    let mut tx = pool.begin().await?;
+    let mut queued: i64 = 0;
+    for &document_id in document_ids {
+        create_run_with_jobs_on_tx(
+            &mut tx,
+            document_id,
+            stages,
+            mode,
+            trigger_tag,
+            actor,
+            priority,
+        )
+        .await?;
+        queued += 1;
+    }
+    tx.commit().await?;
+    Ok(queued)
+}
+
+/// Per-document run/job creation against an existing transaction. Callers own the begin/commit so
+/// batch backfills can amortise one transaction across many documents instead of paying a full
+/// begin+commit per doc. The active-run guard and idempotent inventory upsert are unchanged.
+async fn create_run_with_jobs_on_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    paperless_document_id: i32,
+    stages: &[Stage],
+    mode: ProcessingMode,
+    trigger_tag: &str,
+    actor: &str,
+    priority: Option<i64>,
+) -> Result<Uuid> {
     if stages.is_empty() {
         return Err(anyhow!("cannot create a run without stages"));
     }
 
-    let mut tx = pool.begin().await?;
     if let Some(row) = sqlx::query(
         r#"
         select id from pipeline_runs
@@ -4271,7 +4434,7 @@ pub async fn create_run_with_jobs_with_priority(
         "#,
     )
     .bind(paperless_document_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     {
         return Ok(row.try_get("id")?);
@@ -4292,7 +4455,7 @@ pub async fn create_run_with_jobs_with_priority(
     .bind(mode.to_string())
     .bind(trigger_tag)
     .bind(stages_json)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?
     .try_get("id")?;
 
@@ -4310,7 +4473,7 @@ pub async fn create_run_with_jobs_with_priority(
             "priority": cross_run_priority,
             "stage_priority": ((index as i32) + 1) * 10,
         }))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -4326,11 +4489,11 @@ pub async fn create_run_with_jobs_with_priority(
     )
     .bind(paperless_document_id)
     .bind(run_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     append_audit_tx(
-        &mut tx,
+        tx,
         AuditEventInput {
             event_type: "run.created".to_owned(),
             actor_type: actor.to_owned(),
@@ -4349,7 +4512,6 @@ pub async fn create_run_with_jobs_with_priority(
     )
     .await?;
 
-    tx.commit().await?;
     Ok(run_id)
 }
 
@@ -4388,14 +4550,16 @@ pub async fn queue_missing_stage(
     }
     let rows = builder.fetch_all(pool).await?;
 
+    // Amortise one transaction across the whole batch instead of a begin+commit per document.
+    let mut tx = pool.begin().await?;
     let mut created = 0;
     for row in rows {
         let document_id: i32 = row.try_get("paperless_document_id")?;
         // Age-derived priority — newer documents jump ahead of older ones in claim_jobs.
         // "manual-batch" is the operator-initiated bulk path, but we still rank by age so
         // a fresh scan doesn't get blocked behind a backfill triggered minutes earlier.
-        create_run_with_jobs_with_priority(
-            pool,
+        create_run_with_jobs_on_tx(
+            &mut tx,
             document_id,
             &[stage],
             mode,
@@ -4406,6 +4570,7 @@ pub async fn queue_missing_stage(
         .await?;
         created += 1;
     }
+    tx.commit().await?;
     Ok(created)
 }
 
@@ -4425,6 +4590,10 @@ pub async fn queue_missing_pipeline(
     // a brittle predicate into SQL. When the budget is None, fetch everything in one shot.
     let chunk_size = max_documents.map(|limit| limit.saturating_mul(2).max(16));
 
+    // Amortise one transaction across every chunk + per-doc insert instead of a begin+commit per
+    // document. Pagination SELECTs run on the same tx so just-queued rows stay consistently
+    // excluded, mirroring the previous per-doc-commit behaviour.
+    let mut tx = pool.begin().await?;
     let mut created: i64 = 0;
     let mut last_seen: i32 = i32::MIN;
     loop {
@@ -4465,7 +4634,7 @@ pub async fn queue_missing_pipeline(
         if let Some(size) = chunk_size {
             builder = builder.bind(size);
         }
-        let rows = builder.fetch_all(pool).await?;
+        let rows = builder.fetch_all(&mut *tx).await?;
         if rows.is_empty() {
             break;
         }
@@ -4498,8 +4667,8 @@ pub async fn queue_missing_pipeline(
 
             // Age-derived priority — newer Paperless documents drain through the full
             // pipeline (OCR -> Metadata) before older queued documents.
-            create_run_with_jobs_with_priority(
-                pool,
+            create_run_with_jobs_on_tx(
+                &mut tx,
                 document_id,
                 &stages,
                 mode,
@@ -4519,6 +4688,7 @@ pub async fn queue_missing_pipeline(
             break;
         }
     }
+    tx.commit().await?;
     Ok(created)
 }
 
@@ -4585,10 +4755,19 @@ pub async fn claim_jobs(
     // outer ORDER BY claims newer documents first (smaller priority), then earlier stages
     // (smaller stage_priority), then FIFO as a tiebreaker. The retry bias (failed jobs first)
     // stays first in the order so a stuck retry never starves out.
+    // Both `priority` and `stage_priority` are STORED generated columns (0019/0030), so the
+    // partial `idx_jobs_claim` (priority, stage_priority, run_after, created_at) where
+    // status='queued' backs this ordering — the column names and values are unchanged.
+    // The claim and its run/inventory follow-ups run in one TX so a crash between them can't
+    // leave jobs `running` while their run/inventory rows stay `queued`.
+    let mut tx = pool.begin().await?;
     let rows = sqlx::query(
         r#"
         with claimed as (
-          select id
+          select id,
+                 status as prior_status,
+                 lease_owner as prior_lease_owner,
+                 attempts as prior_attempts
             from jobs
            where ((status = 'queued' and run_after <= now())
               or (status = 'running' and lease_until < now()))
@@ -4617,10 +4796,12 @@ pub async fn claim_jobs(
             from claimed
            where j.id = claimed.id
           returning j.id, j.run_id, j.paperless_document_id, j.stage, j.status,
-                    j.attempts, j.max_attempts, j.payload
+                    j.attempts, j.max_attempts, j.payload,
+                    claimed.prior_status, claimed.prior_lease_owner, claimed.prior_attempts
         )
         select u.id, u.run_id, u.paperless_document_id, u.stage, r.mode, u.status,
-               u.attempts, u.max_attempts, u.payload
+               u.attempts, u.max_attempts, u.payload,
+               u.prior_status, u.prior_lease_owner, u.prior_attempts
           from updated u
           join pipeline_runs r on r.id = u.run_id
         "#,
@@ -4628,13 +4809,16 @@ pub async fn claim_jobs(
     .bind(limit)
     .bind(lease_owner)
     .bind(lease_seconds as f64)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     let mut jobs = Vec::new();
+    // (job_id, run_id, document_id, prior_lease_owner, prior_attempts) for stale-lease reclaims.
+    let mut reclaimed: Vec<(Uuid, Uuid, i32, Option<String>, i32)> = Vec::new();
     for row in rows {
         let stage: String = row.try_get("stage")?;
         let mode: String = row.try_get("mode")?;
+        let prior_status: String = row.try_get("prior_status")?;
         let job = JobRecord {
             id: row.try_get("id")?,
             run_id: row.try_get("run_id")?,
@@ -4646,7 +4830,55 @@ pub async fn claim_jobs(
             max_attempts: row.try_get("max_attempts")?,
             payload: row.try_get("payload")?,
         };
+        // A prior status of `running` means we reclaimed a job whose lease expired (worker
+        // crash/OOM). The `attempts + 1` above silently burns one of `max_attempts` with no
+        // terminal outcome, so leave a breadcrumb to keep that lost attempt attributable.
+        if prior_status == "running" {
+            let prior_lease_owner: Option<String> = row.try_get("prior_lease_owner")?;
+            let prior_attempts: i32 = row.try_get("prior_attempts")?;
+            tracing::warn!(
+                job_id = %job.id,
+                run_id = %job.run_id,
+                stage = %job.stage,
+                prior_lease_owner = prior_lease_owner.as_deref().unwrap_or("<unknown>"),
+                attempts = job.attempts,
+                "reclaiming job with expired lease; previous attempt consumed without a terminal outcome"
+            );
+            reclaimed.push((
+                job.id,
+                job.run_id,
+                job.paperless_document_id,
+                prior_lease_owner,
+                prior_attempts,
+            ));
+        }
         jobs.push(job);
+    }
+
+    for (job_id, run_id, document_id, prior_lease_owner, prior_attempts) in &reclaimed {
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "job.lease_reclaimed".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: Some(lease_owner.to_owned()),
+                run_id: Some(*run_id),
+                job_id: Some(*job_id),
+                paperless_document_id: Some(*document_id),
+                before: None,
+                after: None,
+                metadata: Some(json!({
+                    "prior_lease_owner": prior_lease_owner,
+                    "prior_attempts": prior_attempts,
+                    "new_lease_owner": lease_owner,
+                })),
+                outcome: "warning".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
     }
 
     if !jobs.is_empty() {
@@ -4670,7 +4902,7 @@ pub async fn claim_jobs(
             "#,
         )
         .bind(&run_ids)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
         sqlx::query(
@@ -4679,13 +4911,46 @@ pub async fn claim_jobs(
                set current_run_status = 'running',
                    updated_at = now()
              where paperless_document_id = any($1::int[])
+               and current_run_status in ('queued', 'running', 'waiting_review')
             "#,
         )
         .bind(&document_ids)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(jobs)
+}
+
+/// Extend the lease on a job we are actively processing. Long multi-page OCR
+/// jobs can outlive the lease window granted by `claim_jobs`, which would let a
+/// second replica reclaim the stale lease and double-apply the work. The
+/// processing worker calls this after each unit of progress to push
+/// `lease_until` forward by the same window. Returns `true` when our lease was
+/// still held (a row matched) and `false` when the lease was lost — the caller
+/// should stop in that case so it can't fight a replica that already took over.
+pub async fn bump_job_lease(
+    pool: &DbPool,
+    job_id: Uuid,
+    lease_owner: &str,
+    lease_seconds: i64,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        update jobs
+           set lease_until = now() + make_interval(secs => $3),
+               updated_at = now()
+         where id = $1
+           and lease_owner = $2
+           and status = 'running'
+        "#,
+    )
+    .bind(job_id)
+    .bind(lease_owner)
+    .bind(lease_seconds as f64)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Mark a single run + inventory row as running. `claim_jobs` issues equivalent updates in bulk;
@@ -4892,6 +5157,26 @@ pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bo
         .bind(error)
         .execute(&mut *tx)
         .await?;
+        // A permanent failure aborts the whole run, so cancel the sibling jobs in the same TX.
+        // Mirrors the reject path: leaving them `queued` makes them unclaimable (the claim guard
+        // blocks them behind the failed stage) yet still scanned on every poll, inflating
+        // `jobs_queued` forever.
+        sqlx::query(
+            r#"
+            update jobs
+               set status = 'cancelled',
+                   lease_owner = null,
+                   lease_until = null,
+                   updated_at = now()
+             where run_id = $1
+               and id <> $2
+               and status in ('queued', 'running', 'waiting_review')
+            "#,
+        )
+        .bind(job.run_id)
+        .bind(job.id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     append_audit_tx(
@@ -5065,6 +5350,22 @@ pub async fn list_reviews(
             })
         })
         .collect()
+}
+
+/// Count review items matching the same optional `status` filter used by
+/// [`list_reviews`]. Lets the API report an honest total alongside a clamped page.
+pub async fn count_reviews(pool: &DbPool, status: Option<&str>) -> Result<i64> {
+    let count = if let Some(status) = status {
+        sqlx::query_scalar::<_, i64>(r#"select count(*) from review_items where status = $1"#)
+            .bind(status)
+            .fetch_one(pool)
+            .await?
+    } else {
+        sqlx::query_scalar::<_, i64>(r#"select count(*) from review_items"#)
+            .fetch_one(pool)
+            .await?
+    };
+    Ok(count)
 }
 
 pub async fn review_decision(
@@ -5730,6 +6031,58 @@ pub async fn find_metadata_dedup_source(
     .transpose()
 }
 
+/// Maximum number of duplicate groups returned by [`list_inventory_duplicates`].
+/// Keeps the read-only dedup endpoint cheap and the payload bounded; the
+/// caller logs when the result is truncated at this cap.
+pub const DUPLICATE_GROUP_LIMIT: i64 = 200;
+
+/// Group `document_inventory` rows by `ocr_content_hash`, returning every hash
+/// shared by more than one document (#216 dedup view). Rows with a null hash
+/// are excluded. When more than [`DUPLICATE_GROUP_LIMIT`] groups exist the
+/// largest (most-duplicated) groups are kept; the returned groups themselves
+/// are ordered by hash.
+pub async fn list_inventory_duplicates(pool: &DbPool) -> Result<Vec<DuplicateGroup>> {
+    let rows = sqlx::query(
+        r#"
+        select ocr_content_hash as hash,
+               paperless_document_id,
+               title
+          from document_inventory
+         where ocr_content_hash is not null
+           and ocr_content_hash in (
+                 select ocr_content_hash
+                   from document_inventory
+                  where ocr_content_hash is not null
+                  group by ocr_content_hash
+                 having count(*) > 1
+                  order by count(*) desc
+                  limit $1
+               )
+         order by ocr_content_hash, paperless_document_id
+        "#,
+    )
+    .bind(DUPLICATE_GROUP_LIMIT)
+    .fetch_all(pool)
+    .await?;
+
+    let mut groups: Vec<DuplicateGroup> = Vec::new();
+    for row in rows {
+        let hash: String = row.try_get("hash")?;
+        let document = DuplicateDocument {
+            paperless_document_id: row.try_get("paperless_document_id")?,
+            title: row.try_get("title")?,
+        };
+        match groups.last_mut() {
+            Some(group) if group.hash == hash => group.documents.push(document),
+            _ => groups.push(DuplicateGroup {
+                hash,
+                documents: vec![document],
+            }),
+        }
+    }
+    Ok(groups)
+}
+
 pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Result<Uuid> {
     let request = prepare_ai_artifact_value(input.request, input.storage_mode);
     let response = prepare_ai_artifact_value(input.response, input.storage_mode);
@@ -5873,6 +6226,8 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
           (select count(*)::bigint from jobs where status = 'succeeded') as jobs_succeeded,
           (select count(*)::bigint from review_items where status = 'pending') as reviews_pending,
           (select count(*)::bigint from pipeline_runs where status in ('queued', 'running', 'waiting_review', 'applying')) as runs_active,
+          -- Total event count keeps an exact count(*); switch to a pg_class
+          -- reltuples estimate if this scan ever becomes a hot spot.
           (select count(*)::bigint from audit_events) as audit_events,
           (select count(*)::bigint from audit_events where event_type = 'workflow.selector_ran') as selector_runs_total,
           coalesce((
@@ -5888,22 +6243,28 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
           ) as model_errors_total,
           (select count(*)::bigint from audit_events where event_type = 'document.patch_applied' and outcome = 'success') as apply_success_total,
           (select count(*)::bigint from audit_events where event_type = 'document.patch_apply_failed' and outcome = 'failed') as apply_failure_total,
+          -- Latency aggregates are scoped to a recent window so they no longer
+          -- scan the entire unbounded audit_events table; the
+          -- (event_type, created_at) index covers this access path.
           coalesce((
             select count(*)::bigint
               from audit_events
              where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and created_at > now() - interval '24 hours'
                and metadata ? 'duration_ms'
           ), 0) as apply_latency_ms_count,
           coalesce((
             select sum((metadata ->> 'duration_ms')::bigint)::bigint
               from audit_events
              where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and created_at > now() - interval '24 hours'
                and metadata ? 'duration_ms'
           ), 0) as apply_latency_ms_sum,
           coalesce((
             select (percentile_disc(0.95) within group (order by (metadata ->> 'duration_ms')::bigint))::bigint
               from audit_events
              where event_type in ('document.patch_applied', 'document.patch_apply_failed')
+               and created_at > now() - interval '24 hours'
                and metadata ? 'duration_ms'
           ), 0) as apply_latency_ms_p95
         "#,

@@ -9,7 +9,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
   const [sessions, setSessions] = useState<DocumentChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<DocumentChatMessage[]>([]);
-  const [sessionTitle, setSessionTitle] = useState('Document chat');
+  const [sessionTitle, setSessionTitle] = useState(t('chat.default_session_title'));
   const [question, setQuestion] = useState('');
   const [documentIds, setDocumentIds] = useState('');
   const [busy, setBusy] = useState(false);
@@ -47,7 +47,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
     if (!trimmed) return;
     const ids = parseDocumentIds(documentIds);
     if (ids === false) {
-      setError('Document IDs must be up to 50 comma-separated positive numbers');
+      setError(t('chat.error_invalid_document_ids'));
       return;
     }
 
@@ -68,7 +68,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
 
   return (
     <section className="page chat-page">
-      <PageHeader title="Document Chat" />
+      <PageHeader title={t('chat.title')} />
       <div className="chat-layout">
         <aside className="chat-sessions">
           <form
@@ -79,7 +79,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
             }}
           >
             <input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} />
-            <button title="New chat" disabled={busy}><MessageSquare size={16} /></button>
+            <button title={t('chat.new_chat')} disabled={busy}><MessageSquare size={16} /></button>
           </form>
           <div className="chat-session-list">
             {sessions.map((session) => (
@@ -97,11 +97,11 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
         </aside>
         <div className="chat-panel">
           <div className="chat-messages">
-            {messages.length === 0 && <div className="empty-state">No messages</div>}
+            {messages.length === 0 && <div className="empty-state">{t('chat.no_messages')}</div>}
             {messages.map((message) => (
               <article className={`chat-message ${message.role}`} key={message.id}>
                 <header>
-                  <strong>{message.role === 'assistant' ? 'Archivist' : 'You'}</strong>
+                  <strong>{message.role === 'assistant' ? t('chat.role_assistant') : t('chat.role_user')}</strong>
                   {message.model && <span>{message.provider} / {message.model}</span>}
                 </header>
                 <p>{message.content}</p>
@@ -110,7 +110,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
                     {message.sources.map((source, index) => (
                       <details key={`${message.id}-${source.paperless_document_id}-${index}`}>
                         <summary>
-                          Document {source.paperless_document_id}
+                          {t('chat.source_document', { id: source.paperless_document_id })}
                           {source.title ? ` - ${source.title}` : ''}
                         </summary>
                         <p>{source.snippet}</p>
@@ -129,15 +129,15 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
             }}
           >
             <label>
-              Document IDs
+              {t('chat.document_ids_label')}
               <input value={documentIds} onChange={(event) => setDocumentIds(event.target.value)} placeholder="12, 98" />
             </label>
             <label className="wide">
-              Question
+              {t('chat.question_label')}
               <textarea value={question} onChange={(event) => setQuestion(event.target.value)} required />
             </label>
-            <button className="primary-button" title="Send" disabled={busy || !question.trim()}>
-              <Send size={16} /> Send
+            <button className="primary-button" title={t('chat.send')} disabled={busy || !question.trim()}>
+              <Send size={16} /> {t('chat.send')}
             </button>
           </form>
         </div>

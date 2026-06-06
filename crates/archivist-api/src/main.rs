@@ -19,16 +19,17 @@ use archivist_core::{
 use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, MetadataApplyAudit, MetadataArtifact,
     MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry, ReviewItemRecord,
-    append_audit, apply_security_retention, connect, consume_oidc_login_state,
+    append_audit, apply_security_retention, connect, consume_oidc_login_state, count_reviews,
     create_document_chat_session, create_oidc_login_state, create_run_with_jobs_with_priority,
-    create_session, create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
-    document_chat_session_visible, find_api_token, find_session, find_user_for_login,
-    get_backlog_counts, get_dashboard_live_status, get_dashboard_stats, get_runtime_settings,
-    has_any_user, hash_token, insert_document_chat_message, insert_document_chat_sources,
-    latest_apply_audit_for_run, latest_metadata_artifact_for_run, latest_metadata_run_for_document,
-    list_audit_events, list_document_chat_messages, list_document_chat_sessions, list_inventory,
-    list_prompt_usage, list_prompts, list_reviews, list_secret_references, list_sessions,
-    list_users, metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
+    create_runs_for_documents, create_session, create_user_with_roles, dashboard_bucket_labels,
+    dashboard_range_start, document_chat_session_visible, find_api_token, find_session,
+    find_user_for_login, get_backlog_counts, get_dashboard_live_status, get_dashboard_stats,
+    get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
+    insert_document_chat_sources, latest_apply_audit_for_run, latest_metadata_artifact_for_run,
+    latest_metadata_run_for_document, list_audit_events, list_document_chat_messages,
+    list_document_chat_sessions, list_inventory, list_prompt_experiments, list_prompt_usage,
+    list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
+    metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
     paperless_sync_cursor, provider_bucket_entries, queue_missing_pipeline, queue_missing_stage,
     record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
     recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
@@ -168,7 +169,7 @@ async fn auth_rate_limit_middleware(
         .map(|info| info.0.ip());
     let trusted_proxy = state.config.trust_proxy;
     let header_ip = if trusted_proxy {
-        forwarded_for_first_hop(req.headers())
+        forwarded_for_nearest_hop(req.headers())
     } else {
         None
     };
@@ -191,22 +192,31 @@ async fn auth_rate_limit_middleware(
     Ok(next.run(req).await)
 }
 
-fn forwarded_for_first_hop(headers: &HeaderMap) -> Option<IpAddr> {
+/// Extract the client IP from `X-Forwarded-For` using the RIGHTMOST entry.
+///
+/// `X-Forwarded-For` is built left-to-right: each proxy *appends* the address
+/// of the peer it received the request from. The leftmost token is therefore
+/// fully attacker-controlled (a client can send any value, and proxies append
+/// to the right), so trusting it would allow rate-limit bypass and audit-log
+/// IP spoofing. The rightmost entry is the one written by the single trusted
+/// reverse proxy sitting directly in front of us, so we trust exactly that hop.
+fn forwarded_for_nearest_hop(headers: &HeaderMap) -> Option<IpAddr> {
     let value = headers.get("x-forwarded-for")?.to_str().ok()?;
-    let first = value.split(',').next()?.trim();
-    first.parse::<IpAddr>().ok()
+    let nearest = value.split(',').next_back()?.trim();
+    nearest.parse::<IpAddr>().ok()
 }
 
 /// Resolve the client IP for audit/logging purposes. When `trust_proxy` is
-/// enabled and `X-Forwarded-For` is present, use the first hop; otherwise
-/// fall back to the TCP peer recorded by axum.
+/// enabled and `X-Forwarded-For` is present, use the nearest (rightmost) hop
+/// written by the trusted proxy; otherwise fall back to the TCP peer recorded
+/// by axum.
 fn request_source_ip(
     state: &AppState,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
 ) -> Option<String> {
     let forwarded = if state.config.trust_proxy {
-        forwarded_for_first_hop(headers)
+        forwarded_for_nearest_hop(headers)
     } else {
         None
     };
@@ -328,6 +338,7 @@ fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
         )
         .route("/prompts/usage", get(prompt_usage))
+        .route("/prompts/experiments", get(prompt_experiments))
         .route(
             "/prompts/test",
             post(test_prompt_endpoint).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
@@ -344,6 +355,7 @@ fn router(state: AppState) -> Router {
         .route("/workflow/mode", put(update_workflow_mode))
         .route("/workflow/controls", patch(update_workflow_controls))
         .route("/inventory", get(inventory))
+        .route("/inventory/duplicates", get(inventory_duplicates))
         .route(
             "/inventory/{document_id}/metadata-trace",
             get(inventory_metadata_trace),
@@ -363,6 +375,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/batches/ocr", post(queue_ocr_batch))
         .route("/batches/full", post(queue_full_batch))
+        .route("/batches/rerun", post(rerun_batch))
         .route("/reviews", get(reviews))
         .route("/reviews/batch", post(batch_review))
         .route("/reviews/auto-fix-preview", post(auto_fix_preview))
@@ -424,11 +437,23 @@ fn router(state: AppState) -> Router {
             auth_rate_limit_middleware,
         ));
 
+    // Machine-to-machine webhooks. These deliberately sit OUTSIDE the
+    // `auth_middleware` layer (no user session); each handler authenticates via
+    // its own shared secret. Kept on a dedicated nest so the auth layer never
+    // wraps it.
+    let webhooks = Router::new()
+        .route(
+            "/paperless/document-consumed",
+            post(webhook_paperless_document_consumed),
+        )
+        .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT));
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .nest("/api/auth", auth_public)
+        .nest("/api/webhooks", webhooks)
         .nest("/api", protected)
         .fallback_service(spa)
         .layer(TraceLayer::new_for_http())
@@ -508,34 +533,40 @@ async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
             "# HELP paperless_archivist_runs_active Active pipeline runs\n",
             "# TYPE paperless_archivist_runs_active gauge\n",
             "paperless_archivist_runs_active {}\n",
-            "# HELP paperless_archivist_audit_events Audit events total\n",
-            "# TYPE paperless_archivist_audit_events counter\n",
+            // Derived as a live COUNT over `audit_events`, which is hard-deleted
+            // by retention. The value can therefore decrease, so it is a gauge —
+            // declaring it a counter would make Prometheus misread retention
+            // pruning as a counter reset and corrupt rate() results.
+            "# HELP paperless_archivist_audit_events Audit events currently retained\n",
+            "# TYPE paperless_archivist_audit_events gauge\n",
             "paperless_archivist_audit_events {}\n",
-            "# HELP paperless_archivist_selector_runs_total Automatic selector runs\n",
-            "# TYPE paperless_archivist_selector_runs_total counter\n",
+            "# HELP paperless_archivist_selector_runs_total Automatic selector runs currently retained in audit log\n",
+            "# TYPE paperless_archivist_selector_runs_total gauge\n",
             "paperless_archivist_selector_runs_total {}\n",
-            "# HELP paperless_archivist_selector_documents_queued_total Documents queued by automatic selector\n",
-            "# TYPE paperless_archivist_selector_documents_queued_total counter\n",
+            "# HELP paperless_archivist_selector_documents_queued_total Documents queued by automatic selector (retained in audit log)\n",
+            "# TYPE paperless_archivist_selector_documents_queued_total gauge\n",
             "paperless_archivist_selector_documents_queued_total {}\n",
-            "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures\n",
-            "# TYPE paperless_archivist_job_retries_scheduled_total counter\n",
+            "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures (retained in audit log)\n",
+            "# TYPE paperless_archivist_job_retries_scheduled_total gauge\n",
             "paperless_archivist_job_retries_scheduled_total {}\n",
             "# HELP paperless_archivist_model_errors_total Jobs with model-stage error messages\n",
             "# TYPE paperless_archivist_model_errors_total gauge\n",
             "paperless_archivist_model_errors_total {}\n",
-            "# HELP paperless_archivist_apply_success_total Successful Paperless apply operations\n",
-            "# TYPE paperless_archivist_apply_success_total counter\n",
+            // apply_* are also live aggregates over the prunable `audit_events`
+            // table, so they are gauges rather than monotone counters.
+            "# HELP paperless_archivist_apply_success_total Successful Paperless apply operations (retained in audit log)\n",
+            "# TYPE paperless_archivist_apply_success_total gauge\n",
             "paperless_archivist_apply_success_total {}\n",
-            "# HELP paperless_archivist_apply_failure_total Failed Paperless apply operations\n",
-            "# TYPE paperless_archivist_apply_failure_total counter\n",
+            "# HELP paperless_archivist_apply_failure_total Failed Paperless apply operations (retained in audit log)\n",
+            "# TYPE paperless_archivist_apply_failure_total gauge\n",
             "paperless_archivist_apply_failure_total {}\n",
-            "# HELP paperless_archivist_apply_latency_ms_sum Sum of observed Paperless apply latency in milliseconds\n",
-            "# TYPE paperless_archivist_apply_latency_ms_sum counter\n",
+            "# HELP paperless_archivist_apply_latency_ms_sum Sum of observed Paperless apply latency in milliseconds (retained in audit log)\n",
+            "# TYPE paperless_archivist_apply_latency_ms_sum gauge\n",
             "paperless_archivist_apply_latency_ms_sum {}\n",
-            "# HELP paperless_archivist_apply_latency_ms_count Count of observed Paperless apply latency samples\n",
-            "# TYPE paperless_archivist_apply_latency_ms_count counter\n",
+            "# HELP paperless_archivist_apply_latency_ms_count Count of observed Paperless apply latency samples (retained in audit log)\n",
+            "# TYPE paperless_archivist_apply_latency_ms_count gauge\n",
             "paperless_archivist_apply_latency_ms_count {}\n",
-            "# HELP paperless_archivist_apply_latency_ms_p95 Rolling p95 of observed Paperless apply latency in milliseconds\n",
+            "# HELP paperless_archivist_apply_latency_ms_p95 Lifetime p95 of observed Paperless apply latency in milliseconds (over retained audit events)\n",
             "# TYPE paperless_archivist_apply_latency_ms_p95 gauge\n",
             "paperless_archivist_apply_latency_ms_p95 {}\n"
         ),
@@ -859,6 +890,9 @@ async fn login(
     let user_agent = request_user_agent(&headers);
     let user = find_user_for_login(&state.pool, &request.username).await?;
     let Some(user) = user else {
+        // Spend the same Argon2id time as a real account so an attacker can't
+        // distinguish existing from non-existing usernames by response latency.
+        verify_dummy_password(&request.password);
         record_login_failure(
             &state.pool,
             None,
@@ -875,7 +909,10 @@ async fn login(
     {
         return Err(ApiError::unauthorized("invalid credentials"));
     }
-    if !user.enabled || !verify_password(&user, &request.password)? {
+    // Always run the password verification (even for disabled accounts) so the
+    // `!enabled` case can't be told apart from a wrong password by timing.
+    let password_ok = verify_password(&user, &request.password)?;
+    if !user.enabled || !password_ok {
         record_login_failure(
             &state.pool,
             Some(user.id),
@@ -1055,6 +1092,10 @@ async fn verify_paperless_credentials(
         .timeout(std::time::Duration::from_secs(
             settings.paperless.timeout_seconds.clamp(1, 120),
         ))
+        // Refuse redirects so a 3xx response can't steer this credentialed
+        // request to an internal address after the SSRF guard validated only
+        // the originally supplied URL.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build Paperless login HTTP client")?;
     let response = client
@@ -1320,6 +1361,16 @@ async fn prompt_usage(
     require(&auth.0, Permission::ReadSettings)?;
     Ok(Json(
         json!({ "items": list_prompt_usage(&state.pool).await? }),
+    ))
+}
+
+async fn prompt_experiments(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadSettings)?;
+    Ok(Json(
+        json!({ "items": list_prompt_experiments(&state.pool).await? }),
     ))
 }
 
@@ -1694,7 +1745,7 @@ async fn validate_outbound_url(raw: &str) -> Result<Url, ApiError> {
 ///
 /// The threat model here is narrow on purpose:
 ///
-/// - These endpoints require `WriteSettings`; the operator who can call them
+/// - These endpoints require `ReadSettings`; the operator who can call them
 ///   already controls the settings document and is trusted to point the
 ///   integration at real internal services.
 /// - Paperless Archivist is routinely deployed inside Kubernetes / Docker
@@ -1762,6 +1813,10 @@ fn is_ssrf_dangerous_ipv6(ip: Ipv6Addr) -> bool {
 async fn send_notification_webhook(webhook_url: &str, payload: Value) -> Result<()> {
     let response = HttpClient::builder()
         .timeout(std::time::Duration::from_secs(10))
+        // Refuse redirects so a 3xx to an internal address (e.g. IMDS at
+        // 169.254.169.254 / loopback) can't bypass the SSRF guard that only
+        // validated the originally supplied URL.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?
         .post(webhook_url)
         .json(&payload)
@@ -3118,6 +3173,45 @@ async fn inventory(
     })))
 }
 
+// `GET /api/inventory/duplicates`
+//
+// Read-only dedup view (#216): groups `document_inventory` by the already
+// persisted `ocr_content_hash`, returning every hash shared by more than one
+// document. Capped at `DUPLICATE_GROUP_LIMIT` groups; logs a warning when the
+// result is truncated so operators know the view is incomplete.
+async fn inventory_duplicates(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadInventory)?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    let groups = archivist_db::list_inventory_duplicates(&state.pool).await?;
+    if groups.len() as i64 >= archivist_db::DUPLICATE_GROUP_LIMIT {
+        warn!(
+            cap = archivist_db::DUPLICATE_GROUP_LIMIT,
+            "inventory duplicate groups truncated at cap; some duplicates not shown"
+        );
+    }
+    // Externally reachable Paperless base for browser deep-links: prefer the
+    // configured public_url, fall back to the internal base_url. Trailing slash
+    // trimmed so the frontend can append `/documents/{id}/details`. Returned
+    // here (rather than read from /api/settings) because the Inventory view is
+    // available to users without the ReadSettings permission.
+    let paperless_base = settings
+        .paperless
+        .public_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(settings.paperless.base_url.trim())
+        .trim_end_matches('/')
+        .to_owned();
+    Ok(Json(json!({
+        "groups": groups,
+        "paperless_base": paperless_base,
+    })))
+}
+
 fn inventory_item_with_debug(
     item: DocumentInventoryItem,
     settings: &RuntimeSettings,
@@ -4017,6 +4111,96 @@ async fn trigger_document(
     Ok(Json(json!({ "run_id": run_id })))
 }
 
+/// Inbound webhook body. Accepts either a batch (`document_ids`) or a single
+/// (`document_id`) shape so a Paperless workflow can post whichever it has.
+#[derive(Debug, Deserialize)]
+struct WebhookConsumedRequest {
+    #[serde(default)]
+    document_ids: Option<Vec<i32>>,
+    #[serde(default)]
+    document_id: Option<i32>,
+}
+
+/// Machine-to-machine webhook: a Paperless workflow posts here when it consumes
+/// a document so we trigger processing immediately instead of waiting for the
+/// next ~60s poll.
+///
+/// This route lives OUTSIDE the auth-required router layer (no user session); it
+/// is gated solely by the shared `ARCHIVIST_WEBHOOK_SECRET`, supplied in the
+/// `X-Webhook-Secret` header and compared in constant time. When the env var is
+/// unset the endpoint is disabled and returns `503`.
+#[tracing::instrument(
+    skip(state, headers, request),
+    fields(queued = tracing::field::Empty)
+)]
+async fn webhook_paperless_document_consumed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<WebhookConsumedRequest>,
+) -> ApiResult<Response> {
+    let Some(expected) = state.config.webhook_secret.as_ref() else {
+        return Err(ApiError::service_unavailable("webhook disabled"));
+    };
+    let provided = headers
+        .get("x-webhook-secret")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let expected = expected.expose_secret();
+    // Constant-time compare to deny timing oracles on the shared secret.
+    if expected.len() != provided.len()
+        || !bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+    {
+        return Err(ApiError::unauthorized("invalid webhook secret"));
+    }
+
+    // Merge both accepted shapes, drop non-positive ids, and de-duplicate so a
+    // single payload never enqueues the same document twice.
+    let mut normalized: Vec<i32> = Vec::new();
+    for document_id in request
+        .document_ids
+        .into_iter()
+        .flatten()
+        .chain(request.document_id)
+    {
+        if document_id <= 0 {
+            return Err(ApiError::bad_request(
+                "document ids must be positive Paperless document IDs",
+            ));
+        }
+        if !normalized.contains(&document_id) {
+            normalized.push(document_id);
+        }
+    }
+    if normalized.is_empty() {
+        return Err(ApiError::bad_request(
+            "document_ids or document_id is required",
+        ));
+    }
+
+    let settings = get_runtime_settings(&state.pool).await?;
+    let stages = settings.workflow.enabled_stages.clone();
+    let mode = settings.workflow.mode;
+    // Webhook-triggered runs carry priority 0 (same as manual triggers) so a
+    // freshly consumed document jumps ahead of queued auto-selected work.
+    let mut queued: i64 = 0;
+    for document_id in normalized {
+        create_run_with_jobs_with_priority(
+            &state.pool,
+            document_id,
+            &stages,
+            mode,
+            "webhook",
+            "webhook",
+            Some(0),
+        )
+        .await?;
+        queued += 1;
+    }
+    Span::current().record("queued", queued);
+    info!(queued, "webhook enqueued documents");
+    Ok((StatusCode::ACCEPTED, Json(json!({ "queued": queued }))).into_response())
+}
+
 #[tracing::instrument(
     skip(state, auth),
     fields(user_id = tracing::field::Empty, queued = tracing::field::Empty)
@@ -4077,6 +4261,67 @@ async fn queue_full_batch(
 }
 
 #[derive(Debug, Deserialize)]
+struct RerunBatchRequest {
+    document_ids: Vec<i32>,
+    /// Stage names (e.g. `["ocr","metadata"]`). Validated against the known [`Stage`] set.
+    stages: Vec<String>,
+}
+
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(user_id = tracing::field::Empty, queued = tracing::field::Empty)
+)]
+async fn rerun_batch(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<RerunBatchRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteBatches)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
+
+    if request.document_ids.is_empty() {
+        return Err(ApiError::bad_request("document_ids must not be empty"));
+    }
+    if request.stages.is_empty() {
+        return Err(ApiError::bad_request("stages must not be empty"));
+    }
+
+    // Validate every requested stage against the known Stage set before queueing anything.
+    let stages = request
+        .stages
+        .iter()
+        .map(|raw| {
+            raw.parse::<Stage>()
+                .map_err(|_| ApiError::bad_request(format!("unknown stage: {raw}")))
+        })
+        .collect::<Result<Vec<Stage>, _>>()?;
+
+    // De-duplicate ids so a doubled id can't enqueue (or attempt) two runs.
+    let mut document_ids: Vec<i32> = request.document_ids;
+    document_ids.sort_unstable();
+    document_ids.dedup();
+
+    let settings = get_runtime_settings(&state.pool).await?;
+    // Operator-initiated re-run jumps ahead of age-derived auto-selected runs (priority 0),
+    // mirroring the manual single-document trigger.
+    let queued = create_runs_for_documents(
+        &state.pool,
+        &document_ids,
+        &stages,
+        settings.workflow.mode,
+        "bulk-rerun",
+        &auth.0.actor_type,
+        Some(0),
+    )
+    .await?;
+    Span::current().record("queued", queued);
+    info!(queued, "queued bulk re-run batch");
+    Ok(Json(json!({ "queued": queued })))
+}
+
+#[derive(Debug, Deserialize)]
 struct ReviewQuery {
     status: Option<String>,
     limit: Option<i64>,
@@ -4092,14 +4337,18 @@ async fn reviews(
     let items = list_reviews(
         &state.pool,
         query.status.as_deref(),
-        query.limit.unwrap_or(100),
+        query.limit.unwrap_or(100).clamp(1, 500),
     )
     .await?
     .into_iter()
     .map(|review| review_with_debug(review, &settings))
     .collect::<Result<Vec<_>>>()?;
+    let total = count_reviews(&state.pool, query.status.as_deref()).await?;
+    let has_more = total > items.len() as i64;
     Ok(Json(json!({
-        "items": items
+        "items": items,
+        "total": total,
+        "has_more": has_more
     })))
 }
 
@@ -4954,6 +5203,20 @@ async fn apply_audit_retention(
 }
 
 fn csv_escape(value: &str) -> String {
+    // Neutralize spreadsheet formula injection (CWE-1236): a leading
+    // = + - @ or tab/CR makes Excel/LibreOffice treat the cell as a formula.
+    // Prefix such values with a single quote so they are rendered as text.
+    let needs_formula_guard = value
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'));
+    let guarded;
+    let value = if needs_formula_guard {
+        guarded = format!("'{value}");
+        guarded.as_str()
+    } else {
+        value
+    };
     if value.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
@@ -6143,6 +6406,23 @@ fn verify_password(user: &AuthUser, password: &str) -> Result<bool> {
         .is_ok())
 }
 
+/// A real Argon2id hash computed once at first use. Verifying a candidate
+/// password against this when the supplied username does not exist makes the
+/// login path spend the same ~Argon2id time it would for a real account,
+/// closing the timing side channel that otherwise enumerates valid usernames.
+static DUMMY_PASSWORD_HASH: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| hash_password("paperless-archivist-dummy-password").ok());
+
+/// Perform a throwaway Argon2id verification to equalize login timing for
+/// non-existent users. The result is intentionally discarded.
+fn verify_dummy_password(password: &str) {
+    if let Some(hash) = DUMMY_PASSWORD_HASH.as_deref()
+        && let Ok(parsed) = PasswordHash::new(hash)
+    {
+        let _ = Argon2::default().verify_password(password.as_bytes(), &parsed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6554,6 +6834,7 @@ mod tests {
             trust_proxy: false,
             auth_rate_limit: 10,
             auth_rate_limit_window_seconds: 60,
+            webhook_secret: None,
         }
     }
 
@@ -6751,7 +7032,11 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let header = headers.get(header::COOKIE)?.to_str().ok()?;
     for cookie in header.split(';') {
-        let (key, value) = cookie.trim().split_once('=')?;
+        // Skip valueless segments rather than aborting the whole scan — a
+        // leading junk cookie without `=` must not break session lookup.
+        let Some((key, value)) = cookie.trim().split_once('=') else {
+            continue;
+        };
         if key == name {
             return Some(value.to_owned());
         }
@@ -6795,6 +7080,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -6806,18 +7098,23 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        // Log the full cause chain server-side, but never return internal
+        // error text (SQL fragments, column/constraint names, pool/reqwest
+        // URLs) to the client — some 5xx paths are unauthenticated.
+        tracing::error!(error = format!("{error:#}"), "internal server error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
+            message: "internal server error".to_owned(),
         }
     }
 }
 
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
+        tracing::error!(error = format!("{error:#}"), "database error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
+            message: "internal server error".to_owned(),
         }
     }
 }

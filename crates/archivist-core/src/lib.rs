@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use regex::Regex;
@@ -800,6 +801,9 @@ impl RuntimeSettings {
                 .unwrap_or_else(default_tag_output_language);
         self.paperless = self.paperless.normalized();
         self.fields = self.fields.normalized();
+        self.metadata = self.metadata.normalized();
+        self.tagging = self.tagging.normalized();
+        self.ocr = self.ocr.normalized();
         self
     }
 
@@ -2036,6 +2040,14 @@ impl Default for OcrSettings {
     }
 }
 
+impl OcrSettings {
+    pub fn normalized(mut self) -> Self {
+        self.page_limit = self.page_limit.clamp(1, 1000);
+        self.min_chars = self.min_chars.clamp(1, 100_000);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaggingSettings {
     pub max_tags: usize,
@@ -2058,6 +2070,16 @@ impl Default for TaggingSettings {
     }
 }
 
+impl TaggingSettings {
+    pub fn normalized(mut self) -> Self {
+        self.max_tags = self.max_tags.clamp(1, 50);
+        self.confidence_threshold = self.confidence_threshold.clamp(0.0, 1.0);
+        // `tag_output_language` is normalized separately in
+        // `RuntimeSettings::normalized()`; leave it untouched here.
+        self
+    }
+}
+
 fn default_tag_output_language() -> String {
     "de".to_owned()
 }
@@ -2070,12 +2092,16 @@ pub struct MetadataSettings {
     pub allow_new_correspondents: bool,
     pub allow_new_document_types: bool,
     /// Legacy global threshold. Kept for compatibility with v1.5.x configs; the
-    /// per-field overrides below take precedence when they are set above 0.
+    /// per-field overrides below take precedence when they are set (`Some`).
     pub confidence_threshold: f32,
     /// Per-field minimum-confidence overrides (v1.5.12+). Each field's
-    /// `effective_*_threshold` accessor returns the override when it is above
-    /// zero, falling back to `confidence_threshold` otherwise. Defaults reflect
-    /// observed reliability per field on production traffic:
+    /// `effective_*_threshold` accessor returns the override when it is set
+    /// (`Some`), falling back to `confidence_threshold` when it is `None`
+    /// (inherit). `None` means inherit; `Some(x)` is a literal threshold.
+    /// Note: `normalized()` collapses a persisted `Some(0.0)` back to `None`
+    /// because pre-`Option` configs stored `0.0` to mean "inherit"; this keeps
+    /// existing settings behaving identically. Defaults reflect observed
+    /// reliability per field on production traffic:
     ///   * title — easy to phrase loosely so the bar is low.
     ///   * correspondent / document_type — closed-vocabulary lookups, demand
     ///     fairly strong evidence.
@@ -2084,16 +2110,17 @@ pub struct MetadataSettings {
     ///   * tags — closed-vocabulary, multi-label, moderate.
     ///   * fields — open-shape extraction, demand strong evidence.
     #[serde(default)]
-    pub title_confidence_threshold: f32,
-    pub document_date_confidence_threshold: f32,
+    pub title_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub correspondent_confidence_threshold: f32,
+    pub document_date_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub document_type_confidence_threshold: f32,
+    pub correspondent_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub tags_confidence_threshold: f32,
+    pub document_type_confidence_threshold: Option<f32>,
     #[serde(default)]
-    pub fields_confidence_threshold: f32,
+    pub tags_confidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub fields_confidence_threshold: Option<f32>,
     /// Cap on the size of each closed-vocabulary allowed-value list
     /// (correspondents, document_types, tags) passed into the metadata
     /// prompt. v1.5.12+ pre-filters by OCR-substring frequency.
@@ -2121,13 +2148,47 @@ pub struct MetadataSettings {
 /// attention and inflates token cost.
 pub const DEFAULT_METADATA_ALLOWED_LIST_MAX: usize = 20;
 
+/// Normalize a per-field confidence-threshold override.
+///
+/// `None` stays `None` (inherit the global threshold). `Some(0.0)` is mapped
+/// to `None` because persisted configs predating the `Option` switch stored a
+/// literal `0.0` to mean "inherit"; collapsing it preserves that behavior for
+/// existing settings. Any other `Some(x)` is clamped into `0.0..=1.0`.
+fn normalize_override_threshold(value: Option<f32>) -> Option<f32> {
+    match value {
+        Some(x) if x <= 0.0 => None,
+        Some(x) => Some(x.clamp(0.0, 1.0)),
+        None => None,
+    }
+}
+
 impl MetadataSettings {
-    fn effective(&self, override_value: f32) -> f32 {
-        if override_value > 0.0 {
-            override_value
-        } else {
-            self.confidence_threshold
-        }
+    pub fn normalized(mut self) -> Self {
+        self.confidence_threshold = self.confidence_threshold.clamp(0.0, 1.0);
+        self.title_confidence_threshold =
+            normalize_override_threshold(self.title_confidence_threshold);
+        self.document_date_confidence_threshold =
+            normalize_override_threshold(self.document_date_confidence_threshold);
+        self.correspondent_confidence_threshold =
+            normalize_override_threshold(self.correspondent_confidence_threshold);
+        self.document_type_confidence_threshold =
+            normalize_override_threshold(self.document_type_confidence_threshold);
+        self.tags_confidence_threshold =
+            normalize_override_threshold(self.tags_confidence_threshold);
+        self.fields_confidence_threshold =
+            normalize_override_threshold(self.fields_confidence_threshold);
+        self.document_date_anchor_penalty = self.document_date_anchor_penalty.clamp(0.0, 1.0);
+        // `0` disables prefiltering (send the full list); above that, cap to a
+        // sane upper bound so a persisted absurd value can't blow up prompts.
+        self.allowed_list_max = self.allowed_list_max.min(1000);
+        self
+    }
+
+    fn effective(&self, override_value: Option<f32>) -> f32 {
+        // `None` inherits the global threshold; `Some(x)` is a literal value
+        // (including `Some(0.0)`). Persisted `Some(0.0)` is mapped to `None`
+        // in `normalized()` to preserve the legacy "0.0 means inherit" meaning.
+        override_value.unwrap_or(self.confidence_threshold)
     }
 
     pub fn effective_title_threshold(&self) -> f32 {
@@ -2145,11 +2206,7 @@ impl MetadataSettings {
     pub fn effective_document_date_threshold(&self) -> f32 {
         // document_date_confidence_threshold predates the per-field rollout in
         // v1.5.12 so it already worked as an override — preserve that history.
-        if self.document_date_confidence_threshold > 0.0 {
-            self.document_date_confidence_threshold
-        } else {
-            self.confidence_threshold
-        }
+        self.effective(self.document_date_confidence_threshold)
     }
 
     pub fn effective_tags_threshold(&self) -> f32 {
@@ -2170,12 +2227,12 @@ impl Default for MetadataSettings {
             allow_new_correspondents: false,
             allow_new_document_types: false,
             confidence_threshold: 0.65,
-            title_confidence_threshold: 0.60,
-            document_date_confidence_threshold: 0.90,
-            correspondent_confidence_threshold: 0.80,
-            document_type_confidence_threshold: 0.75,
-            tags_confidence_threshold: 0.65,
-            fields_confidence_threshold: 0.80,
+            title_confidence_threshold: Some(0.60),
+            document_date_confidence_threshold: Some(0.90),
+            correspondent_confidence_threshold: Some(0.80),
+            document_type_confidence_threshold: Some(0.75),
+            tags_confidence_threshold: Some(0.65),
+            fields_confidence_threshold: Some(0.80),
             allowed_list_max: DEFAULT_METADATA_ALLOWED_LIST_MAX,
             document_date_anchor_required: true,
             document_date_anchor_penalty: 0.30,
@@ -2201,6 +2258,20 @@ pub fn prefilter_allowed_list(content: &str, allowed: &[String], max: usize) -> 
         return allowed.to_vec();
     }
     let content_lower = content.to_lowercase();
+    prefilter_allowed_list_lower(&content_lower, allowed, max)
+}
+
+/// Same as [`prefilter_allowed_list`] but takes already-lowercased content so a
+/// caller filtering several lists against the same OCR text only pays for one
+/// `to_lowercase()` of the (potentially large) document body.
+pub fn prefilter_allowed_list_lower(
+    content_lower: &str,
+    allowed: &[String],
+    max: usize,
+) -> Vec<String> {
+    if max == 0 || allowed.len() <= max {
+        return allowed.to_vec();
+    }
     let mut scored: Vec<(usize, String)> = allowed
         .iter()
         .map(|name| {
@@ -2648,15 +2719,40 @@ pub fn validate_document_date_suggestion(
     }
 }
 
+static ISO_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.{0,48}?)(\d{4})-(\d{2})-(\d{2})(.{0,48})").expect("valid iso date regex")
+});
+static NUMERIC_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.{0,48}?)(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(.{0,48})")
+        .expect("valid numeric date regex")
+});
+static CJK_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.{0,48}?)(\d{4})\s*[年/]\s*(\d{1,2})\s*[月/]\s*(\d{1,2})\s*日?(.{0,48})")
+        .expect("valid CJK date regex")
+});
+static DAY_MONTH_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.{0,48}?)(\d{1,2})\.?\s+([\p{L}.]+)\s+(\d{2,4})(.{0,48})")
+        .expect("valid day-month-name date regex")
+});
+static MONTH_NAME_DAY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.{0,48}?)([\p{L}.]+)\s+(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(\d{4})(.{0,48})")
+        .expect("valid month-name-day date regex")
+});
+
 fn extract_date_candidates(text: &str) -> Vec<(NaiveDate, String)> {
     let mut candidates = Vec::new();
     let normalized_text = normalize_date_digits(text);
-    let iso = Regex::new(r"(?i)(.{0,48}?)(\d{4})-(\d{2})-(\d{2})(.{0,48})")
-        .expect("valid iso date regex");
-    for captures in iso.captures_iter(&normalized_text).take(25) {
+    // Byte ranges of the date portion of each ISO match, so the generic numeric
+    // pass below can skip overlapping substrings (e.g. `2026-05-12` also matches
+    // the numeric pattern as `26-05-12`, producing a phantom `2012-05-26`).
+    let mut iso_spans: Vec<(usize, usize)> = Vec::new();
+    for captures in ISO_DATE_RE.captures_iter(&normalized_text).take(25) {
         let year = captures.get(2).and_then(|m| m.as_str().parse::<i32>().ok());
         let month = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
         let day = captures.get(4).and_then(|m| m.as_str().parse::<u32>().ok());
+        if let (Some(g2), Some(g4)) = (captures.get(2), captures.get(4)) {
+            iso_spans.push((g2.start(), g4.end()));
+        }
         if let (Some(year), Some(month), Some(day)) = (year, month, day)
             && let Some(date) = NaiveDate::from_ymd_opt(year, month, day)
         {
@@ -2672,31 +2768,41 @@ fn extract_date_candidates(text: &str) -> Vec<(NaiveDate, String)> {
         }
     }
 
-    let numeric = Regex::new(r"(?i)(.{0,48}?)(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(.{0,48})")
-        .expect("valid numeric date regex");
-    for captures in numeric.captures_iter(&normalized_text).take(25) {
-        let day = captures.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
-        let month = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
+    for captures in NUMERIC_DATE_RE.captures_iter(&normalized_text).take(25) {
+        // Skip substrings that are really the tail of an ISO date already
+        // captured above (avoids phantom candidates burning the take() budget).
+        if let (Some(g2), Some(g4)) = (captures.get(2), captures.get(4)) {
+            let (start, end) = (g2.start(), g4.end());
+            if iso_spans.iter().any(|&(s, e)| start < e && s < end) {
+                continue;
+            }
+        }
+        let first = captures.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+        let second = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
         let year = captures.get(4).and_then(|m| parse_year(m.as_str()));
-        if let (Some(day), Some(month), Some(year)) = (day, month, year)
-            && let Some(date) = NaiveDate::from_ymd_opt(year, month, day)
-        {
-            candidates.push((
-                date,
-                captures
-                    .get(0)
-                    .map(|m| m.as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .to_owned(),
-            ));
+        if let (Some(first), Some(second), Some(year)) = (first, second, year) {
+            // Primary interpretation is DD/MM (locale-dominant for this
+            // deployment). If that yields an invalid date, retry with the
+            // groups swapped (MM/DD) instead of silently discarding — this
+            // recovers US-format dates like `01/13/2026` that are illegal as
+            // DD/MM without changing any already-valid DD/MM parse.
+            let date = NaiveDate::from_ymd_opt(year, second, first)
+                .or_else(|| NaiveDate::from_ymd_opt(year, first, second));
+            if let Some(date) = date {
+                candidates.push((
+                    date,
+                    captures
+                        .get(0)
+                        .map(|m| m.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned(),
+                ));
+            }
         }
     }
 
-    let cjk =
-        Regex::new(r"(?i)(.{0,48}?)(\d{4})\s*[年/]\s*(\d{1,2})\s*[月/]\s*(\d{1,2})\s*日?(.{0,48})")
-            .expect("valid CJK date regex");
-    for captures in cjk.captures_iter(&normalized_text).take(25) {
+    for captures in CJK_DATE_RE.captures_iter(&normalized_text).take(25) {
         let year = captures.get(2).and_then(|m| m.as_str().parse::<i32>().ok());
         let month = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
         let day = captures.get(4).and_then(|m| m.as_str().parse::<u32>().ok());
@@ -2715,10 +2821,7 @@ fn extract_date_candidates(text: &str) -> Vec<(NaiveDate, String)> {
         }
     }
 
-    let day_month_name =
-        Regex::new(r"(?i)(.{0,48}?)(\d{1,2})\.?\s+([\p{L}.]+)\s+(\d{2,4})(.{0,48})")
-            .expect("valid day-month-name date regex");
-    for captures in day_month_name.captures_iter(&normalized_text).take(25) {
+    for captures in DAY_MONTH_NAME_RE.captures_iter(&normalized_text).take(25) {
         let day = captures.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
         let month = captures.get(3).and_then(|m| month_number(m.as_str()));
         let year = captures.get(4).and_then(|m| parse_year(m.as_str()));
@@ -2737,10 +2840,7 @@ fn extract_date_candidates(text: &str) -> Vec<(NaiveDate, String)> {
         }
     }
 
-    let month_name_day =
-        Regex::new(r"(?i)(.{0,48}?)([\p{L}.]+)\s+(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(\d{4})(.{0,48})")
-            .expect("valid month-name-day date regex");
-    for captures in month_name_day.captures_iter(&normalized_text).take(25) {
+    for captures in MONTH_NAME_DAY_RE.captures_iter(&normalized_text).take(25) {
         let month = captures.get(2).and_then(|m| month_number(m.as_str()));
         let day = captures.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
         let year = captures.get(4).and_then(|m| parse_year(m.as_str()));
@@ -3552,8 +3652,9 @@ pub fn normalize_model_json(raw: &str) -> Option<Value> {
         return Some(value);
     }
 
-    let fence = Regex::new(r"(?s)```(?:json)?\s*(.*?)\s*```").ok()?;
-    if let Some(captures) = fence.captures(raw)
+    static FENCE_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?s)```(?:json)?\s*(.*?)\s*```").expect("valid fence regex"));
+    if let Some(captures) = FENCE_RE.captures(raw)
         && let Some(body) = captures.get(1)
         && let Ok(value) = serde_json::from_str(body.as_str())
     {
@@ -3600,6 +3701,22 @@ pub struct DocumentInventoryItem {
     pub detected_language_confidence: Option<f32>,
     pub detected_language_source: Option<String>,
     pub last_seen_at: DateTime<Utc>,
+}
+
+/// One member document of a duplicate group (#216 dedup view). Documents are
+/// grouped by their shared `ocr_content_hash`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateDocument {
+    pub paperless_document_id: i32,
+    pub title: Option<String>,
+}
+
+/// A set of documents that share the same OCR content hash, i.e. likely
+/// duplicates of one another (#216 dedup view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateGroup {
+    pub hash: String,
+    pub documents: Vec<DuplicateDocument>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

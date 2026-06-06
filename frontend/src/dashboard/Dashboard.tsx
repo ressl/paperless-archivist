@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useDashboardLive, useDashboardStats, useFreshness, useMediaQuery } from './hooks';
 import {
   Activity,
@@ -279,16 +279,28 @@ function AlertsBar({
   );
 }
 
+// Isolated leaf component: owns the 1s freshness ticker so the per-second
+// re-renders stay scoped to the countdown and never reach the heavy Dashboard
+// tree (Recharts + tables).
+function FreshnessCountdown({ intervalMs, lastLoadedAt }: { intervalMs: number; lastLoadedAt: string | null }) {
+  const { t } = useI18n();
+  const { nextRefreshIn, pulse } = useFreshness(intervalMs, lastLoadedAt);
+  return (
+    <div className="freshness-indicator" aria-live="polite">
+      <span className={`pulse-dot ${pulse ? 'is-pulsing' : ''}`} aria-hidden="true" />
+      <em>{t('dashboard.freshness.next', { seconds: nextRefreshIn })}</em>
+    </div>
+  );
+}
+
 function HealthBadge({
   score,
   generatedAt,
-  nextRefreshIn,
-  pulse
+  lastLoadedAt
 }: {
   score: number | null;
   generatedAt: string | null;
-  nextRefreshIn: number;
-  pulse: boolean;
+  lastLoadedAt: string | null;
 }) {
   const { t, formatRelativeTime } = useI18n();
   const tone = healthTone(score);
@@ -306,10 +318,7 @@ function HealthBadge({
         <strong>{label}</strong>
         <em>{generatedAt ? formatRelativeTime(generatedAt) : '-'}</em>
       </div>
-      <div className="freshness-indicator" aria-live="polite">
-        <span className={`pulse-dot ${pulse ? 'is-pulsing' : ''}`} aria-hidden="true" />
-        <em>{t('dashboard.freshness.next', { seconds: nextRefreshIn })}</em>
-      </div>
+      <FreshnessCountdown intervalMs={30_000} lastLoadedAt={lastLoadedAt} />
     </div>
   );
 }
@@ -647,7 +656,7 @@ function MaintenanceDrawer({
   );
 }
 
-function StageMatrix({ stats, onStageSelect }: { stats: DashboardStats | null; onStageSelect: (stage: string) => void }) {
+const StageMatrix = memo(function StageMatrix({ stats, onStageSelect }: { stats: DashboardStats | null; onStageSelect: (stage: string) => void }) {
   const { t, formatNumber } = useI18n();
   const [sortKey, setSortKey] = useState<StageMatrixSortKey>('queued');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -727,7 +736,7 @@ function StageMatrix({ stats, onStageSelect }: { stats: DashboardStats | null; o
       </div>
     </ChartPanel>
   );
-}
+});
 
 function ActivityTimeline({ live }: { live: DashboardLiveStatus | null }) {
   const { t, formatRelativeTime } = useI18n();
@@ -777,7 +786,7 @@ function ActivityTimeline({ live }: { live: DashboardLiveStatus | null }) {
 
 type ProviderTableSortKey = 'provider' | 'model' | 'stage' | 'request_count' | 'avg_duration_ms' | 'p95_duration_ms' | 'tokens' | 'cost' | 'feedback' | 'acceptance';
 
-function ProviderTable({ usage }: { usage: DashboardStats['provider_usage'] }) {
+const ProviderTable = memo(function ProviderTable({ usage }: { usage: DashboardStats['provider_usage'] }) {
   const { t, formatPercent: formatPercentValue } = useI18n();
   const [sortKey, setSortKey] = useState<ProviderTableSortKey>('request_count');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -909,9 +918,9 @@ function ProviderTable({ usage }: { usage: DashboardStats['provider_usage'] }) {
       </div>
     </ChartPanel>
   );
-}
+});
 
-function CostPanel({ stats, range }: { stats: DashboardStats | null; range: DashboardRange }) {
+const CostPanel = memo(function CostPanel({ stats, range }: { stats: DashboardStats | null; range: DashboardRange }) {
   const { t, formatNumber } = useI18n();
   const total = stats?.kpis.cost_in_range_usd ?? null;
   const breakdown = stats?.cost_breakdown_by_provider ?? [];
@@ -967,7 +976,7 @@ function CostPanel({ stats, range }: { stats: DashboardStats | null; range: Dash
       )}
     </section>
   );
-}
+});
 
 function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
   const { t, formatNumber, formatRelativeTime: formatRelative } = useI18n();
@@ -1110,7 +1119,6 @@ export function Dashboard({
 
   const { stats, counts, lastLoadedAt, reload: load } = useDashboardStats(range, setError);
   const { live, recovery, reload: loadLive, reloadRecovery: loadRecovery, setLive } = useDashboardLive(canReadRuns, setError);
-  const { nextRefreshIn, pulse } = useFreshness(30_000, lastLoadedAt);
   const compactLayout = useMediaQuery('(max-width: 1100px)');
   const [activeTab, setActiveTab] = useState<'analytics' | 'live' | 'activity'>('analytics');
 
@@ -1192,7 +1200,10 @@ export function Dashboard({
   };
 
   const openBacklog = counts.total_documents - counts.complete;
-  const jobStatusData = statusChartData(stats?.job_status.length ? stats.job_status : defaultJobStatus, t);
+  const jobStatusData = useMemo(
+    () => statusChartData(stats?.job_status.length ? stats.job_status : defaultJobStatus, t),
+    [stats?.job_status, t]
+  );
   const comparison = stats?.comparison;
   const throughputWithRate = useMemo(() => {
     const series = stats?.throughput_series ?? [];
@@ -1212,6 +1223,78 @@ export function Dashboard({
     });
   }, [stats?.backlog_series]);
   const runningJobs = stats?.kpis.running_jobs ?? counts.running;
+
+  // Memoize the heavy analytics column (4 Recharts + StageMatrix). It depends
+  // only on stats/range-derived data, so the 5s `live` poll re-render reuses the
+  // same element reference and React skips reconciling the charts entirely.
+  const analyticsColumn = useMemo(() => (
+    <div className={`dashboard-analytics${compactLayout && activeTab !== 'analytics' ? ' is-hidden' : ''}`} role={compactLayout ? 'tabpanel' : undefined}>
+      <ChartPanel title={t('dashboard.chart.throughput', { range })} wide>
+        <ResponsiveContainer width="100%" height={280}>
+          <ComposedChart data={throughputWithRate}>
+            <defs>
+              <pattern id="pat-created" patternUnits="userSpaceOnUse" width="6" height="6">
+                <rect width="6" height="6" fill="#dbe9f5" />
+                <circle cx="3" cy="3" r="1.2" fill="#28649b" />
+              </pattern>
+              <pattern id="pat-succeeded" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+                <rect width="6" height="6" fill="#d9eeee" />
+                <line x1="0" y1="0" x2="0" y2="6" stroke="#147f7a" strokeWidth="1.2" />
+              </pattern>
+              <pattern id="pat-failed" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(-45)">
+                <rect width="6" height="6" fill="#f5dddd" />
+                <line x1="0" y1="0" x2="0" y2="6" stroke="#a6403a" strokeWidth="1.6" />
+              </pattern>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} />
+            <XAxis dataKey="label" />
+            <YAxis yAxisId="count" allowDecimals={false} width={56} />
+            <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" width={44} />
+            <Tooltip formatter={chartTooltipFormatter} />
+            <Legend />
+            <Area yAxisId="count" type="monotone" dataKey="jobs_created" name={t('dashboard.chart.created')} stroke="#28649b" fill="url(#pat-created)" />
+            <Area yAxisId="count" type="monotone" dataKey="jobs_succeeded" name={t('dashboard.chart.succeeded')} stroke="#147f7a" fill="url(#pat-succeeded)" />
+            <Area yAxisId="count" type="monotone" dataKey="jobs_failed" name={t('dashboard.chart.failed')} stroke="#a6403a" fill="url(#pat-failed)" />
+            <Line yAxisId="rate" type="monotone" dataKey="success_rate" name={t('dashboard.chart.success_rate')} stroke="#0f5f5b" strokeWidth={2} dot={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </ChartPanel>
+      <StageMatrix stats={stats} onStageSelect={() => undefined} />
+      <div className="dashboard-grid compact">
+        <ChartPanel title={t('dashboard.chart.backlog_trend')}>
+          <ResponsiveContainer width="100%" height={240}>
+            <ComposedChart data={backlogWithRate}>
+              <defs>
+                <pattern id="pat-backlog" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(135)">
+                  <rect width="8" height="8" fill="#f1e5d0" />
+                  <line x1="0" y1="0" x2="0" y2="8" stroke="#a9782b" strokeWidth="1.2" />
+                </pattern>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="label" />
+              <YAxis yAxisId="count" allowDecimals={false} width={56} />
+              <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" width={44} />
+              <Tooltip formatter={chartTooltipFormatter} />
+              <Legend />
+              <Area yAxisId="count" type="monotone" dataKey="open_backlog" name={t('dashboard.chart.open')} stroke="#a9782b" fill="url(#pat-backlog)" />
+              <Line yAxisId="rate" type="monotone" dataKey="completion_rate" name={t('dashboard.chart.completion_rate')} stroke="#147f7a" strokeWidth={2} dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </ChartPanel>
+        <ChartPanel title={t('dashboard.chart.queue_state')}>
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={jobStatusData} layout="vertical" margin={{ left: 12 }}>
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+              <XAxis type="number" allowDecimals={false} />
+              <YAxis type="category" dataKey="label" width={92} />
+              <Tooltip />
+              <Bar dataKey="count" fill="#28649b" radius={[0, 4, 4, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartPanel>
+      </div>
+    </div>
+  ), [t, range, compactLayout, activeTab, throughputWithRate, backlogWithRate, jobStatusData, stats]);
 
   const healthScore = computeHealthScore(stats, live);
   const heroMetric = {
@@ -1293,8 +1376,7 @@ export function Dashboard({
           <HealthBadge
             score={healthScore}
             generatedAt={stats?.generated_at ?? null}
-            nextRefreshIn={nextRefreshIn}
-            pulse={pulse}
+            lastLoadedAt={lastLoadedAt}
           />
         </div>
         <div className="dashboard-heading-actions">
@@ -1431,72 +1513,7 @@ export function Dashboard({
 
       <ErrorBoundary>
       <div className={`dashboard-ops-grid${compactLayout ? ' is-compact' : ''}`}>
-        <div className={`dashboard-analytics${compactLayout && activeTab !== 'analytics' ? ' is-hidden' : ''}`} role={compactLayout ? 'tabpanel' : undefined}>
-          <ChartPanel title={t('dashboard.chart.throughput', { range })} wide>
-            <ResponsiveContainer width="100%" height={280}>
-              <ComposedChart data={throughputWithRate}>
-                <defs>
-                  <pattern id="pat-created" patternUnits="userSpaceOnUse" width="6" height="6">
-                    <rect width="6" height="6" fill="#dbe9f5" />
-                    <circle cx="3" cy="3" r="1.2" fill="#28649b" />
-                  </pattern>
-                  <pattern id="pat-succeeded" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
-                    <rect width="6" height="6" fill="#d9eeee" />
-                    <line x1="0" y1="0" x2="0" y2="6" stroke="#147f7a" strokeWidth="1.2" />
-                  </pattern>
-                  <pattern id="pat-failed" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(-45)">
-                    <rect width="6" height="6" fill="#f5dddd" />
-                    <line x1="0" y1="0" x2="0" y2="6" stroke="#a6403a" strokeWidth="1.6" />
-                  </pattern>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="label" />
-                <YAxis yAxisId="count" allowDecimals={false} width={56} />
-                <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" width={44} />
-                <Tooltip formatter={chartTooltipFormatter} />
-                <Legend />
-                <Area yAxisId="count" type="monotone" dataKey="jobs_created" name={t('dashboard.chart.created')} stroke="#28649b" fill="url(#pat-created)" />
-                <Area yAxisId="count" type="monotone" dataKey="jobs_succeeded" name={t('dashboard.chart.succeeded')} stroke="#147f7a" fill="url(#pat-succeeded)" />
-                <Area yAxisId="count" type="monotone" dataKey="jobs_failed" name={t('dashboard.chart.failed')} stroke="#a6403a" fill="url(#pat-failed)" />
-                <Line yAxisId="rate" type="monotone" dataKey="success_rate" name={t('dashboard.chart.success_rate')} stroke="#0f5f5b" strokeWidth={2} dot={false} />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </ChartPanel>
-          <StageMatrix stats={stats} onStageSelect={() => undefined} />
-          <div className="dashboard-grid compact">
-            <ChartPanel title={t('dashboard.chart.backlog_trend')}>
-              <ResponsiveContainer width="100%" height={240}>
-                <ComposedChart data={backlogWithRate}>
-                  <defs>
-                    <pattern id="pat-backlog" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(135)">
-                      <rect width="8" height="8" fill="#f1e5d0" />
-                      <line x1="0" y1="0" x2="0" y2="8" stroke="#a9782b" strokeWidth="1.2" />
-                    </pattern>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="label" />
-                  <YAxis yAxisId="count" allowDecimals={false} width={56} />
-                  <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" width={44} />
-                  <Tooltip formatter={chartTooltipFormatter} />
-                  <Legend />
-                  <Area yAxisId="count" type="monotone" dataKey="open_backlog" name={t('dashboard.chart.open')} stroke="#a9782b" fill="url(#pat-backlog)" />
-                  <Line yAxisId="rate" type="monotone" dataKey="completion_rate" name={t('dashboard.chart.completion_rate')} stroke="#147f7a" strokeWidth={2} dot={false} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            </ChartPanel>
-            <ChartPanel title={t('dashboard.chart.queue_state')}>
-              <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={jobStatusData} layout="vertical" margin={{ left: 12 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                  <XAxis type="number" allowDecimals={false} />
-                  <YAxis type="category" dataKey="label" width={92} />
-                  <Tooltip />
-                  <Bar dataKey="count" fill="#28649b" radius={[0, 4, 4, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </ChartPanel>
-          </div>
-        </div>
+        {analyticsColumn}
         <div className={compactLayout && activeTab !== 'live' ? 'is-hidden' : ''} role={compactLayout ? 'tabpanel' : undefined}>
           <LiveProcessingPanel live={live} />
         </div>
