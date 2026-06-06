@@ -4252,6 +4252,7 @@ mod tests {
             trust_proxy: false,
             auth_rate_limit: 10,
             auth_rate_limit_window_seconds: 60,
+            webhook_secret: None,
         }
     }
 }

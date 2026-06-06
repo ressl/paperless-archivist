@@ -9,9 +9,10 @@ use archivist_core::{
     DashboardComparison, DashboardCostBucket, DashboardLiveFailure, DashboardLiveJob,
     DashboardLiveLlmEvent, DashboardLiveRun, DashboardLiveStatus, DashboardRange,
     DashboardStageStatus, DashboardStats, DashboardStatusCount, DashboardTimeBucket,
-    DocumentChatSource, DocumentInventoryItem, LanguageDetection, NeedsAttentionItem,
-    ProcessingMode, ProviderUsageStats, QualityStats, Role, RuntimeSettings,
-    ServiceProcessingStatus, Stage, WorkflowRules, WorkflowSafetyStatus, redact_sensitive_json,
+    DocumentChatSource, DocumentInventoryItem, DuplicateDocument, DuplicateGroup,
+    LanguageDetection, NeedsAttentionItem, ProcessingMode, ProviderUsageStats, QualityStats, Role,
+    RuntimeSettings, ServiceProcessingStatus, Stage, WorkflowRules, WorkflowSafetyStatus,
+    redact_sensitive_json,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -225,6 +226,20 @@ pub struct PromptUsageRecord {
     pub avg_duration_ms: f64,
     pub last_provider: Option<String>,
     pub last_model: Option<String>,
+}
+
+/// One row of the prompt A/B experiment evaluation: the review-outcome
+/// breakdown for all metadata artifacts stamped with a given
+/// `prompt_experiment_group` (see [`get_active_prompt_with_experiment`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptExperimentRecord {
+    pub group: String,
+    pub total: i64,
+    pub approved: i64,
+    pub rejected: i64,
+    pub edited: i64,
+    pub applied: i64,
+    pub mean_confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1527,6 +1542,87 @@ pub async fn list_prompt_usage(pool: &DbPool) -> Result<Vec<PromptUsageRecord>> 
                 avg_duration_ms: row.try_get("avg_duration_ms")?,
                 last_provider: row.try_get("last_provider")?,
                 last_model: row.try_get("last_model")?,
+            })
+        })
+        .collect()
+}
+
+/// Aggregate prompt A/B-experiment outcomes by `prompt_experiment_group`.
+///
+/// The group label is stamped into `ai_artifacts.normalized_output ->>
+/// 'prompt_experiment_group'` by the metadata worker. We dedupe to the latest
+/// artifact per (run, job) — guarding against retries — and join those jobs to
+/// their `review_items` to count review statuses per group. `mean_confidence`
+/// is the average of the per-artifact mean over the available sub-suggestion
+/// confidences (title, document_type, correspondent, document_date, tags,
+/// fields). Read-only; no migration.
+pub async fn list_prompt_experiments(pool: &DbPool) -> Result<Vec<PromptExperimentRecord>> {
+    let rows = sqlx::query(
+        r#"
+        with art_groups as (
+            select distinct on (run_id, job_id)
+                   run_id,
+                   job_id,
+                   normalized_output->>'prompt_experiment_group' as grp,
+                   (
+                     select avg(c)
+                       from (values
+                         ((normalized_output#>>'{title,confidence}')::double precision),
+                         ((normalized_output#>>'{document_type,confidence}')::double precision),
+                         ((normalized_output#>>'{correspondent,confidence}')::double precision),
+                         ((normalized_output#>>'{document_date,confidence}')::double precision),
+                         ((normalized_output#>>'{tags,confidence}')::double precision),
+                         ((normalized_output#>>'{fields,confidence}')::double precision)
+                       ) as t(c)
+                      where c is not null
+                   ) as conf
+              from ai_artifacts
+             where normalized_output ? 'prompt_experiment_group'
+               and normalized_output->>'prompt_experiment_group' is not null
+             order by run_id, job_id, created_at desc
+        ),
+        counts as (
+            select ag.grp,
+                   count(ri.id) as total,
+                   count(ri.id) filter (where ri.status = 'approved') as approved,
+                   count(ri.id) filter (where ri.status = 'rejected') as rejected,
+                   count(ri.id) filter (where ri.status = 'edited') as edited,
+                   count(ri.id) filter (where ri.status = 'applied') as applied
+              from art_groups ag
+              left join review_items ri
+                on ri.run_id = ag.run_id and ri.job_id = ag.job_id
+             group by ag.grp
+        ),
+        conf as (
+            select grp, avg(conf)::double precision as mean_confidence
+              from art_groups
+             group by grp
+        )
+        select c.grp as grp,
+               c.total as total,
+               c.approved as approved,
+               c.rejected as rejected,
+               c.edited as edited,
+               c.applied as applied,
+               cf.mean_confidence as mean_confidence
+          from counts c
+          join conf cf using (grp)
+         order by c.grp
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PromptExperimentRecord {
+                group: row.try_get("grp")?,
+                total: row.try_get("total")?,
+                approved: row.try_get("approved")?,
+                rejected: row.try_get("rejected")?,
+                edited: row.try_get("edited")?,
+                applied: row.try_get("applied")?,
+                mean_confidence: row.try_get("mean_confidence")?,
             })
         })
         .collect()
@@ -4273,6 +4369,45 @@ pub async fn create_run_with_jobs_with_priority(
     Ok(run_id)
 }
 
+/// Bulk re-run: create one run (with the given stages) per document in a single transaction.
+///
+/// Used by the `/api/batches/rerun` endpoint so operators can re-trigger a hand-picked set of
+/// "succeeded-but-wrong" documents in one shot instead of one trigger at a time. The active-run
+/// guard inside [`create_run_with_jobs_on_tx`] still applies per document, so ids that already
+/// have an in-flight run are silently reused (no duplicate run). Returns the number of documents
+/// processed (the size of the input set; each contributes exactly one run, new or reused).
+pub async fn create_runs_for_documents(
+    pool: &DbPool,
+    document_ids: &[i32],
+    stages: &[Stage],
+    mode: ProcessingMode,
+    trigger_tag: &str,
+    actor: &str,
+    priority: Option<i64>,
+) -> Result<i64> {
+    if document_ids.is_empty() {
+        return Ok(0);
+    }
+    // Amortise one transaction across the whole batch instead of a begin+commit per document.
+    let mut tx = pool.begin().await?;
+    let mut queued: i64 = 0;
+    for &document_id in document_ids {
+        create_run_with_jobs_on_tx(
+            &mut tx,
+            document_id,
+            stages,
+            mode,
+            trigger_tag,
+            actor,
+            priority,
+        )
+        .await?;
+        queued += 1;
+    }
+    tx.commit().await?;
+    Ok(queued)
+}
+
 /// Per-document run/job creation against an existing transaction. Callers own the begin/commit so
 /// batch backfills can amortise one transaction across many documents instead of paying a full
 /// begin+commit per doc. The active-run guard and idempotent inventory upsert are unchanged.
@@ -5894,6 +6029,58 @@ pub async fn find_metadata_dedup_source(
         Ok((r.try_get("source_id")?, r.try_get("metadata_payload")?))
     })
     .transpose()
+}
+
+/// Maximum number of duplicate groups returned by [`list_inventory_duplicates`].
+/// Keeps the read-only dedup endpoint cheap and the payload bounded; the
+/// caller logs when the result is truncated at this cap.
+pub const DUPLICATE_GROUP_LIMIT: i64 = 200;
+
+/// Group `document_inventory` rows by `ocr_content_hash`, returning every hash
+/// shared by more than one document (#216 dedup view). Rows with a null hash
+/// are excluded. When more than [`DUPLICATE_GROUP_LIMIT`] groups exist the
+/// largest (most-duplicated) groups are kept; the returned groups themselves
+/// are ordered by hash.
+pub async fn list_inventory_duplicates(pool: &DbPool) -> Result<Vec<DuplicateGroup>> {
+    let rows = sqlx::query(
+        r#"
+        select ocr_content_hash as hash,
+               paperless_document_id,
+               title
+          from document_inventory
+         where ocr_content_hash is not null
+           and ocr_content_hash in (
+                 select ocr_content_hash
+                   from document_inventory
+                  where ocr_content_hash is not null
+                  group by ocr_content_hash
+                 having count(*) > 1
+                  order by count(*) desc
+                  limit $1
+               )
+         order by ocr_content_hash, paperless_document_id
+        "#,
+    )
+    .bind(DUPLICATE_GROUP_LIMIT)
+    .fetch_all(pool)
+    .await?;
+
+    let mut groups: Vec<DuplicateGroup> = Vec::new();
+    for row in rows {
+        let hash: String = row.try_get("hash")?;
+        let document = DuplicateDocument {
+            paperless_document_id: row.try_get("paperless_document_id")?,
+            title: row.try_get("title")?,
+        };
+        match groups.last_mut() {
+            Some(group) if group.hash == hash => group.documents.push(document),
+            _ => groups.push(DuplicateGroup {
+                hash,
+                documents: vec![document],
+            }),
+        }
+    }
+    Ok(groups)
 }
 
 pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Result<Uuid> {

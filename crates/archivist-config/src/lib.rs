@@ -96,6 +96,13 @@ pub struct AppConfig {
         default_value_t = 60
     )]
     pub auth_rate_limit_window_seconds: u64,
+
+    /// Shared secret for the machine-to-machine inbound webhook
+    /// (`POST /api/webhooks/paperless/document-consumed`). When unset, the
+    /// webhook endpoint is disabled and responds `503`. Callers authenticate
+    /// by sending this exact value in the `X-Webhook-Secret` header.
+    #[arg(long, env = "ARCHIVIST_WEBHOOK_SECRET")]
+    pub webhook_secret: Option<SecretString>,
 }
 
 impl AppConfig {

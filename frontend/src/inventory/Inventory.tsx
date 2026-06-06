@@ -1,11 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, Filter, RefreshCw, Search, Sparkles, Stethoscope, Tags, X } from 'lucide-react';
+import { Copy, ExternalLink, FileText, Filter, RefreshCw, RotateCcw, Search, Sparkles, Stethoscope, Tags, X } from 'lucide-react';
 import {
   api,
+  type DuplicateGroup,
   type InventoryItem,
   type InventoryQueryParams,
   type MetadataFieldOutcome,
   type MetadataTrace,
+  type Stage,
 } from '../api/client';
 import { languageOptions } from '../data/worldLanguages';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
@@ -13,6 +15,9 @@ import { ActionButton, PageHeader, Status, localizedErrorMessage, run } from '..
 import { DebugContextDetails } from '../lib/DebugContextDetails';
 
 const PAGE_SIZE = 500;
+// Default stage set for a bulk re-run: the full business pipeline. Re-running a
+// "succeeded-but-wrong" document should regenerate OCR + metadata from scratch.
+const RERUN_STAGES: Stage[] = ['ocr', 'metadata'];
 const STATUS_OPTIONS = ['queued', 'running', 'succeeded', 'failed', 'waiting_review', 'unknown'] as const;
 const RUN_STATUS_OPTIONS = ['queued', 'running', 'waiting_review', 'applying', 'succeeded', 'failed'] as const;
 
@@ -138,10 +143,13 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
     return f.id != null ? String(f.id) : (f.q ?? '');
   });
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [diagnoseDocumentId, setDiagnoseDocumentId] = useState<number | null>(null);
   const [diagnoseTrace, setDiagnoseTrace] = useState<MetadataTrace | null>(null);
   const [diagnoseBusy, setDiagnoseBusy] = useState(false);
   const [diagnoseMissing, setDiagnoseMissing] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [notice, setNotice] = useState<string | null>(null);
   const languages = useMemo(() => languageOptions(locale), [locale]);
 
   // Sync filters → URL whenever filters change.
@@ -254,6 +262,48 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
     [loadFirst, setError, t]
   );
 
+  const toggleSelect = useCallback((documentId: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(documentId)) {
+        next.delete(documentId);
+      } else {
+        next.add(documentId);
+      }
+      return next;
+    });
+  }, []);
+
+  const allOnPageSelected = items.length > 0 && items.every((item) => selected.has(item.paperless_document_id));
+
+  const toggleSelectAll = useCallback(() => {
+    setSelected((prev) => {
+      const everySelected = items.length > 0 && items.every((item) => prev.has(item.paperless_document_id));
+      if (everySelected) {
+        const next = new Set(prev);
+        items.forEach((item) => next.delete(item.paperless_document_id));
+        return next;
+      }
+      const next = new Set(prev);
+      items.forEach((item) => next.add(item.paperless_document_id));
+      return next;
+    });
+  }, [items]);
+
+  const rerunSelected = useCallback(() => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return Promise.resolve();
+    setNotice(null);
+    return api
+      .bulkRerun(ids, RERUN_STAGES)
+      .then((result) => {
+        setSelected(new Set());
+        setNotice(t('inventory.rerun_done', { count: result.queued }));
+        return loadFirst();
+      })
+      .catch((err) => setError(localizedErrorMessage(err, t)));
+  }, [selected, loadFirst, setError, t]);
+
   const openDiagnose = useCallback(
     async (documentId: number) => {
       setDiagnoseDocumentId(documentId);
@@ -339,6 +389,9 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
         <button className={`chip-button${advancedOpen ? ' active' : ''}`} onClick={() => setAdvancedOpen((open) => !open)}>
           <Filter size={14} /> {t('inventory.advanced_toggle')}
         </button>
+        <button className={`chip-button${duplicatesOpen ? ' active' : ''}`} onClick={() => setDuplicatesOpen((open) => !open)}>
+          <Copy size={14} /> {t('inventory.duplicates_toggle')}
+        </button>
         {filtersActive && (
           <button className="chip-button" onClick={clearAll}>
             <X size={14} /> {t('inventory.clear_filters')}
@@ -350,10 +403,37 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
         <AdvancedPanel filters={filters} setFilters={setFilters} languages={languages} t={t} />
       )}
 
+      {duplicatesOpen && <DuplicatesPanel setError={setError} t={t} />}
+
+      <div className="toolbar inventory-selection-bar">
+        <button
+          className="primary-button"
+          disabled={busy || selected.size === 0}
+          onClick={() => run(setBusy, setError, rerunSelected, t)}
+        >
+          <RotateCcw size={16} /> {t('inventory.rerun_selected')}
+        </button>
+        <small className="field-hint">{t('inventory.selected_count', { count: selected.size })}</small>
+        {selected.size > 0 && (
+          <button className="chip-button" onClick={() => setSelected(new Set())}>
+            <X size={14} /> {t('inventory.clear_selection')}
+          </button>
+        )}
+        {notice && <small className="field-hint">{notice}</small>}
+      </div>
+
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
+              <th className="select-col">
+                <input
+                  type="checkbox"
+                  checked={allOnPageSelected}
+                  onChange={toggleSelectAll}
+                  aria-label={t('inventory.select_all')}
+                />
+              </th>
               <th>{t('inventory.id')}</th>
               <th>{t('inventory.document_title')}</th>
               <th>{t('inventory.ocr')}</th>
@@ -369,7 +449,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
           <tbody>
             {items.length === 0 ? (
               <tr>
-                <td colSpan={10} className="empty-row">
+                <td colSpan={11} className="empty-row">
                   {t('inventory.no_results')}
                 </td>
               </tr>
@@ -378,6 +458,8 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
                 <InventoryRow
                   key={item.paperless_document_id}
                   item={item}
+                  selected={selected.has(item.paperless_document_id)}
+                  onToggleSelect={toggleSelect}
                   languages={languages}
                   t={t}
                   onTriggerOcr={triggerOcr}
@@ -418,6 +500,75 @@ function ChipButton({ label, active, onClick }: { label: string; active: boolean
     <button className={`chip-button${active ? ' active' : ''}`} onClick={onClick}>
       {label}
     </button>
+  );
+}
+
+// Read-only dedup view (#216): lists groups of documents sharing the same OCR
+// content hash, each member linking out to its Paperless detail page. Fetches
+// its own data when first rendered so the cost is only paid when the operator
+// opens the panel.
+function DuplicatesPanel({ setError, t }: { setError: (error: string | null) => void; t: TFunction }) {
+  const [groups, setGroups] = useState<DuplicateGroup[] | null>(null);
+  const [paperlessBase, setPaperlessBase] = useState<string>('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    setBusy(true);
+    return api
+      .inventoryDuplicates()
+      .then((data) => {
+        setGroups(data.groups);
+        setPaperlessBase(data.paperless_base);
+      })
+      .catch((err) => setError(localizedErrorMessage(err, t)))
+      .finally(() => setBusy(false));
+  }, [setError, t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const documentUrl = (id: number) =>
+    paperlessBase ? `${paperlessBase}/documents/${id}/details` : null;
+
+  return (
+    <div className="advanced-panel duplicates-panel">
+      <div className="toolbar">
+        <strong>{t('inventory.duplicates_title')}</strong>
+        <ActionButton icon={<RefreshCw />} label={t('generic.reload')} busy={busy} onClick={load} />
+        {groups != null && (
+          <small className="field-hint">{t('inventory.duplicates_group_count', { count: groups.length })}</small>
+        )}
+      </div>
+      {groups != null && groups.length === 0 && (
+        <p className="field-hint">{t('inventory.duplicates_empty')}</p>
+      )}
+      {groups?.map((group) => (
+        <div key={group.hash} className="duplicates-group">
+          <div className="field-hint">
+            {t('inventory.duplicates_hash', { hash: group.hash.slice(0, 12) })} ·{' '}
+            {t('inventory.duplicates_doc_count', { count: group.documents.length })}
+          </div>
+          <ul>
+            {group.documents.map((doc) => {
+              const url = documentUrl(doc.paperless_document_id);
+              const label = `#${doc.paperless_document_id} ${doc.title ?? t('inventory.untitled')}`;
+              return (
+                <li key={doc.paperless_document_id}>
+                  {url ? (
+                    <a href={url} target="_blank" rel="noreferrer">
+                      <ExternalLink size={14} /> {label}
+                    </a>
+                  ) : (
+                    label
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -565,6 +716,8 @@ function AdvancedPanel({ filters, setFilters, languages, t }: AdvancedPanelProps
 
 type InventoryRowProps = {
   item: InventoryItem;
+  selected: boolean;
+  onToggleSelect: (documentId: number) => void;
   languages: ReturnType<typeof languageOptions>;
   t: TFunction;
   onTriggerOcr: (documentId: number) => void;
@@ -574,11 +727,19 @@ type InventoryRowProps = {
 };
 
 const InventoryRow = memo(
-  function InventoryRow({ item, languages, t, onTriggerOcr, onTriggerMetadata, onTriggerPipeline, onDiagnose }: InventoryRowProps) {
+  function InventoryRow({ item, selected, onToggleSelect, languages, t, onTriggerOcr, onTriggerMetadata, onTriggerPipeline, onDiagnose }: InventoryRowProps) {
     return (
       // `content-visibility: auto` lets the browser skip layout/paint for rows
       // outside the viewport, keeping a long (load-more) list cheap to render.
       <tr style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 41px' }}>
+        <td className="select-col">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => onToggleSelect(item.paperless_document_id)}
+            aria-label={t('inventory.select_row', { id: item.paperless_document_id })}
+          />
+        </td>
         <td>{item.paperless_document_id}</td>
         <td>{item.title || item.original_file_name || t('inventory.untitled')}</td>
         <td><Status value={item.ocr_status} /></td>
@@ -607,6 +768,8 @@ const InventoryRow = memo(
   },
   (prev, next) => {
     if (prev.t !== next.t) return false;
+    if (prev.selected !== next.selected) return false;
+    if (prev.onToggleSelect !== next.onToggleSelect) return false;
     if (prev.languages !== next.languages) return false;
     if (prev.onTriggerOcr !== next.onTriggerOcr) return false;
     if (prev.onTriggerMetadata !== next.onTriggerMetadata) return false;

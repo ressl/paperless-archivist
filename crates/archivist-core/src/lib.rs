@@ -3703,6 +3703,22 @@ pub struct DocumentInventoryItem {
     pub last_seen_at: DateTime<Utc>,
 }
 
+/// One member document of a duplicate group (#216 dedup view). Documents are
+/// grouped by their shared `ocr_content_hash`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateDocument {
+    pub paperless_document_id: i32,
+    pub title: Option<String>,
+}
+
+/// A set of documents that share the same OCR content hash, i.e. likely
+/// duplicates of one another (#216 dedup view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateGroup {
+    pub hash: String,
+    pub documents: Vec<DuplicateDocument>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentChatSource {
     pub paperless_document_id: i32,
