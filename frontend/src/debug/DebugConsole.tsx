@@ -46,12 +46,37 @@ export function DebugConsole({ setError }: { setError: (error: string | null) =>
     void reload();
   }, [reload]);
 
+  // Poll only while the tab is visible (mirrors the dashboard's
+  // useVisibleInterval): pause on hidden, force-refresh once on return.
   useEffect(() => {
     if (paused) return;
-    const id = window.setInterval(() => {
-      void reload();
-    }, POLL_INTERVAL_MS);
-    return () => window.clearInterval(id);
+    let timer: number | null = null;
+    const start = () => {
+      if (timer != null) return;
+      timer = window.setInterval(() => {
+        void reload();
+      }, POLL_INTERVAL_MS);
+    };
+    const stop = () => {
+      if (timer != null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const handleVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        void reload();
+        start();
+      }
+    };
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [paused, reload]);
 
   const activeJobs = live?.active_jobs ?? [];
