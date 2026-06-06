@@ -5424,10 +5424,17 @@ async fn sync_paperless_inventory(
     let archive_name = settings.paperless.active_archive.clone();
     let sync_started_at = Utc::now();
     let mut tags = client.list_tags().await?;
+    // Only hit `ensure_tag` for workflow tags that are genuinely absent. Each
+    // `ensure_tag` re-fetches the entire Paperless tag catalog, so calling it
+    // unconditionally per workflow tag was O(workflow_tags × all_tags) — with a
+    // few thousand tags this added minutes to every sync. The catalog is already
+    // in `tags`; match it the same case-insensitive way `ensure_tag` does.
     for workflow_tag in settings.workflow.tags.all() {
-        let tag = client.ensure_tag(workflow_tag).await?;
-        if !tags.iter().any(|existing| existing.id == tag.id) {
-            tags.push(tag);
+        if !tags
+            .iter()
+            .any(|existing| existing.name.eq_ignore_ascii_case(workflow_tag))
+        {
+            tags.push(client.ensure_tag(workflow_tag).await?);
         }
     }
     let correspondents = client.list_correspondents().await?;

@@ -3161,11 +3161,14 @@ async fn sync_metadata(
     settings: &RuntimeSettings,
 ) -> Result<PaperlessSyncSnapshot> {
     let mut tags = paperless.list_tags().await?;
+    // Reuse the already-fetched catalog via `ensure_tag_cached`, which only
+    // calls Paperless when a workflow tag is genuinely missing. The previous
+    // unconditional `ensure_tag` per workflow tag re-fetched the entire tag
+    // catalog every iteration — O(workflow_tags × all_tags). With a few
+    // thousand tags that alone overran the 300s trigger-poll timeout, so the
+    // poll never completed and document ingestion stalled entirely.
     for workflow_tag in settings.workflow.tags.all() {
-        let tag = paperless.ensure_tag(workflow_tag).await?;
-        if !tags.iter().any(|existing| existing.id == tag.id) {
-            tags.push(tag);
-        }
+        ensure_tag_cached(paperless, &mut tags, workflow_tag).await?;
     }
     let correspondents = paperless.list_correspondents().await?;
     let document_types = paperless.list_document_types().await?;
