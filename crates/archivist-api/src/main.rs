@@ -1134,7 +1134,6 @@ async fn verify_paperless_credentials(
         .redirect(reqwest::redirect::Policy::none())
         // Pin the validated IP at connect time to close the DNS-rebinding
         // TOCTOU on the operator-configured Paperless host.
-        .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
         .build()
         .context("build Paperless login HTTP client")?;
     let response = client
@@ -1794,7 +1793,6 @@ async fn send_notification_webhook(webhook_url: &str, payload: Value) -> Result<
         // Pin the validated IP at connect time: the SSRF resolver re-checks the
         // resolved address right before dialing, closing the DNS-rebinding
         // TOCTOU between `validate_outbound_url` and the actual request.
-        .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
         .build()?
         .post(webhook_url)
         .json(&payload)

@@ -751,7 +751,6 @@ async fn send_notification_webhook(
         .redirect(reqwest::redirect::Policy::none())
         // Pin the validated IP at connect time to close the DNS-rebinding
         // TOCTOU on the operator-configured webhook host (#183).
-        .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
         .build()?
         .post(webhook_url.expose_secret())
         .json(&payload)

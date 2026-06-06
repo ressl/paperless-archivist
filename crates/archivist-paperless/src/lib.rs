@@ -123,7 +123,6 @@ impl PaperlessClient {
             // re-checks the resolved address right before dialing, so a rebound
             // DNS name cannot point this client at an internal address between
             // an up-front check and the connect (DNS-rebinding TOCTOU, #183).
-            .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
             .default_headers(headers)
             .build()
             .context("build Paperless HTTP client")?;
