@@ -3,7 +3,7 @@
 FROM node:26-bookworm AS frontend
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN npm install -g pnpm@10.33.4 && pnpm install --frozen-lockfile
+RUN npm install -g pnpm@10.34.1 && pnpm install --frozen-lockfile
 COPY openapi /app/openapi
 COPY frontend ./
 RUN pnpm generate:client && pnpm build
