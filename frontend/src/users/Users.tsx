@@ -4,6 +4,8 @@ import { api, ApiToken, Role, SessionItem, UserItem } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage } from '../lib/ui';
 
+const ALL_ROLES: Role[] = ['viewer', 'reviewer', 'operator', 'auditor', 'admin'];
+
 function splitTags(value: string) {
   return value
     .split(',')
@@ -67,17 +69,27 @@ export function Users({ setError }: { setError: (error: string | null) => void }
               <tr key={user.id}>
                 <td>{user.username}</td>
                 <td>
-                  <select
-                    value={user.roles[0] ?? 'viewer'}
-                    aria-label={`roles for ${user.username}`}
-                    onChange={(event) => api.updateUserRoles(user.id, [event.target.value as Role]).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}
-                  >
-                    <option value="viewer">viewer</option>
-                    <option value="reviewer">reviewer</option>
-                    <option value="operator">operator</option>
-                    <option value="auditor">auditor</option>
-                    <option value="admin">admin</option>
-                  </select>
+                  <fieldset className="role-checkboxes" aria-label={`roles for ${user.username}`}>
+                    {ALL_ROLES.map((roleOption) => {
+                      const checked = user.roles.includes(roleOption);
+                      return (
+                        <label key={roleOption}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            aria-label={`${roleOption} role for ${user.username}`}
+                            onChange={() => {
+                              const nextRoles = checked
+                                ? user.roles.filter((existing) => existing !== roleOption)
+                                : [...user.roles, roleOption];
+                              api.updateUserRoles(user.id, nextRoles).then(load).catch((err) => setError(localizedErrorMessage(err, t)));
+                            }}
+                          />
+                          {roleOption}
+                        </label>
+                      );
+                    })}
+                  </fieldset>
                 </td>
                 <td>{user.enabled ? 'enabled' : 'disabled'}</td>
                 <td className="inline-edit">
