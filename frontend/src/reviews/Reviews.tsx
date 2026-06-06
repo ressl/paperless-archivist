@@ -25,11 +25,21 @@ const REVIEW_MAX_LIMIT = 500;
 export function Reviews({ setError }: { setError: (error: string | null) => void }) {
   const { t } = useI18n();
   const [items, setItems] = useState<ReviewItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [serverHasMore, setServerHasMore] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [limit, setLimit] = useState(REVIEW_PAGE_SIZE);
   const load = useCallback(
-    () => api.reviews(limit).then((data) => setItems(data.items)).catch((err) => setError(localizedErrorMessage(err, t))),
+    () =>
+      api
+        .reviews(limit)
+        .then((data) => {
+          setItems(data.items);
+          setTotal(data.total);
+          setServerHasMore(data.has_more);
+        })
+        .catch((err) => setError(localizedErrorMessage(err, t))),
     [limit, setError, t]
   );
 
@@ -37,9 +47,9 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
     void load();
   }, [load]);
 
-  // A full page very likely means more pending items exist; expose Load-More until
-  // we either receive a short page or hit the backend's hard cap.
-  const hasMore = items.length >= limit && limit < REVIEW_MAX_LIMIT;
+  // The server reports whether more pending items exist beyond this page; we can
+  // only keep loading until we hit the backend's hard cap on `limit`.
+  const hasMore = serverHasMore && limit < REVIEW_MAX_LIMIT;
   const loadMore = useCallback(() => {
     setLimit((current) => Math.min(current + REVIEW_PAGE_SIZE, REVIEW_MAX_LIMIT));
   }, []);
@@ -113,6 +123,7 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
         <button disabled={busy || items.length === 0} onClick={() => void autoFixAll()} title={t('review.auto_fix_all')}>
           <Wrench size={16} /> {t('review.auto_fix_all')}
         </button>
+        <small className="field-hint">{t('reviews.count', { shown: items.length, total })}</small>
       </div>
       <div className="review-list">
         {items.map((item) => (

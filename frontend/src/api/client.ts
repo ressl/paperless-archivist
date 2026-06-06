@@ -823,7 +823,9 @@ export const api = {
       body: JSON.stringify(input)
     }),
   reviews: (limit = 100) =>
-    request<{ items: ReviewItem[] }>(`/api/reviews?status=pending&limit=${encodeURIComponent(String(limit))}`),
+    request<{ items: ReviewItem[]; total: number; has_more: boolean }>(
+      `/api/reviews?status=pending&limit=${encodeURIComponent(String(limit))}`
+    ),
   approveReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/approve`, { method: 'POST' }),
   rejectReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/reject`, { method: 'POST' }),
   autoFixReviewPreview: (limit?: number) =>

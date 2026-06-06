@@ -19,7 +19,7 @@ use archivist_core::{
 use archivist_db::{
     AuthUser, DbPool, DocumentChatCandidate, MetadataApplyAudit, MetadataArtifact,
     MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry, ReviewItemRecord,
-    append_audit, apply_security_retention, connect, consume_oidc_login_state,
+    append_audit, apply_security_retention, connect, consume_oidc_login_state, count_reviews,
     create_document_chat_session, create_oidc_login_state, create_run_with_jobs_with_priority,
     create_session, create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
     document_chat_session_visible, find_api_token, find_session, find_user_for_login,
@@ -4127,8 +4127,12 @@ async fn reviews(
     .into_iter()
     .map(|review| review_with_debug(review, &settings))
     .collect::<Result<Vec<_>>>()?;
+    let total = count_reviews(&state.pool, query.status.as_deref()).await?;
+    let has_more = total > items.len() as i64;
     Ok(Json(json!({
-        "items": items
+        "items": items,
+        "total": total,
+        "has_more": has_more
     })))
 }
 

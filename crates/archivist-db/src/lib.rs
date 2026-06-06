@@ -5217,6 +5217,22 @@ pub async fn list_reviews(
         .collect()
 }
 
+/// Count review items matching the same optional `status` filter used by
+/// [`list_reviews`]. Lets the API report an honest total alongside a clamped page.
+pub async fn count_reviews(pool: &DbPool, status: Option<&str>) -> Result<i64> {
+    let count = if let Some(status) = status {
+        sqlx::query_scalar::<_, i64>(r#"select count(*) from review_items where status = $1"#)
+            .bind(status)
+            .fetch_one(pool)
+            .await?
+    } else {
+        sqlx::query_scalar::<_, i64>(r#"select count(*) from review_items"#)
+            .fetch_one(pool)
+            .await?
+    };
+    Ok(count)
+}
+
 pub async fn review_decision(
     pool: &DbPool,
     review_id: Uuid,

@@ -1,11 +1,13 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { languageOptions } from '../data/worldLanguages';
 import {
+  enMessages,
   fallbackLocale,
   hasMessageKey,
   isCompleteLocale,
-  messages,
+  loadLocaleMessages,
   type CompleteLocale,
+  type LocaleMessages,
   type MessageKey
 } from './messages';
 
@@ -38,9 +40,35 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState(() => initialLocale());
   const messageLocale = resolveMessageLocale(locale);
 
+  // English is always available synchronously; other locales are loaded on demand.
+  // Until the active locale's bundle resolves, `t` falls back to English so there is
+  // no flash of missing strings.
+  const [loadedMessages, setLoadedMessages] = useState<Partial<Record<CompleteLocale, LocaleMessages>>>(
+    () => ({ en: enMessages })
+  );
+
+  useEffect(() => {
+    if (loadedMessages[messageLocale]) return;
+    let cancelled = false;
+    loadLocaleMessages(messageLocale)
+      .then((loaded) => {
+        if (cancelled) return;
+        setLoadedMessages((prev) => (prev[messageLocale] ? prev : { ...prev, [messageLocale]: loaded }));
+      })
+      .catch(() => {
+        // Locale bundle failed to load; the English fallback remains in effect.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadedMessages, messageLocale]);
+
   const t = useCallback<TFunction>(
-    (key, values) => interpolate(messages[messageLocale][key] ?? messages[fallbackLocale][key] ?? key, values),
-    [messageLocale]
+    (key, values) => {
+      const active = loadedMessages[messageLocale];
+      return interpolate(active?.[key] ?? enMessages[key] ?? key, values);
+    },
+    [loadedMessages, messageLocale]
   );
 
   const setLocale = useCallback((nextLocale: string) => {
