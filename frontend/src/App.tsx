@@ -16,13 +16,15 @@ import {
 import { api, Me, OidcConfig } from './api/client';
 import { buildInfo, buildInfoLabel } from './buildInfo';
 import { useI18n } from './i18n/I18nProvider';
-import { Dashboard } from './dashboard/Dashboard';
-import { Inventory } from './inventory/Inventory';
-import { Reviews } from './reviews/Reviews';
 import { ErrorBoundary } from './lib/ErrorBoundary';
 import { PageHeader, localizedErrorMessage } from './lib/ui';
 import { LanguageSelector } from './lib/LanguageSelector';
 
+// Dashboard pulls in Recharts; keep it (and the other tab pages) out of the
+// critical shell/login chunk by loading them lazily on first navigation.
+const Dashboard = lazy(() => import('./dashboard/Dashboard').then((mod) => ({ default: mod.Dashboard })));
+const Inventory = lazy(() => import('./inventory/Inventory').then((mod) => ({ default: mod.Inventory })));
+const Reviews = lazy(() => import('./reviews/Reviews').then((mod) => ({ default: mod.Reviews })));
 const SettingsPage = lazy(() => import('./settings/SettingsPage').then((mod) => ({ default: mod.SettingsPage })));
 const Prompts = lazy(() => import('./prompts/Prompts').then((mod) => ({ default: mod.Prompts })));
 const Audit = lazy(() => import('./audit/Audit').then((mod) => ({ default: mod.Audit })));
@@ -72,6 +74,16 @@ export function App() {
 
   const canUseChat = me.roles.some((role) => role === 'admin' || role === 'reviewer' || role === 'operator');
   const canManageSettings = me.roles.some((role) => role === 'admin');
+  const canReadSettings = me.permissions.read_settings;
+  const canReadAudit = me.permissions.read_audit;
+  const canManageUsers = me.permissions.manage_users;
+
+  // Switch tabs and drop any stale global error so a banner from one tab does
+  // not bleed into the next one.
+  const selectTab = (next: Tab) => {
+    setError(null);
+    setTab(next);
+  };
 
   const lazyFallback = (
     <section className="page">
@@ -91,16 +103,16 @@ export function App() {
           </div>
         </div>
         <nav>
-          <NavButton icon={<Activity />} label={t('nav.dashboard')} active={tab === 'dashboard'} onClick={() => setTab('dashboard')} />
-          <NavButton icon={<Archive />} label={t('nav.inventory')} active={tab === 'inventory'} onClick={() => setTab('inventory')} />
-          {canUseChat && <NavButton icon={<MessageSquare />} label={t('nav.chat')} active={tab === 'chat'} onClick={() => setTab('chat')} />}
-          <NavButton icon={<ListChecks />} label={t('nav.review')} active={tab === 'reviews'} onClick={() => setTab('reviews')} />
-          <NavButton icon={<Settings />} label={t('nav.settings')} active={tab === 'settings'} onClick={() => setTab('settings')} />
-          <NavButton icon={<ClipboardList />} label={t('nav.prompts')} active={tab === 'prompts'} onClick={() => setTab('prompts')} />
-          <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => setTab('audit')} />
-          <NavButton icon={<UserPlus />} label={t('nav.users')} active={tab === 'users'} onClick={() => setTab('users')} />
+          <NavButton icon={<Activity />} label={t('nav.dashboard')} active={tab === 'dashboard'} onClick={() => selectTab('dashboard')} />
+          <NavButton icon={<Archive />} label={t('nav.inventory')} active={tab === 'inventory'} onClick={() => selectTab('inventory')} />
+          {canUseChat && <NavButton icon={<MessageSquare />} label={t('nav.chat')} active={tab === 'chat'} onClick={() => selectTab('chat')} />}
+          <NavButton icon={<ListChecks />} label={t('nav.review')} active={tab === 'reviews'} onClick={() => selectTab('reviews')} />
+          {canReadSettings && <NavButton icon={<Settings />} label={t('nav.settings')} active={tab === 'settings'} onClick={() => selectTab('settings')} />}
+          {canReadSettings && <NavButton icon={<ClipboardList />} label={t('nav.prompts')} active={tab === 'prompts'} onClick={() => selectTab('prompts')} />}
+          {canReadAudit && <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => selectTab('audit')} />}
+          {canManageUsers && <NavButton icon={<UserPlus />} label={t('nav.users')} active={tab === 'users'} onClick={() => selectTab('users')} />}
           {debugConsoleEnabled && (
-            <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => setTab('debug')} />
+            <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => selectTab('debug')} />
           )}
         </nav>
         <LanguageSelector />
@@ -123,7 +135,7 @@ export function App() {
 
       <main className="workspace">
         {error && (
-          <div className="banner error">
+          <div className="banner error" role="alert" aria-live="assertive">
             <span>{error}</span>
             <button title={t('generic.dismiss')} onClick={() => setError(null)}>
               <X size={16} />
@@ -132,6 +144,7 @@ export function App() {
         )}
         {tab === 'dashboard' && (
           <ErrorBoundary>
+            <Suspense fallback={lazyFallback}>
             <Dashboard
               setError={setError}
               canManageSettings={canManageSettings}
@@ -160,11 +173,14 @@ export function App() {
                 }
               }}
             />
+            </Suspense>
           </ErrorBoundary>
         )}
         {tab === 'inventory' && (
           <ErrorBoundary>
-            <Inventory setError={setError} />
+            <Suspense fallback={lazyFallback}>
+              <Inventory setError={setError} />
+            </Suspense>
           </ErrorBoundary>
         )}
         {tab === 'chat' && canUseChat && (
@@ -176,31 +192,33 @@ export function App() {
         )}
         {tab === 'reviews' && (
           <ErrorBoundary>
-            <Reviews setError={setError} />
+            <Suspense fallback={lazyFallback}>
+              <Reviews setError={setError} />
+            </Suspense>
           </ErrorBoundary>
         )}
-        {tab === 'settings' && (
+        {tab === 'settings' && canReadSettings && (
           <ErrorBoundary>
             <Suspense fallback={lazyFallback}>
               <SettingsPage setError={setError} />
             </Suspense>
           </ErrorBoundary>
         )}
-        {tab === 'prompts' && (
+        {tab === 'prompts' && canReadSettings && (
           <ErrorBoundary>
             <Suspense fallback={lazyFallback}>
               <Prompts setError={setError} />
             </Suspense>
           </ErrorBoundary>
         )}
-        {tab === 'audit' && (
+        {tab === 'audit' && canReadAudit && (
           <ErrorBoundary>
             <Suspense fallback={lazyFallback}>
               <Audit setError={setError} />
             </Suspense>
           </ErrorBoundary>
         )}
-        {tab === 'users' && (
+        {tab === 'users' && canManageUsers && (
           <ErrorBoundary>
             <Suspense fallback={lazyFallback}>
               <Users setError={setError} />
