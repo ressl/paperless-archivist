@@ -168,7 +168,7 @@ async fn auth_rate_limit_middleware(
         .map(|info| info.0.ip());
     let trusted_proxy = state.config.trust_proxy;
     let header_ip = if trusted_proxy {
-        forwarded_for_first_hop(req.headers())
+        forwarded_for_nearest_hop(req.headers())
     } else {
         None
     };
@@ -191,22 +191,31 @@ async fn auth_rate_limit_middleware(
     Ok(next.run(req).await)
 }
 
-fn forwarded_for_first_hop(headers: &HeaderMap) -> Option<IpAddr> {
+/// Extract the client IP from `X-Forwarded-For` using the RIGHTMOST entry.
+///
+/// `X-Forwarded-For` is built left-to-right: each proxy *appends* the address
+/// of the peer it received the request from. The leftmost token is therefore
+/// fully attacker-controlled (a client can send any value, and proxies append
+/// to the right), so trusting it would allow rate-limit bypass and audit-log
+/// IP spoofing. The rightmost entry is the one written by the single trusted
+/// reverse proxy sitting directly in front of us, so we trust exactly that hop.
+fn forwarded_for_nearest_hop(headers: &HeaderMap) -> Option<IpAddr> {
     let value = headers.get("x-forwarded-for")?.to_str().ok()?;
-    let first = value.split(',').next()?.trim();
-    first.parse::<IpAddr>().ok()
+    let nearest = value.split(',').next_back()?.trim();
+    nearest.parse::<IpAddr>().ok()
 }
 
 /// Resolve the client IP for audit/logging purposes. When `trust_proxy` is
-/// enabled and `X-Forwarded-For` is present, use the first hop; otherwise
-/// fall back to the TCP peer recorded by axum.
+/// enabled and `X-Forwarded-For` is present, use the nearest (rightmost) hop
+/// written by the trusted proxy; otherwise fall back to the TCP peer recorded
+/// by axum.
 fn request_source_ip(
     state: &AppState,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
 ) -> Option<String> {
     let forwarded = if state.config.trust_proxy {
-        forwarded_for_first_hop(headers)
+        forwarded_for_nearest_hop(headers)
     } else {
         None
     };
@@ -508,34 +517,40 @@ async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
             "# HELP paperless_archivist_runs_active Active pipeline runs\n",
             "# TYPE paperless_archivist_runs_active gauge\n",
             "paperless_archivist_runs_active {}\n",
-            "# HELP paperless_archivist_audit_events Audit events total\n",
-            "# TYPE paperless_archivist_audit_events counter\n",
+            // Derived as a live COUNT over `audit_events`, which is hard-deleted
+            // by retention. The value can therefore decrease, so it is a gauge —
+            // declaring it a counter would make Prometheus misread retention
+            // pruning as a counter reset and corrupt rate() results.
+            "# HELP paperless_archivist_audit_events Audit events currently retained\n",
+            "# TYPE paperless_archivist_audit_events gauge\n",
             "paperless_archivist_audit_events {}\n",
-            "# HELP paperless_archivist_selector_runs_total Automatic selector runs\n",
-            "# TYPE paperless_archivist_selector_runs_total counter\n",
+            "# HELP paperless_archivist_selector_runs_total Automatic selector runs currently retained in audit log\n",
+            "# TYPE paperless_archivist_selector_runs_total gauge\n",
             "paperless_archivist_selector_runs_total {}\n",
-            "# HELP paperless_archivist_selector_documents_queued_total Documents queued by automatic selector\n",
-            "# TYPE paperless_archivist_selector_documents_queued_total counter\n",
+            "# HELP paperless_archivist_selector_documents_queued_total Documents queued by automatic selector (retained in audit log)\n",
+            "# TYPE paperless_archivist_selector_documents_queued_total gauge\n",
             "paperless_archivist_selector_documents_queued_total {}\n",
-            "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures\n",
-            "# TYPE paperless_archivist_job_retries_scheduled_total counter\n",
+            "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures (retained in audit log)\n",
+            "# TYPE paperless_archivist_job_retries_scheduled_total gauge\n",
             "paperless_archivist_job_retries_scheduled_total {}\n",
             "# HELP paperless_archivist_model_errors_total Jobs with model-stage error messages\n",
             "# TYPE paperless_archivist_model_errors_total gauge\n",
             "paperless_archivist_model_errors_total {}\n",
-            "# HELP paperless_archivist_apply_success_total Successful Paperless apply operations\n",
-            "# TYPE paperless_archivist_apply_success_total counter\n",
+            // apply_* are also live aggregates over the prunable `audit_events`
+            // table, so they are gauges rather than monotone counters.
+            "# HELP paperless_archivist_apply_success_total Successful Paperless apply operations (retained in audit log)\n",
+            "# TYPE paperless_archivist_apply_success_total gauge\n",
             "paperless_archivist_apply_success_total {}\n",
-            "# HELP paperless_archivist_apply_failure_total Failed Paperless apply operations\n",
-            "# TYPE paperless_archivist_apply_failure_total counter\n",
+            "# HELP paperless_archivist_apply_failure_total Failed Paperless apply operations (retained in audit log)\n",
+            "# TYPE paperless_archivist_apply_failure_total gauge\n",
             "paperless_archivist_apply_failure_total {}\n",
-            "# HELP paperless_archivist_apply_latency_ms_sum Sum of observed Paperless apply latency in milliseconds\n",
-            "# TYPE paperless_archivist_apply_latency_ms_sum counter\n",
+            "# HELP paperless_archivist_apply_latency_ms_sum Sum of observed Paperless apply latency in milliseconds (retained in audit log)\n",
+            "# TYPE paperless_archivist_apply_latency_ms_sum gauge\n",
             "paperless_archivist_apply_latency_ms_sum {}\n",
-            "# HELP paperless_archivist_apply_latency_ms_count Count of observed Paperless apply latency samples\n",
-            "# TYPE paperless_archivist_apply_latency_ms_count counter\n",
+            "# HELP paperless_archivist_apply_latency_ms_count Count of observed Paperless apply latency samples (retained in audit log)\n",
+            "# TYPE paperless_archivist_apply_latency_ms_count gauge\n",
             "paperless_archivist_apply_latency_ms_count {}\n",
-            "# HELP paperless_archivist_apply_latency_ms_p95 Rolling p95 of observed Paperless apply latency in milliseconds\n",
+            "# HELP paperless_archivist_apply_latency_ms_p95 Lifetime p95 of observed Paperless apply latency in milliseconds (over retained audit events)\n",
             "# TYPE paperless_archivist_apply_latency_ms_p95 gauge\n",
             "paperless_archivist_apply_latency_ms_p95 {}\n"
         ),
@@ -859,6 +874,9 @@ async fn login(
     let user_agent = request_user_agent(&headers);
     let user = find_user_for_login(&state.pool, &request.username).await?;
     let Some(user) = user else {
+        // Spend the same Argon2id time as a real account so an attacker can't
+        // distinguish existing from non-existing usernames by response latency.
+        verify_dummy_password(&request.password);
         record_login_failure(
             &state.pool,
             None,
@@ -875,7 +893,10 @@ async fn login(
     {
         return Err(ApiError::unauthorized("invalid credentials"));
     }
-    if !user.enabled || !verify_password(&user, &request.password)? {
+    // Always run the password verification (even for disabled accounts) so the
+    // `!enabled` case can't be told apart from a wrong password by timing.
+    let password_ok = verify_password(&user, &request.password)?;
+    if !user.enabled || !password_ok {
         record_login_failure(
             &state.pool,
             Some(user.id),
@@ -1055,6 +1076,10 @@ async fn verify_paperless_credentials(
         .timeout(std::time::Duration::from_secs(
             settings.paperless.timeout_seconds.clamp(1, 120),
         ))
+        // Refuse redirects so a 3xx response can't steer this credentialed
+        // request to an internal address after the SSRF guard validated only
+        // the originally supplied URL.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build Paperless login HTTP client")?;
     let response = client
@@ -1694,7 +1719,7 @@ async fn validate_outbound_url(raw: &str) -> Result<Url, ApiError> {
 ///
 /// The threat model here is narrow on purpose:
 ///
-/// - These endpoints require `WriteSettings`; the operator who can call them
+/// - These endpoints require `ReadSettings`; the operator who can call them
 ///   already controls the settings document and is trusted to point the
 ///   integration at real internal services.
 /// - Paperless Archivist is routinely deployed inside Kubernetes / Docker
@@ -1762,6 +1787,10 @@ fn is_ssrf_dangerous_ipv6(ip: Ipv6Addr) -> bool {
 async fn send_notification_webhook(webhook_url: &str, payload: Value) -> Result<()> {
     let response = HttpClient::builder()
         .timeout(std::time::Duration::from_secs(10))
+        // Refuse redirects so a 3xx to an internal address (e.g. IMDS at
+        // 169.254.169.254 / loopback) can't bypass the SSRF guard that only
+        // validated the originally supplied URL.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?
         .post(webhook_url)
         .json(&payload)
@@ -4092,7 +4121,7 @@ async fn reviews(
     let items = list_reviews(
         &state.pool,
         query.status.as_deref(),
-        query.limit.unwrap_or(100),
+        query.limit.unwrap_or(100).clamp(1, 500),
     )
     .await?
     .into_iter()
@@ -4954,6 +4983,20 @@ async fn apply_audit_retention(
 }
 
 fn csv_escape(value: &str) -> String {
+    // Neutralize spreadsheet formula injection (CWE-1236): a leading
+    // = + - @ or tab/CR makes Excel/LibreOffice treat the cell as a formula.
+    // Prefix such values with a single quote so they are rendered as text.
+    let needs_formula_guard = value
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'));
+    let guarded;
+    let value = if needs_formula_guard {
+        guarded = format!("'{value}");
+        guarded.as_str()
+    } else {
+        value
+    };
     if value.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
@@ -6143,6 +6186,23 @@ fn verify_password(user: &AuthUser, password: &str) -> Result<bool> {
         .is_ok())
 }
 
+/// A real Argon2id hash computed once at first use. Verifying a candidate
+/// password against this when the supplied username does not exist makes the
+/// login path spend the same ~Argon2id time it would for a real account,
+/// closing the timing side channel that otherwise enumerates valid usernames.
+static DUMMY_PASSWORD_HASH: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| hash_password("paperless-archivist-dummy-password").ok());
+
+/// Perform a throwaway Argon2id verification to equalize login timing for
+/// non-existent users. The result is intentionally discarded.
+fn verify_dummy_password(password: &str) {
+    if let Some(hash) = DUMMY_PASSWORD_HASH.as_deref()
+        && let Ok(parsed) = PasswordHash::new(hash)
+    {
+        let _ = Argon2::default().verify_password(password.as_bytes(), &parsed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6751,7 +6811,11 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let header = headers.get(header::COOKIE)?.to_str().ok()?;
     for cookie in header.split(';') {
-        let (key, value) = cookie.trim().split_once('=')?;
+        // Skip valueless segments rather than aborting the whole scan — a
+        // leading junk cookie without `=` must not break session lookup.
+        let Some((key, value)) = cookie.trim().split_once('=') else {
+            continue;
+        };
         if key == name {
             return Some(value.to_owned());
         }
@@ -6806,18 +6870,23 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        // Log the full cause chain server-side, but never return internal
+        // error text (SQL fragments, column/constraint names, pool/reqwest
+        // URLs) to the client — some 5xx paths are unauthenticated.
+        tracing::error!(error = format!("{error:#}"), "internal server error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
+            message: "internal server error".to_owned(),
         }
     }
 }
 
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
+        tracing::error!(error = format!("{error:#}"), "database error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
+            message: "internal server error".to_owned(),
         }
     }
 }
