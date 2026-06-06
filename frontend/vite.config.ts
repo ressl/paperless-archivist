@@ -86,9 +86,11 @@ export default defineConfig({
         // first paint. Both libraries are unconditionally imported today, so
         // splitting them does not delay rendering further; it just reduces
         // the dominant chunk size.
-        manualChunks: {
-          recharts: ['recharts'],
-          'lucide-icons': ['lucide-react']
+        // Vite 8 (rolldown) requires the function form of manualChunks.
+        manualChunks(id: string) {
+          if (id.includes('node_modules/recharts')) return 'recharts'
+          if (id.includes('node_modules/lucide-react')) return 'lucide-icons'
+          return undefined
         }
       }
     }
