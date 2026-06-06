@@ -1,0 +1,30 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "timezone": "Europe/Zurich",
+  "schedule": ["before 6am on monday"],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "rangeStrategy": "update-lockfile",
+  "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on monday"] },
+  "vulnerabilityAlerts": { "labels": ["security"], "schedule": ["at any time"] },
+  "packageRules": [
+    {
+      "description": "Batch low-risk patch/minor updates into one PR per ecosystem",
+      "matchUpdateTypes": ["patch", "minor", "pin", "digest"],
+      "groupName": "non-major dependencies"
+    },
+    {
+      "description": "Keep major updates separate and clearly flagged for manual review/testing",
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["major-update"],
+      "automerge": false
+    },
+    {
+      "description": "Cargo: bump the lockfile within ranges; manifest majors stay separate",
+      "matchManagers": ["cargo"],
+      "rangeStrategy": "update-lockfile"
+    }
+  ]
+}
