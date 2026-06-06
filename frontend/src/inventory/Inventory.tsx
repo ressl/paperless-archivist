@@ -155,29 +155,39 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
     }
   }, [filters]);
 
-  const loadFirst = useCallback(
-    () =>
-      api
-        .inventory({ ...filtersToParams(filters), offset: 0, limit: PAGE_SIZE })
-        .then((data) => {
-          setItems(data.items);
-          setTotal(data.total);
-        })
-        .catch((err) => setError(localizedErrorMessage(err, t))),
-    [filters, setError, t]
-  );
+  // Monotonic request id: a slower earlier response (e.g. after a fast filter
+  // change) must never overwrite the result of a newer in-flight request.
+  const requestIdRef = useRef(0);
 
-  const loadMore = useCallback(
-    () =>
-      api
-        .inventory({ ...filtersToParams(filters), offset: items.length, limit: PAGE_SIZE })
-        .then((data) => {
-          setItems((prev) => [...prev, ...data.items]);
-          setTotal(data.total);
-        })
-        .catch((err) => setError(localizedErrorMessage(err, t))),
-    [filters, items.length, setError, t]
-  );
+  const loadFirst = useCallback(() => {
+    const requestId = ++requestIdRef.current;
+    return api
+      .inventory({ ...filtersToParams(filters), offset: 0, limit: PAGE_SIZE })
+      .then((data) => {
+        if (requestId !== requestIdRef.current) return;
+        setItems(data.items);
+        setTotal(data.total);
+      })
+      .catch((err) => {
+        if (requestId !== requestIdRef.current) return;
+        setError(localizedErrorMessage(err, t));
+      });
+  }, [filters, setError, t]);
+
+  const loadMore = useCallback(() => {
+    const requestId = ++requestIdRef.current;
+    return api
+      .inventory({ ...filtersToParams(filters), offset: items.length, limit: PAGE_SIZE })
+      .then((data) => {
+        if (requestId !== requestIdRef.current) return;
+        setItems((prev) => [...prev, ...data.items]);
+        setTotal(data.total);
+      })
+      .catch((err) => {
+        if (requestId !== requestIdRef.current) return;
+        setError(localizedErrorMessage(err, t));
+      });
+  }, [filters, items.length, setError, t]);
 
   useEffect(() => {
     void loadFirst();
@@ -566,7 +576,9 @@ type InventoryRowProps = {
 const InventoryRow = memo(
   function InventoryRow({ item, languages, t, onTriggerOcr, onTriggerMetadata, onTriggerPipeline, onDiagnose }: InventoryRowProps) {
     return (
-      <tr>
+      // `content-visibility: auto` lets the browser skip layout/paint for rows
+      // outside the viewport, keeping a long (load-more) list cheap to render.
+      <tr style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 41px' }}>
         <td>{item.paperless_document_id}</td>
         <td>{item.title || item.original_file_name || t('inventory.untitled')}</td>
         <td><Status value={item.ocr_status} /></td>
