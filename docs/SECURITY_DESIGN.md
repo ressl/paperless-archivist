@@ -195,15 +195,28 @@ deploying behind a TLS-terminating reverse proxy should additionally set
 `ARCHIVIST_TRUST_PROXY=true` so the originating client IP — not the
 proxy — is recorded in the audit log.
 
-### 4.3 SSRF Threat Model for Admin Test Endpoints
+### 4.3 SSRF Threat Model for Outbound Requests
 
-The admin "test" endpoints — `POST /api/settings/test/paperless`,
+Every outbound request to an operator-influenceable URL — the admin "test"
+endpoints (`POST /api/settings/test/paperless`,
 `POST /api/settings/test/provider`, `POST /api/settings/test/notification`,
-and `GET /api/settings/providers/{name}/models` — fire an HTTP request at
-an operator-supplied URL pulled from settings. To stop a session hijacker
-who briefly holds `WriteSettings` from turning those probes into a
-host-side scanner, every test path runs `validate_outbound_url()` before
-opening a socket.
+`GET /api/settings/providers/{name}/models`) **and** the worker data path
+(Paperless downloads / metadata, AI provider calls, notification webhooks) —
+is guarded against SSRF. To stop a session hijacker who briefly holds
+`WriteSettings` from turning those requests into a host-side scanner, two
+layers cooperate:
+
+1. **Up-front check (test endpoints).** Each test path runs
+   `validate_outbound_url()` before opening a socket, for an early, friendly
+   rejection of an obviously dangerous URL.
+2. **Connection-time guard (everywhere).** Every outbound `reqwest` client is
+   built with a shared `SsrfGuardResolver` (a custom DNS resolver) plus a
+   no-redirect policy. The resolver applies the address policy below to the
+   exact IPs reqwest is about to dial, so a hostname cannot be rebound to an
+   internal address in the gap between the up-front check and the connect
+   (DNS-rebinding TOCTOU). This applies to the worker data path too, not just
+   the UI test handlers. (IP-literal hosts bypass the resolver — they carry no
+   rebinding risk and are screened up front by `validate_outbound_url`.)
 
 The validator is intentionally **narrow**, not paranoid: Paperless
 Archivist is routinely deployed inside Kubernetes / Docker Compose /
@@ -240,9 +253,14 @@ The SSRF guard targets the abuse cases that no operator would ever
 deliberately configure — loopback to scan the API pod itself, IMDS to
 exfiltrate cloud credentials, link-local to probe the host network.
 
-Implementation: `crates/archivist-api/src/main.rs::validate_outbound_url`
-(invoked by `test_paperless`, `test_provider`, `test_notification`,
-`model_provider_models`). Covered by unit tests in the same file.
+Implementation: the up-front check is
+`crates/archivist-api/src/main.rs::validate_outbound_url` (invoked by
+`test_paperless`, `test_provider`, `test_notification`,
+`model_provider_models`), covered by unit tests in the same file. The shared
+address policy and connection-time resolver live in
+`crates/archivist-core/src/ssrf.rs` (`is_ssrf_dangerous_ip`,
+`SsrfGuardResolver`) and are installed on every Paperless / AI-provider /
+webhook client across the API and worker.
 
 ## 5. API Tokens and Service Accounts
 

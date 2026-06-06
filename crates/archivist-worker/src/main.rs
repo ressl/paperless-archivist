@@ -22,16 +22,19 @@ use archivist_db::{
     claim_notification_delivery, claim_pending_review_for_autopilot_drain, complete_job, connect,
     create_review_item, create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job,
     get_active_prompt, get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
-    get_workflow_safety_status, insert_ai_artifact, is_last_active_job,
+    get_workflow_safety_status, increment_metric_counter, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
-    named_entity_id_for_name, queue_missing_pipeline, rebalance_backfilled_metadata_priorities,
-    record_dashboard_snapshot, record_document_language, requeue_vision_crashed_jobs,
-    reset_stuck_running_pipeline_runs, resolve_secret, revert_review_to_pending_after_failed_drain,
-    selector_document_budget, tag_id_pairs_for_names, tag_ids_for_names, upsert_inventory_item,
+    named_entity_id_for_name, paperless_sync_cursor, queue_missing_pipeline,
+    rebalance_backfilled_metadata_priorities, record_dashboard_snapshot, record_document_language,
+    requeue_vision_crashed_jobs, reset_stuck_running_pipeline_runs, resolve_secret,
+    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_id_pairs_for_names,
+    tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
-use archivist_ocr::{normalize_ocr_pages, render_document_pages, validate_ocr_text};
+use archivist_ocr::{
+    normalize_ocr_pages, render_document_pages, strip_code_fences, validate_ocr_text,
+};
 use archivist_paperless::{
     PaperlessClient, PaperlessDocumentDetail, PaperlessDocumentSummary, PaperlessError,
     PaperlessTag,
@@ -490,9 +493,9 @@ async fn process_available_jobs(
     let paperless = match paperless_client(pool, config, &settings).await {
         Ok(client) => Arc::new(client),
         Err(error) => {
-            warn!(error = %error, "failed to construct Paperless client for batch; failing claimed jobs");
+            warn!(error = ?error, "failed to construct Paperless client for batch; failing claimed jobs");
             for job in &jobs {
-                let _ = fail_job(pool, job, &error.to_string(), true).await;
+                let _ = fail_job(pool, job, worker_id, &format!("{:#}", error), true).await;
             }
             return Ok(());
         }
@@ -549,7 +552,7 @@ async fn process_available_jobs(
                                 match release_lease_for_cooldown(&pool, &job, cooldown_until).await {
                                     Ok(()) => {
                                         warn!(
-                                            error = %error,
+                                            error = ?error,
                                             failure_class = failure_class.as_str(),
                                             until = %cooldown_until,
                                             duration_ms = started.elapsed().as_millis() as u64,
@@ -587,7 +590,7 @@ async fn process_available_jobs(
                         // `ai.fallback_vision_model` explicitly. Under Full-Auto this still
                         // falls through to the standard transient retry budget.
                         warn!(
-                            error = %error,
+                            error = ?error,
                             failure_class = failure_class.as_str(),
                             duration_ms = started.elapsed().as_millis() as u64,
                             vision_model_crash = true,
@@ -596,7 +599,7 @@ async fn process_available_jobs(
                         );
                     } else {
                         warn!(
-                            error = %error,
+                            error = ?error,
                             failure_class = failure_class.as_str(),
                             duration_ms = started.elapsed().as_millis() as u64,
                             "job processing failed"
@@ -605,7 +608,8 @@ async fn process_available_jobs(
                     let _ = fail_job(
                         &pool,
                         &job,
-                        &error.to_string(),
+                        &lease_owner,
+                        &format!("{:#}", error),
                         failure_class.is_retryable(),
                     )
                     .await;
@@ -745,6 +749,9 @@ async fn send_notification_webhook(
     let response = HttpClient::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
+        // Pin the validated IP at connect time to close the DNS-rebinding
+        // TOCTOU on the operator-configured webhook host (#183).
+        .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
         .build()?
         .post(webhook_url.expose_secret())
         .json(&payload)
@@ -1290,7 +1297,9 @@ async fn process_job(
 
     match job.stage {
         Stage::Ocr => process_ocr(pool, config, paperless, settings, job, lease_owner).await,
-        Stage::Metadata => process_metadata(pool, config, paperless, settings, job).await,
+        Stage::Metadata => {
+            process_metadata(pool, config, paperless, settings, job, lease_owner).await
+        }
         Stage::Apply => Err(anyhow!(
             "stage {} is not directly executable by the worker",
             job.stage
@@ -1438,6 +1447,10 @@ async fn process_ocr(
         );
         any_fallback_used |= fallback_used;
 
+        // Sanitize before caching so any leaked markdown fence is stripped once
+        // and never re-served from the page cache.
+        let page_text = strip_code_fences(&response.text);
+
         // Cache the successful page-level OCR so a future retry / re-trigger
         // doesn't pay for the vision call again. Cache write is best-effort:
         // a failure here is logged but does not fail the OCR job.
@@ -1446,7 +1459,7 @@ async fn process_ocr(
             job.paperless_document_id,
             index as i32,
             &page_hash,
-            &response.text,
+            &page_text,
             Some(&provider.name),
             Some(&model_used),
         )
@@ -1461,7 +1474,7 @@ async fn process_ocr(
         }
 
         models_used.push(model_used);
-        texts.push(response.text);
+        texts.push(page_text);
         raw_responses.push(response.raw_response);
 
         // Heartbeat the lease after each page. Multi-page vision OCR can run
@@ -1538,6 +1551,23 @@ async fn process_ocr(
         );
     }
 
+    // #217: persist the OCR body locally so chat search can full-text
+    // rank against it. NUL bytes are stripped because Postgres `text`
+    // cannot store them; the body is otherwise the same text sent to
+    // Paperless. Best-effort write — a failure here doesn't fail OCR, it
+    // only means this document won't surface via body FTS until re-OCR'd.
+    let ocr_body = text.replace('\0', "");
+    if let Err(error) =
+        archivist_db::set_document_inventory_ocr_body(pool, job.paperless_document_id, &ocr_body)
+            .await
+    {
+        warn!(
+            document_id = job.paperless_document_id,
+            error = %error,
+            "set_document_inventory_ocr_body failed; body full-text search will not apply"
+        );
+    }
+
     let patch = DocumentPatch {
         content: Some(text),
         title: None,
@@ -1547,7 +1577,17 @@ async fn process_ocr(
         created: None,
         custom_fields: None,
     };
-    handle_patch_result(pool, paperless, settings, job, patch, Vec::new(), None).await
+    handle_patch_result(
+        pool,
+        paperless,
+        settings,
+        job,
+        patch,
+        Vec::new(),
+        None,
+        lease_owner,
+    )
+    .await
 }
 
 async fn language_context_for_content(
@@ -1668,15 +1708,25 @@ async fn resolve_tag_names_to_ids(
 /// the pairs list are dropped. Extracted for unit testability.
 fn build_custom_field_value_patch(
     fields: &[archivist_core::FieldValueSuggestion],
-    id_pairs: &[(String, i32)],
+    id_pairs: &[(String, i32, Option<String>)],
 ) -> Vec<serde_json::Value> {
     fields
         .iter()
         .filter_map(|field| {
-            id_pairs
+            let (_, id, data_type) = id_pairs
                 .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(&field.name))
-                .map(|(_, id)| json!({ "field": id, "value": field.value }))
+                .find(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))?;
+            match archivist_core::coerce_custom_field_value(data_type.as_deref(), &field.value) {
+                Some(value) => Some(json!({ "field": id, "value": value })),
+                None => {
+                    warn!(
+                        field = %field.name,
+                        value = %field.value,
+                        "dropped uncoercible custom field value"
+                    );
+                    None
+                }
+            }
         })
         .collect()
 }
@@ -1697,7 +1747,7 @@ async fn resolve_custom_field_values_to_ids(
     for field in fields {
         if !id_pairs
             .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case(&field.name))
+            .any(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))
         {
             warn!(
                 unknown_custom_field = %field.name,
@@ -1718,15 +1768,24 @@ async fn process_metadata(
     paperless: &PaperlessClient,
     settings: &RuntimeSettings,
     job: &JobRecord,
+    lease_owner: &str,
 ) -> Result<()> {
     let enabled = MetadataFieldFlags::from_enabled_stages(&settings.workflow.enabled_stages);
     if !enabled.any() {
-        complete_job(
+        if !complete_job(
             pool,
             job,
+            lease_owner,
             json!({ "skipped": "no metadata fields are enabled in workflow settings" }),
         )
-        .await?;
+        .await?
+        {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                "lease lost before completion; another worker owns this job — skipping"
+            );
+        }
         return Ok(());
     }
 
@@ -1795,13 +1854,17 @@ async fn process_metadata(
     } else {
         Vec::new()
     };
-    let allowed_field_names = if enabled.fields {
+    // Carry each field's data_type alongside its name so the prompt can
+    // render a per-type formatting hint (#148). The schema still only needs
+    // the names, so we derive a names-only view for `schema_for_metadata`
+    // just before that call.
+    let allowed_fields: Vec<(String, Option<String>)> = if enabled.fields {
         list_custom_fields(pool)
             .await?
             .into_iter()
             .filter(|field| settings.fields.field_enabled(&field.name))
-            .map(|field| field.name)
-            .collect::<Vec<_>>()
+            .map(|field| (field.name, field.data_type))
+            .collect()
     } else {
         Vec::new()
     };
@@ -1845,7 +1908,7 @@ async fn process_metadata(
         &allowed_correspondents,
         &allowed_document_types,
         &allowed_tags,
-        &allowed_field_names,
+        &allowed_fields,
         &enabled,
         &language,
         settings.effective_tuning().max_tags as usize,
@@ -1862,6 +1925,10 @@ async fn process_metadata(
     // OpenAI-compatible and Anthropic clients ignore this field today;
     // their wire-level enforcement (response_format json_schema /
     // tool-use) is tracked as future work.
+    let allowed_field_names: Vec<String> = allowed_fields
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
     request.response_schema = archivist_ai::schema_for_metadata(
         &allowed_correspondents,
         &allowed_document_types,
@@ -2235,15 +2302,32 @@ async fn process_metadata(
                     .map(|field| field.name.clone())
                     .collect::<Vec<_>>();
                 let ids = custom_field_ids_for_names(pool, &names).await?;
-                let values = valid
-                    .fields
-                    .iter()
-                    .filter_map(|field| {
-                        ids.iter()
-                            .find(|(name, _)| name.eq_ignore_ascii_case(&field.name))
-                            .map(|(_, id)| json!({ "field": id, "value": field.value }))
-                    })
-                    .collect::<Vec<_>>();
+                let mut values = Vec::new();
+                for field in &valid.fields {
+                    let Some((_, id, data_type)) = ids
+                        .iter()
+                        .find(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))
+                    else {
+                        continue;
+                    };
+                    match archivist_core::coerce_custom_field_value(
+                        data_type.as_deref(),
+                        &field.value,
+                    ) {
+                        Some(value) => values.push(json!({ "field": id, "value": value })),
+                        None => {
+                            warn!(
+                                field = %field.name,
+                                value = %field.value,
+                                "dropped uncoercible custom field value"
+                            );
+                            composite_warnings.push(format!(
+                                "dropped uncoercible custom field value: {} = {}",
+                                field.name, field.value
+                            ));
+                        }
+                    }
+                }
                 composite_patch.custom_fields = Some(json!(values));
                 composite_warnings.extend(valid.warnings);
                 applied_fields.push("fields");
@@ -2368,9 +2452,10 @@ async fn process_metadata(
                 final_run_stage,
             )
             .await?;
-            complete_job(
+            if !complete_job(
                 pool,
                 job,
+                lease_owner,
                 json!({
                     "applied": true,
                     "fields": applied_fields,
@@ -2378,7 +2463,15 @@ async fn process_metadata(
                     "dropped_field_count": review_warning_count,
                 }),
             )
-            .await
+            .await?
+            {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    "lease lost before completion; another worker owns this job — skipping"
+                );
+            }
+            Ok(())
         } else {
             // manual_review (or dry_run): a single composite review item with all validated
             // suggestions so the operator approves the whole set atomically.
@@ -2392,26 +2485,44 @@ async fn process_metadata(
         // record the warnings in the job result and mark the job complete so
         // the run drains — Paperless gets nothing for this stage but neither
         // does the operator get a useless review pile.
-        complete_job(
+        if !complete_job(
             pool,
             job,
+            lease_owner,
             json!({
                 "skipped": "all metadata fields had validation warnings — no resolvable patch in full_auto",
                 "warnings": composite_warnings,
                 "dropped_field_count": review_warning_count,
             }),
         )
-        .await
+        .await?
+        {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                "lease lost before completion; another worker owns this job — skipping"
+            );
+        }
+        Ok(())
     } else {
-        complete_job(
+        if !complete_job(
             pool,
             job,
+            lease_owner,
             json!({
                 "skipped": "all metadata fields skipped (already-set or model omitted)",
                 "skipped_fields": skipped_fields,
             }),
         )
-        .await
+        .await?
+        {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                "lease lost before completion; another worker owns this job — skipping"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -2574,6 +2685,7 @@ async fn run_consensus_check(
     Ok(outcome)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_patch_result(
     pool: &DbPool,
     paperless: &PaperlessClient,
@@ -2582,6 +2694,7 @@ async fn handle_patch_result(
     patch: DocumentPatch,
     warnings: Vec<String>,
     review_metadata: Option<serde_json::Value>,
+    lease_owner: &str,
 ) -> Result<()> {
     // Effective routing policy is the live runtime workflow mode, not the per-run mode that was
     // stamped onto pipeline_runs at queue time. Per-run mode is captured at queue time from the
@@ -2630,7 +2743,21 @@ async fn handle_patch_result(
     }
     let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
     apply_patch_with_workflow_tags(pool, paperless, settings, job, patch, final_run_stage).await?;
-    complete_job(pool, job, json!({ "applied": true, "warnings": warnings })).await
+    if !complete_job(
+        pool,
+        job,
+        lease_owner,
+        json!({ "applied": true, "warnings": warnings }),
+    )
+    .await?
+    {
+        warn!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            "lease lost before completion; another worker owns this job — skipping"
+        );
+    }
+    Ok(())
 }
 
 async fn apply_patch_with_workflow_tags(
@@ -2681,9 +2808,16 @@ async fn apply_patch_with_workflow_tags(
     let before_value = audit_before_for_patch(&document, &patch);
     let patch_value = audit_patch_payload(&patch);
     let apply_started = std::time::Instant::now();
-    if let Err(error) = paperless
-        .patch_document(job.paperless_document_id, &patch)
-        .await
+    if let Err(error) = patch_document_dropping_bad_custom_fields(
+        pool,
+        paperless,
+        job.paperless_document_id,
+        &patch,
+        Some(job.run_id),
+        Some(job.id),
+        json!({ "stage": job.stage }),
+    )
+    .await
     {
         let duration_ms = apply_started.elapsed().as_millis() as u64;
         append_audit(
@@ -2705,6 +2839,7 @@ async fn apply_patch_with_workflow_tags(
             },
         )
         .await?;
+        increment_metric_counter(pool, "apply_failure_total", 1).await?;
         return Err(error);
     }
     let duration_ms = apply_started.elapsed().as_millis() as u64;
@@ -2727,6 +2862,7 @@ async fn apply_patch_with_workflow_tags(
         },
     )
     .await?;
+    increment_metric_counter(pool, "apply_success_total", 1).await?;
     Ok(())
 }
 
@@ -2989,9 +3125,20 @@ async fn apply_autopilot_drain_patch(
     let before = audit_before_for_patch(&document, &patch);
     let after = audit_patch_payload(&patch);
     let apply_started = std::time::Instant::now();
-    if let Err(error) = paperless
-        .patch_document(review.paperless_document_id, &patch)
-        .await
+    if let Err(error) = patch_document_dropping_bad_custom_fields(
+        pool,
+        paperless,
+        review.paperless_document_id,
+        &patch,
+        Some(review.run_id),
+        review.job_id,
+        json!({
+            "stage": review.stage,
+            "review_id": review.id,
+            "trigger": "autopilot_drain"
+        }),
+    )
+    .await
     {
         let duration_ms = apply_started.elapsed().as_millis() as u64;
         append_audit(
@@ -3018,6 +3165,7 @@ async fn apply_autopilot_drain_patch(
             },
         )
         .await?;
+        increment_metric_counter(pool, "apply_failure_total", 1).await?;
         return Err(error);
     }
     let duration_ms = apply_started.elapsed().as_millis() as u64;
@@ -3040,6 +3188,83 @@ async fn apply_autopilot_drain_patch(
             })),
             outcome: "success".to_owned(),
             error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    increment_metric_counter(pool, "apply_success_total", 1).await?;
+    Ok(())
+}
+
+/// Whether a `patch_document` failure is a Paperless 400 that implicates
+/// `custom_fields`. The typed `PaperlessError::Client` Display embeds both
+/// `status=` and the response `body`, and a Paperless validation 400 names the
+/// offending field (`custom_fields`) in that body — so matching on the rendered
+/// error string is enough to recognise the "one bad custom field" case.
+fn is_custom_fields_400(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("status=400") && message.contains("custom_fields")
+}
+
+/// Apply `patch` to a Paperless document, resilient to a single bad custom
+/// field sinking the whole patch. If the initial PATCH fails with a Paperless
+/// 400 that implicates `custom_fields`, retry ONCE with the same patch but
+/// `custom_fields = None`, so title/tags/correspondent/date still land. On a
+/// successful retry, append a `document.custom_fields_dropped` audit event
+/// recording that the custom fields were dropped due to a Paperless 400. If the
+/// retry also fails — or the failure was not a custom_fields 400 — the original
+/// error is propagated unchanged. A single retry only; never a loop.
+async fn patch_document_dropping_bad_custom_fields(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    document_id: i32,
+    patch: &DocumentPatch,
+    run_id: Option<Uuid>,
+    job_id: Option<Uuid>,
+    extra_metadata: serde_json::Value,
+) -> Result<()> {
+    let error = match paperless.patch_document(document_id, patch).await {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    if patch.custom_fields.is_none() || !is_custom_fields_400(&error) {
+        return Err(error);
+    }
+    let mut retry = patch.clone();
+    retry.custom_fields = None;
+    if paperless.patch_document(document_id, &retry).await.is_err() {
+        // Dropping custom_fields didn't help — surface the original failure.
+        return Err(error);
+    }
+    let mut metadata = extra_metadata;
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "custom_fields_dropped".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+        object.insert(
+            "reason".to_owned(),
+            serde_json::Value::String(
+                "Paperless rejected custom_fields with a 400; patch reapplied without them"
+                    .to_owned(),
+            ),
+        );
+    }
+    append_audit(
+        pool,
+        AuditEventInput {
+            event_type: "document.custom_fields_dropped".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id,
+            job_id,
+            paperless_document_id: Some(document_id),
+            before: None,
+            after: None,
+            metadata: Some(metadata),
+            outcome: "success".to_owned(),
+            error_message: Some(error.to_string()),
             source_ip: None,
             user_agent: None,
         },
@@ -3308,6 +3533,8 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
             },
         )
         .await?;
+        increment_metric_counter(pool, "selector_runs_total", 1).await?;
+        increment_metric_counter(pool, "selector_documents_queued_total", auto_selected).await?;
         info!(
             auto_selected,
             mode = %settings.workflow.mode,
@@ -3327,6 +3554,8 @@ async fn sync_metadata(
     paperless: &PaperlessClient,
     settings: &RuntimeSettings,
 ) -> Result<PaperlessSyncSnapshot> {
+    let archive_name = settings.paperless.active_archive.clone();
+    let sync_started_at = Utc::now();
     let mut tags = paperless.list_tags().await?;
     // Reuse the already-fetched catalog via `ensure_tag_cached`, which only
     // calls Paperless when a workflow tag is genuinely missing. The previous
@@ -3337,15 +3566,43 @@ async fn sync_metadata(
     for workflow_tag in settings.workflow.tags.all() {
         ensure_tag_cached(paperless, &mut tags, workflow_tag).await?;
     }
+    // Delta sync: when enabled and a prior cursor exists, fetch only documents
+    // modified since the cursor (minus an overlap window to absorb clock skew)
+    // instead of the full catalog — mirroring the API sync path. No cursor
+    // (first run) or a delta error falls back to a full list. Tags,
+    // correspondents and types stay full; they are small relative to documents.
+    let cursor = paperless_sync_cursor(pool, &archive_name).await?;
+    let delta_cursor = cursor.map(|cursor| {
+        cursor - ChronoDuration::minutes(settings.paperless.delta_sync_overlap_minutes)
+    });
     // These four catalog fetches are independent GETs against Paperless; run
     // them concurrently rather than serially. The tag list above must stay
     // sequential because `ensure_tag_cached` mutates it in place. custom_fields
     // keeps its best-effort `unwrap_or_default` semantics inside the join.
-    let (correspondents, document_types, custom_fields, documents) = tokio::try_join!(
+    let (correspondents, document_types, custom_fields, (sync_mode, documents)) = tokio::try_join!(
         paperless.list_correspondents(),
         paperless.list_document_types(),
         async { anyhow::Ok(paperless.list_custom_fields().await.unwrap_or_default()) },
-        paperless.list_documents(),
+        async {
+            if settings.paperless.delta_sync_enabled {
+                if let Some(cursor) = delta_cursor {
+                    match paperless
+                        .list_documents_modified_since(&cursor.to_rfc3339())
+                        .await
+                    {
+                        Ok(documents) => anyhow::Ok(("delta", documents)),
+                        Err(_) => anyhow::Ok((
+                            "full_after_delta_error",
+                            paperless.list_documents().await?,
+                        )),
+                    }
+                } else {
+                    anyhow::Ok(("full_initial", paperless.list_documents().await?))
+                }
+            } else {
+                anyhow::Ok(("full", paperless.list_documents().await?))
+            }
+        },
     )?;
 
     let mut tx = pool.begin().await?;
@@ -3409,6 +3666,7 @@ async fn sync_metadata(
         )
         .await?;
     }
+    update_paperless_sync_cursor(&mut tx, &archive_name, sync_mode, sync_started_at).await?;
     tx.commit().await?;
     Ok(PaperlessSyncSnapshot { tags, documents })
 }
@@ -4073,7 +4331,7 @@ mod tests {
                 confidence: Some(0.9),
             },
         ];
-        let id_pairs = vec![("invoice number".to_owned(), 42)];
+        let id_pairs = vec![("invoice number".to_owned(), 42, Some("string".to_owned()))];
         let patch = build_custom_field_value_patch(&fields, &id_pairs);
         assert_eq!(patch.len(), 1, "ghost_field should be dropped");
         // Shape must be { "field": <i32>, "value": ... } — what Paperless / DocumentPatch expects.
@@ -4102,7 +4360,7 @@ mod tests {
                 confidence: None,
             },
         ];
-        let id_pairs = vec![("a".to_owned(), 1), ("b".to_owned(), 2)];
+        let id_pairs = vec![("a".to_owned(), 1, None), ("b".to_owned(), 2, None)];
         let patch = build_custom_field_value_patch(&fields, &id_pairs);
         assert_eq!(
             patch[0].get("field").and_then(Value::as_i64),

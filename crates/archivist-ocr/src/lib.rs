@@ -126,10 +126,56 @@ async fn render_pdf_with_pdftoppm(
 pub fn normalize_ocr_pages(page_texts: &[String]) -> String {
     page_texts
         .iter()
-        .map(|page| page.trim())
+        .map(|page| strip_code_fences(page))
+        .map(|page| page.trim().to_owned())
         .filter(|page| !page.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Returns true when `line` is a standalone markdown code-fence line, i.e. it
+/// trims to three backticks optionally followed by an ASCII language tag (the
+/// `^\s*```[a-zA-Z]*\s*$` shape). Inline backticks inside running text never
+/// match because such lines carry additional non-fence characters.
+fn is_code_fence_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("```") && trimmed[3..].chars().all(|c| c.is_ascii_alphabetic())
+}
+
+/// Strips leaked markdown code fences from a single OCR page.
+///
+/// Some vision models wrap their transcription in a ```` ```lang ... ``` ````
+/// block or append a stray fence line despite the prompt. Such fences corrupt
+/// downstream ingestion, so we remove them here:
+///
+/// * If the page is wholly wrapped in a triple-backtick block, unwrap it to its
+///   inner content.
+/// * Otherwise drop any standalone fence lines while keeping every other line
+///   (and legitimate inline backticks) verbatim.
+pub fn strip_code_fences(page: &str) -> String {
+    let trimmed = page.trim();
+    let lines: Vec<&str> = trimmed.lines().collect();
+
+    // Whole-page fenced block: unwrap to the inner content.
+    if lines.len() >= 2
+        && is_code_fence_line(lines[0])
+        && is_code_fence_line(lines[lines.len() - 1])
+    {
+        return lines[1..lines.len() - 1].join("\n").trim().to_owned();
+    }
+
+    // Stray standalone fence lines (e.g. a ```markdown trailer): drop just
+    // those lines and keep the rest of the page untouched.
+    if lines.iter().any(|line| is_code_fence_line(line)) {
+        return trimmed
+            .lines()
+            .filter(|line| !is_code_fence_line(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    // No fences present: behave as a no-op.
+    page.to_owned()
 }
 
 pub fn validate_ocr_text(text: &str, min_chars: usize) -> Result<()> {
@@ -137,4 +183,36 @@ pub fn validate_ocr_text(text: &str, min_chars: usize) -> Result<()> {
         return Err(anyhow!("OCR result is below minimum length"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_code_fences_unwraps_whole_page_block() {
+        let page = "```\nInvoice 42\nTotal: 9.90\n```";
+        assert_eq!(strip_code_fences(page), "Invoice 42\nTotal: 9.90");
+    }
+
+    #[test]
+    fn strip_code_fences_unwraps_language_tagged_block() {
+        let page = "```markdown\nHello world\n```";
+        assert_eq!(strip_code_fences(page), "Hello world");
+    }
+
+    #[test]
+    fn strip_code_fences_drops_markdown_trailer() {
+        let page = "Real OCR line one\nReal OCR line two\n```markdown";
+        assert_eq!(
+            strip_code_fences(page),
+            "Real OCR line one\nReal OCR line two"
+        );
+    }
+
+    #[test]
+    fn strip_code_fences_is_noop_on_clean_text() {
+        let page = "Use the `--flag` switch to enable it.\nSecond line.";
+        assert_eq!(strip_code_fences(page), page);
+    }
 }

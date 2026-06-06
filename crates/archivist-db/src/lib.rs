@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -298,6 +299,11 @@ pub struct MetricsSnapshot {
     pub apply_latency_ms_count: i64,
     pub apply_latency_ms_sum: i64,
     pub apply_latency_ms_p95: i64,
+    pub ocr_latency_ms_count: i64,
+    pub ocr_latency_ms_p95: i64,
+    pub metadata_latency_ms_count: i64,
+    pub metadata_latency_ms_p95: i64,
+    pub oldest_queued_age_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2262,12 +2268,12 @@ pub async fn list_custom_fields(pool: &DbPool) -> Result<Vec<CustomFieldRecord>>
 pub async fn custom_field_ids_for_names(
     pool: &DbPool,
     names: &[String],
-) -> Result<Vec<(String, i32)>> {
+) -> Result<Vec<(String, i32, Option<String>)>> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        "select name, id from paperless_custom_fields where lower(name) = any($1) order by name",
+        "select name, id, data_type from paperless_custom_fields where lower(name) = any($1) order by name",
     )
     .bind(
         names
@@ -2278,7 +2284,13 @@ pub async fn custom_field_ids_for_names(
     .fetch_all(pool)
     .await?;
     rows.into_iter()
-        .map(|row| Ok((row.try_get("name")?, row.try_get("id")?)))
+        .map(|row| {
+            Ok((
+                row.try_get("name")?,
+                row.try_get("id")?,
+                row.try_get("data_type")?,
+            ))
+        })
         .collect()
 }
 
@@ -4265,10 +4277,22 @@ pub async fn search_document_chat_candidates(
     let rows = sqlx::query(
         r#"
         select paperless_document_id, title, original_file_name, current_tags,
-               greatest(
-                 similarity(coalesce(title, ''), $1),
-                 similarity(coalesce(original_file_name, ''), $1),
-                 similarity(array_to_string(current_tags, ' '), $1)
+               -- Blend the pg_trgm title/file/tags similarity with a
+               -- full-text rank over the persisted OCR body (#217). Both
+               -- terms live in [0, 1]: pg_trgm similarity is bounded by
+               -- construction, and ts_rank with normalization flag 32
+               -- (rank/(rank+1)) bounds the body score to [0, 1). Their
+               -- sum is clamped back into [0, 1] so the combined score
+               -- stays comparable with the metadata-only scores callers
+               -- already feed into score_document_chat_source.
+               least(
+                 1.0,
+                 greatest(
+                   similarity(coalesce(title, ''), $1),
+                   similarity(coalesce(original_file_name, ''), $1),
+                   similarity(array_to_string(current_tags, ' '), $1)
+                 )
+                 + ts_rank(ocr_body_tsv, websearch_to_tsquery('simple', $1), 32)
                )::double precision as metadata_score
           from document_inventory
          where ($2::integer[] is null or paperless_document_id = any($2))
@@ -4279,6 +4303,7 @@ pub async fn search_document_chat_candidates(
                similarity(coalesce(original_file_name, ''), $1),
                similarity(array_to_string(current_tags, ' '), $1)
              ) > 0
+             or ocr_body_tsv @@ websearch_to_tsquery('simple', $1)
            )
          order by metadata_score desc, last_seen_at desc
          limit $3
@@ -4984,9 +5009,20 @@ pub async fn mark_run_running(pool: &DbPool, run_id: Uuid, document_id: i32) -> 
     Ok(())
 }
 
-pub async fn complete_job(pool: &DbPool, job: &JobRecord, result: Value) -> Result<()> {
+/// Mark a job succeeded, but only if `lease_owner` still owns the lease. Returns
+/// `true` when our row matched (we owned the lease and applied the completion)
+/// and `false` when no row matched — the lease was lost to another replica that
+/// reclaimed it. Callers must treat `false` as "lease lost, skip" rather than an
+/// error: writing unconditionally would let a worker that already lost its lease
+/// double-apply over the replica that legitimately took over.
+pub async fn complete_job(
+    pool: &DbPool,
+    job: &JobRecord,
+    lease_owner: &str,
+    result: Value,
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         update jobs
            set status = 'succeeded',
@@ -4996,12 +5032,22 @@ pub async fn complete_job(pool: &DbPool, job: &JobRecord, result: Value) -> Resu
                error_message = null,
                updated_at = now()
          where id = $1
+           and lease_owner = $3
         "#,
     )
     .bind(job.id)
     .bind(&result)
+    .bind(lease_owner)
     .execute(&mut *tx)
     .await?;
+
+    // Lease lost: another replica reclaimed the stale lease and owns this job
+    // now. Roll back without touching inventory/run state so we don't fight the
+    // worker that took over.
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
 
     set_inventory_stage_status_tx(
         &mut tx,
@@ -5090,7 +5136,7 @@ pub async fn complete_job(pool: &DbPool, job: &JobRecord, result: Value) -> Resu
     )
     .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 pub async fn is_last_active_job(pool: &DbPool, run_id: Uuid, current_job_id: Uuid) -> Result<bool> {
@@ -5111,7 +5157,18 @@ pub async fn is_last_active_job(pool: &DbPool, run_id: Uuid, current_job_id: Uui
     row.try_get("is_last").context("read last active job state")
 }
 
-pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bool) -> Result<()> {
+/// Mark a job failed (or schedule a retry), but only if `lease_owner` still owns
+/// the lease. Returns `true` when our row matched and `false` when the lease was
+/// lost to a replica that reclaimed it. As with `complete_job`, callers must
+/// treat `false` as "lease lost, skip" — a worker that lost its lease must not
+/// overwrite the state of the replica that took over.
+pub async fn fail_job(
+    pool: &DbPool,
+    job: &JobRecord,
+    lease_owner: &str,
+    error: &str,
+    retryable: bool,
+) -> Result<bool> {
     let retry = retryable && job.attempts < job.max_attempts;
     let status = if retry { "queued" } else { "failed" };
     let base_delay = (2_i64.pow(job.attempts.clamp(0, 6) as u32)) * 30;
@@ -5120,7 +5177,7 @@ pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bo
     let jitter = (rand::random::<f64>() - 0.5) * 0.5 * base_delay as f64;
     let delay_seconds = ((base_delay as f64) + jitter).max(1.0);
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         update jobs
            set status = $2,
@@ -5130,14 +5187,24 @@ pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bo
                run_after = case when $2 = 'queued' then now() + make_interval(secs => $4) else run_after end,
                updated_at = now()
          where id = $1
+           and lease_owner = $5
         "#,
     )
     .bind(job.id)
     .bind(status)
     .bind(error)
     .bind(delay_seconds)
+    .bind(lease_owner)
     .execute(&mut *tx)
     .await?;
+
+    // Lease lost: a replica reclaimed the stale lease. Roll back without
+    // cancelling siblings or flipping run state so we don't clobber the worker
+    // that took over.
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
 
     if !retry {
         set_inventory_stage_status_tx(
@@ -5203,8 +5270,11 @@ pub async fn fail_job(pool: &DbPool, job: &JobRecord, error: &str, retryable: bo
         },
     )
     .await?;
+    if retry {
+        increment_metric_counter_tx(&mut tx, "job_retries_scheduled_total", 1).await?;
+    }
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 pub async fn create_review_item(
@@ -5992,6 +6062,31 @@ pub async fn set_document_inventory_ocr_content_hash(
     Ok(())
 }
 
+/// Persist the (sanitized) OCR body on `document_inventory` so it can be
+/// indexed for full-text retrieval in chat search (#217). The companion
+/// generated `ocr_body_tsv` column is recomputed by Postgres on write.
+/// Idempotent; best-effort from the worker's point of view (a failure
+/// here does not fail the OCR stage).
+pub async fn set_document_inventory_ocr_body(
+    pool: &DbPool,
+    paperless_document_id: i32,
+    ocr_body: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update document_inventory
+           set ocr_body = $2,
+               updated_at = now()
+         where paperless_document_id = $1
+        "#,
+    )
+    .bind(paperless_document_id)
+    .bind(ocr_body)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Find a recent document whose OCR text hash matches and whose
 /// metadata stage has already settled (succeeded). Used by the
 /// metadata stage to short-circuit a re-extraction when the same
@@ -6216,6 +6311,66 @@ fn ai_artifact_metadata_only(value: &Value) -> Value {
     metadata
 }
 
+/// Atomically bump a monotone metric counter, creating the row on first use.
+///
+/// Unlike the `audit_events`-derived gauges in [`metrics_snapshot`], these
+/// counters live in their own table and are therefore unaffected by audit
+/// retention pruning, keeping the `/metrics` series monotone and `rate()`-safe.
+/// Increment exactly once at the source event so the counter never double-counts.
+pub async fn increment_metric_counter(pool: &DbPool, name: &str, by: i64) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into metrics_counters (name, value, updated_at)
+        values ($1, $2, now())
+        on conflict (name) do update
+           set value = metrics_counters.value + excluded.value,
+               updated_at = now()
+        "#,
+    )
+    .bind(name)
+    .bind(by)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Transaction-scoped variant of [`increment_metric_counter`] so a counter bump
+/// can be made atomic with the source event written in the same transaction.
+async fn increment_metric_counter_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    name: &str,
+    by: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into metrics_counters (name, value, updated_at)
+        values ($1, $2, now())
+        on conflict (name) do update
+           set value = metrics_counters.value + excluded.value,
+               updated_at = now()
+        "#,
+    )
+    .bind(name)
+    .bind(by)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Read all monotone metric counters as a `name -> value` map.
+pub async fn read_metric_counters(pool: &DbPool) -> Result<HashMap<String, i64>> {
+    let rows = sqlx::query("select name, value from metrics_counters")
+        .fetch_all(pool)
+        .await?;
+    let mut counters = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let name: String = row.try_get("name")?;
+        let value: i64 = row.try_get("value")?;
+        counters.insert(name, value);
+    }
+    Ok(counters)
+}
+
 pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
     let row = sqlx::query(
         r#"
@@ -6266,7 +6421,46 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
              where event_type in ('document.patch_applied', 'document.patch_apply_failed')
                and created_at > now() - interval '24 hours'
                and metadata ? 'duration_ms'
-          ), 0) as apply_latency_ms_p95
+          ), 0) as apply_latency_ms_p95,
+          -- Per-stage latency is sourced from ai_artifacts.duration_ms (the
+          -- recorded job timing for each stage round-trip), scoped to the same
+          -- 24h window as the apply latency aggregates above.
+          coalesce((
+            select count(*)::bigint
+              from ai_artifacts
+             where stage = 'ocr'
+               and duration_ms is not null
+               and created_at > now() - interval '24 hours'
+          ), 0) as ocr_latency_ms_count,
+          coalesce((
+            select (percentile_disc(0.95) within group (order by duration_ms))::bigint
+              from ai_artifacts
+             where stage = 'ocr'
+               and duration_ms is not null
+               and created_at > now() - interval '24 hours'
+          ), 0) as ocr_latency_ms_p95,
+          coalesce((
+            select count(*)::bigint
+              from ai_artifacts
+             where stage = 'metadata'
+               and duration_ms is not null
+               and created_at > now() - interval '24 hours'
+          ), 0) as metadata_latency_ms_count,
+          coalesce((
+            select (percentile_disc(0.95) within group (order by duration_ms))::bigint
+              from ai_artifacts
+             where stage = 'metadata'
+               and duration_ms is not null
+               and created_at > now() - interval '24 hours'
+          ), 0) as metadata_latency_ms_p95,
+          -- Oldest backlog age: how long the earliest queued job has been
+          -- waiting (now() - min(run_after) over status='queued'). Null when
+          -- the queue is empty, coalesced to 0.
+          coalesce((
+            select extract(epoch from (now() - min(run_after)))::bigint
+              from jobs
+             where status = 'queued'
+          ), 0) as oldest_queued_age_seconds
         "#,
     )
     .fetch_one(pool)
@@ -6288,6 +6482,11 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
         apply_latency_ms_count: row.try_get("apply_latency_ms_count")?,
         apply_latency_ms_sum: row.try_get("apply_latency_ms_sum")?,
         apply_latency_ms_p95: row.try_get("apply_latency_ms_p95")?,
+        ocr_latency_ms_count: row.try_get("ocr_latency_ms_count")?,
+        ocr_latency_ms_p95: row.try_get("ocr_latency_ms_p95")?,
+        metadata_latency_ms_count: row.try_get("metadata_latency_ms_count")?,
+        metadata_latency_ms_p95: row.try_get("metadata_latency_ms_p95")?,
+        oldest_queued_age_seconds: row.try_get("oldest_queued_age_seconds")?,
     })
 }
 
