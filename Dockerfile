@@ -15,11 +15,11 @@ COPY crates ./crates
 COPY migrations ./migrations
 RUN cargo build --release --locked --workspace
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 # apt-get upgrade picks up Debian Security patches for libraries that ship
 # pre-installed in the base layer (libc6, libcap2, libsystemd0, libudev1, …)
 # but would otherwise stay at whatever version Docker Hub baked into the
-# bookworm-slim tag. Without it, image scans flag CVEs that are already fixed
+# trixie-slim tag. Without it, image scans flag CVEs that are already fixed
 # upstream.
 # hadolint ignore=DL3008
 RUN apt-get update \
