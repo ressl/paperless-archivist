@@ -822,7 +822,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input)
     }),
-  reviews: () => request<{ items: ReviewItem[] }>('/api/reviews?status=pending&limit=100'),
+  reviews: (limit = 100) =>
+    request<{ items: ReviewItem[] }>(`/api/reviews?status=pending&limit=${encodeURIComponent(String(limit))}`),
   approveReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/approve`, { method: 'POST' }),
   rejectReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/reject`, { method: 'POST' }),
   autoFixReviewPreview: (limit?: number) =>
