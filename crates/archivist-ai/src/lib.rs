@@ -315,7 +315,6 @@ impl OllamaClient {
             .redirect(reqwest::redirect::Policy::none())
             // Pin the validated IP at connect time to close the DNS-rebinding
             // TOCTOU on the operator-configured provider host (#183).
-            .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
             .build()
             .context("build Ollama HTTP client")?;
         Ok(Self {
@@ -743,7 +742,6 @@ impl OpenAiCompatibleClient {
             .redirect(reqwest::redirect::Policy::none())
             // Pin the validated IP at connect time to close the DNS-rebinding
             // TOCTOU on the operator-configured provider host (#183).
-            .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
             .build()?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -914,7 +912,6 @@ impl AnthropicClient {
             .redirect(reqwest::redirect::Policy::none())
             // Pin the validated IP at connect time to close the DNS-rebinding
             // TOCTOU on the operator-configured provider host (#183).
-            .dns_resolver(archivist_core::ssrf::SsrfGuardResolver::arc())
             .build()?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
