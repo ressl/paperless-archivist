@@ -2694,6 +2694,87 @@ pub fn document_date_has_anchor(date_iso: &str, ocr_text: &str) -> bool {
     false
 }
 
+/// Coerce a custom-field value so it matches a Paperless custom-field
+/// `data_type`. Returns `Some(coerced)` when the value can be represented in
+/// the target type, or `None` when it is uncoercible — e.g. the integer field
+/// 1870 fed a value like "1/2013".
+///
+/// Pass-through types (`string`, `url`, `documentlink`, `select`, and an
+/// unknown or absent `data_type`) return the value unchanged. Numeric/date
+/// types are normalised: integers tolerate thousands separators but reject
+/// fractional values, monetary/float values become JSON numbers, and dates are
+/// normalised to ISO `YYYY-MM-DD`.
+pub fn coerce_custom_field_value(
+    data_type: Option<&str>,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    match data_type.map(|kind| kind.to_ascii_lowercase()).as_deref() {
+        Some("integer") => coerce_integer_value(value),
+        Some("boolean") => coerce_boolean_value(value),
+        Some("date") => coerce_date_value(value),
+        Some("monetary") | Some("float") => coerce_float_value(value),
+        // string / url / documentlink / select / unknown / None: pass through.
+        _ => Some(value.clone()),
+    }
+}
+
+fn coerce_integer_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    match value {
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                Some(Value::from(int))
+            } else {
+                // Reject any number that carries a fractional part.
+                match number.as_f64() {
+                    Some(float) if float.fract() == 0.0 => Some(Value::from(float as i64)),
+                    _ => None,
+                }
+            }
+        }
+        Value::String(text) => {
+            // Strip spaces and thousands separators ('.' / ',' / ' '), then
+            // require the remainder to be a clean integer — "1/2013" keeps its
+            // slash and fails, while " 4.466 " collapses to 4466.
+            let stripped: String = text
+                .chars()
+                .filter(|character| !matches!(character, '.' | ',' | ' '))
+                .collect();
+            stripped.parse::<i64>().ok().map(Value::from)
+        }
+        _ => None,
+    }
+}
+
+fn coerce_boolean_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    match value {
+        Value::Bool(flag) => Some(Value::Bool(*flag)),
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(Value::Bool(true)),
+            "false" | "0" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn coerce_date_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    let text = value.as_str()?;
+    let parsed = NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()?;
+    Some(Value::String(parsed.format("%Y-%m-%d").to_string()))
+}
+
+fn coerce_float_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    match value {
+        Value::Number(number) => number.as_f64().map(Value::from),
+        Value::String(text) => text.trim().parse::<f64>().ok().map(Value::from),
+        _ => None,
+    }
+}
+
 pub fn validate_document_date_suggestion(
     suggestion: DocumentDateSuggestion,
     confidence_threshold: f32,
@@ -3879,6 +3960,108 @@ fn next_char_boundary(value: &str, mut index: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coerce_integer_field_rejects_non_integer_and_strips_separators() {
+        use serde_json::{Value, json};
+        // The 1870 case: an integer custom field fed "1/2013" is uncoercible.
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!("1/2013")),
+            None
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!("2013")),
+            Some(Value::from(2013_i64))
+        );
+        // Thousands separators and spaces collapse away ("4.466" -> 4466).
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!(" 4.466 ")),
+            Some(Value::from(4466_i64))
+        );
+        // Plain JSON numbers pass through; fractional numbers are rejected.
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!(42)),
+            Some(Value::from(42_i64))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!(42.0)),
+            Some(Value::from(42_i64))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!(42.5)),
+            None
+        );
+    }
+
+    #[test]
+    fn coerce_boolean_field_accepts_common_truthy_strings() {
+        use serde_json::{Value, json};
+        assert_eq!(
+            coerce_custom_field_value(Some("boolean"), &json!(true)),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("boolean"), &json!("TRUE")),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("boolean"), &json!("0")),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("boolean"), &json!("maybe")),
+            None
+        );
+    }
+
+    #[test]
+    fn coerce_date_field_normalises_to_iso() {
+        use serde_json::{Value, json};
+        assert_eq!(
+            coerce_custom_field_value(Some("date"), &json!(" 2013-04-09 ")),
+            Some(Value::String("2013-04-09".to_owned()))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("date"), &json!("09.04.2013")),
+            None
+        );
+    }
+
+    #[test]
+    fn coerce_monetary_and_float_fields_yield_numbers() {
+        use serde_json::{Value, json};
+        assert_eq!(
+            coerce_custom_field_value(Some("monetary"), &json!("12.50")),
+            Some(Value::from(12.5_f64))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("float"), &json!(3.5)),
+            Some(Value::from(3.5_f64))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("monetary"), &json!("not-a-number")),
+            None
+        );
+    }
+
+    #[test]
+    fn coerce_passthrough_types_return_value_unchanged() {
+        use serde_json::json;
+        let value = json!("anything goes");
+        for kind in [
+            None,
+            Some("string"),
+            Some("url"),
+            Some("documentlink"),
+            Some("select"),
+        ] {
+            assert_eq!(
+                coerce_custom_field_value(kind, &value),
+                Some(value.clone()),
+                "data_type {kind:?} should pass through"
+            );
+        }
+    }
 
     #[test]
     fn prefilter_allowed_list_returns_full_list_below_cap() {

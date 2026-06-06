@@ -43,7 +43,10 @@ fn main() {
             "IT".to_owned(),
             "Geschäftlich".to_owned(),
         ],
-        &["Invoice Number".to_owned(), "Total".to_owned()],
+        &[
+            ("Invoice Number".to_owned(), Some("integer".to_owned())),
+            ("Total".to_owned(), Some("monetary".to_owned())),
+        ],
         &MetadataFieldFlags::ALL,
         &language,
         5,

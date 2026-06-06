@@ -2262,12 +2262,12 @@ pub async fn list_custom_fields(pool: &DbPool) -> Result<Vec<CustomFieldRecord>>
 pub async fn custom_field_ids_for_names(
     pool: &DbPool,
     names: &[String],
-) -> Result<Vec<(String, i32)>> {
+) -> Result<Vec<(String, i32, Option<String>)>> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        "select name, id from paperless_custom_fields where lower(name) = any($1) order by name",
+        "select name, id, data_type from paperless_custom_fields where lower(name) = any($1) order by name",
     )
     .bind(
         names
@@ -2278,7 +2278,13 @@ pub async fn custom_field_ids_for_names(
     .fetch_all(pool)
     .await?;
     rows.into_iter()
-        .map(|row| Ok((row.try_get("name")?, row.try_get("id")?)))
+        .map(|row| {
+            Ok((
+                row.try_get("name")?,
+                row.try_get("id")?,
+                row.try_get("data_type")?,
+            ))
+        })
         .collect()
 }
 
