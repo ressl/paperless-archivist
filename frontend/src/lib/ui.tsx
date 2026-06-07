@@ -1,10 +1,79 @@
-import { useMemo, type ReactNode } from 'react';
-import { AlertTriangle, Check, CircleDashed, Eye, Info } from 'lucide-react';
+import { useEffect, useMemo, useRef, type ReactNode, type RefObject } from 'react';
+import { AlertTriangle, Check, CircleDashed, Eye, Info, X } from 'lucide-react';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { statusLabel } from './format';
 
 export function PageHeader({ title }: { title: string }) {
   return <header className="page-header"><h2>{title}</h2></header>;
+}
+
+export type BannerTone = 'error' | 'success' | 'info';
+
+/**
+ * Inline status banner. `tone` drives the colour so positive outcomes render in
+ * a green/neutral banner instead of the red error box (see #228). Errors keep
+ * the assertive live-region; success/info use a polite one.
+ */
+export function Banner({ tone, message, onDismiss }: { tone: BannerTone; message: string; onDismiss: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className={`banner ${tone}`} role={tone === 'error' ? 'alert' : 'status'} aria-live={tone === 'error' ? 'assertive' : 'polite'}>
+      <span>{message}</span>
+      <button title={t('generic.dismiss')} onClick={onDismiss}>
+        <X size={16} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Focus management for an overlay (drawer / modal): on open, move focus into
+ * the container and trap Tab / Shift+Tab inside it; on close, restore focus to
+ * the element that was focused before opening (see #242). Pass the same `active`
+ * flag that controls the overlay's visibility.
+ */
+export function useFocusTrap(active: boolean, containerRef: RefObject<HTMLElement | null>) {
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    const container = containerRef.current;
+    if (!container) return;
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+
+    const focusable = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.offsetParent !== null);
+
+    const first = focusable()[0] ?? container;
+    first.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const items = focusable();
+      if (items.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const firstEl = items[0];
+      const lastEl = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === firstEl) {
+        event.preventDefault();
+        lastEl.focus();
+      } else if (!event.shiftKey && document.activeElement === lastEl) {
+        event.preventDefault();
+        firstEl.focus();
+      }
+    };
+
+    container.addEventListener('keydown', onKeyDown);
+    return () => {
+      container.removeEventListener('keydown', onKeyDown);
+      previouslyFocused.current?.focus?.();
+    };
+  }, [active, containerRef]);
 }
 
 type StatusTone = 'success' | 'danger' | 'info' | 'review' | 'neutral';

@@ -10,14 +10,13 @@ import {
   MessageSquare,
   Settings,
   Shield,
-  UserPlus,
-  X
+  UserPlus
 } from 'lucide-react';
 import { api, Me, OidcConfig } from './api/client';
 import { buildInfo, buildInfoLabel } from './buildInfo';
 import { useI18n } from './i18n/I18nProvider';
 import { ErrorBoundary } from './lib/ErrorBoundary';
-import { PageHeader, localizedErrorMessage } from './lib/ui';
+import { Banner, PageHeader, localizedErrorMessage } from './lib/ui';
 import { LanguageSelector } from './lib/LanguageSelector';
 
 // Dashboard pulls in Recharts; keep it (and the other tab pages) out of the
@@ -40,6 +39,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>('dashboard');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [debugConsoleEnabled, setDebugConsoleEnabled] = useState(false);
 
   useEffect(() => {
@@ -82,6 +82,7 @@ export function App() {
   // not bleed into the next one.
   const selectTab = (next: Tab) => {
     setError(null);
+    setSuccess(null);
     setTab(next);
   };
 
@@ -103,16 +104,28 @@ export function App() {
           </div>
         </div>
         <nav>
-          <NavButton icon={<Activity />} label={t('nav.dashboard')} active={tab === 'dashboard'} onClick={() => selectTab('dashboard')} />
-          <NavButton icon={<Archive />} label={t('nav.inventory')} active={tab === 'inventory'} onClick={() => selectTab('inventory')} />
-          {canUseChat && <NavButton icon={<MessageSquare />} label={t('nav.chat')} active={tab === 'chat'} onClick={() => selectTab('chat')} />}
-          <NavButton icon={<ListChecks />} label={t('nav.review')} active={tab === 'reviews'} onClick={() => selectTab('reviews')} />
-          {canReadSettings && <NavButton icon={<Settings />} label={t('nav.settings')} active={tab === 'settings'} onClick={() => selectTab('settings')} />}
-          {canReadSettings && <NavButton icon={<ClipboardList />} label={t('nav.prompts')} active={tab === 'prompts'} onClick={() => selectTab('prompts')} />}
-          {canReadAudit && <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => selectTab('audit')} />}
-          {canManageUsers && <NavButton icon={<UserPlus />} label={t('nav.users')} active={tab === 'users'} onClick={() => selectTab('users')} />}
-          {debugConsoleEnabled && (
-            <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => selectTab('debug')} />
+          {/* Fixed-order, labelled groups so nav positions never shift by role (#235). */}
+          <div className="nav-group">
+            <span className="nav-group-label">{t('nav.group.operations')}</span>
+            <NavButton icon={<Activity />} label={t('nav.dashboard')} active={tab === 'dashboard'} onClick={() => selectTab('dashboard')} />
+            <NavButton icon={<Archive />} label={t('nav.inventory')} active={tab === 'inventory'} onClick={() => selectTab('inventory')} />
+            <NavButton icon={<ListChecks />} label={t('nav.review')} active={tab === 'reviews'} onClick={() => selectTab('reviews')} />
+            {canUseChat && <NavButton icon={<MessageSquare />} label={t('nav.chat')} active={tab === 'chat'} onClick={() => selectTab('chat')} />}
+          </div>
+          {(canReadSettings || canManageUsers) && (
+            <div className="nav-group">
+              <span className="nav-group-label">{t('nav.group.configuration')}</span>
+              {canReadSettings && <NavButton icon={<Settings />} label={t('nav.settings')} active={tab === 'settings'} onClick={() => selectTab('settings')} />}
+              {canReadSettings && <NavButton icon={<ClipboardList />} label={t('nav.prompts')} active={tab === 'prompts'} onClick={() => selectTab('prompts')} />}
+              {canManageUsers && <NavButton icon={<UserPlus />} label={t('nav.users')} active={tab === 'users'} onClick={() => selectTab('users')} />}
+            </div>
+          )}
+          {(canReadAudit || debugConsoleEnabled) && (
+            <div className="nav-group">
+              <span className="nav-group-label">{t('nav.group.system')}</span>
+              {canReadAudit && <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => selectTab('audit')} />}
+              {debugConsoleEnabled && <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => selectTab('debug')} />}
+            </div>
           )}
         </nav>
         <LanguageSelector />
@@ -134,19 +147,14 @@ export function App() {
       </aside>
 
       <main className="workspace">
-        {error && (
-          <div className="banner error" role="alert" aria-live="assertive">
-            <span>{error}</span>
-            <button title={t('generic.dismiss')} onClick={() => setError(null)}>
-              <X size={16} />
-            </button>
-          </div>
-        )}
+        {error && <Banner tone="error" message={error} onDismiss={() => setError(null)} />}
+        {success && <Banner tone="success" message={success} onDismiss={() => setSuccess(null)} />}
         {tab === 'dashboard' && (
           <ErrorBoundary>
             <Suspense fallback={lazyFallback}>
             <Dashboard
               setError={setError}
+              setSuccess={setSuccess}
               canManageSettings={canManageSettings}
               permissions={me.permissions}
               onNavigate={(nextTab, search) => {
@@ -193,7 +201,7 @@ export function App() {
         {tab === 'reviews' && (
           <ErrorBoundary>
             <Suspense fallback={lazyFallback}>
-              <Reviews setError={setError} />
+              <Reviews setError={setError} setSuccess={setSuccess} />
             </Suspense>
           </ErrorBoundary>
         )}

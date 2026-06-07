@@ -289,7 +289,21 @@ th {
 .sidebar nav {
   display: grid;
   align-content: start;
-  gap: 6px;
+  gap: var(--space-4);
+}
+
+.nav-group {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.nav-group-label {
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgb(220 231 233 / 55%);
 }
 
 .sidebar nav button,
@@ -477,6 +491,27 @@ th {
   background: var(--danger-soft);
   color: var(--danger);
 }
+
+.banner.success {
+  border-color: var(--teal);
+  background: var(--success-soft);
+  color: var(--teal);
+}
+
+.banner.info {
+  border-color: var(--info);
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+/* Change indicator — colour encodes good/bad (see deltaTone), not just up/down. */
+.delta {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--muted);
+}
+.delta.good { color: var(--success); }
+.delta.bad { color: var(--danger); }
 
 .error-boundary {
   display: grid;

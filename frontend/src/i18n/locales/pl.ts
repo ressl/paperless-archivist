@@ -12,6 +12,10 @@ const plMessages: Record<MessageKey, string> = {
   'nav.audit': 'Audyt',
   'nav.users': 'Użytkownicy',
   'nav.debug': 'Debug',
+  'nav.group.operations': 'Operacje',
+  'nav.group.configuration': 'Konfiguracja',
+  'nav.group.system': 'System',
+
   'nav.logout': 'Wyloguj',
   'debug.title': 'Konsola debug',
   'debug.pause': 'Wstrzymaj',

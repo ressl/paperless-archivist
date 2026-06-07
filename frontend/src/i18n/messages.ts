@@ -10,6 +10,10 @@ export const enMessages = {
   'nav.audit': 'Audit',
   'nav.users': 'Users',
   'nav.debug': 'Debug',
+  'nav.group.operations': 'Operations',
+  'nav.group.configuration': 'Configuration',
+  'nav.group.system': 'System',
+
   'nav.logout': 'Logout',
   'debug.title': 'Debug Console',
   'debug.pause': 'Pause',

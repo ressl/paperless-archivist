@@ -84,8 +84,13 @@ export function formatMttc(value?: number | null) {
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
-export function deltaTone(value: number) {
-  if (value > 0) return 'delta up';
-  if (value < 0) return 'delta down';
-  return 'delta';
+// Tone for a change indicator. `higherIsBetter` says whether a rising value is
+// good (e.g. throughput) or bad (e.g. failures/backlog), so the colour encodes
+// good/bad rather than merely up/down — a rising failure count must read red,
+// not green. Pass higherIsBetter=false for "less is better" metrics.
+export function deltaTone(value: number, higherIsBetter = true) {
+  if (value === 0) return 'delta';
+  const isGood = value > 0 ? higherIsBetter : !higherIsBetter;
+  const direction = value > 0 ? 'up' : 'down';
+  return `delta ${direction} ${isGood ? 'good' : 'bad'}`;
 }

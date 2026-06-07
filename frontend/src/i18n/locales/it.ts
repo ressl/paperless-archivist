@@ -12,6 +12,10 @@ const itMessages: Record<MessageKey, string> = {
   'nav.audit': 'Audit',
   'nav.users': 'Utenti',
   'nav.debug': 'Debug',
+  'nav.group.operations': 'Operazioni',
+  'nav.group.configuration': 'Configurazione',
+  'nav.group.system': 'Sistema',
+
   'nav.logout': 'Esci',
   'debug.title': 'Console di debug',
   'debug.pause': 'Pausa',

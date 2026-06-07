@@ -12,6 +12,10 @@ const esMessages: Record<MessageKey, string> = {
   'nav.audit': 'Audit',
   'nav.users': 'Usuarios',
   'nav.debug': 'Debug',
+  'nav.group.operations': 'Operaciones',
+  'nav.group.configuration': 'Configuración',
+  'nav.group.system': 'Sistema',
+
   'nav.logout': 'Cerrar sesión',
   'debug.title': 'Consola de debug',
   'debug.pause': 'Pausar',

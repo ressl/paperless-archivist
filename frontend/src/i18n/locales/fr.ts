@@ -12,6 +12,10 @@ const frMessages: Record<MessageKey, string> = {
   'nav.audit': 'Audit',
   'nav.users': 'Utilisateurs',
   'nav.debug': 'Debug',
+  'nav.group.operations': 'Opérations',
+  'nav.group.configuration': 'Configuration',
+  'nav.group.system': 'Système',
+
   'nav.logout': 'Déconnexion',
   'debug.title': 'Console de debug',
   'debug.pause': 'Pause',

@@ -12,6 +12,10 @@ const nlMessages: Record<MessageKey, string> = {
   'nav.audit': 'Audit',
   'nav.users': 'Gebruikers',
   'nav.debug': 'Debug',
+  'nav.group.operations': 'Operaties',
+  'nav.group.configuration': 'Configuratie',
+  'nav.group.system': 'Systeem',
+
   'nav.logout': 'Uitloggen',
   'debug.title': 'Debug-console',
   'debug.pause': 'Pauzeren',

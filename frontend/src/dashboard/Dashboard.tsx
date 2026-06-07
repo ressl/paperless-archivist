@@ -1070,11 +1070,13 @@ function LiveProcessingPanel({ live }: { live: DashboardLiveStatus | null }) {
 
 export function Dashboard({
   setError,
+  setSuccess,
   canManageSettings,
   permissions,
   onNavigate
 }: {
   setError: (error: string | null) => void;
+  setSuccess: (message: string | null) => void;
   canManageSettings: boolean;
   permissions: import('../api/client').Permissions;
   /**
