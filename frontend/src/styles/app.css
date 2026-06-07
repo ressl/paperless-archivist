@@ -2860,6 +2860,9 @@ th {
 .prompt-lab-card,
 .prompt-test-card,
 .prompt-compare-card {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--surface);
@@ -2914,15 +2917,6 @@ th {
   color: var(--muted);
   font-size: 12px;
   font-style: normal;
-}
-
-.prompt-editor-card,
-.prompt-lab-card,
-.prompt-test-card,
-.prompt-compare-card {
-  display: grid;
-  gap: 14px;
-  padding: var(--space-4);
 }
 
 .prompt-card-header {
