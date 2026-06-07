@@ -1962,7 +1962,9 @@ pub async fn upsert_paperless_named_entity(
                       updated_at = now()
         "#
     );
-    sqlx::query(&sql)
+    // SAFETY: `sql` is a static literal built above with no user-controlled
+    // interpolation; only bind parameters carry caller data.
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .bind(name)
         .execute(&mut **tx)
@@ -2242,9 +2244,12 @@ pub async fn list_allowed_named_entities(pool: &DbPool, table: &str) -> Result<V
         "paperless_document_types" => "paperless_document_types",
         _ => return Err(anyhow!("unsupported metadata table: {table}")),
     };
-    let rows = sqlx::query(&format!("select name from {table} order by name"))
-        .fetch_all(pool)
-        .await?;
+    // SAFETY: `table` is matched to a closed allow-list of literal table names above.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "select name from {table} order by name"
+    )))
+    .fetch_all(pool)
+    .await?;
     rows.into_iter()
         .map(|row| row.try_get("name").context("entity name"))
         .collect()
@@ -2346,9 +2351,10 @@ pub async fn named_entity_id_for_name(
         "paperless_document_types" => "paperless_document_types",
         _ => return Err(anyhow!("unsupported metadata table: {table}")),
     };
-    let row = sqlx::query(&format!(
+    // SAFETY: `table` is matched to a closed allow-list of literal table names above.
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "select id from {table} where lower(name) = lower($1)"
-    ))
+    )))
     .bind(name)
     .fetch_optional(pool)
     .await?;
@@ -3512,7 +3518,7 @@ impl StatusTable {
 
 async fn status_counts(pool: &DbPool, table: StatusTable) -> Result<Vec<DashboardStatusCount>> {
     // SAFETY: `table.name()` is a compile-time constant chosen from a closed enum.
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         select status, count(*)::bigint as count
           from {table}
@@ -3520,7 +3526,7 @@ async fn status_counts(pool: &DbPool, table: StatusTable) -> Result<Vec<Dashboar
          order by count desc, status
         "#,
         table = table.name(),
-    ))
+    )))
     .fetch_all(pool)
     .await?;
     rows.into_iter()
@@ -3920,7 +3926,7 @@ impl InventoryQuery {
 /// predicate is prefixed with ` AND ` so the caller's clause acts as the
 /// implicit `1=1`. Returns early without writing anything when the query
 /// is empty.
-fn push_inventory_filters<'q>(builder: &mut QueryBuilder<'q, Postgres>, query: &'q InventoryQuery) {
+fn push_inventory_filters(builder: &mut QueryBuilder<Postgres>, query: &InventoryQuery) {
     if let Some(id) = query.id {
         builder.push(" and paperless_document_id = ").push_bind(id);
     }
@@ -4569,7 +4575,11 @@ pub async fn queue_missing_stage(
          {limit_clause}
         "#
     );
-    let mut builder = sqlx::query(&query).bind(&include_tags).bind(&exclude_tags);
+    // SAFETY: `query` is assembled from static fragments plus the validated
+    // `limit_clause`; all caller data flows through bind parameters below.
+    let mut builder = sqlx::query(sqlx::AssertSqlSafe(query))
+        .bind(&include_tags)
+        .bind(&exclude_tags);
     if let Some(limit) = max_documents {
         builder = builder.bind(limit);
     }
@@ -4652,7 +4662,9 @@ pub async fn queue_missing_pipeline(
              {limit_clause}
             "#
         );
-        let mut builder = sqlx::query(&query)
+        // SAFETY: `query` is assembled from static fragments plus the validated
+        // `limit_clause`; all caller data flows through bind parameters below.
+        let mut builder = sqlx::query(sqlx::AssertSqlSafe(query))
             .bind(&include_tags)
             .bind(&exclude_tags)
             .bind(last_seen);
@@ -7100,7 +7112,9 @@ async fn set_inventory_stage_status_tx(
          where paperless_document_id = $1
         "#
     );
-    sqlx::query(&sql)
+    // SAFETY: `sql` is a static literal built above with no user-controlled
+    // interpolation; only bind parameters carry caller data.
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(paperless_document_id)
         .bind(status)
         .bind(error)
