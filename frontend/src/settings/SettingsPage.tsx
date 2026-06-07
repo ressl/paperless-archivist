@@ -218,14 +218,32 @@ function tuningPresetKindFor(
   return provider.kind;
 }
 
+// #229: the typed-but-unsaved provider API keys are tracked by list index so a
+// rename keeps the entry. The save endpoint still matches secrets by provider
+// name, so translate back to a name-keyed map at the boundary.
+function providerSecretsByName(
+  settings: RuntimeSettings,
+  secretsByIndex: Record<number, string>
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  settings.ai.providers.forEach((provider, index) => {
+    const secret = secretsByIndex[index];
+    if (secret && provider.name) out[provider.name] = secret;
+  });
+  return out;
+}
+
 export function SettingsPage({ setError }: { setError: (error: string | null) => void }) {
   const { t, locale } = useI18n();
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
   const [savedSettings, setSavedSettings] = useState<RuntimeSettings | null>(null);
   const [token, setToken] = useState('');
-  const [providerSecrets, setProviderSecrets] = useState<Record<string, string>>({});
+  // #229: key transient per-provider state (typed API key + loaded models) by
+  // the provider's stable list index rather than its mutable display name, so
+  // renaming a provider no longer drops the in-progress secret or model list.
+  const [providerSecrets, setProviderSecrets] = useState<Record<number, string>>({});
   const [notificationWebhook, setNotificationWebhook] = useState('');
-  const [ollamaModels, setOllamaModels] = useState<Record<string, OllamaModelLoadState>>({});
+  const [ollamaModels, setOllamaModels] = useState<Record<number, OllamaModelLoadState>>({});
   const [paperlessTest, setPaperlessTest] = useState<ConnectionTestState | null>(null);
   const [providerTest, setProviderTest] = useState<ConnectionTestState | null>(null);
   const [notificationTest, setNotificationTest] = useState<ConnectionTestState | null>(null);
@@ -233,13 +251,13 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
   const [result, setResult] = useState<string | null>(null);
   const worldLanguages = useMemo(() => languageOptions(locale), [locale]);
 
-  const loadOllamaModels = (providerName: string) => {
+  const loadOllamaModels = (index: number, providerName: string) => {
     setOllamaModels((current) => ({
       ...current,
-      [providerName]: {
+      [index]: {
         loading: true,
-        loaded: current[providerName]?.loaded ?? false,
-        models: current[providerName]?.models ?? [],
+        loaded: current[index]?.loaded ?? false,
+        models: current[index]?.models ?? [],
         error: null
       }
     }));
@@ -248,7 +266,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       .then((data) => {
         setOllamaModels((current) => ({
           ...current,
-          [providerName]: {
+          [index]: {
             loading: false,
             loaded: true,
             models: data.models,
@@ -263,10 +281,10 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         const message = err instanceof Error && err.message ? err.message : t('settings.ollama.load_error');
         setOllamaModels((current) => ({
           ...current,
-          [providerName]: {
+          [index]: {
             loading: false,
             loaded: true,
-            models: current[providerName]?.models ?? [],
+            models: current[index]?.models ?? [],
             error: message
           }
         }));
@@ -274,15 +292,12 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
   };
 
   const refreshInstalledOllamaModels = (nextSettings: RuntimeSettings) => {
-    const providerNames = Array.from(
-      new Set(
-        nextSettings.ai.providers
-          .filter((provider) => provider.kind === 'ollama' && !isOllamaCloudProvider(provider))
-          .map((provider) => provider.name)
-          .filter(Boolean)
-      )
-    );
-    void Promise.allSettled(providerNames.map((providerName) => loadOllamaModels(providerName)));
+    const targets = nextSettings.ai.providers
+      .map((provider, index) => ({ provider, index }))
+      .filter(
+        ({ provider }) => provider.kind === 'ollama' && !isOllamaCloudProvider(provider) && Boolean(provider.name)
+      );
+    void Promise.allSettled(targets.map(({ provider, index }) => loadOllamaModels(index, provider.name)));
   };
 
   useEffect(() => {
@@ -367,6 +382,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       }
     }));
   const selectedDefaultProvider = defaultProvider(settings);
+  const selectedDefaultProviderIndex = settings.ai.providers.findIndex(
+    (provider) => provider.name === settings.ai.default_provider
+  );
   const runPaperlessTest = () => {
     if (savedSettings && paperlessSettingsChanged(settings, savedSettings, token)) {
       setPaperlessTest(paperlessUnsavedSettingsFeedback(settings, savedSettings, token, t));
@@ -458,7 +476,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       <div className="settings-language-row">
         <LanguageSelector compact />
       </div>
-      <div className="settings-grid">
+      <div className="card-grid card-grid--default">
         <fieldset>
           <legend>{t('settings.paperless')}</legend>
           <label>
@@ -531,9 +549,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
               provider={selectedDefaultProvider}
               value={settings.ai.default_text_model}
               catalog={settings.ai.model_catalog}
-              ollamaState={ollamaModels[selectedDefaultProvider.name]}
+              ollamaState={ollamaModels[selectedDefaultProviderIndex]}
               onChange={(value) => update((s) => ({ ...s, ai: { ...s.ai, default_text_model: value } }))}
-              onRefresh={() => loadOllamaModels(selectedDefaultProvider.name)}
+              onRefresh={() => loadOllamaModels(selectedDefaultProviderIndex, selectedDefaultProvider.name)}
             />
           </div>
           <div className="settings-field">
@@ -543,9 +561,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
               provider={selectedDefaultProvider}
               value={settings.ai.default_vision_model}
               catalog={settings.ai.model_catalog}
-              ollamaState={ollamaModels[selectedDefaultProvider.name]}
+              ollamaState={ollamaModels[selectedDefaultProviderIndex]}
               onChange={(value) => update((s) => ({ ...s, ai: { ...s.ai, default_vision_model: value } }))}
-              onRefresh={() => loadOllamaModels(selectedDefaultProvider.name)}
+              onRefresh={() => loadOllamaModels(selectedDefaultProviderIndex, selectedDefaultProvider.name)}
             />
           </div>
           <div className="settings-field">
@@ -555,14 +573,14 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
               provider={selectedDefaultProvider}
               value={settings.ai.fallback_vision_model ?? ''}
               catalog={settings.ai.model_catalog}
-              ollamaState={ollamaModels[selectedDefaultProvider.name]}
+              ollamaState={ollamaModels[selectedDefaultProviderIndex]}
               onChange={(value) =>
                 update((s) => ({
                   ...s,
                   ai: { ...s.ai, fallback_vision_model: value.trim() === '' ? null : value }
                 }))
               }
-              onRefresh={() => loadOllamaModels(selectedDefaultProvider.name)}
+              onRefresh={() => loadOllamaModels(selectedDefaultProviderIndex, selectedDefaultProvider.name)}
             />
             <small>{t('settings.ai.vision_crash_fallback_hint')}</small>
           </div>
@@ -619,7 +637,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           <ConnectionTestFeedback state={providerTest} />
         </fieldset>
         <fieldset>
-          <legend>{t('settings.workflow')}</legend>
+          <legend>{t('settings.workflow.section.processing')}</legend>
           <label>
             {t('settings.workflow.mode')}
             <select value={settings.workflow.mode} onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, mode: event.target.value as RuntimeSettings['workflow']['mode'] } }))}>
@@ -660,9 +678,31 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             />
           </label>
           <label>
+            {t('settings.workflow.include_tags')}
+            <input
+              value={settings.workflow.rules.include_tags.join(', ')}
+              onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, rules: { ...s.workflow.rules, include_tags: splitTags(event.target.value) } } }))}
+              placeholder={t('settings.workflow.optional_tags')}
+            />
+          </label>
+          <label>
+            {t('settings.workflow.exclude_tags')}
+            <input
+              value={settings.workflow.rules.exclude_tags.join(', ')}
+              onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, rules: { ...s.workflow.rules, exclude_tags: splitTags(event.target.value) } } }))}
+              placeholder={t('settings.workflow.optional_tags')}
+            />
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>{t('settings.workflow.section.ocr')}</legend>
+          <label>
             {t('settings.workflow.ocr_pages')}
             <input type="number" min="1" max="20" value={settings.ocr.page_limit} onChange={(event) => update((s) => ({ ...s, ocr: { ...s.ocr, page_limit: Number(event.target.value) } }))} />
           </label>
+        </fieldset>
+        <fieldset>
+          <legend>{t('settings.workflow.section.tagging')}</legend>
           <label>
             {t('settings.workflow.max_tags')}
             <input type="number" min="1" max="20" value={settings.tagging.max_tags} onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, max_tags: Number(event.target.value) } }))} />
@@ -688,6 +728,13 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             </datalist>
             <small>{t('settings.workflow.tag_output_hint')}</small>
           </label>
+          <label className="inline">
+            <input type="checkbox" checked={settings.tagging.allow_new_tags} onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, allow_new_tags: event.target.checked } }))} />
+            {t('settings.workflow.allow_new_tags')}
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>{t('settings.workflow.section.fields')}</legend>
           <label>
             {t('settings.workflow.max_fields')}
             <input type="number" min="1" max="50" value={settings.fields.max_fields} onChange={(event) => update((s) => ({ ...s, fields: { ...s.fields, max_fields: Number(event.target.value) } }))} />
@@ -706,6 +753,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             />
             <small>{t('settings.workflow.field_mappings_hint')}</small>
           </label>
+        </fieldset>
+        <fieldset>
+          <legend>{t('settings.workflow.section.metadata')}</legend>
           <label>
             {t('settings.workflow.metadata_confidence')}
             <input type="number" min="0" max="1" step="0.05" value={settings.metadata.confidence_threshold} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, confidence_threshold: Number(event.target.value) } }))} />
@@ -733,26 +783,6 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           <label className="inline">
             <input type="checkbox" checked={settings.metadata.allow_new_document_types} onChange={(event) => update((s) => ({ ...s, metadata: { ...s.metadata, allow_new_document_types: event.target.checked } }))} />
             {t('settings.workflow.allow_new_document_types')}
-          </label>
-          <label className="inline">
-            <input type="checkbox" checked={settings.tagging.allow_new_tags} onChange={(event) => update((s) => ({ ...s, tagging: { ...s.tagging, allow_new_tags: event.target.checked } }))} />
-            {t('settings.workflow.allow_new_tags')}
-          </label>
-          <label>
-            {t('settings.workflow.include_tags')}
-            <input
-              value={settings.workflow.rules.include_tags.join(', ')}
-              onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, rules: { ...s.workflow.rules, include_tags: splitTags(event.target.value) } } }))}
-              placeholder={t('settings.workflow.optional_tags')}
-            />
-          </label>
-          <label>
-            {t('settings.workflow.exclude_tags')}
-            <input
-              value={settings.workflow.rules.exclude_tags.join(', ')}
-              onChange={(event) => update((s) => ({ ...s, workflow: { ...s.workflow, rules: { ...s.workflow.rules, exclude_tags: splitTags(event.target.value) } } }))}
-              placeholder={t('settings.workflow.optional_tags')}
-            />
           </label>
         </fieldset>
         <fieldset>
@@ -920,7 +950,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         </fieldset>
       </div>
       <PageHeader title={t('settings.providers')} />
-      <div className="provider-list">
+      <div className="card-grid card-grid--default">
         {settings.ai.providers.map((provider, index) => (
           <fieldset key={`${provider.name}-${index}`}>
             <legend>{provider.name || t('settings.provider.provider')}</legend>
@@ -979,9 +1009,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
                 provider={provider}
                 value={provider.default_text_model ?? ''}
                 catalog={settings.ai.model_catalog}
-                ollamaState={ollamaModels[provider.name]}
+                ollamaState={ollamaModels[index]}
                 onChange={(value) => updateProvider(index, { default_text_model: value })}
-                onRefresh={() => loadOllamaModels(provider.name)}
+                onRefresh={() => loadOllamaModels(index, provider.name)}
               />
             </div>
             <div className="settings-field">
@@ -991,18 +1021,18 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
                 provider={provider}
                 value={provider.default_vision_model ?? ''}
                 catalog={settings.ai.model_catalog}
-                ollamaState={ollamaModels[provider.name]}
+                ollamaState={ollamaModels[index]}
                 onChange={(value) => updateProvider(index, { default_vision_model: value })}
-                onRefresh={() => loadOllamaModels(provider.name)}
+                onRefresh={() => loadOllamaModels(index, provider.name)}
               />
             </div>
             <label>
               {t('settings.provider.api_key')}
               <input
                 type="password"
-                value={providerSecrets[provider.name] ?? ''}
+                value={providerSecrets[index] ?? ''}
                 placeholder={provider.secret_id ? t('settings.paperless.configured') : ''}
-                onChange={(event) => setProviderSecrets((current) => ({ ...current, [provider.name]: event.target.value }))}
+                onChange={(event) => setProviderSecrets((current) => ({ ...current, [index]: event.target.value }))}
               />
             </label>
             <label className="inline">
@@ -1027,7 +1057,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           icon={<Save />}
           label={t('generic.save')}
           busy={busy}
-          onClick={() => run(setBusy, setError, () => api.saveSettings(settings, token, providerSecrets, notificationWebhook).then((saved) => {
+          onClick={() => run(setBusy, setError, () => api.saveSettings(settings, token, providerSecretsByName(settings, providerSecrets), notificationWebhook).then((saved) => {
             const nextSettings = withModelDefaults(saved);
             setSettings(nextSettings);
             setSavedSettings(nextSettings);

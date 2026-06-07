@@ -446,6 +446,12 @@ const frMessages: Record<MessageKey, string> = {
   'settings.tuning.field.loaded_models': 'Modèles chargés',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Mode',
+  'settings.workflow.section.processing': 'Mode de traitement et sécurité',
+  'settings.workflow.section.ocr': 'OCR',
+  'settings.workflow.section.tagging': 'Étiquetage',
+  'settings.workflow.section.fields': 'Champs personnalisés',
+  'settings.workflow.section.metadata': 'Écrasement des métadonnées',
+
   'settings.workflow.paused': 'Mettre en pause le selector automatique',
   'settings.workflow.dry_run': 'Dry-run full auto',
   'settings.workflow.hourly_limit': 'Limite horaire de documents',

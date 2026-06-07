@@ -446,6 +446,12 @@ const nlMessages: Record<MessageKey, string> = {
   'settings.tuning.field.loaded_models': 'Geladen modellen',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modus',
+  'settings.workflow.section.processing': 'Verwerkingsmodus & veiligheid',
+  'settings.workflow.section.ocr': 'OCR',
+  'settings.workflow.section.tagging': 'Labelen',
+  'settings.workflow.section.fields': 'Aangepaste velden',
+  'settings.workflow.section.metadata': 'Metadata overschrijven',
+
   'settings.workflow.paused': 'Automatische selector pauzeren',
   'settings.workflow.dry_run': 'Dry-run full auto',
   'settings.workflow.hourly_limit': 'Documentlimiet per uur',

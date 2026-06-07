@@ -444,6 +444,12 @@ export const enMessages = {
   'settings.tuning.field.loaded_models': 'Loaded models',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Mode',
+  'settings.workflow.section.processing': 'Processing mode & safety',
+  'settings.workflow.section.ocr': 'OCR',
+  'settings.workflow.section.tagging': 'Tagging',
+  'settings.workflow.section.fields': 'Custom fields',
+  'settings.workflow.section.metadata': 'Metadata overwrite',
+
   'settings.workflow.paused': 'Pause automatic selector',
   'settings.workflow.dry_run': 'Dry-run full auto',
   'settings.workflow.hourly_limit': 'Hourly document limit',

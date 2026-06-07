@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useDashboardLive, useDashboardStats, useFreshness, useMediaQuery } from './hooks';
 import {
   Activity,
@@ -44,7 +44,7 @@ import {
   RecoveryCandidate
 } from '../api/client';
 import { localizedMessage, useI18n, type TFunction } from '../i18n/I18nProvider';
-import { ActionButton, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { ActionButton, PageHeader, Status, localizedErrorMessage, run, useFocusTrap } from '../lib/ui';
 import { ErrorBoundary } from '../lib/ErrorBoundary';
 import {
   deltaTone,
@@ -235,7 +235,7 @@ function Sparkline({
 
 function ChartPanel({ title, wide, children }: { title: string; wide?: boolean; children: ReactNode }) {
   return (
-    <section className={`chart-panel${wide ? ' wide' : ''}`} role="region" aria-label={title}>
+    <section className={`card chart-panel${wide ? ' wide' : ''}`} role="region" aria-label={title}>
       <h3>{title}</h3>
       {children}
     </section>
@@ -609,6 +609,8 @@ function MaintenanceDrawer({
   onQueueFull: () => void;
 }) {
   const { t } = useI18n();
+  const drawerRef = useRef<HTMLElement>(null);
+  useFocusTrap(open, drawerRef);
   useEffect(() => {
     if (!open) return;
     const handler = (event: KeyboardEvent) => {
@@ -621,7 +623,7 @@ function MaintenanceDrawer({
   return (
     <div className="drawer-root" role="dialog" aria-modal="true" aria-label={t('dashboard.maintenance.title')}>
       <div className="drawer-backdrop" onClick={onClose} />
-      <aside className="drawer">
+      <aside className="drawer" ref={drawerRef}>
         <header>
           <strong>{t('dashboard.maintenance.title')}</strong>
           <button type="button" className="drawer-close" onClick={onClose} aria-label={t('dashboard.maintenance.close')}>
@@ -656,7 +658,7 @@ function MaintenanceDrawer({
   );
 }
 
-const StageMatrix = memo(function StageMatrix({ stats, onStageSelect }: { stats: DashboardStats | null; onStageSelect: (stage: string) => void }) {
+const StageMatrix = memo(function StageMatrix({ stats, onStageSelect }: { stats: DashboardStats | null; onStageSelect?: (stage: string) => void }) {
   const { t, formatNumber } = useI18n();
   const [sortKey, setSortKey] = useState<StageMatrixSortKey>('queued');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -717,9 +719,13 @@ const StageMatrix = memo(function StageMatrix({ stats, onStageSelect }: { stats:
             {sorted.map((row) => (
               <tr key={row.stage} className={bottleneckStage === row.stage ? 'is-bottleneck' : ''}>
                 <td>
-                  <button className="link-button" type="button" onClick={() => onStageSelect(row.stage)}>
-                    {stageLabel(row.stage, t)}
-                  </button>
+                  {onStageSelect ? (
+                    <button className="link-button" type="button" onClick={() => onStageSelect(row.stage)}>
+                      {stageLabel(row.stage, t)}
+                    </button>
+                  ) : (
+                    stageLabel(row.stage, t)
+                  )}
                 </td>
                 <td>{formatNumber(row.queued)}</td>
                 <td>{formatNumber(row.running)}</td>
@@ -934,7 +940,7 @@ const CostPanel = memo(function CostPanel({ stats, range }: { stats: DashboardSt
   const maxBucket = useMemo(() => series.reduce((max, b) => Math.max(max, b.cost_usd ?? 0), 0), [series]);
   const maxBreakdownCost = sortedBreakdown[0]?.cost_usd ?? 0;
   return (
-    <section className="cost-panel chart-panel wide">
+    <section className="card cost-panel chart-panel wide">
       <h3>{t('dashboard.cost.title', { range })}</h3>
       <p className="chart-panel-subtitle">{t('dashboard.cost.subtitle')}</p>
       {total == null || total <= 0 ? (
@@ -1173,9 +1179,9 @@ export function Dashboard({
   };
   const unblockBlockedJobs = async () => {
     const summary = await api.unblockJobs({ clear_provider_cooldowns: true });
-    // Show a one-shot success message reused via setError; tone is
-    // controlled by the existing message-banner styling.
-    setError(
+    // Positive outcome: surface via the success banner, not the error banner
+    // (issue #228).
+    setSuccess(
       t('dashboard.alert.unblock_success', {
         predecessors: String(summary.predecessors_requeued),
         runs: String(summary.runs_unblocked),
@@ -1186,7 +1192,7 @@ export function Dashboard({
   };
   const clearProviderCooldowns = async () => {
     const result = await api.clearProviderCooldown();
-    setError(
+    setSuccess(
       t('dashboard.alert.cooldown_cleared', { count: String(result.cleared) })
     );
     await loadLive();
@@ -1226,6 +1232,14 @@ export function Dashboard({
   }, [stats?.backlog_series]);
   const runningJobs = stats?.kpis.running_jobs ?? counts.running;
 
+  // Wire the stage-matrix stage names to cross-tab navigation. When no
+  // `onNavigate` is provided the matrix renders plain labels instead of dead
+  // links (issue #230).
+  const handleStageSelect = useMemo(
+    () => (onNavigate ? (stage: string) => onNavigate('inventory', `?stage=${stage}`) : undefined),
+    [onNavigate]
+  );
+
   // Memoize the heavy analytics column (4 Recharts + StageMatrix). It depends
   // only on stats/range-derived data, so the 5s `live` poll re-render reuses the
   // same element reference and React skips reconciling the charts entirely.
@@ -1261,8 +1275,8 @@ export function Dashboard({
           </ComposedChart>
         </ResponsiveContainer>
       </ChartPanel>
-      <StageMatrix stats={stats} onStageSelect={() => undefined} />
-      <div className="dashboard-grid compact">
+      <StageMatrix stats={stats} onStageSelect={handleStageSelect} />
+      <div className="card-grid card-grid--wide">
         <ChartPanel title={t('dashboard.chart.backlog_trend')}>
           <ResponsiveContainer width="100%" height={240}>
             <ComposedChart data={backlogWithRate}>
@@ -1296,26 +1310,41 @@ export function Dashboard({
         </ChartPanel>
       </div>
     </div>
-  ), [t, range, compactLayout, activeTab, throughputWithRate, backlogWithRate, jobStatusData, stats]);
+  ), [t, range, compactLayout, activeTab, throughputWithRate, backlogWithRate, jobStatusData, stats, handleStageSelect]);
 
   const healthScore = computeHealthScore(stats, live);
+  // Derive the hero backlog tone from the value/trend instead of hardcoding
+  // 'warning': empty or shrinking backlog reads success, growth reads
+  // warning (or danger when it grew by a quarter or more) (issue #233).
+  const backlogValue = stats?.kpis.open_backlog ?? openBacklog;
+  const backlogDelta = comparison?.open_backlog_delta ?? 0;
+  const backlogGrowthPct = backlogValue > 0 && backlogDelta > 0 ? backlogDelta / backlogValue : 0;
+  const heroTone: 'success' | 'warning' | 'danger' | 'neutral' =
+    backlogValue === 0 || backlogDelta < 0
+      ? 'success'
+      : backlogDelta === 0
+        ? 'neutral'
+        : backlogGrowthPct >= 0.25
+          ? 'danger'
+          : 'warning';
   const heroMetric = {
     label: t('dashboard.metric.open_backlog'),
-    value: stats?.kpis.open_backlog ?? openBacklog,
-    tone: 'warning' as const,
-    delta: comparison?.open_backlog_delta
+    value: backlogValue,
+    tone: heroTone,
+    delta: comparison?.open_backlog_delta,
+    higherIsBetter: false
   };
   const secondaryMetrics = [
-    { label: t('dashboard.metric.throughput'), value: stats?.kpis.throughput ?? 0, tone: 'success', delta: comparison?.jobs_succeeded_delta },
-    { label: t('dashboard.metric.completion'), value: formatPercent(stats?.kpis.completion_rate ?? 0), tone: 'neutral', delta: null },
-    { label: t('dashboard.metric.mttc'), value: formatMttc(stats?.kpis.mttc_seconds), tone: 'neutral', delta: null },
-    { label: t('dashboard.metric.cost', { range }), value: formatCost(stats?.kpis.cost_in_range_usd), tone: 'neutral', delta: null }
+    { label: t('dashboard.metric.throughput'), value: stats?.kpis.throughput ?? 0, tone: 'success', delta: comparison?.jobs_succeeded_delta, higherIsBetter: true },
+    { label: t('dashboard.metric.completion'), value: formatPercent(stats?.kpis.completion_rate ?? 0), tone: 'neutral', delta: null, higherIsBetter: true },
+    { label: t('dashboard.metric.mttc'), value: formatMttc(stats?.kpis.mttc_seconds), tone: 'neutral', delta: null, higherIsBetter: false },
+    { label: t('dashboard.metric.cost', { range }), value: formatCost(stats?.kpis.cost_in_range_usd), tone: 'neutral', delta: null, higherIsBetter: false }
   ];
   const tertiaryMetrics = [
-    { label: t('dashboard.metric.running_now'), value: runningJobs, tone: 'info', delta: null },
-    { label: t('dashboard.metric.review_queue'), value: counts.waiting_review, tone: 'review', delta: null },
-    { label: t('dashboard.metric.failed'), value: counts.failed, tone: 'danger', delta: comparison?.jobs_failed_delta },
-    { label: t('dashboard.metric.p95_latency'), value: formatMs(stats?.kpis.p95_stage_duration_ms ?? 0), tone: 'neutral', delta: null }
+    { label: t('dashboard.metric.running_now'), value: runningJobs, tone: 'info', delta: null, higherIsBetter: true },
+    { label: t('dashboard.metric.review_queue'), value: counts.waiting_review, tone: 'review', delta: null, higherIsBetter: false },
+    { label: t('dashboard.metric.failed'), value: counts.failed, tone: 'danger', delta: comparison?.jobs_failed_delta, higherIsBetter: false },
+    { label: t('dashboard.metric.p95_latency'), value: formatMs(stats?.kpis.p95_stage_duration_ms ?? 0), tone: 'neutral', delta: null, higherIsBetter: false }
   ];
 
   const onAlertAction = (item: NeedsAttentionItem) => {
@@ -1454,28 +1483,28 @@ export function Dashboard({
       )}
 
       <div className="kpi-grid">
-        <div className={`metric hero ${heroMetric.tone}`}>
+        <div className={`card metric hero ${heroMetric.tone}`}>
           <span>{heroMetric.label}</span>
           <strong>{typeof heroMetric.value === 'number' ? formatNumber(heroMetric.value) : heroMetric.value}</strong>
           {typeof heroMetric.delta === 'number' && (
-            <em className={deltaTone(heroMetric.delta)}>{formatDelta(heroMetric.delta, t, formatNumber)}</em>
+            <em className={deltaTone(heroMetric.delta, heroMetric.higherIsBetter)}>{formatDelta(heroMetric.delta, t, formatNumber)}</em>
           )}
         </div>
-        <div className="kpi-secondary">
-          {secondaryMetrics.map(({ label, value, tone, delta }) => (
-            <div className={`metric ${tone}`} key={label}>
+        <div className="kpi-secondary card-grid card-grid--compact">
+          {secondaryMetrics.map(({ label, value, tone, delta, higherIsBetter }) => (
+            <div className={`card metric ${tone}`} key={label}>
               <span>{label}</span>
               <strong>{typeof value === 'number' ? formatNumber(value) : value}</strong>
-              {typeof delta === 'number' && <em className={deltaTone(delta)}>{formatDelta(delta, t, formatNumber)}</em>}
+              {typeof delta === 'number' && <em className={deltaTone(delta, higherIsBetter)}>{formatDelta(delta, t, formatNumber)}</em>}
             </div>
           ))}
         </div>
-        <div className="kpi-tertiary">
-          {tertiaryMetrics.map(({ label, value, tone, delta }) => (
-            <div className={`metric ${tone}`} key={label}>
+        <div className="kpi-tertiary card-grid card-grid--compact">
+          {tertiaryMetrics.map(({ label, value, tone, delta, higherIsBetter }) => (
+            <div className={`card metric ${tone}`} key={label}>
               <span>{label}</span>
               <strong>{typeof value === 'number' ? formatNumber(value) : value}</strong>
-              {typeof delta === 'number' && <em className={deltaTone(delta)}>{formatDelta(delta, t, formatNumber)}</em>}
+              {typeof delta === 'number' && <em className={deltaTone(delta, higherIsBetter)}>{formatDelta(delta, t, formatNumber)}</em>}
             </div>
           ))}
         </div>
@@ -1527,23 +1556,23 @@ export function Dashboard({
       </div>
 
       <div className="quality-strip">
-        <div>
+        <div className="card card--compact">
           <span>{t('dashboard.quality.review_decisions')}</span>
           <strong>{formatNumber(stats?.quality.review_decisions ?? 0)}</strong>
         </div>
-        <div>
+        <div className="card card--compact">
           <span>{t('dashboard.quality.acceptance')}</span>
           <strong>{stats?.quality.acceptance_rate == null ? '-' : formatPercent(stats.quality.acceptance_rate)}</strong>
         </div>
-        <div>
+        <div className="card card--compact">
           <span>{t('dashboard.quality.edited')}</span>
           <strong>{formatNumber(stats?.quality.review_edited ?? 0)}</strong>
         </div>
-        <div>
+        <div className="card card--compact">
           <span>{t('dashboard.quality.rejected')}</span>
           <strong>{formatNumber(stats?.quality.review_rejected ?? 0)}</strong>
         </div>
-        <div>
+        <div className="card card--compact">
           <span>{t('dashboard.quality.uncertainty')}</span>
           <strong>{formatNumber(stats?.quality.uncertainty_reviews ?? 0)}</strong>
         </div>

@@ -11,7 +11,7 @@ import {
 } from '../api/client';
 import { languageOptions } from '../data/worldLanguages';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
-import { ActionButton, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { ActionButton, PageHeader, Status, localizedErrorMessage, run, useFocusTrap } from '../lib/ui';
 import { DebugContextDetails } from '../lib/DebugContextDetails';
 
 const PAGE_SIZE = 500;
@@ -532,7 +532,7 @@ function DuplicatesPanel({ setError, t }: { setError: (error: string | null) => 
     paperlessBase ? `${paperlessBase}/documents/${id}/details` : null;
 
   return (
-    <div className="advanced-panel duplicates-panel">
+    <div className="card">
       <div className="toolbar">
         <strong>{t('inventory.duplicates_title')}</strong>
         <ActionButton icon={<RefreshCw />} label={t('generic.reload')} busy={busy} onClick={load} />
@@ -543,31 +543,35 @@ function DuplicatesPanel({ setError, t }: { setError: (error: string | null) => 
       {groups != null && groups.length === 0 && (
         <p className="field-hint">{t('inventory.duplicates_empty')}</p>
       )}
-      {groups?.map((group) => (
-        <div key={group.hash} className="duplicates-group">
-          <div className="field-hint">
-            {t('inventory.duplicates_hash', { hash: group.hash.slice(0, 12) })} ·{' '}
-            {t('inventory.duplicates_doc_count', { count: group.documents.length })}
-          </div>
-          <ul>
-            {group.documents.map((doc) => {
-              const url = documentUrl(doc.paperless_document_id);
-              const label = `#${doc.paperless_document_id} ${doc.title ?? t('inventory.untitled')}`;
-              return (
-                <li key={doc.paperless_document_id}>
-                  {url ? (
-                    <a href={url} target="_blank" rel="noreferrer">
-                      <ExternalLink size={14} /> {label}
-                    </a>
-                  ) : (
-                    label
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+      {groups != null && groups.length > 0 && (
+        <div className="card-grid card-grid--wide">
+          {groups.map((group) => (
+            <div key={group.hash} className="card card--compact card--muted">
+              <div className="field-hint">
+                {t('inventory.duplicates_hash', { hash: group.hash.slice(0, 12) })} ·{' '}
+                {t('inventory.duplicates_doc_count', { count: group.documents.length })}
+              </div>
+              <ul>
+                {group.documents.map((doc) => {
+                  const url = documentUrl(doc.paperless_document_id);
+                  const label = `#${doc.paperless_document_id} ${doc.title ?? t('inventory.untitled')}`;
+                  return (
+                    <li key={doc.paperless_document_id}>
+                      {url ? (
+                        <a href={url} target="_blank" rel="noreferrer">
+                          <ExternalLink size={14} /> {label}
+                        </a>
+                      ) : (
+                        label
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 }
@@ -877,6 +881,8 @@ type DiagnoseDrawerProps = {
 
 function DiagnoseDrawer({ documentId, trace, busy, missing, onClose }: DiagnoseDrawerProps) {
   const { t, formatRelativeTime } = useI18n();
+  const drawerRef = useRef<HTMLElement>(null);
+  useFocusTrap(true, drawerRef);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
@@ -894,7 +900,7 @@ function DiagnoseDrawer({ documentId, trace, busy, missing, onClose }: DiagnoseD
   return (
     <div className="drawer-root" role="dialog" aria-modal="true" aria-label={t('inventory.diagnose.title', { id: documentId })}>
       <div className="drawer-backdrop" onClick={onClose} />
-      <aside className="drawer diagnose-drawer">
+      <aside ref={drawerRef} className="drawer diagnose-drawer">
         <header>
           <strong>{t('inventory.diagnose.title', { id: documentId })}</strong>
           <button
