@@ -1,30 +1,26 @@
 //! Shared SSRF hardening for outbound HTTP clients.
 //!
-//! Two layers cooperate:
+//! [`is_ssrf_dangerous_ip`] is the address policy — the set of IPs that have no
+//! legitimate operator target and that an attacker who can influence an
+//! outbound URL could abuse (loopback, link-local incl. cloud-metadata IMDS,
+//! unspecified, broadcast, multicast). It is intentionally permissive about
+//! RFC1918 / RFC6598 / RFC4193 private ranges, because Paperless-ngx and Ollama
+//! routinely live on private addresses in the deployments this app targets.
 //!
-//! * [`is_ssrf_dangerous_ip`] is the address policy — the set of IPs that have
-//!   no legitimate operator target and that an attacker who can influence an
-//!   outbound URL could abuse (loopback, link-local incl. cloud-metadata IMDS,
-//!   unspecified, broadcast, multicast). It is intentionally permissive about
-//!   RFC1918 / RFC6598 / RFC4193 private ranges, because Paperless-ngx and
-//!   Ollama routinely live on private addresses in the deployments this app
-//!   targets.
+//! It is applied up front by `validate_outbound_url` (in the API crate), which
+//! resolves the configured host and rejects dangerous targets before any
+//! request is made.
 //!
-//! * [`SsrfGuardResolver`] is a `reqwest` DNS resolver that applies that policy
-//!   at *connection time*, on the exact addresses reqwest is about to dial.
-//!   Installing it on every client that talks to an operator- or
-//!   attacker-influenceable URL (webhook, Paperless, AI providers) closes the
-//!   DNS-rebinding TOCTOU: a hostname cannot be re-pointed to an internal
-//!   address in the gap between an up-front `validate_outbound_url` check and
-//!   the actual connect, because the resolver re-checks the resolved IPs at the
-//!   moment they are used and the connection can only use the addresses it
-//!   returns. This runs on both the UI "Test" handlers and the worker data
-//!   path (download / AI calls), not just the test endpoints.
+//! There is deliberately **no** connection-time IP-pinning DNS resolver. A
+//! `reqwest` `Resolve` implementation was trialled (#183) to close the
+//! DNS-rebinding TOCTOU but it replaced reqwest's happy-eyeballs behaviour and
+//! caused a worker-only connectivity regression against a dual-stack (A+AAAA)
+//! host, so it was reverted (v1.8.1). The residual TOCTOU is accepted because
+//! every outbound target is operator-configured (Paperless, AI providers,
+//! notification webhook), not user-supplied per request. See
+//! `docs/SECURITY_DESIGN.md` §4.3.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
-
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Decide whether an IP must be hard-rejected for outbound requests to
 /// operator- or attacker-influenceable URLs (Paperless, Ollama / AI providers,
@@ -92,55 +88,6 @@ fn is_ssrf_dangerous_ipv6(ip: Ipv6Addr) -> bool {
         return true;
     }
     false
-}
-
-/// `reqwest` DNS resolver that resolves a host and drops every address that
-/// [`is_ssrf_dangerous_ip`] rejects before reqwest connects.
-///
-/// Because the filtering happens at connection time on the exact addresses that
-/// will be dialed, a hostname cannot be rebound to an internal address between
-/// an up-front validation and the actual connect (DNS-rebinding TOCTOU).
-///
-/// Note: hyper does not route IP-literal hosts through the DNS resolver, so a
-/// URL whose host is already an IP literal is connected to directly and bypasses
-/// this resolver. IP literals carry no rebinding risk (the address is fixed);
-/// the UI test handlers additionally screen them up front via
-/// `validate_outbound_url`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SsrfGuardResolver;
-
-impl SsrfGuardResolver {
-    /// Construct the resolver wrapped in an `Arc`, ready for
-    /// `reqwest::ClientBuilder::dns_resolver`.
-    pub fn arc() -> Arc<Self> {
-        Arc::new(Self)
-    }
-}
-
-impl Resolve for SsrfGuardResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            // Port 0: reqwest overrides it with the URL's explicit port, or the
-            // scheme default, after this resolver returns.
-            let resolved = tokio::net::lookup_host((host.as_str(), 0u16)).await?;
-            let mut safe: Vec<SocketAddr> = Vec::new();
-            for addr in resolved {
-                if !is_ssrf_dangerous_ip(addr.ip()) {
-                    safe.push(addr);
-                }
-            }
-            if safe.is_empty() {
-                let err: Box<dyn std::error::Error + Send + Sync> = format!(
-                    "SSRF guard blocked host '{host}': resolved only to loopback / \
-                     link-local / unspecified / multicast addresses"
-                )
-                .into();
-                return Err(err);
-            }
-            Ok(Box::new(safe.into_iter()) as Addrs)
-        })
-    }
 }
 
 #[cfg(test)]

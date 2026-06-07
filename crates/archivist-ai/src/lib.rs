@@ -313,8 +313,9 @@ impl OllamaClient {
             .default_headers(headers)
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
-            // Pin the validated IP at connect time to close the DNS-rebinding
-            // TOCTOU on the operator-configured provider host (#183).
+            // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an
+            // accepted residual risk for this operator-configured provider host
+            // (the pinning resolver was reverted, see #183).
             .build()
             .context("build Ollama HTTP client")?;
         Ok(Self {
@@ -740,8 +741,9 @@ impl OpenAiCompatibleClient {
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(180))
             .redirect(reqwest::redirect::Policy::none())
-            // Pin the validated IP at connect time to close the DNS-rebinding
-            // TOCTOU on the operator-configured provider host (#183).
+            // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an
+            // accepted residual risk for this operator-configured provider host
+            // (the pinning resolver was reverted, see #183).
             .build()?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -910,8 +912,9 @@ impl AnthropicClient {
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(180))
             .redirect(reqwest::redirect::Policy::none())
-            // Pin the validated IP at connect time to close the DNS-rebinding
-            // TOCTOU on the operator-configured provider host (#183).
+            // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an
+            // accepted residual risk for this operator-configured provider host
+            // (the pinning resolver was reverted, see #183).
             .build()?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),

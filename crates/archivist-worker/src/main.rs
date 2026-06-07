@@ -749,8 +749,8 @@ async fn send_notification_webhook(
     let response = HttpClient::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
-        // Pin the validated IP at connect time to close the DNS-rebinding
-        // TOCTOU on the operator-configured webhook host (#183).
+        // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an accepted
+        // residual risk for this operator-configured webhook host (see #183).
         .build()?
         .post(webhook_url.expose_secret())
         .json(&payload)
