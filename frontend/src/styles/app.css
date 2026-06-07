@@ -5,8 +5,11 @@
   --text: #1e2933;
   --muted: #687789;
   --line: #d8e0e6;
+  --line-strong: #b9c4ce;
   --surface: #ffffff;
+  --surface-2: #f7f9fa;
   --base: #f6f3ed;
+  --paper: #f6f3ed;
   --teal: #147f7a;
   --teal-soft: #d9eeee;
   --brass: #a9782b;
@@ -15,7 +18,71 @@
   --danger-soft: #f5dddd;
   --info: #28649b;
   --info-soft: #dbe9f5;
+  --success: #147f7a;
+  --success-soft: #d9eeee;
+  --warning: #a9782b;
+  --warning-soft: #f1e5d0;
+
+  /* Spacing scale — replaces ad-hoc 4/8/10/12/14/16/24px paddings & gaps */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Radius scale — replaces 2/3/4/6/8/18/999px ad-hoc radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Typography scale — replaces 11..42px hardcoded font sizes */
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-md: 16px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
+  --font-size-2xl: 28px;
+  --font-size-3xl: 42px;
+
+  /* Elevation scale — replaces one-off box-shadows */
+  --shadow-sm: 0 1px 2px rgb(23 35 49 / 8%);
+  --shadow-md: 0 8px 24px rgb(23 35 49 / 12%);
+  --shadow-lg: 0 20px 60px rgb(23 35 49 / 14%);
+
+  /* Canonical card-grid tile floors — replaces 6+ ad-hoc minmax() values */
+  --tile-compact: 140px;
+  --tile-default: 220px;
+  --tile-wide: 280px;
 }
+
+/* ---------------------------------------------------------------------------
+   Shared surface + grid primitives (UI redesign foundation).
+   Every page should use `.card` / `.card-grid--*` so box chrome and tile
+   sizing are uniform app-wide instead of each feature re-declaring border +
+   radius + background + a hand-picked padding / minmax floor.
+   --------------------------------------------------------------------------- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  min-width: 0;
+}
+.card--compact { padding: var(--space-3); }
+.card--flush { padding: 0; }
+.card--muted { background: var(--surface-2); }
+
+.card-grid {
+  display: grid;
+  gap: var(--space-4);
+  align-items: start;
+}
+.card-grid--compact { grid-template-columns: repeat(auto-fit, minmax(var(--tile-compact), 1fr)); }
+.card-grid--default { grid-template-columns: repeat(auto-fit, minmax(var(--tile-default), 1fr)); }
+.card-grid--wide { grid-template-columns: repeat(auto-fit, minmax(var(--tile-wide), 1fr)); }
 
 * {
   box-sizing: border-box;
@@ -107,7 +174,7 @@ td {
 th {
   color: var(--muted);
   font-weight: 700;
-  background: #f7f9fa;
+  background: var(--surface-2);
 }
 
 .boot {
@@ -340,7 +407,7 @@ th {
   padding: 5px 9px;
   border-radius: 999px;
   background: var(--info-soft);
-  color: #28649b;
+  color: var(--info);
   font-weight: 800;
 }
 
@@ -1522,7 +1589,7 @@ th {
 
 .diagnose-field-card.tone-neutral {
   border-color: var(--line);
-  background: #f7f9fa;
+  background: var(--surface-2);
 }
 
 .diagnose-field-card header {
@@ -2062,7 +2129,7 @@ th {
   overflow: auto;
   padding: 12px;
   border-radius: 6px;
-  background: #f7f9fa;
+  background: var(--surface-2);
   color: var(--ink);
 }
 
@@ -2118,7 +2185,7 @@ th {
 .debug-context {
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #f7f9fa;
+  background: var(--surface-2);
   padding: 8px 10px;
   font-size: 12px;
 }
@@ -2246,7 +2313,7 @@ th {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #f7f9fa;
+  background: var(--surface-2);
 }
 
 .chat-message.user {
@@ -2457,7 +2524,7 @@ th {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #f7f9fa;
+  background: var(--surface-2);
   color: var(--ink-2);
   font-size: 13px;
 }
@@ -2764,7 +2831,7 @@ th {
   padding: 10px;
   text-align: left;
   border-color: transparent;
-  background: #f7f9fa;
+  background: var(--surface-2);
 }
 
 .prompt-stage-rail button.active {
@@ -2873,7 +2940,7 @@ th {
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #f7f9fa;
+  background: var(--surface-2);
 }
 
 .prompt-stat span {
@@ -3008,7 +3075,7 @@ th {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #f7f9fa;
+  background: var(--surface-2);
   color: var(--ink-2);
   font-size: 12px;
   line-height: 1.45;
