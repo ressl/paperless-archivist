@@ -204,19 +204,28 @@ endpoints (`POST /api/settings/test/paperless`,
 (Paperless downloads / metadata, AI provider calls, notification webhooks) —
 is guarded against SSRF. To stop a session hijacker who briefly holds
 `WriteSettings` from turning those requests into a host-side scanner, two
-layers cooperate:
+controls cooperate:
 
-1. **Up-front check (test endpoints).** Each test path runs
-   `validate_outbound_url()` before opening a socket, for an early, friendly
-   rejection of an obviously dangerous URL.
-2. **Connection-time guard (everywhere).** Every outbound `reqwest` client is
-   built with a shared `SsrfGuardResolver` (a custom DNS resolver) plus a
-   no-redirect policy. The resolver applies the address policy below to the
-   exact IPs reqwest is about to dial, so a hostname cannot be rebound to an
-   internal address in the gap between the up-front check and the connect
-   (DNS-rebinding TOCTOU). This applies to the worker data path too, not just
-   the UI test handlers. (IP-literal hosts bypass the resolver — they carry no
-   rebinding risk and are screened up front by `validate_outbound_url`.)
+1. **Up-front address check.** `validate_outbound_url()` resolves the host and
+   rejects dangerous targets (per the address policy below) before opening a
+   socket, applied on the admin test endpoints.
+2. **No-redirect policy.** Every outbound `reqwest` client is built with
+   `redirect::Policy::none()`, so a `3xx` to an internal address (e.g. IMDS at
+   `169.254.169.254` or loopback) cannot bypass the validated origin.
+
+**Accepted residual risk — DNS-rebinding TOCTOU.** The window between the
+up-front resolve and the actual connect is *not* closed. A connection-time
+IP-pinning DNS resolver (`SsrfGuardResolver`) was trialled (#183) to close it,
+but a custom `reqwest` `Resolve` impl replaces reqwest's happy-eyeballs
+behaviour and caused a worker-only connectivity regression against a dual-stack
+(A+AAAA) host — curl succeeded while the worker received spurious `404`s, not
+reproducible outside the cluster — so it was reverted (v1.8.1). The residual
+TOCTOU is accepted because **every outbound target is operator-configured** (the
+Paperless base URL, the AI-provider URLs, and the notification webhook), not a
+per-request user-supplied URL; exploiting the window requires an attacker who
+already controls DNS for an admin-configured host. Re-introducing connect-time
+pinning would require a mechanism that preserves dual-stack happy-eyeballs and
+is validated against a real A+AAAA target before reaching the prod data path.
 
 The validator is intentionally **narrow**, not paranoid: Paperless
 Archivist is routinely deployed inside Kubernetes / Docker Compose /
@@ -257,10 +266,9 @@ Implementation: the up-front check is
 `crates/archivist-api/src/main.rs::validate_outbound_url` (invoked by
 `test_paperless`, `test_provider`, `test_notification`,
 `model_provider_models`), covered by unit tests in the same file. The shared
-address policy and connection-time resolver live in
-`crates/archivist-core/src/ssrf.rs` (`is_ssrf_dangerous_ip`,
-`SsrfGuardResolver`) and are installed on every Paperless / AI-provider /
-webhook client across the API and worker.
+address policy lives in `crates/archivist-core/src/ssrf.rs`
+(`is_ssrf_dangerous_ip`). The no-redirect policy is set on every Paperless /
+AI-provider / webhook client across the API and worker.
 
 ## 5. API Tokens and Service Accounts
 

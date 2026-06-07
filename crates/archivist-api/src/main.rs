@@ -1132,8 +1132,9 @@ async fn verify_paperless_credentials(
         // request to an internal address after the SSRF guard validated only
         // the originally supplied URL.
         .redirect(reqwest::redirect::Policy::none())
-        // Pin the validated IP at connect time to close the DNS-rebinding
-        // TOCTOU on the operator-configured Paperless host.
+        // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an accepted
+        // residual risk for this operator-configured Paperless host (the
+        // pinning resolver was reverted, see #183).
         .build()
         .context("build Paperless login HTTP client")?;
     let response = client
@@ -1733,11 +1734,22 @@ async fn notification_webhook_url(state: &AppState, settings: &RuntimeSettings) 
 /// caller is expected to use this on every outbound "tester" endpoint where
 /// an admin can supply an arbitrary URL, for an early, friendly rejection.
 ///
-/// This is the up-front check only. The connection-time guard that actually
-/// closes the DNS-rebinding TOCTOU lives in `archivist_core::ssrf` and is
-/// installed on every outbound client (webhook, Paperless, AI providers) via
-/// `SsrfGuardResolver`, so the protection also covers the worker data path
-/// (download / AI calls), not just these test handlers.
+/// This is an up-front DNS-time check. There is intentionally **no**
+/// connection-time IP-pinning resolver: a custom `reqwest` DNS resolver was
+/// trialled to close the DNS-rebinding TOCTOU but it replaced reqwest's
+/// happy-eyeballs behaviour and caused a worker-only connectivity regression on
+/// a dual-stack host (host resolved A+AAAA; curl succeeded, the worker got
+/// spurious 404s), so it was reverted (v1.8.1) and removed. See #183.
+///
+/// Accepted residual risk: the DNS-rebinding TOCTOU between this check and the
+/// actual request is **not** closed. It is acceptable here because every
+/// outbound target is operator-configured (the Paperless base URL, the LLM
+/// provider URLs, and the notification webhook) rather than user-supplied per
+/// request, so exploiting the window requires an attacker who already controls
+/// DNS for an admin-configured host. The remaining controls — this validation
+/// plus `redirect::Policy::none()` on the outbound clients — cover the
+/// practical vectors. Redirects are refused so a 3xx to an internal address
+/// (e.g. IMDS / loopback) cannot bypass the validated origin.
 ///
 /// Rejections:
 ///  * non-http/https schemes
@@ -1790,9 +1802,10 @@ async fn send_notification_webhook(webhook_url: &str, payload: Value) -> Result<
         // 169.254.169.254 / loopback) can't bypass the SSRF guard that only
         // validated the originally supplied URL.
         .redirect(reqwest::redirect::Policy::none())
-        // Pin the validated IP at connect time: the SSRF resolver re-checks the
-        // resolved address right before dialing, closing the DNS-rebinding
-        // TOCTOU between `validate_outbound_url` and the actual request.
+        // NB: the caller is expected to have run `validate_outbound_url` first.
+        // There is no connect-time IP-pinning (see that fn's docs / #183 for
+        // why the resolver was reverted); the DNS-rebinding TOCTOU is an
+        // accepted residual risk for these operator-configured targets.
         .build()?
         .post(webhook_url)
         .json(&payload)
