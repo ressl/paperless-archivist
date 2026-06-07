@@ -8,7 +8,7 @@ COPY openapi /app/openapi
 COPY frontend ./
 RUN pnpm generate:client && pnpm build
 
-FROM rust:1.95-bookworm AS rust-build
+FROM rust:1.96-bookworm AS rust-build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
