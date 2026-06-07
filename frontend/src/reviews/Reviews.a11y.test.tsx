@@ -66,7 +66,7 @@ describe('<Reviews> a11y shell', () => {
     const { Reviews } = await import('./Reviews');
     const { container } = render(
       <I18nProvider>
-        <Reviews setError={() => undefined} />
+        <Reviews setError={() => undefined} setSuccess={() => undefined} />
       </I18nProvider>
     );
     await waitFor(

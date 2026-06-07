@@ -12,6 +12,10 @@ const itMessages: Record<MessageKey, string> = {
   'nav.audit': 'Audit',
   'nav.users': 'Utenti',
   'nav.debug': 'Debug',
+  'nav.group.operations': 'Operazioni',
+  'nav.group.configuration': 'Configurazione',
+  'nav.group.system': 'Sistema',
+
   'nav.logout': 'Esci',
   'debug.title': 'Console di debug',
   'debug.pause': 'Pausa',
@@ -442,6 +446,12 @@ const itMessages: Record<MessageKey, string> = {
   'settings.tuning.field.loaded_models': 'Modelli caricati',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Modalità',
+  'settings.workflow.section.processing': 'Modalità di elaborazione e sicurezza',
+  'settings.workflow.section.ocr': 'OCR',
+  'settings.workflow.section.tagging': 'Etichettatura',
+  'settings.workflow.section.fields': 'Campi personalizzati',
+  'settings.workflow.section.metadata': 'Sovrascrittura metadati',
+
   'settings.workflow.paused': 'Metti in pausa il selector automatico',
   'settings.workflow.dry_run': 'Dry-run full auto',
   'settings.workflow.hourly_limit': 'Limite orario di documenti',

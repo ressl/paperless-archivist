@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { MessageSquare, Send } from 'lucide-react';
 import { api, DocumentChatMessage, DocumentChatSession } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
-import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
+import { Button, PageHeader, localizedErrorMessage, run } from '../lib/ui';
 
 export function DocumentChat({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatDateTime } = useI18n();
@@ -78,8 +78,8 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
               void run(setBusy, setError, createSession);
             }}
           >
-            <input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} />
-            <button title={t('chat.new_chat')} disabled={busy}><MessageSquare size={16} /></button>
+            <input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} aria-label={t('chat.new_chat')} />
+            <Button variant="secondary" icon={<MessageSquare size={16} />} title={t('chat.new_chat')} aria-label={t('chat.new_chat')} disabled={busy} />
           </form>
           <div className="chat-session-list">
             {sessions.map((session) => (
@@ -136,9 +136,9 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
               {t('chat.question_label')}
               <textarea value={question} onChange={(event) => setQuestion(event.target.value)} required />
             </label>
-            <button className="primary-button" title={t('chat.send')} disabled={busy || !question.trim()}>
-              <Send size={16} /> {t('chat.send')}
-            </button>
+            <Button variant="primary" icon={<Send size={16} />} title={t('chat.send')} disabled={busy || !question.trim()}>
+              {t('chat.send')}
+            </Button>
           </form>
         </div>
       </div>

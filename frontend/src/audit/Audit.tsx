@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Archive, Check, FileText, Shield, X } from 'lucide-react';
 import { api, AuditEvent, AuditIntegrityReport, RetentionResult } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
-import { ActionButton, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { ActionButton, Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
 
 export function Audit({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatDateTime, formatNumber } = useI18n();
@@ -28,9 +28,9 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
         <a className="button-link" href="/api/audit/export.csv">
           <FileText size={16} /> {t('audit.export_csv')}
         </a>
-        <button onClick={refreshIntegrity}>
-          <Shield size={16} /> {t('audit.verify_chain')}
-        </button>
+        <Button variant="secondary" icon={<Shield size={16} />} onClick={refreshIntegrity}>
+          {t('audit.verify_chain')}
+        </Button>
         <ActionButton
           icon={<Archive />}
           label={t('audit.apply_retention')}
@@ -45,7 +45,11 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
         />
       </div>
       {integrity && (
-        <div className={`connection-feedback ${integrity.ok ? 'success' : 'error'}`}>
+        <div
+          className={`connection-feedback ${integrity.ok ? 'success' : 'error'}`}
+          role={integrity.ok ? 'status' : 'alert'}
+          aria-live={integrity.ok ? 'polite' : 'assertive'}
+        >
           <header>
             {integrity.ok ? <Check size={16} /> : <X size={16} />}
             <strong>{integrity.ok ? t('audit.chain_verified') : t('audit.chain_problem')}</strong>
@@ -58,7 +62,7 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
         </div>
       )}
       {retentionResult && (
-        <div className="connection-feedback success">
+        <div className="connection-feedback success" role="status" aria-live="polite">
           <header><Check size={16} /><strong>{t('audit.retention_applied')}</strong></header>
           <p>
             {t('audit.retention_summary', {

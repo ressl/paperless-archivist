@@ -22,7 +22,7 @@ export type ReviewEditState = {
 const REVIEW_PAGE_SIZE = 100;
 const REVIEW_MAX_LIMIT = 500;
 
-export function Reviews({ setError }: { setError: (error: string | null) => void }) {
+export function Reviews({ setError, setSuccess }: { setError: (error: string | null) => void; setSuccess: (message: string | null) => void }) {
   const { t } = useI18n();
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -81,9 +81,8 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
       const result = await api.autoFixReviewBulk(items.length);
       setSelected([]);
       await load();
-      // Surface result via the same error banner; not an error in the
-      // failure sense — operator wants the summary visible somewhere.
-      setError(
+      // Positive outcome → success banner, not the red error box (#228).
+      setSuccess(
         t('review.auto_fix_result', {
           applied: result.applied,
           rejected: result.rejected,
@@ -97,7 +96,8 @@ export function Reviews({ setError }: { setError: (error: string | null) => void
     await run(setBusy, setError, async () => {
       const result = await api.autoFixReviewSingle(id);
       await load();
-      setError(
+      // Positive outcome → success banner, not the red error box (#228).
+      setSuccess(
         t('review.auto_fix_result', {
           applied: result.action === 'applied' ? 1 : 0,
           rejected: result.action === 'rejected' ? 1 : 0,

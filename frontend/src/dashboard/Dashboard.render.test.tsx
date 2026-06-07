@@ -129,6 +129,7 @@ async function renderDashboard() {
     <I18nProvider>
       <Dashboard
         setError={() => undefined}
+        setSuccess={() => undefined}
         canManageSettings={true}
         permissions={allPermissions}
       />

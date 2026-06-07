@@ -12,6 +12,10 @@ const plMessages: Record<MessageKey, string> = {
   'nav.audit': 'Audyt',
   'nav.users': 'Użytkownicy',
   'nav.debug': 'Debug',
+  'nav.group.operations': 'Operacje',
+  'nav.group.configuration': 'Konfiguracja',
+  'nav.group.system': 'System',
+
   'nav.logout': 'Wyloguj',
   'debug.title': 'Konsola debug',
   'debug.pause': 'Wstrzymaj',
@@ -442,6 +446,12 @@ const plMessages: Record<MessageKey, string> = {
   'settings.tuning.field.loaded_models': 'Załadowane modele',
   'settings.workflow': 'Workflow',
   'settings.workflow.mode': 'Tryb',
+  'settings.workflow.section.processing': 'Tryb przetwarzania i bezpieczeństwo',
+  'settings.workflow.section.ocr': 'OCR',
+  'settings.workflow.section.tagging': 'Tagowanie',
+  'settings.workflow.section.fields': 'Pola niestandardowe',
+  'settings.workflow.section.metadata': 'Nadpisywanie metadanych',
+
   'settings.workflow.paused': 'Wstrzymaj automatyczny selector',
   'settings.workflow.dry_run': 'Dry-run full auto',
   'settings.workflow.hourly_limit': 'Godzinowy limit dokumentów',
