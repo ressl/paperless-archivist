@@ -1,7 +1,81 @@
-import { useEffect, useMemo, useRef, type ReactNode, type RefObject } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+  type RefObject
+} from 'react';
 import { AlertTriangle, Check, CircleDashed, Eye, Info, X } from 'lucide-react';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
-import { statusLabel } from './format';
+import { deltaTone, statusLabel } from './format';
+
+// --- Shared form / surface primitives (UI redesign) -------------------------
+// One set of building blocks so forms, sections, buttons and metric tiles look
+// and size the same on every page instead of each feature re-rolling markup.
+
+type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'link';
+
+/** Button with a design-system variant mapped to the shared button classes. */
+export function Button({
+  variant = 'primary',
+  icon,
+  children,
+  className,
+  ...rest
+}: { variant?: ButtonVariant; icon?: ReactNode } & ButtonHTMLAttributes<HTMLButtonElement>) {
+  const base = `${variant}-button`;
+  return (
+    <button className={className ? `${base} ${className}` : base} {...rest}>
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+/** A titled card section (fieldset semantics) used to group related controls. */
+export function Section({ title, children, className }: { title: string; children: ReactNode; className?: string }) {
+  return (
+    <fieldset className={className ? `card ${className}` : 'card'}>
+      <legend>{title}</legend>
+      {children}
+    </fieldset>
+  );
+}
+
+/** A labelled form control with optional help text. Wrap an input/select/etc. */
+export function FormField({ label, help, htmlFor, children }: { label: string; help?: string; htmlFor?: string; children: ReactNode }) {
+  return (
+    <label className="form-field" htmlFor={htmlFor}>
+      <span className="form-field-label">{label}</span>
+      {children}
+      {help && <span className="form-field-help">{help}</span>}
+    </label>
+  );
+}
+
+/** A single KPI / metric tile with an optional good/bad-aware delta. */
+export function KpiCard({
+  label,
+  value,
+  delta,
+  higherIsBetter = true,
+  tone = 'neutral'
+}: {
+  label: string;
+  value: ReactNode;
+  delta?: { value: number; formatted: string } | null;
+  higherIsBetter?: boolean;
+  tone?: 'success' | 'warning' | 'danger' | 'neutral';
+}) {
+  return (
+    <div className={`card metric metric--${tone}`}>
+      <span className="metric-label">{label}</span>
+      <strong>{value}</strong>
+      {delta && <em className={deltaTone(delta.value, higherIsBetter)}>{delta.formatted}</em>}
+    </div>
+  );
+}
 
 export function PageHeader({ title }: { title: string }) {
   return <header className="page-header"><h2>{title}</h2></header>;

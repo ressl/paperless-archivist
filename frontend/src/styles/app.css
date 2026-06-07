@@ -84,6 +84,25 @@
 .card-grid--default { grid-template-columns: repeat(auto-fit, minmax(var(--tile-default), 1fr)); }
 .card-grid--wide { grid-template-columns: repeat(auto-fit, minmax(var(--tile-wide), 1fr)); }
 
+/* Shared form-field primitive (label + control + optional help). */
+.form-field {
+  display: grid;
+  gap: var(--space-1);
+}
+.form-field-label {
+  font-weight: 600;
+  font-size: var(--font-size-sm);
+}
+.form-field-help {
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Metric tile tone accents (left border) for KpiCard. */
+.metric--success { border-left: 3px solid var(--success); }
+.metric--warning { border-left: 3px solid var(--warning); }
+.metric--danger { border-left: 3px solid var(--danger); }
+
 * {
   box-sizing: border-box;
 }
