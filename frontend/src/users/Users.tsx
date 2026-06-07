@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { KeyRound, Power, RotateCcw, UserPlus, X } from 'lucide-react';
 import { api, ApiToken, Role, SessionItem, UserItem } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
-import { PageHeader, localizedErrorMessage } from '../lib/ui';
+import { Button, PageHeader, localizedErrorMessage } from '../lib/ui';
 
 const ALL_ROLES: Role[] = ['viewer', 'reviewer', 'operator', 'auditor', 'admin'];
 
@@ -57,7 +57,7 @@ export function Users({ setError }: { setError: (error: string | null) => void }
             <option key={roleOption} value={roleOption}>{t(`users.role_${roleOption}` as Parameters<TFunction>[0])}</option>
           ))}
         </select>
-        <button><UserPlus size={16} /> {t('users.create')}</button>
+        <Button variant="primary" icon={<UserPlus size={16} />}>{t('users.create')}</Button>
       </form>
       <div className="table-wrap">
         <table>
@@ -98,7 +98,9 @@ export function Users({ setError }: { setError: (error: string | null) => void }
                     placeholder={t('users.new_password')}
                     aria-label={t('users.new_password_for', { user: user.username })}
                   />
-                  <button
+                  <Button
+                    variant="secondary"
+                    icon={<RotateCcw size={16} />}
                     title={t('users.reset_password')}
                     aria-label={t('users.reset_password_for', { user: user.username })}
                     disabled={!resetPasswords[user.id]}
@@ -106,15 +108,13 @@ export function Users({ setError }: { setError: (error: string | null) => void }
                       setResetPasswords((current) => ({ ...current, [user.id]: '' }));
                       load();
                     }).catch((err) => setError(localizedErrorMessage(err, t)))}
-                  >
-                    <RotateCcw size={16} />
-                  </button>
+                  />
                 </td>
                 <td>
                   {user.enabled ? (
-                    <button title={t('users.disable_user')} aria-label={t('users.disable_user_for', { user: user.username })} onClick={() => api.disableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><Power size={16} /> {t('users.disable')}</button>
+                    <Button variant="secondary" icon={<Power size={16} />} title={t('users.disable_user')} aria-label={t('users.disable_user_for', { user: user.username })} onClick={() => api.disableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}>{t('users.disable')}</Button>
                   ) : (
-                    <button title={t('users.enable_user')} aria-label={t('users.enable_user_for', { user: user.username })} onClick={() => api.enableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><Power size={16} /> {t('users.enable')}</button>
+                    <Button variant="secondary" icon={<Power size={16} />} title={t('users.enable_user')} aria-label={t('users.enable_user_for', { user: user.username })} onClick={() => api.enableUser(user.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}>{t('users.enable')}</Button>
                   )}
                 </td>
               </tr>
@@ -135,7 +135,7 @@ export function Users({ setError }: { setError: (error: string | null) => void }
                 <td>{formatDateTime(session.expires_at)}</td>
                 <td>{session.revoked_at ? t('users.status_revoked') : t('users.status_active')}</td>
                 <td>
-                  {!session.revoked_at && <button title={t('users.revoke_session')} aria-label={t('users.revoke_session_for', { user: session.username })} onClick={() => api.revokeSession(session.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>}
+                  {!session.revoked_at && <Button variant="secondary" icon={<X size={16} />} title={t('users.revoke_session')} aria-label={t('users.revoke_session_for', { user: session.username })} onClick={() => api.revokeSession(session.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))} />}
                 </td>
               </tr>
             ))}
@@ -161,7 +161,7 @@ export function Users({ setError }: { setError: (error: string | null) => void }
           onChange={(event) => setTokenExpiresInDays(Number(event.target.value))}
           aria-label={t('users.token_expiry_days')}
         />
-        <button><KeyRound size={16} /> {t('users.create_token')}</button>
+        <Button variant="primary" icon={<KeyRound size={16} />}>{t('users.create_token')}</Button>
       </form>
       {newToken && <pre className="token-once">{newToken}</pre>}
       <div className="table-wrap">
@@ -178,17 +178,17 @@ export function Users({ setError }: { setError: (error: string | null) => void }
                 <td>
                   {!token.revoked_at && (
                     <>
-                      <button
+                      <Button
+                        variant="secondary"
+                        icon={<RotateCcw size={16} />}
                         title={t('users.rotate_token')}
                         aria-label={t('users.rotate_token_for', { name: token.name })}
                         onClick={() => api.rotateApiToken(token.id, { expires_in_days: tokenExpiresInDays }).then((created) => {
                           setNewToken(created.token);
                           load();
                         }).catch((err) => setError(localizedErrorMessage(err, t)))}
-                      >
-                        <RotateCcw size={16} />
-                      </button>
-                      <button title={t('users.revoke_token')} aria-label={t('users.revoke_token_for', { name: token.name })} onClick={() => api.revokeApiToken(token.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))}><X size={16} /></button>
+                      />
+                      <Button variant="secondary" icon={<X size={16} />} title={t('users.revoke_token')} aria-label={t('users.revoke_token_for', { name: token.name })} onClick={() => api.revokeApiToken(token.id).then(load).catch((err) => setError(localizedErrorMessage(err, t)))} />
                     </>
                   )}
                 </td>

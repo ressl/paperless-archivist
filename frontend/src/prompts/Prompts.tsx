@@ -3,7 +3,7 @@ import { AlertTriangle, Check, GitCompare, History, Info, Play, RotateCcw, Save 
 import { api, Prompt, PromptExperiment, PromptTestResponse, PromptUsage, Stage } from '../api/client';
 import { promptStageHelp, promptStageOrder, type PromptStageHelp } from '../data/promptHelp';
 import { useI18n } from '../i18n/I18nProvider';
-import { PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
 import { formatMs } from '../lib/format';
 
 export function Prompts({ setError }: { setError: (error: string | null) => void }) {
@@ -199,8 +199,9 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                 />
               </label>
               <div className="prompt-editor-actions">
-                <button
-                  className="primary-button"
+                <Button
+                  variant="primary"
+                  icon={<Save size={16} />}
                   disabled={saving || !editorName.trim() || !editorContent.trim()}
                   onClick={() =>
                     run(setSaving, setError, async () => {
@@ -216,18 +217,22 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                     })
                   }
                 >
-                  <Save size={16} /> {saving ? 'Saving...' : 'Save New Version'}
-                </button>
-                <button
+                  {saving ? 'Saving...' : 'Save New Version'}
+                </Button>
+                <Button
+                  variant="secondary"
+                  icon={<RotateCcw size={16} />}
                   disabled={!selectedPrompt || !promptDirty}
                   onClick={() => {
                     setEditorName(selectedPrompt?.name ?? 'default');
                     setEditorContent(selectedPrompt?.content ?? '');
                   }}
                 >
-                  <RotateCcw size={16} /> Reset
-                </button>
-                <button
+                  Reset
+                </Button>
+                <Button
+                  variant="secondary"
+                  icon={<Check size={16} />}
                   disabled={activating || !selectedPrompt || selectedPrompt.active}
                   onClick={() =>
                     selectedPrompt &&
@@ -237,8 +242,8 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                     })
                   }
                 >
-                  <Check size={16} /> {activating ? 'Activating...' : 'Activate Selected'}
-                </button>
+                  {activating ? 'Activating...' : 'Activate Selected'}
+                </Button>
               </div>
               <div className="prompt-stats-grid">
                 <PromptStat label="Lines" value={promptStats.lines} />
@@ -319,9 +324,10 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
               />
             </label>
           </div>
-          <button
-            className="primary-button"
+          <Button
+            variant="primary"
             type="button"
+            icon={<Play size={16} />}
             disabled={testing || !editorContent.trim()}
             onClick={() => run(setTesting, setError, async () => {
               const documentId = sampleDocumentId.trim() ? Number(sampleDocumentId) : null;
@@ -334,8 +340,8 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
               setTestResult(result);
             })}
           >
-            <Play size={16} /> {testing ? 'Testing...' : 'Test Current Editor'}
-          </button>
+            {testing ? 'Testing...' : 'Test Current Editor'}
+          </Button>
           {testResult && (
             <section className="test-result">
               <header>

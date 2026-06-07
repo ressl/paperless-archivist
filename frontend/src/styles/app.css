@@ -103,6 +103,16 @@
 .metric--warning { border-left: 3px solid var(--warning); }
 .metric--danger { border-left: 3px solid var(--danger); }
 
+/* Phone safety net: collapse all canonical card grids to one column so a tile
+   floor can never force horizontal scroll on very narrow screens (#243). */
+@media (max-width: 480px) {
+  .card-grid--compact,
+  .card-grid--default,
+  .card-grid--wide {
+    grid-template-columns: 1fr;
+  }
+}
+
 * {
   box-sizing: border-box;
 }

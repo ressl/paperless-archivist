@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Pause, Play, RefreshCw } from 'lucide-react';
 import { api, type AuditEvent, type DashboardLiveStatus } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
-import { ActionButton, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { ActionButton, Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
 
 const POLL_INTERVAL_MS = 2_500;
 
@@ -99,10 +99,14 @@ export function DebugConsole({ setError }: { setError: (error: string | null) =>
           busy={busy}
           onClick={() => run(setBusy, setError, reload, t)}
         />
-        <button className="ghost-button" onClick={() => setPaused((p) => !p)}>
-          {paused ? <Play size={16} /> : <Pause size={16} />}
+        <Button
+          variant="ghost"
+          icon={paused ? <Play size={16} /> : <Pause size={16} />}
+          aria-pressed={paused}
+          onClick={() => setPaused((p) => !p)}
+        >
           {paused ? t('debug.resume') : t('debug.pause')}
-        </button>
+        </Button>
         <small className="field-hint">
           {paused ? t('debug.paused_label') : t('debug.live_label', { value: lastRefreshLabel })}
         </small>
