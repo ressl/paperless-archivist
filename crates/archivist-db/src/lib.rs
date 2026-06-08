@@ -3076,6 +3076,139 @@ pub async fn provider_bucket_entries(
         .collect()
 }
 
+// --- Statistics page aggregations -------------------------------------------
+// Fine-grained, custom-range aggregations powering the dedicated Statistics
+// page. The API handler assembles summary / by-provider / by-model / by-stage /
+// time-series views from these rows in Rust (one DB round-trip each).
+
+/// One (bucket × provider × model × stage) AI-usage cell.
+#[derive(Debug, Clone)]
+pub struct StatisticsUsageRow {
+    pub bucket: DateTime<Utc>,
+    pub provider: String,
+    pub model: String,
+    pub stage: String,
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub avg_duration_ms: Option<f64>,
+    pub p95_duration_ms: Option<f64>,
+}
+
+/// AI-usage cells over a custom `[from, to)` range, bucketed by `trunc`
+/// (a validated date_trunc unit: hour/day/week/month). Token extraction mirrors
+/// `provider_bucket_entries` — OpenAI `usage.*` plus Ollama top-level
+/// `prompt_eval_count`/`eval_count`, with the redaction guard.
+pub async fn statistics_usage_rows(
+    pool: &DbPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    trunc: &str,
+) -> Result<Vec<StatisticsUsageRow>> {
+    let rows = sqlx::query(
+        r#"
+        select
+          date_trunc($3, ai.created_at) as bucket,
+          ai.provider,
+          ai.model,
+          ai.stage,
+          count(*)::bigint as request_count,
+          coalesce(sum(
+            coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
+            coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0) +
+            case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
+                 then (response ->> 'prompt_eval_count')::bigint else 0 end
+          ), 0)::bigint as input_tokens,
+          coalesce(sum(
+            coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
+            coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0) +
+            case when response ->> 'eval_count' ~ '^[0-9]+$'
+                 then (response ->> 'eval_count')::bigint else 0 end
+          ), 0)::bigint as output_tokens,
+          avg(duration_ms)::double precision as avg_duration_ms,
+          percentile_cont(0.95) within group (order by duration_ms)::double precision as p95_duration_ms
+        from ai_artifacts ai
+        where ai.created_at >= $1
+          and ai.created_at < $2
+        group by 1, 2, 3, 4
+        order by 1, 2, 3, 4
+        "#,
+    )
+    .bind(from)
+    .bind(to)
+    .bind(trunc)
+    .fetch_all(pool)
+    .await
+    .context("query statistics usage rows")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(StatisticsUsageRow {
+                bucket: row.try_get("bucket")?,
+                provider: row.try_get("provider")?,
+                model: row.try_get("model")?,
+                stage: row.try_get("stage")?,
+                request_count: row.try_get("request_count")?,
+                input_tokens: row.try_get("input_tokens")?,
+                output_tokens: row.try_get("output_tokens")?,
+                avg_duration_ms: row.try_get("avg_duration_ms")?,
+                p95_duration_ms: row.try_get("p95_duration_ms")?,
+            })
+        })
+        .collect()
+}
+
+/// One (bucket × stage × status) pipeline-throughput cell from `jobs`.
+#[derive(Debug, Clone)]
+pub struct StatisticsThroughputRow {
+    pub bucket: DateTime<Utc>,
+    pub stage: String,
+    pub status: String,
+    pub job_count: i64,
+}
+
+/// Pipeline throughput over a custom `[from, to)` range, bucketed by `trunc`.
+/// Buckets on `updated_at` (when the job reached its terminal status).
+pub async fn statistics_throughput_rows(
+    pool: &DbPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    trunc: &str,
+) -> Result<Vec<StatisticsThroughputRow>> {
+    let rows = sqlx::query(
+        r#"
+        select
+          date_trunc($3, updated_at) as bucket,
+          stage,
+          status,
+          count(*)::bigint as job_count
+        from jobs
+        where updated_at >= $1
+          and updated_at < $2
+          and status in ('succeeded', 'failed', 'cancelled')
+        group by 1, 2, 3
+        order by 1, 2, 3
+        "#,
+    )
+    .bind(from)
+    .bind(to)
+    .bind(trunc)
+    .fetch_all(pool)
+    .await
+    .context("query statistics throughput rows")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(StatisticsThroughputRow {
+                bucket: row.try_get("bucket")?,
+                stage: row.try_get("stage")?,
+                status: row.try_get("status")?,
+                job_count: row.try_get("job_count")?,
+            })
+        })
+        .collect()
+}
+
 pub fn dashboard_bucket_labels(
     start: DateTime<Utc>,
     now: DateTime<Utc>,
