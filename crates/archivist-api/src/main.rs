@@ -32,14 +32,13 @@ use archivist_db::{
     list_sessions, list_users, metadata_review_items_for_run,
     metrics_snapshot as db_metrics_snapshot, migrate, paperless_sync_cursor,
     provider_bucket_entries, queue_missing_pipeline, queue_missing_stage, read_metric_counters,
-    statistics_throughput_rows, statistics_usage_rows,
     record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
     recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
     rotate_api_token, search_document_chat_candidates, set_user_enabled, set_user_roles,
-    update_paperless_sync_cursor, update_runtime_settings, update_user_password_hash,
-    upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
-    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
-    verify_audit_integrity,
+    statistics_throughput_rows, statistics_usage_rows, update_paperless_sync_cursor,
+    update_runtime_settings, update_user_password_hash, upsert_encrypted_secret,
+    upsert_inventory_item, upsert_oidc_user, upsert_paperless_custom_field,
+    upsert_paperless_named_entity, upsert_paperless_tag, verify_audit_integrity,
 };
 use archivist_paperless::{PaperlessClient, PaperlessDocumentDetail, PaperlessTag};
 use argon2::password_hash::rand_core::OsRng;
@@ -1920,8 +1919,12 @@ async fn discover_provider_models(
     let base = provider.base_url.trim_end_matches('/');
     match provider.kind {
         AiProviderKind::Ollama if !is_ollama_cloud(base) => {
-            let client =
-                OllamaClient::new_with_timeout(&provider.name, base, secret, std::time::Duration::from_secs(12))?;
+            let client = OllamaClient::new_with_timeout(
+                &provider.name,
+                base,
+                secret,
+                std::time::Duration::from_secs(12),
+            )?;
             let models = client.list_models().await.map_err(|error| {
                 ApiError::internal(format!("Ollama model discovery failed: {error}"))
             })?;
@@ -2297,8 +2300,11 @@ async fn provider_secret(state: &AppState, provider: &ApiProvider) -> Result<Opt
 async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Value> {
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client =
-                OllamaClient::new(&provider.name, &provider.base_url, provider_secret(state, provider).await?)?;
+            let client = OllamaClient::new(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(state, provider).await?,
+            )?;
             client.test_connection(Some(&provider.model)).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
@@ -2352,8 +2358,11 @@ async fn chat_with_default_provider(
 ) -> Result<AiResponse> {
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client =
-                OllamaClient::new(&provider.name, &provider.base_url, provider_secret(state, provider).await?)?;
+            let client = OllamaClient::new(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(state, provider).await?,
+            )?;
             client.chat(request).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
@@ -2904,7 +2913,11 @@ async fn statistics(
     }
     let bucket = match query.bucket.as_deref().unwrap_or("day") {
         b @ ("hour" | "day" | "week" | "month") => b.to_owned(),
-        _ => return Err(ApiError::bad_request("bucket must be hour, day, week or month")),
+        _ => {
+            return Err(ApiError::bad_request(
+                "bucket must be hour, day, week or month",
+            ));
+        }
     };
 
     let usage = statistics_usage_rows(&state.pool, from, to, &bucket).await?;
@@ -2919,7 +2932,10 @@ async fn statistics(
         .map(|p| {
             (
                 p.name.clone(),
-                (p.cost_per_1m_input_tokens_usd, p.cost_per_1m_output_tokens_usd),
+                (
+                    p.cost_per_1m_input_tokens_usd,
+                    p.cost_per_1m_output_tokens_usd,
+                ),
             )
         })
         .collect();
@@ -2932,7 +2948,10 @@ async fn statistics(
 
     for row in &usage {
         total.add(row);
-        by_provider.entry(row.provider.clone()).or_default().add(row);
+        by_provider
+            .entry(row.provider.clone())
+            .or_default()
+            .add(row);
         by_model.entry(row.model.clone()).or_default().add(row);
         by_stage.entry(row.stage.clone()).or_default().add(row);
         series.entry(row.bucket).or_default().add(row);
@@ -7142,9 +7161,13 @@ mod tests {
             })),
         )
         .await;
-        let client =
-            OllamaClient::new_with_timeout("ollama", &base_url, None, std::time::Duration::from_secs(2))
-                .expect("client builds");
+        let client = OllamaClient::new_with_timeout(
+            "ollama",
+            &base_url,
+            None,
+            std::time::Duration::from_secs(2),
+        )
+        .expect("client builds");
         let response = fetch_ollama_runtime_hints_with_client("ollama", &client).await;
         assert!(response.reachable, "Ollama mock should be reachable");
         assert_eq!(response.provider, "ollama");
@@ -7206,8 +7229,8 @@ mod tests {
             axum::serve(listener, router).await.ok();
         });
 
-        let client =
-            OllamaClient::new("ollama-cloud", &format!("http://{addr}"), None).expect("client builds");
+        let client = OllamaClient::new("ollama-cloud", &format!("http://{addr}"), None)
+            .expect("client builds");
         let response = client
             .chat(ChatRequest {
                 model: "glm-5.1".to_owned(),
