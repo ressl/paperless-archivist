@@ -704,6 +704,68 @@ export type UserItem = {
   created_at: string;
 };
 
+// --- Statistics page (GET /api/statistics) ---------------------------------
+// Usage/cost analytics over a free time range, mirroring the backend
+// StatisticsResponse contract. input_tokens is often 0 (Ollama input tokens
+// are redacted upstream) and estimated_cost_usd is null unless the provider
+// has cost configured.
+export type StatisticsBucket = 'hour' | 'day' | 'week' | 'month';
+
+export type StatisticsQueryParams = {
+  from?: string;
+  to?: string;
+  bucket?: StatisticsBucket;
+};
+
+export type StatisticsSummary = {
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  avg_duration_ms: number;
+  estimated_cost_usd?: number | null;
+  jobs_succeeded: number;
+  jobs_failed: number;
+  jobs_cancelled: number;
+};
+
+export type StatisticsTimePoint = {
+  bucket: string;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  avg_duration_ms: number;
+};
+
+export type StatisticsThroughputPoint = {
+  bucket: string;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+};
+
+export type StatisticsBreakdownRow = {
+  provider?: string;
+  model?: string;
+  stage?: string;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  avg_duration_ms: number;
+  estimated_cost_usd?: number | null;
+};
+
+export type StatisticsResponse = {
+  from: string;
+  to: string;
+  bucket: StatisticsBucket;
+  summary: StatisticsSummary;
+  time_series: StatisticsTimePoint[];
+  throughput_series: StatisticsThroughputPoint[];
+  by_provider: StatisticsBreakdownRow[];
+  by_model: StatisticsBreakdownRow[];
+  by_stage: StatisticsBreakdownRow[];
+};
+
 function csrfToken(): string | undefined {
   const match = document.cookie
     .split(';')
@@ -784,6 +846,14 @@ export const api = {
       body: JSON.stringify(input)
     }),
   dashboard: (range: DashboardRange = '24h') => request<DashboardResponse>(`/api/dashboard?range=${encodeURIComponent(range)}`),
+  statistics: (params: StatisticsQueryParams = {}) => {
+    const qs = new URLSearchParams();
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.bucket) qs.set('bucket', params.bucket);
+    const query = qs.toString();
+    return request<StatisticsResponse>(`/api/statistics${query ? `?${query}` : ''}`);
+  },
   dashboardLive: () => request<DashboardLiveStatus>('/api/dashboard/live'),
   updateWorkflowMode: (mode: ProcessingMode) =>
     request<RuntimeSettings>('/api/workflow/mode', {

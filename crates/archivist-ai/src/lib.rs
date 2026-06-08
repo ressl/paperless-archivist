@@ -241,6 +241,12 @@ pub trait VisionProvider: Send + Sync {
 
 #[derive(Clone)]
 pub struct OllamaClient {
+    /// Configured provider name (e.g. "ollama" or "ollama-cloud"), used to
+    /// attribute usage metrics. Both the local and cloud Ollama providers share
+    /// `kind = ollama`, so the metric must carry the distinct provider *name*,
+    /// not a hardcoded "ollama" — otherwise two Ollama-kind providers collapse
+    /// into one label in the dashboard.
+    provider_name: String,
     base_url: String,
     client: reqwest::Client,
 }
@@ -295,11 +301,12 @@ struct RawOllamaModel {
 }
 
 impl OllamaClient {
-    pub fn new(base_url: &str, token: Option<SecretString>) -> Result<Self> {
-        Self::new_with_timeout(base_url, token, Duration::from_secs(180))
+    pub fn new(provider_name: &str, base_url: &str, token: Option<SecretString>) -> Result<Self> {
+        Self::new_with_timeout(provider_name, base_url, token, Duration::from_secs(180))
     }
 
     pub fn new_with_timeout(
+        provider_name: &str,
         base_url: &str,
         token: Option<SecretString>,
         timeout: Duration,
@@ -319,6 +326,7 @@ impl OllamaClient {
             .build()
             .context("build Ollama HTTP client")?;
         Ok(Self {
+            provider_name: provider_name.to_owned(),
             base_url: base_url.trim_end_matches('/').to_owned(),
             client,
         })
@@ -677,7 +685,7 @@ impl TextProvider for OllamaClient {
             .unwrap_or_default()
             .to_owned();
         Ok(AiResponse {
-            provider: "ollama".to_owned(),
+            provider: self.provider_name.clone(),
             model: request.model,
             text,
             raw_response: raw,
@@ -714,7 +722,7 @@ impl VisionProvider for OllamaClient {
             .unwrap_or_default()
             .to_owned();
         Ok(AiResponse {
-            provider: "ollama".to_owned(),
+            provider: self.provider_name.clone(),
             model: request.model,
             text,
             raw_response: raw,

@@ -35,10 +35,10 @@ use archivist_db::{
     record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
     recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
     rotate_api_token, search_document_chat_candidates, set_user_enabled, set_user_roles,
-    update_paperless_sync_cursor, update_runtime_settings, update_user_password_hash,
-    upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
-    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
-    verify_audit_integrity,
+    statistics_throughput_rows, statistics_usage_rows, update_paperless_sync_cursor,
+    update_runtime_settings, update_user_password_hash, upsert_encrypted_secret,
+    upsert_inventory_item, upsert_oidc_user, upsert_paperless_custom_field,
+    upsert_paperless_named_entity, upsert_paperless_tag, verify_audit_integrity,
 };
 use archivist_paperless::{PaperlessClient, PaperlessDocumentDetail, PaperlessTag};
 use argon2::password_hash::rand_core::OsRng;
@@ -53,7 +53,7 @@ use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use cookie::{Cookie, SameSite};
 use jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER as JWT_CRYPTO_PROVIDER;
 use jsonwebtoken::jwk::JwkSet;
@@ -353,6 +353,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/dashboard", get(dashboard))
         .route("/dashboard/live", get(dashboard_live))
+        .route("/statistics", get(statistics))
         .route("/workflow/mode", put(update_workflow_mode))
         .route("/workflow/controls", patch(update_workflow_controls))
         .route("/inventory", get(inventory))
@@ -1918,8 +1919,12 @@ async fn discover_provider_models(
     let base = provider.base_url.trim_end_matches('/');
     match provider.kind {
         AiProviderKind::Ollama if !is_ollama_cloud(base) => {
-            let client =
-                OllamaClient::new_with_timeout(base, secret, std::time::Duration::from_secs(12))?;
+            let client = OllamaClient::new_with_timeout(
+                &provider.name,
+                base,
+                secret,
+                std::time::Duration::from_secs(12),
+            )?;
             let models = client.list_models().await.map_err(|error| {
                 ApiError::internal(format!("Ollama model discovery failed: {error}"))
             })?;
@@ -2099,6 +2104,7 @@ async fn fetch_ollama_runtime_hints(
         }
     };
     let client = match OllamaClient::new_with_timeout(
+        &provider.name,
         &provider.base_url,
         secret,
         std::time::Duration::from_secs(5),
@@ -2294,8 +2300,11 @@ async fn provider_secret(state: &AppState, provider: &ApiProvider) -> Result<Opt
 async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Value> {
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client =
-                OllamaClient::new(&provider.base_url, provider_secret(state, provider).await?)?;
+            let client = OllamaClient::new(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(state, provider).await?,
+            )?;
             client.test_connection(Some(&provider.model)).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
@@ -2349,8 +2358,11 @@ async fn chat_with_default_provider(
 ) -> Result<AiResponse> {
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client =
-                OllamaClient::new(&provider.base_url, provider_secret(state, provider).await?)?;
+            let client = OllamaClient::new(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(state, provider).await?,
+            )?;
             client.chat(request).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
@@ -2811,6 +2823,215 @@ async fn dashboard_live(
     Ok(Json(json!(
         get_dashboard_live_status(&state.pool, &settings).await?
     )))
+}
+
+#[derive(Debug, Deserialize)]
+struct StatisticsQuery {
+    /// RFC3339 / `YYYY-MM-DD` start (inclusive). Defaults to `to - 30 days`.
+    from: Option<String>,
+    /// RFC3339 / `YYYY-MM-DD` end (exclusive). Defaults to now.
+    to: Option<String>,
+    /// Bucket granularity: hour | day | week | month. Defaults to day.
+    bucket: Option<String>,
+}
+
+fn parse_stat_datetime(raw: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    // Accept a bare date (YYYY-MM-DD) interpreted as UTC midnight.
+    let date = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
+    Some(Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0)?))
+}
+
+#[derive(Default, Clone)]
+struct UsageAgg {
+    request_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    duration_sum: f64,
+    duration_n: f64,
+}
+
+impl UsageAgg {
+    fn add(&mut self, row: &archivist_db::StatisticsUsageRow) {
+        self.request_count += row.request_count;
+        self.input_tokens += row.input_tokens;
+        self.output_tokens += row.output_tokens;
+        if let Some(avg) = row.avg_duration_ms {
+            // Weight the per-cell average by its request count to recover a
+            // correct overall mean.
+            self.duration_sum += avg * row.request_count as f64;
+            self.duration_n += row.request_count as f64;
+        }
+    }
+    fn avg_ms(&self) -> Option<f64> {
+        (self.duration_n > 0.0).then(|| self.duration_sum / self.duration_n)
+    }
+    fn cost(&self, costs: Option<&(Option<f64>, Option<f64>)>) -> Option<f64> {
+        let (Some(ci), Some(co)) = *costs? else {
+            return None;
+        };
+        Some(
+            (self.input_tokens as f64 / 1_000_000.0 * ci)
+                + (self.output_tokens as f64 / 1_000_000.0 * co),
+        )
+    }
+    fn to_json(&self, key_field: &str, key: &str, cost: Option<f64>) -> Value {
+        json!({
+            key_field: key,
+            "request_count": self.request_count,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "avg_duration_ms": self.avg_ms(),
+            "estimated_cost_usd": cost,
+        })
+    }
+}
+
+/// Comprehensive Statistics page data: summary + time-series + per-provider /
+/// per-model / per-stage breakdowns + pipeline throughput, over a custom range.
+async fn statistics(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Query(query): Query<StatisticsQuery>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadDashboard)?;
+    let now = Utc::now();
+    let to = query
+        .to
+        .as_deref()
+        .and_then(parse_stat_datetime)
+        .unwrap_or(now);
+    let from = query
+        .from
+        .as_deref()
+        .and_then(parse_stat_datetime)
+        .unwrap_or(to - Duration::days(30));
+    if from >= to {
+        return Err(ApiError::bad_request("'from' must be before 'to'"));
+    }
+    let bucket = match query.bucket.as_deref().unwrap_or("day") {
+        b @ ("hour" | "day" | "week" | "month") => b.to_owned(),
+        _ => {
+            return Err(ApiError::bad_request(
+                "bucket must be hour, day, week or month",
+            ));
+        }
+    };
+
+    let usage = statistics_usage_rows(&state.pool, from, to, &bucket).await?;
+    let throughput = statistics_throughput_rows(&state.pool, from, to, &bucket).await?;
+    let settings = get_runtime_settings(&state.pool).await?;
+
+    // provider name -> (input cost / 1M, output cost / 1M)
+    let cost_map: HashMap<String, (Option<f64>, Option<f64>)> = settings
+        .ai
+        .providers
+        .iter()
+        .map(|p| {
+            (
+                p.name.clone(),
+                (
+                    p.cost_per_1m_input_tokens_usd,
+                    p.cost_per_1m_output_tokens_usd,
+                ),
+            )
+        })
+        .collect();
+
+    let mut total = UsageAgg::default();
+    let mut by_provider: std::collections::BTreeMap<String, UsageAgg> = Default::default();
+    let mut by_model: std::collections::BTreeMap<String, UsageAgg> = Default::default();
+    let mut by_stage: std::collections::BTreeMap<String, UsageAgg> = Default::default();
+    let mut series: std::collections::BTreeMap<DateTime<Utc>, UsageAgg> = Default::default();
+
+    for row in &usage {
+        total.add(row);
+        by_provider
+            .entry(row.provider.clone())
+            .or_default()
+            .add(row);
+        by_model.entry(row.model.clone()).or_default().add(row);
+        by_stage.entry(row.stage.clone()).or_default().add(row);
+        series.entry(row.bucket).or_default().add(row);
+    }
+
+    // Pipeline throughput per bucket: succeeded / failed / cancelled.
+    let mut throughput_series: std::collections::BTreeMap<DateTime<Utc>, (i64, i64, i64)> =
+        Default::default();
+    let (mut tot_ok, mut tot_fail, mut tot_cancel) = (0_i64, 0_i64, 0_i64);
+    for row in &throughput {
+        let entry = throughput_series.entry(row.bucket).or_default();
+        match row.status.as_str() {
+            "succeeded" => {
+                entry.0 += row.job_count;
+                tot_ok += row.job_count;
+            }
+            "failed" => {
+                entry.1 += row.job_count;
+                tot_fail += row.job_count;
+            }
+            _ => {
+                entry.2 += row.job_count;
+                tot_cancel += row.job_count;
+            }
+        }
+    }
+
+    let total_cost: Option<f64> = {
+        let mut any = false;
+        let mut sum = 0.0;
+        for (name, agg) in &by_provider {
+            if let Some(c) = agg.cost(cost_map.get(name)) {
+                any = true;
+                sum += c;
+            }
+        }
+        any.then_some(sum)
+    };
+
+    let to_series = |s: &std::collections::BTreeMap<DateTime<Utc>, UsageAgg>| -> Vec<Value> {
+        s.iter()
+            .map(|(bucket, agg)| {
+                json!({
+                    "bucket": bucket.to_rfc3339(),
+                    "request_count": agg.request_count,
+                    "input_tokens": agg.input_tokens,
+                    "output_tokens": agg.output_tokens,
+                    "avg_duration_ms": agg.avg_ms(),
+                })
+            })
+            .collect()
+    };
+
+    Ok(Json(json!({
+        "from": from.to_rfc3339(),
+        "to": to.to_rfc3339(),
+        "bucket": bucket,
+        "summary": {
+            "request_count": total.request_count,
+            "input_tokens": total.input_tokens,
+            "output_tokens": total.output_tokens,
+            "avg_duration_ms": total.avg_ms(),
+            "estimated_cost_usd": total_cost,
+            "jobs_succeeded": tot_ok,
+            "jobs_failed": tot_fail,
+            "jobs_cancelled": tot_cancel,
+        },
+        "time_series": to_series(&series),
+        "throughput_series": throughput_series.iter().map(|(bucket, (ok, fail, cancel))| json!({
+            "bucket": bucket.to_rfc3339(),
+            "succeeded": ok,
+            "failed": fail,
+            "cancelled": cancel,
+        })).collect::<Vec<_>>(),
+        "by_provider": by_provider.iter().map(|(name, agg)| {
+            agg.to_json("provider", name, agg.cost(cost_map.get(name)))
+        }).collect::<Vec<_>>(),
+        "by_model": by_model.iter().map(|(name, agg)| agg.to_json("model", name, None)).collect::<Vec<_>>(),
+        "by_stage": by_stage.iter().map(|(name, agg)| agg.to_json("stage", name, None)).collect::<Vec<_>>(),
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -6940,9 +7161,13 @@ mod tests {
             })),
         )
         .await;
-        let client =
-            OllamaClient::new_with_timeout(&base_url, None, std::time::Duration::from_secs(2))
-                .expect("client builds");
+        let client = OllamaClient::new_with_timeout(
+            "ollama",
+            &base_url,
+            None,
+            std::time::Duration::from_secs(2),
+        )
+        .expect("client builds");
         let response = fetch_ollama_runtime_hints_with_client("ollama", &client).await;
         assert!(response.reachable, "Ollama mock should be reachable");
         assert_eq!(response.provider, "ollama");
@@ -6971,6 +7196,7 @@ mod tests {
         drop(listener); // close the socket so the next connect refuses
 
         let client = OllamaClient::new_with_timeout(
+            "ollama",
             &format!("http://{dead_addr}"),
             None,
             std::time::Duration::from_millis(500),
@@ -6985,6 +7211,45 @@ mod tests {
             hint.contains("Ollama unreachable"),
             "unreachable hint should explain the failure, got {hint:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn ollama_chat_stamps_configured_provider_name_not_kind() {
+        // Regression: the OllamaClient used to hardcode provider = "ollama", so
+        // two ollama-kind providers (local "ollama" vs "ollama-cloud") collapsed
+        // into one label in usage metrics. It must now stamp the configured name.
+        use axum::Json as AxumJson;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/api/chat",
+            post(|| async { AxumJson(serde_json::json!({ "message": { "content": "ok" } })) }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        let client = OllamaClient::new("ollama-cloud", &format!("http://{addr}"), None)
+            .expect("client builds");
+        let response = client
+            .chat(ChatRequest {
+                model: "glm-5.1".to_owned(),
+                system_prompt: "s".to_owned(),
+                user_prompt: "u".to_owned(),
+                temperature: 0.0,
+                num_ctx: None,
+                response_schema: None,
+                reasoning_effort: None,
+            })
+            .await
+            .expect("chat succeeds");
+
+        assert_eq!(
+            response.provider, "ollama-cloud",
+            "metric must carry the configured provider name, not the hardcoded kind"
+        );
+        assert_eq!(response.model, "glm-5.1");
+        handle.abort();
     }
 }
 

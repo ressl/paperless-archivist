@@ -1142,7 +1142,7 @@ async fn installed_ollama_models_for_provider(
             return Vec::new();
         }
     };
-    let client = match OllamaClient::new(&provider.base_url, secret) {
+    let client = match OllamaClient::new(&provider.name, &provider.base_url, secret) {
         Ok(client) => client,
         Err(error) => {
             warn!(
@@ -3845,6 +3845,7 @@ async fn chat_with_provider(
     match provider.kind {
         AiProviderKind::Ollama => {
             let client = OllamaClient::new(
+                &provider.name,
                 &provider.base_url,
                 provider_secret(pool, config, provider).await?,
             )?;
@@ -3901,6 +3902,7 @@ async fn build_vision_client(
 ) -> Result<VisionClient> {
     match provider.kind {
         AiProviderKind::Ollama => Ok(VisionClient::Ollama(OllamaClient::new(
+            &provider.name,
             &provider.base_url,
             provider_secret(pool, config, provider).await?,
         )?)),
