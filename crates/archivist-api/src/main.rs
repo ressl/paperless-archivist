@@ -1919,7 +1919,7 @@ async fn discover_provider_models(
     match provider.kind {
         AiProviderKind::Ollama if !is_ollama_cloud(base) => {
             let client =
-                OllamaClient::new_with_timeout(base, secret, std::time::Duration::from_secs(12))?;
+                OllamaClient::new_with_timeout(&provider.name, base, secret, std::time::Duration::from_secs(12))?;
             let models = client.list_models().await.map_err(|error| {
                 ApiError::internal(format!("Ollama model discovery failed: {error}"))
             })?;
@@ -2099,6 +2099,7 @@ async fn fetch_ollama_runtime_hints(
         }
     };
     let client = match OllamaClient::new_with_timeout(
+        &provider.name,
         &provider.base_url,
         secret,
         std::time::Duration::from_secs(5),
@@ -2295,7 +2296,7 @@ async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Va
     match provider.kind {
         AiProviderKind::Ollama => {
             let client =
-                OllamaClient::new(&provider.base_url, provider_secret(state, provider).await?)?;
+                OllamaClient::new(&provider.name, &provider.base_url, provider_secret(state, provider).await?)?;
             client.test_connection(Some(&provider.model)).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
@@ -2350,7 +2351,7 @@ async fn chat_with_default_provider(
     match provider.kind {
         AiProviderKind::Ollama => {
             let client =
-                OllamaClient::new(&provider.base_url, provider_secret(state, provider).await?)?;
+                OllamaClient::new(&provider.name, &provider.base_url, provider_secret(state, provider).await?)?;
             client.chat(request).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
@@ -6941,7 +6942,7 @@ mod tests {
         )
         .await;
         let client =
-            OllamaClient::new_with_timeout(&base_url, None, std::time::Duration::from_secs(2))
+            OllamaClient::new_with_timeout("ollama", &base_url, None, std::time::Duration::from_secs(2))
                 .expect("client builds");
         let response = fetch_ollama_runtime_hints_with_client("ollama", &client).await;
         assert!(response.reachable, "Ollama mock should be reachable");
@@ -6971,6 +6972,7 @@ mod tests {
         drop(listener); // close the socket so the next connect refuses
 
         let client = OllamaClient::new_with_timeout(
+            "ollama",
             &format!("http://{dead_addr}"),
             None,
             std::time::Duration::from_millis(500),
@@ -6985,6 +6987,45 @@ mod tests {
             hint.contains("Ollama unreachable"),
             "unreachable hint should explain the failure, got {hint:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn ollama_chat_stamps_configured_provider_name_not_kind() {
+        // Regression: the OllamaClient used to hardcode provider = "ollama", so
+        // two ollama-kind providers (local "ollama" vs "ollama-cloud") collapsed
+        // into one label in usage metrics. It must now stamp the configured name.
+        use axum::Json as AxumJson;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/api/chat",
+            post(|| async { AxumJson(serde_json::json!({ "message": { "content": "ok" } })) }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        let client =
+            OllamaClient::new("ollama-cloud", &format!("http://{addr}"), None).expect("client builds");
+        let response = client
+            .chat(ChatRequest {
+                model: "glm-5.1".to_owned(),
+                system_prompt: "s".to_owned(),
+                user_prompt: "u".to_owned(),
+                temperature: 0.0,
+                num_ctx: None,
+                response_schema: None,
+                reasoning_effort: None,
+            })
+            .await
+            .expect("chat succeeds");
+
+        assert_eq!(
+            response.provider, "ollama-cloud",
+            "metric must carry the configured provider name, not the hardcoded kind"
+        );
+        assert_eq!(response.model, "glm-5.1");
+        handle.abort();
     }
 }
 
