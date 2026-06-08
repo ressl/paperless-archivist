@@ -50,12 +50,38 @@ impl PaperlessError {
     /// including non-standard codes such as Cloudflare 520/521/525 or
     /// 507/508 — is treated as a transient server error so the worker
     /// retries instead of mis-classifying it as permanent.
+    ///
+    /// A `404` is normally a permanent client error (the object is gone), but
+    /// when Paperless is briefly unreachable — e.g. mid-restart after an
+    /// OOMKill — the fronting gateway/proxy answers with a *gateway* 404 whose
+    /// body is the Go `net/http` default `404 page not found`, not the DRF
+    /// `{"detail":"Not found."}` a genuine missing object produces. That gateway
+    /// 404 is transient, so we classify it as a server error and let the worker
+    /// retry instead of permanently parking the job. See #245.
     fn from_status(status: u16, body: String) -> Self {
-        if (500..600).contains(&status) {
+        if (500..600).contains(&status) || (status == 404 && is_gateway_not_found(&body)) {
             Self::Server { status, body }
         } else {
             Self::Client { status, body }
         }
+    }
+}
+
+/// True when a 404 body looks like an infrastructure/gateway "not found"
+/// (e.g. Go's `404 page not found`, or an HTML/empty error page) rather than a
+/// genuine Paperless/DRF missing-object response, which is JSON carrying a
+/// `detail` field. Conservative: only bodies that are clearly NOT a DRF error
+/// are treated as gateway 404s, so real missing-object 404s stay permanent.
+fn is_gateway_not_found(body: &str) -> bool {
+    let trimmed = body.trim();
+    if trimmed.eq_ignore_ascii_case("404 page not found") {
+        return true;
+    }
+    // A genuine DRF 404 is JSON with a "detail" key; anything that does not
+    // parse as such (plain text, HTML, empty) is treated as a gateway 404.
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) => value.get("detail").is_none(),
+        Err(_) => true,
     }
 }
 
@@ -467,4 +493,49 @@ pub struct PaperlessDocumentDetail {
     pub document_type: Option<i32>,
     #[serde(default, alias = "original_file_name")]
     pub original_file_name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_404_is_transient() {
+        // Go net/http default body returned by the proxy while Paperless is
+        // mid-restart (#245).
+        let err = PaperlessError::from_status(404, "404 page not found\n".to_owned());
+        assert!(matches!(err, PaperlessError::Server { .. }));
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn genuine_drf_404_is_permanent() {
+        let err = PaperlessError::from_status(404, "{\"detail\":\"Not found.\"}".to_owned());
+        assert!(matches!(err, PaperlessError::Client { .. }));
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn empty_or_html_404_is_transient() {
+        assert!(PaperlessError::from_status(404, String::new()).is_transient());
+        assert!(
+            PaperlessError::from_status(404, "<html><body>404</body></html>".to_owned())
+                .is_transient()
+        );
+    }
+
+    #[test]
+    fn other_4xx_stays_permanent() {
+        // A 400/403 (auth/payload) is a genuine client fault regardless of body.
+        assert!(!PaperlessError::from_status(400, "bad".to_owned()).is_transient());
+        assert!(
+            !PaperlessError::from_status(403, "{\"detail\":\"forbidden\"}".to_owned())
+                .is_transient()
+        );
+    }
+
+    #[test]
+    fn server_5xx_still_transient() {
+        assert!(PaperlessError::from_status(503, "down".to_owned()).is_transient());
+    }
 }
