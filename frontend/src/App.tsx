@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState, type ReactNode } from 'react';
 import {
   Activity,
   Archive,
+  BarChart3,
   Bug,
   ClipboardList,
   KeyRound,
@@ -22,6 +23,7 @@ import { LanguageSelector } from './lib/LanguageSelector';
 // Dashboard pulls in Recharts; keep it (and the other tab pages) out of the
 // critical shell/login chunk by loading them lazily on first navigation.
 const Dashboard = lazy(() => import('./dashboard/Dashboard').then((mod) => ({ default: mod.Dashboard })));
+const Statistics = lazy(() => import('./statistics/Statistics').then((mod) => ({ default: mod.Statistics })));
 const Inventory = lazy(() => import('./inventory/Inventory').then((mod) => ({ default: mod.Inventory })));
 const Reviews = lazy(() => import('./reviews/Reviews').then((mod) => ({ default: mod.Reviews })));
 const SettingsPage = lazy(() => import('./settings/SettingsPage').then((mod) => ({ default: mod.SettingsPage })));
@@ -31,7 +33,7 @@ const Users = lazy(() => import('./users/Users').then((mod) => ({ default: mod.U
 const DocumentChat = lazy(() => import('./chat/DocumentChat').then((mod) => ({ default: mod.DocumentChat })));
 const DebugConsole = lazy(() => import('./debug/DebugConsole').then((mod) => ({ default: mod.DebugConsole })));
 
-type Tab = 'dashboard' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users' | 'debug';
+type Tab = 'dashboard' | 'statistics' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users' | 'debug';
 
 export function App() {
   const { t } = useI18n();
@@ -72,6 +74,7 @@ export function App() {
   if (loading) return <div className="boot">{t('app.loading')}</div>;
   if (!me) return <Login onLogin={setMe} />;
 
+  const canReadDashboard = me.permissions.read_dashboard;
   const canUseChat = me.roles.some((role) => role === 'admin' || role === 'reviewer' || role === 'operator');
   const canManageSettings = me.roles.some((role) => role === 'admin');
   const canReadSettings = me.permissions.read_settings;
@@ -108,6 +111,7 @@ export function App() {
           <div className="nav-group">
             <span className="nav-group-label">{t('nav.group.operations')}</span>
             <NavButton icon={<Activity />} label={t('nav.dashboard')} active={tab === 'dashboard'} onClick={() => selectTab('dashboard')} />
+            {canReadDashboard && <NavButton icon={<BarChart3 />} label={t('nav.statistics')} active={tab === 'statistics'} onClick={() => selectTab('statistics')} />}
             <NavButton icon={<Archive />} label={t('nav.inventory')} active={tab === 'inventory'} onClick={() => selectTab('inventory')} />
             <NavButton icon={<ListChecks />} label={t('nav.review')} active={tab === 'reviews'} onClick={() => selectTab('reviews')} />
             {canUseChat && <NavButton icon={<MessageSquare />} label={t('nav.chat')} active={tab === 'chat'} onClick={() => selectTab('chat')} />}
@@ -171,7 +175,8 @@ export function App() {
                   `${window.location.pathname}${nextSearch}${window.location.hash}`
                 );
                 if (
-                  nextTab === 'dashboard' || nextTab === 'inventory' ||
+                  nextTab === 'dashboard' || nextTab === 'statistics' ||
+                  nextTab === 'inventory' ||
                   nextTab === 'chat' || nextTab === 'reviews' ||
                   nextTab === 'settings' || nextTab === 'prompts' ||
                   nextTab === 'audit' || nextTab === 'users' ||
@@ -181,6 +186,13 @@ export function App() {
                 }
               }}
             />
+            </Suspense>
+          </ErrorBoundary>
+        )}
+        {tab === 'statistics' && canReadDashboard && (
+          <ErrorBoundary>
+            <Suspense fallback={lazyFallback}>
+              <Statistics setError={setError} />
             </Suspense>
           </ErrorBoundary>
         )}
