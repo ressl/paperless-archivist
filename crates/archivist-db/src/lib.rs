@@ -2940,11 +2940,17 @@ async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<Provi
                coalesce(percentile_cont(0.95) within group (order by duration_ms), 0)::bigint as p95_duration_ms,
                coalesce(sum(
                  coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
-                 coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0)
+                 coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0) +
+                 -- Ollama reports tokens top-level, not under `usage`; guard the
+                 -- cast since prompt_eval_count may be redacted to an object.
+                 case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
+                      then (response ->> 'prompt_eval_count')::bigint else 0 end
                ), 0)::bigint as input_tokens,
                coalesce(sum(
                  coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
-                 coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0)
+                 coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0) +
+                 case when response ->> 'eval_count' ~ '^[0-9]+$'
+                      then (response ->> 'eval_count')::bigint else 0 end
                ), 0)::bigint as output_tokens,
                count(distinct feedback.id)::bigint as feedback_count,
                count(distinct feedback.id) filter (
@@ -3024,11 +3030,18 @@ pub async fn provider_bucket_entries(
           ai.stage,
           coalesce(sum(
             coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
-            coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0)
+            coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0) +
+            -- Ollama reports tokens at the top level (prompt_eval_count /
+            -- eval_count), not under `usage`. Guard the cast: prompt_eval_count
+            -- may be redacted to a JSON object, so only sum plain integers.
+            case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
+                 then (response ->> 'prompt_eval_count')::bigint else 0 end
           ), 0)::bigint as input_tokens,
           coalesce(sum(
             coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
-            coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0)
+            coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0) +
+            case when response ->> 'eval_count' ~ '^[0-9]+$'
+                 then (response ->> 'eval_count')::bigint else 0 end
           ), 0)::bigint as output_tokens,
           avg(duration_ms)::double precision as avg_duration_ms,
           count(*)::bigint as request_count
