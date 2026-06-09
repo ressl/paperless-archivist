@@ -3711,10 +3711,13 @@ pub fn redact_sensitive_json(value: &mut Value) {
     match value {
         Value::Object(map) => {
             for (key, nested) in map {
-                if SENSITIVE
+                let sensitive_key = SENSITIVE
                     .iter()
-                    .any(|needle| key.to_ascii_lowercase().contains(needle))
-                {
+                    .any(|needle| key.to_ascii_lowercase().contains(needle));
+                // Numbers and booleans under a sensitive-looking key are usage
+                // counters (`prompt_tokens`, `eval_count`, …), never credentials —
+                // redacting them would permanently destroy token statistics.
+                if sensitive_key && !matches!(nested, Value::Number(_) | Value::Bool(_)) {
                     *nested = Value::String("[REDACTED]".to_owned());
                 } else {
                     redact_sensitive_json(nested);
@@ -4853,5 +4856,31 @@ mod tests {
     fn openai_compatible_default_constructor_ships_blank_tuning() {
         let provider = AiProviderSettings::openai_compatible_default();
         assert_eq!(provider.tuning, ProviderTuning::default());
+    }
+
+    #[test]
+    fn redact_sensitive_json_keeps_numeric_counters_and_redacts_credentials() {
+        use serde_json::json;
+        let mut value = json!({
+            "usage": { "prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14 },
+            "prompt_eval_count": 12,
+            "tokens_capped": true,
+            "api_key": "sk-secret",
+            "authorization": "Bearer abc",
+            "paperless_token": "tok-123",
+            "options": { "token": "raw-secret", "num_ctx": 4096 }
+        });
+        redact_sensitive_json(&mut value);
+
+        assert_eq!(value["usage"]["prompt_tokens"], 10);
+        assert_eq!(value["usage"]["completion_tokens"], 4);
+        assert_eq!(value["usage"]["total_tokens"], 14);
+        assert_eq!(value["prompt_eval_count"], 12);
+        assert_eq!(value["tokens_capped"], true);
+        assert_eq!(value["api_key"], "[REDACTED]");
+        assert_eq!(value["authorization"], "[REDACTED]");
+        assert_eq!(value["paperless_token"], "[REDACTED]");
+        assert_eq!(value["options"]["token"], "[REDACTED]");
+        assert_eq!(value["options"]["num_ctx"], 4096);
     }
 }

@@ -5,6 +5,20 @@
 > `1.5.35`). The Rust workspace `Cargo.toml` files remain at the pre-GA
 > internal version `0.3.2`; bumping them does not change the release.
 
+## Unreleased
+
+### Token-usage redaction destroyed provider token statistics (#246)
+
+Releases up to v1.11.2 redacted numeric `usage.*` token counts in stored AI
+artifacts to the string `"[REDACTED]"` (and, in `redacted` storage mode,
+summarized `prompt_tokens` / `prompt_eval_count` into objects). Token counts
+recorded for OpenAI-compatible / Anthropic providers during that window are
+unrecoverable — usage and cost statistics report 0 input/output tokens for
+those historical rows. New artifacts keep numeric counters in every storage
+mode, and all aggregate queries now guard the casts so the legacy rows
+aggregate as 0 instead of failing the Statistics page and dashboard with
+`22P02`.
+
 ## v1.5.35 — Refresh the seeded `fields` system prompt to the v1.5.28 redesign
 
 Second instance of the same drift v1.5.34 fixed for metadata: the

@@ -2939,16 +2939,17 @@ async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<Provi
                coalesce(avg(duration_ms), 0)::double precision as avg_duration_ms,
                coalesce(percentile_cont(0.95) within group (order by duration_ms), 0)::bigint as p95_duration_ms,
                coalesce(sum(
-                 coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
-                 coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0) +
-                 -- Ollama reports tokens top-level, not under `usage`; guard the
-                 -- cast since prompt_eval_count may be redacted to an object.
+                 case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
+                 case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
+                 -- Ollama reports tokens top-level, not under `usage`. Guard every
+                 -- cast: releases up to v1.11.2 redacted numeric usage values to the
+                 -- string "[REDACTED]", and prompt_eval_count may be an object.
                  case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
                       then (response ->> 'prompt_eval_count')::bigint else 0 end
                ), 0)::bigint as input_tokens,
                coalesce(sum(
-                 coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
-                 coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0) +
+                 case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
+                 case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
                  case when response ->> 'eval_count' ~ '^[0-9]+$'
                       then (response ->> 'eval_count')::bigint else 0 end
                ), 0)::bigint as output_tokens,
@@ -3029,8 +3030,8 @@ pub async fn provider_bucket_entries(
           ai.model,
           ai.stage,
           coalesce(sum(
-            coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
-            coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0) +
+            case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
+            case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
             -- Ollama reports tokens at the top level (prompt_eval_count /
             -- eval_count), not under `usage`. Guard the cast: prompt_eval_count
             -- may be redacted to a JSON object, so only sum plain integers.
@@ -3038,8 +3039,8 @@ pub async fn provider_bucket_entries(
                  then (response ->> 'prompt_eval_count')::bigint else 0 end
           ), 0)::bigint as input_tokens,
           coalesce(sum(
-            coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
-            coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0) +
+            case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
+            case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
             case when response ->> 'eval_count' ~ '^[0-9]+$'
                  then (response ->> 'eval_count')::bigint else 0 end
           ), 0)::bigint as output_tokens,
@@ -3114,14 +3115,14 @@ pub async fn statistics_usage_rows(
           ai.stage,
           count(*)::bigint as request_count,
           coalesce(sum(
-            coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
-            coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0) +
+            case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
+            case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
             case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
                  then (response ->> 'prompt_eval_count')::bigint else 0 end
           ), 0)::bigint as input_tokens,
           coalesce(sum(
-            coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
-            coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0) +
+            case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
+            case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
             case when response ->> 'eval_count' ~ '^[0-9]+$'
                  then (response ->> 'eval_count')::bigint else 0 end
           ), 0)::bigint as output_tokens,
@@ -3765,16 +3766,16 @@ async fn cost_series_tokens(
           b.bucket,
           coalesce((
             select sum(
-              coalesce(nullif(response #>> '{usage,prompt_tokens}', '')::bigint, 0) +
-              coalesce(nullif(response #>> '{usage,input_tokens}', '')::bigint, 0)
+              case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
+              case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end
             )::bigint
               from ai_artifacts
              where created_at >= b.bucket and created_at < b.bucket + $3::interval
           ), 0)::bigint as input_tokens,
           coalesce((
             select sum(
-              coalesce(nullif(response #>> '{usage,completion_tokens}', '')::bigint, 0) +
-              coalesce(nullif(response #>> '{usage,output_tokens}', '')::bigint, 0)
+              case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
+              case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end
             )::bigint
               from ai_artifacts
              where created_at >= b.bucket and created_at < b.bucket + $3::interval
@@ -6400,10 +6401,13 @@ fn redact_ai_artifact_content(value: &mut Value) {
     match value {
         Value::Object(map) => {
             for (key, nested) in map {
-                if CONTENT_KEYS
+                let content_key = CONTENT_KEYS
                     .iter()
-                    .any(|needle| key.to_ascii_lowercase().contains(needle))
-                {
+                    .any(|needle| key.to_ascii_lowercase().contains(needle));
+                // `prompt_tokens` / `prompt_eval_count` match the "prompt"
+                // substring but are numeric counters, not document content —
+                // summarizing them away destroys token statistics.
+                if content_key && !matches!(nested, Value::Number(_) | Value::Bool(_)) {
                     *nested = ai_artifact_redaction_summary(nested);
                 } else {
                     redact_ai_artifact_content(nested);
@@ -8719,8 +8723,30 @@ mod tests {
         assert!(!serialized.contains("full document text"));
         assert!(!serialized.contains("private content"));
         assert!(!serialized.contains("base64-image"));
-        assert!(serialized.contains("prompt_tokens"));
         assert!(serialized.contains("redacted"));
+        // Usage counters must survive redaction numerically, not as "[REDACTED]".
+        assert_eq!(stored["usage"]["prompt_tokens"], 10);
+    }
+
+    #[test]
+    fn full_storage_mode_keeps_numeric_usage_but_redacts_credentials() {
+        let value = json!({
+            "api_key": "sk-very-secret",
+            "options": { "token": "raw-secret", "num_ctx": 4096 },
+            "usage": { "prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14 },
+            "prompt_eval_count": 12,
+            "eval_count": 7
+        });
+        let stored = prepare_ai_artifact_value(Some(value), AiArtifactStorageMode::Full).unwrap();
+
+        assert_eq!(stored["usage"]["prompt_tokens"], 10);
+        assert_eq!(stored["usage"]["completion_tokens"], 4);
+        assert_eq!(stored["usage"]["total_tokens"], 14);
+        assert_eq!(stored["prompt_eval_count"], 12);
+        assert_eq!(stored["eval_count"], 7);
+        assert_eq!(stored["api_key"], "[REDACTED]");
+        assert_eq!(stored["options"]["token"], "[REDACTED]");
+        assert_eq!(stored["options"]["num_ctx"], 4096);
     }
 
     #[test]
@@ -8736,7 +8762,7 @@ mod tests {
 
         assert!(!serialized.contains("private model text"));
         assert!(serialized.contains("metadata_only"));
-        assert!(serialized.contains("completion_tokens"));
+        assert_eq!(stored["usage"]["completion_tokens"], 4);
     }
 
     #[test]
