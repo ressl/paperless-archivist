@@ -1,5 +1,4 @@
-import createClient from 'openapi-fetch';
-import type { components, paths } from './schema';
+import type { components } from './schema';
 
 export type MetadataTrace = components['schemas']['MetadataTrace'];
 export type MetadataTraceRun = components['schemas']['MetadataTraceRun'];
@@ -196,10 +195,6 @@ export type RuntimeSettings = {
     debug_console_enabled?: boolean;
   };
 };
-
-const openapi = createClient<paths>({
-  credentials: 'include'
-});
 
 export type Permissions = {
   read_dashboard: boolean;
@@ -819,7 +814,6 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  openapi,
   login: (username: string, password: string) =>
     request<Me>('/api/auth/login', {
       method: 'POST',
@@ -994,7 +988,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider_name: providerName ?? null }),
     }),
-  audit: () => request<{ items: AuditEvent[] }>('/api/audit'),
+  audit: (limit?: number) =>
+    request<{ items: AuditEvent[] }>(
+      limit ? `/api/audit?limit=${encodeURIComponent(limit)}` : '/api/audit'
+    ),
   auditIntegrity: () => request<AuditIntegrityReport>('/api/audit/integrity'),
   applyAuditRetention: () => request<RetentionResult>('/api/audit/retention/apply', { method: 'POST' }),
   prompts: () => request<{ items: Prompt[] }>('/api/prompts'),

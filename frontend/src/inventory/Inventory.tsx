@@ -99,7 +99,14 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
   }, [filters, items.length, setError, t]);
 
   useEffect(() => {
-    void loadFirst();
+    // Debounce filter-driven reloads so rapid changes (date pickers, toggles)
+    // collapse into one 500-row query instead of firing per change. The
+    // request-id guard in loadFirst still protects against out-of-order
+    // responses. (#277)
+    const handle = window.setTimeout(() => {
+      void loadFirst();
+    }, 300);
+    return () => window.clearTimeout(handle);
   }, [loadFirst]);
 
   const commitSearch = useCallback(() => {

@@ -5404,13 +5404,22 @@ async fn clear_provider_cooldowns_endpoint(
     Ok(Json(json!({ "cleared": cleared })))
 }
 
+#[derive(Debug, Deserialize)]
+struct AuditQuery {
+    limit: Option<i64>,
+}
+
 async fn audit_events(
     State(state): State<AppState>,
     auth: Authenticated,
+    Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::ReadAudit)?;
+    // Clamp so a caller that only needs a handful of rows (the debug console)
+    // doesn't pull the full 200, and a large value can't be requested. (#277)
+    let limit = query.limit.unwrap_or(200).clamp(1, 500);
     Ok(Json(
-        json!({ "items": list_audit_events(&state.pool, 200).await? }),
+        json!({ "items": list_audit_events(&state.pool, limit).await? }),
     ))
 }
 

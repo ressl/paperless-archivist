@@ -30,7 +30,9 @@ export function DebugConsole({ setError }: { setError: (error: string | null) =>
     try {
       const [liveData, auditData] = await Promise.all([
         api.dashboardLive(),
-        api.audit(),
+        // Only the 50 rows shown are needed; ask the server for them instead of
+        // pulling the full 200 every 2.5s. (#277)
+        api.audit(50),
       ]);
       setLive(liveData);
       setAudit(auditData.items.slice(0, 50));
