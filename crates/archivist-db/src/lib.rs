@@ -3806,7 +3806,11 @@ async fn cost_series_tokens(
           coalesce((
             select sum(
               case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
-              case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end
+              case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
+              -- Ollama reports tokens top-level, not under `usage`. Without
+              -- this the dashboard cost series showed 0 tokens on Ollama-only
+              -- installs while the Statistics page showed real numbers. #261.
+              case when response ->> 'prompt_eval_count' ~ '^[0-9]+$' then (response ->> 'prompt_eval_count')::bigint else 0 end
             )::bigint
               from ai_artifacts
              where created_at >= b.bucket and created_at < b.bucket + $3::interval
@@ -3814,7 +3818,8 @@ async fn cost_series_tokens(
           coalesce((
             select sum(
               case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
-              case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end
+              case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
+              case when response ->> 'eval_count' ~ '^[0-9]+$' then (response ->> 'eval_count')::bigint else 0 end
             )::bigint
               from ai_artifacts
              where created_at >= b.bucket and created_at < b.bucket + $3::interval
@@ -6664,10 +6669,14 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
              where event_type = 'workflow.selector_ran'
           ), 0) as selector_documents_queued_total,
           (select count(*)::bigint from audit_events where event_type = 'job.retry_scheduled') as job_retries_scheduled_total,
+          -- LLM stages only. Pre-v1.4 used six per-field stages; the live
+          -- Stage enum is ocr / metadata / apply, and metadata (the main LLM
+          -- stage) was missing here so its errors were invisible to the
+          -- metric. apply is a Paperless PATCH, not a model call. #262.
           (select count(*)::bigint
              from jobs
             where error_message is not null
-              and stage in ('ocr', 'tags', 'title', 'correspondent', 'document_type', 'fields')
+              and stage in ('ocr', 'metadata')
           ) as model_errors_total,
           (select count(*)::bigint from audit_events where event_type = 'document.patch_applied' and outcome = 'success') as apply_success_total,
           (select count(*)::bigint from audit_events where event_type = 'document.patch_apply_failed' and outcome = 'failed') as apply_failure_total,
