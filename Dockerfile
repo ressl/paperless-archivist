@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:26-bookworm AS frontend
+FROM node:26-bookworm@sha256:076dd90a458a4baf8b8d2716f022a2c8db245dbe70c7de38bacad1708258eeab AS frontend
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN npm install -g pnpm@10.34.1 && pnpm install --frozen-lockfile
@@ -8,14 +8,14 @@ COPY openapi /app/openapi
 COPY frontend ./
 RUN pnpm generate:client && pnpm build
 
-FROM rust:1.96-bookworm AS rust-build
+FROM rust:1.96-bookworm@sha256:13c186980fa33cc12759b429662a1322939dbe697484b7c33b47dd2698d28460 AS rust-build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
 RUN cargo build --release --locked --workspace
 
-FROM debian:trixie-slim AS runtime
+FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 AS runtime
 # apt-get upgrade picks up Debian Security patches for libraries that ship
 # pre-installed in the base layer (libc6, libcap2, libsystemd0, libudev1, …)
 # but would otherwise stay at whatever version Docker Hub baked into the
