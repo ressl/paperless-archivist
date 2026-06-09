@@ -2704,8 +2704,9 @@ pub fn document_date_has_anchor(date_iso: &str, ocr_text: &str) -> bool {
 /// Pass-through types (`string`, `url`, `documentlink`, `select`, and an
 /// unknown or absent `data_type`) return the value unchanged. Numeric/date
 /// types are normalised: integers tolerate thousands separators but reject
-/// fractional values, monetary/float values become JSON numbers, and dates are
-/// normalised to ISO `YYYY-MM-DD`.
+/// fractional values, floats become JSON numbers, monetary values become the
+/// string wire format Paperless validates (`EUR1250.00` / `1250.00`), and
+/// dates are normalised to ISO `YYYY-MM-DD`.
 pub fn coerce_custom_field_value(
     data_type: Option<&str>,
     value: &serde_json::Value,
@@ -2714,7 +2715,8 @@ pub fn coerce_custom_field_value(
         Some("integer") => coerce_integer_value(value),
         Some("boolean") => coerce_boolean_value(value),
         Some("date") => coerce_date_value(value),
-        Some("monetary") | Some("float") => coerce_float_value(value),
+        Some("monetary") => coerce_monetary_value(value),
+        Some("float") => coerce_float_value(value),
         // string / url / documentlink / select / unknown / None: pass through.
         _ => Some(value.clone()),
     }
@@ -2775,6 +2777,124 @@ fn coerce_float_value(value: &serde_json::Value) -> Option<serde_json::Value> {
         Value::String(text) => text.trim().parse::<f64>().ok().map(Value::from),
         _ => None,
     }
+}
+
+/// Normalise a monetary value to the wire format Paperless accepts: either a
+/// bare two-decimal amount (`1250.00`, validated upstream via `Decimal(...)`)
+/// or `<CUR><amount>` with a mandatory 1-2 digit fraction (`EUR1250.00`,
+/// validated via `^[A-Z]{3}-?\d+(\.\d{1,2})$`). The metadata prompt instructs
+/// models to emit the `EUR1250.00` shape, so that exact shape must coerce.
+fn coerce_monetary_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    match value {
+        Value::Number(number) => {
+            let amount = number.as_f64()?;
+            if !amount.is_finite() {
+                return None;
+            }
+            Some(Value::String(format!("{amount:.2}")))
+        }
+        Value::String(text) => {
+            let (currency, amount) = parse_monetary_text(text)?;
+            Some(Value::String(match currency {
+                Some(code) => format!("{code}{amount}"),
+                None => amount,
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Split a free-form monetary string into an optional 3-letter currency code
+/// and a normalised `-?\d+\.\d{2}` amount. Tolerates the shapes models emit:
+/// `EUR1250.00`, `eur 1250`, `12.50 EUR`, `CHF 1'250.50`, `1.250,00`,
+/// `1,250.00`, `€ 99.90`, `-12.50`. A single separator followed by exactly
+/// three digits is read as thousands grouping (`1.250` → `1250.00`).
+fn parse_monetary_text(text: &str) -> Option<(Option<String>, String)> {
+    let mut rest = text.trim();
+
+    let mut currency = None;
+    let prefix_len = rest.chars().take_while(char::is_ascii_alphabetic).count();
+    if prefix_len > 0 {
+        if prefix_len != 3 {
+            return None;
+        }
+        currency = Some(rest[..3].to_ascii_uppercase());
+        rest = rest[3..].trim_start();
+    } else {
+        let suffix_len = rest
+            .chars()
+            .rev()
+            .take_while(char::is_ascii_alphabetic)
+            .count();
+        if suffix_len == 3 {
+            currency = Some(rest[rest.len() - 3..].to_ascii_uppercase());
+            rest = rest[..rest.len() - 3].trim_end();
+        } else if suffix_len > 0 {
+            return None;
+        }
+    }
+
+    // Currency symbols carry nothing Paperless can store — drop them.
+    rest = rest
+        .trim_start_matches(['€', '$', '£'])
+        .trim_end_matches(['€', '$', '£'])
+        .trim();
+
+    let negative = if let Some(stripped) = rest.strip_prefix('-') {
+        rest = stripped.trim_start();
+        true
+    } else {
+        false
+    };
+
+    // Apostrophes and spaces only ever group thousands.
+    let cleaned: String = rest
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '\u{2019}' | ' '))
+        .collect();
+    if cleaned.is_empty()
+        || !cleaned
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | ','))
+    {
+        return None;
+    }
+
+    let dots = cleaned.matches('.').count();
+    let commas = cleaned.matches(',').count();
+    let decimal_at = if dots > 0 && commas > 0 {
+        // Mixed separators: the right-most one is the decimal separator.
+        Some(cleaned.rfind(['.', ','])?)
+    } else if dots + commas == 0 {
+        None
+    } else {
+        let separator = if dots > 0 { '.' } else { ',' };
+        let last = cleaned.rfind(separator)?;
+        let digits_after = cleaned.len() - last - 1;
+        if dots + commas == 1 && (1..=2).contains(&digits_after) {
+            Some(last)
+        } else if digits_after == 3 {
+            None // grouping only, e.g. "1.250" or "1.250.000"
+        } else {
+            return None;
+        }
+    };
+
+    let (int_part, fraction) = match decimal_at {
+        Some(at) => (&cleaned[..at], &cleaned[at + 1..]),
+        None => (cleaned.as_str(), ""),
+    };
+    if fraction.len() > 2 || !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let int_digits: String = int_part.chars().filter(char::is_ascii_digit).collect();
+    if int_digits.is_empty() {
+        return None;
+    }
+
+    let sign = if negative { "-" } else { "" };
+    Some((currency, format!("{sign}{int_digits}.{fraction:0<2}")))
 }
 
 pub fn validate_document_date_suggestion(
@@ -4033,20 +4153,58 @@ mod tests {
     }
 
     #[test]
-    fn coerce_monetary_and_float_fields_yield_numbers() {
+    fn coerce_float_fields_yield_numbers() {
         use serde_json::{Value, json};
-        assert_eq!(
-            coerce_custom_field_value(Some("monetary"), &json!("12.50")),
-            Some(Value::from(12.5_f64))
-        );
         assert_eq!(
             coerce_custom_field_value(Some("float"), &json!(3.5)),
             Some(Value::from(3.5_f64))
         );
         assert_eq!(
-            coerce_custom_field_value(Some("monetary"), &json!("not-a-number")),
-            None
+            coerce_custom_field_value(Some("float"), &json!("12.50")),
+            Some(Value::from(12.5_f64))
         );
+    }
+
+    #[test]
+    fn coerce_monetary_normalises_to_paperless_wire_format() {
+        use serde_json::{Value, json};
+        // The exact shape the metadata prompt instructs ("EUR1250.00") must
+        // coerce — it used to be dropped as uncoercible.
+        let cases = [
+            (json!("EUR1250.00"), "EUR1250.00"),
+            (json!("eur 1250"), "EUR1250.00"),
+            (json!("12.50 EUR"), "EUR12.50"),
+            (json!("CHF 1'250.50"), "CHF1250.50"),
+            (json!("1.250,00"), "1250.00"),
+            (json!("1,250.00"), "1250.00"),
+            (json!("1.250"), "1250.00"),
+            (json!("12.5"), "12.50"),
+            (json!("€ 99.90"), "99.90"),
+            (json!("EUR-12.50"), "EUR-12.50"),
+            (json!("-12.50"), "-12.50"),
+            (json!(12.5), "12.50"),
+            (json!(1250), "1250.00"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                coerce_custom_field_value(Some("monetary"), &input),
+                Some(Value::String(expected.to_owned())),
+                "input: {input}"
+            );
+        }
+        for invalid in [
+            json!("not-a-number"),
+            json!("12.3456"),
+            json!("EURO 12.50"),
+            json!(""),
+            json!(null),
+        ] {
+            assert_eq!(
+                coerce_custom_field_value(Some("monetary"), &invalid),
+                None,
+                "input: {invalid}"
+            );
+        }
     }
 
     #[test]
