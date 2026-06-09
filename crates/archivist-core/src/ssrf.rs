@@ -8,8 +8,12 @@
 //! routinely live on private addresses in the deployments this app targets.
 //!
 //! It is applied up front by `validate_outbound_url` (in the API crate), which
-//! resolves the configured host and rejects dangerous targets before any
-//! request is made.
+//! resolves the configured host and rejects dangerous targets both when
+//! settings are persisted (`update_settings`, including archive profiles and
+//! the notification webhook) and on every outbound tester endpoint. The
+//! worker deliberately does not re-validate on its hot path: the persisted
+//! values are already guarded, and a per-request DNS lookup would put DNS
+//! flakiness in front of every job.
 //!
 //! There is deliberately **no** connection-time IP-pinning DNS resolver. A
 //! `reqwest` `Resolve` implementation was trialled (#183) to close the

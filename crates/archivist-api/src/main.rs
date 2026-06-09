@@ -1150,8 +1150,11 @@ async fn verify_paperless_credentials(
     username: &str,
     password: &str,
 ) -> Result<()> {
-    let base_url = Url::parse(settings.paperless.base_url.trim())
-        .context("Paperless base URL is not valid")?;
+    // Same up-front SSRF validation as the other outbound tester paths —
+    // this endpoint forwards user credentials to the configured URL.
+    let base_url = validate_outbound_url(settings.paperless.base_url.trim())
+        .await
+        .map_err(|error| anyhow!("Paperless base URL rejected: {}", error.message))?;
     let token_url = base_url
         .join("api/token/")
         .context("build Paperless token URL")?;
@@ -1351,6 +1354,62 @@ async fn update_settings(
     require(&auth.0, Permission::WriteSettings)?;
     let actor_id = require_user_session(&auth.0, "settings updates require a user session")?;
     Span::current().record("user_id", tracing::field::display(actor_id));
+
+    // Config-time SSRF guard (SECURITY_DESIGN §4.3): outbound URLs are
+    // validated when they are PERSISTED, not only when the operator happens
+    // to press a "test" button — the worker consumes them verbatim on its
+    // hot path without re-validating.
+    let paperless_url = request.settings.paperless.base_url.trim();
+    if !paperless_url.is_empty() {
+        validate_outbound_url_for_save(paperless_url)
+            .await
+            .map_err(|error| {
+                ApiError::bad_request(format!("Paperless base URL: {}", error.message))
+            })?;
+    }
+    // Disabled providers/profiles may carry placeholder URLs (the seeded
+    // `openai-compatible` example points at localhost); they are not active
+    // outbound targets, and enabling one is itself a settings save — the
+    // guard fires then.
+    for profile in &request.settings.paperless.archive_profiles {
+        let base_url = profile.base_url.trim();
+        if !profile.enabled || base_url.is_empty() {
+            continue;
+        }
+        validate_outbound_url_for_save(base_url)
+            .await
+            .map_err(|error| {
+                ApiError::bad_request(format!(
+                    "archive profile '{}' base URL: {}",
+                    profile.name, error.message
+                ))
+            })?;
+    }
+    for provider in &request.settings.ai.providers {
+        let base_url = provider.base_url.trim();
+        if !provider.enabled || base_url.is_empty() {
+            continue;
+        }
+        validate_outbound_url_for_save(base_url)
+            .await
+            .map_err(|error| {
+                ApiError::bad_request(format!(
+                    "AI provider '{}' base URL: {}",
+                    provider.name, error.message
+                ))
+            })?;
+    }
+    if let Some(webhook_url) = request.notification_webhook_url.as_deref() {
+        let webhook_url = webhook_url.trim();
+        if !webhook_url.is_empty() {
+            validate_outbound_url_for_save(webhook_url)
+                .await
+                .map_err(|error| {
+                    ApiError::bad_request(format!("notification webhook URL: {}", error.message))
+                })?;
+        }
+    }
+
     if let Some(token) = request
         .paperless_token
         .filter(|token| !token.trim().is_empty())
@@ -1790,6 +1849,26 @@ async fn notification_webhook_url(state: &AppState, settings: &RuntimeSettings) 
 ///
 /// Returns the parsed `Url` on success.
 async fn validate_outbound_url(raw: &str) -> Result<Url, ApiError> {
+    validate_outbound_url_with(raw, DnsFailure::Reject).await
+}
+
+/// Settings-save variant: scheme/userinfo/dangerous-IP rules are identical,
+/// but an unresolvable hostname passes. A name that does not resolve is not
+/// an SSRF target, and a transient DNS outage (or pre-configuring a host that
+/// only resolves later/inside the cluster) must not block unrelated settings
+/// changes. The strict variant stays on the tester endpoints, where "does it
+/// resolve" is exactly the feedback the operator asked for.
+async fn validate_outbound_url_for_save(raw: &str) -> Result<Url, ApiError> {
+    validate_outbound_url_with(raw, DnsFailure::Allow).await
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DnsFailure {
+    Reject,
+    Allow,
+}
+
+async fn validate_outbound_url_with(raw: &str, dns_failure: DnsFailure) -> Result<Url, ApiError> {
     let parsed = Url::parse(raw.trim()).map_err(|_| ApiError::bad_request("invalid URL"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(ApiError::bad_request("URL scheme must be http or https"));
@@ -1807,13 +1886,24 @@ async fn validate_outbound_url(raw: &str) -> Result<Url, ApiError> {
         // addresses (macOS getaddrinfo with brackets in the host string).
         url::Host::Ipv4(v4) => vec![IpAddr::V4(v4)],
         url::Host::Ipv6(v6) => vec![IpAddr::V6(v6)],
-        url::Host::Domain(domain) => tokio::net::lookup_host((domain, port))
-            .await
-            .map_err(|error| ApiError::bad_request(format!("failed to resolve host: {error}")))?
-            .map(|addr| addr.ip())
-            .collect(),
+        url::Host::Domain(domain) => match tokio::net::lookup_host((domain, port)).await {
+            Ok(addresses) => addresses.map(|addr| addr.ip()).collect(),
+            Err(error) if dns_failure == DnsFailure::Allow => {
+                tracing::debug!(
+                    domain,
+                    %error,
+                    "skipping SSRF IP check: host does not resolve from here"
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                return Err(ApiError::bad_request(format!(
+                    "failed to resolve host: {error}"
+                )));
+            }
+        },
     };
-    if ips.is_empty() {
+    if ips.is_empty() && dns_failure == DnsFailure::Reject {
         return Err(ApiError::bad_request("host did not resolve to any address"));
     }
     for ip in &ips {
@@ -2133,6 +2223,18 @@ async fn fetch_ollama_runtime_hints(
             };
         }
     };
+    if let Err(error) = validate_outbound_url(&provider.base_url).await {
+        return AiRuntimeHintsResponse {
+            provider: provider.name.clone(),
+            reachable: false,
+            version: None,
+            loaded_models: Vec::new(),
+            num_parallel: None,
+            max_loaded_models: None,
+            keep_alive: None,
+            hint: Some(format!("provider base URL rejected: {}", error.message)),
+        };
+    }
     let client = match OllamaClient::new_with_timeout(
         &provider.name,
         &provider.base_url,
