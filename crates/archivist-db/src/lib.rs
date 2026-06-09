@@ -5436,13 +5436,38 @@ pub async fn fail_job(
     Ok(true)
 }
 
+/// Insert a review item for `job` and flip job/run/inventory to
+/// `waiting_review`. Like `complete_job`/`fail_job`, the job update is fenced
+/// on `lease_owner`: a worker whose lease was reclaimed gets `Ok(None)` and
+/// must stop instead of inserting review items for a job another replica now
+/// owns. A job already in `waiting_review` still matches for the same owner,
+/// so one stage can create several per-field items back to back.
 pub async fn create_review_item(
     pool: &DbPool,
     job: &JobRecord,
     suggested_patch: Value,
     validation_warnings: Value,
-) -> Result<Uuid> {
+    lease_owner: &str,
+) -> Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
+    let fenced = sqlx::query(
+        r#"
+        update jobs
+           set status = 'waiting_review', updated_at = now()
+         where id = $1
+           and lease_owner = $2
+           and status in ('running', 'waiting_review')
+        "#,
+    )
+    .bind(job.id)
+    .bind(lease_owner)
+    .execute(&mut *tx)
+    .await?;
+    if fenced.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
     let id: Uuid = sqlx::query(
         r#"
         insert into review_items (run_id, job_id, paperless_document_id, stage, status, suggested_patch, validation_warnings)
@@ -5460,10 +5485,6 @@ pub async fn create_review_item(
     .await?
     .try_get("id")?;
 
-    sqlx::query("update jobs set status = 'waiting_review', updated_at = now() where id = $1")
-        .bind(job.id)
-        .execute(&mut *tx)
-        .await?;
     sqlx::query(
         "update pipeline_runs set status = 'waiting_review', updated_at = now() where id = $1",
     )
@@ -5500,7 +5521,7 @@ pub async fn create_review_item(
     )
     .await?;
     tx.commit().await?;
-    Ok(id)
+    Ok(Some(id))
 }
 
 pub async fn list_reviews(

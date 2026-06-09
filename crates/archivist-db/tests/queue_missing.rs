@@ -18,7 +18,8 @@ async fn fresh_pool() -> Option<DbPool> {
     // Clear the few tables we touch so the test is hermetic across reruns.
     pool.execute(
         r#"
-        truncate document_inventory, jobs, pipeline_runs, audit_events restart identity cascade;
+        truncate document_inventory, jobs, pipeline_runs, audit_events,
+                 paperless_tags, paperless_custom_fields restart identity cascade;
         "#,
     )
     .await

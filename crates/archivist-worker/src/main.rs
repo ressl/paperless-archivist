@@ -1940,6 +1940,18 @@ async fn process_metadata(
     let (prompt_id, prompt_experiment_group) =
         apply_active_prompt_with_experiment(pool, Stage::Metadata, job.run_id, &mut request)
             .await?;
+    // Heartbeat the lease before each long LLM call. The metadata stage can
+    // chain classifier + main call + consensus (each with a 180s client
+    // timeout) under one 300s lease; without renewing, a second replica
+    // reclaims the "stale" job mid-stage and processes it concurrently.
+    if !archivist_db::bump_job_lease(pool, job.id, lease_owner, 300).await? {
+        warn!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            "metadata lease lost before main LLM call; stopping so a replica isn't duplicated"
+        );
+        return Ok(());
+    }
     let response = chat_for_stage(pool, config, settings, Stage::Metadata, request.clone()).await?;
     let mut suggestion =
         parse_metadata_suggestion(&response.text).unwrap_or_else(|_| MetadataSuggestion::default());
@@ -1960,6 +1972,14 @@ async fn process_metadata(
         && settings.workflow.mode.auto_apply_validated_suggestions()
         && !settings.workflow.dry_run;
     let consensus_outcome = if consensus_enabled {
+        if !archivist_db::bump_job_lease(pool, job.id, lease_owner, 300).await? {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                "metadata lease lost before consensus check; stopping so a replica isn't duplicated"
+            );
+            return Ok(());
+        }
         Some(
             run_consensus_check(
                 pool,
@@ -2375,6 +2395,16 @@ async fn process_metadata(
     //     suggestions atomically rather than seeing a half-applied document.
     //   * If everything was skipped (already-set fields with overwrite disabled),
     //     we still mark the job complete so the run drains.
+    // Final heartbeat before side effects (review inserts / Paperless PATCH):
+    // from here on a lost lease must stop this worker, not double-apply.
+    if !archivist_db::bump_job_lease(pool, job.id, lease_owner, 300).await? {
+        warn!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            "metadata lease lost before apply/review; stopping so a replica isn't duplicated"
+        );
+        return Ok(());
+    }
     let review_warning_count = review_items.len();
     if !review_items.is_empty() && !auto_apply {
         // Manual / dry-run path: demote applied fields to review items too,
@@ -2436,7 +2466,17 @@ async fn process_metadata(
         }
 
         for (patch, warnings) in review_items {
-            create_review_item(pool, job, patch, warnings).await?;
+            if create_review_item(pool, job, patch, warnings, lease_owner)
+                .await?
+                .is_none()
+            {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    "metadata lease lost during review creation; stopping so a replica isn't duplicated"
+                );
+                return Ok(());
+            }
         }
         Ok(())
     } else if !applied_fields.is_empty() {
@@ -2475,8 +2515,22 @@ async fn process_metadata(
             // manual_review (or dry_run): a single composite review item with all validated
             // suggestions so the operator approves the whole set atomically.
             let composite_review_patch = serde_json::to_value(&composite_patch)?;
-            create_review_item(pool, job, composite_review_patch, json!(composite_warnings))
-                .await?;
+            if create_review_item(
+                pool,
+                job,
+                composite_review_patch,
+                json!(composite_warnings),
+                lease_owner,
+            )
+            .await?
+            .is_none()
+            {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    "metadata lease lost during review creation; skipping"
+                );
+            }
             Ok(())
         }
     } else if auto_apply && review_warning_count > 0 {
@@ -2716,7 +2770,17 @@ async fn handle_patch_result(
                     .to_owned(),
             );
         }
-        let review_id = create_review_item(pool, job, review_patch, json!(review_warnings)).await?;
+        let Some(review_id) =
+            create_review_item(pool, job, review_patch, json!(review_warnings), lease_owner)
+                .await?
+        else {
+            warn!(
+                job_id = %job.id,
+                document_id = job.paperless_document_id,
+                "lease lost before review creation; another worker owns this job — skipping"
+            );
+            return Ok(());
+        };
         if settings.workflow.dry_run && auto_apply {
             append_audit(
                 pool,
