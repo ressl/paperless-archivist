@@ -1399,6 +1399,37 @@ async fn shutdown_signal() {
     }
 }
 
+/// Sum per-page vision token usage across raw provider responses into
+/// `(input_tokens, output_tokens)`. Handles both wire shapes: OpenAI/Anthropic
+/// (`usage.prompt_tokens`/`input_tokens`, `usage.completion_tokens`/
+/// `output_tokens`) and Ollama (top-level `prompt_eval_count`/`eval_count`).
+/// Returns `None` when no page reported any tokens. #259.
+fn sum_vision_usage(raw_responses: &[serde_json::Value]) -> Option<(i64, i64)> {
+    fn field(value: &serde_json::Value, path: &[&str]) -> i64 {
+        let mut node = value;
+        for key in path {
+            match node.get(key) {
+                Some(next) => node = next,
+                None => return 0,
+            }
+        }
+        node.as_i64()
+            .or_else(|| node.as_str().and_then(|s| s.parse::<i64>().ok()))
+            .unwrap_or(0)
+    }
+    let mut input = 0_i64;
+    let mut output = 0_i64;
+    for page in raw_responses {
+        input += field(page, &["usage", "prompt_tokens"])
+            + field(page, &["usage", "input_tokens"])
+            + field(page, &["prompt_eval_count"]);
+        output += field(page, &["usage", "completion_tokens"])
+            + field(page, &["usage", "output_tokens"])
+            + field(page, &["eval_count"]);
+    }
+    (input > 0 || output > 0).then_some((input, output))
+}
+
 async fn process_ocr(
     pool: &DbPool,
     config: &AppConfig,
@@ -1609,7 +1640,23 @@ async fn process_ocr(
             prompt_id: prompt.as_ref().map(|prompt| prompt.id),
             input_hash: &hash_bytes(&original),
             request: None,
-            response: Some(json!({ "pages": raw_responses })),
+            response: Some({
+                let mut response = json!({ "pages": raw_responses });
+                // Flatten per-page token usage to a top-level `usage` block so
+                // the OCR/vision stage — usually the most token-heavy — is
+                // counted by provider_usage / statistics / cost queries, which
+                // only read top-level token fields. Top-level also survives
+                // metadata-only storage (which keeps `usage`). #259.
+                if let Some((input, output)) = sum_vision_usage(&raw_responses)
+                    && let Some(object) = response.as_object_mut()
+                {
+                    object.insert(
+                        "usage".to_owned(),
+                        json!({ "prompt_tokens": input, "completion_tokens": output }),
+                    );
+                }
+                response
+            }),
             normalized_output: Some(json!({
                 "content_chars": text.chars().count(),
                 "language": language_detection.language,
@@ -4111,6 +4158,23 @@ fn hash_bytes(value: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn sum_vision_usage_handles_both_wire_shapes() {
+        // OpenAI/Anthropic usage + Ollama top-level counters across pages.
+        let pages = vec![
+            json!({ "usage": { "prompt_tokens": 100, "completion_tokens": 40 } }),
+            json!({ "prompt_eval_count": 7, "eval_count": 3 }),
+            json!({ "usage": { "input_tokens": 5, "output_tokens": 2 } }),
+        ];
+        assert_eq!(sum_vision_usage(&pages), Some((112, 45)));
+    }
+
+    #[test]
+    fn sum_vision_usage_returns_none_without_tokens() {
+        let pages = vec![json!({ "response": "text only" }), json!({})];
+        assert_eq!(sum_vision_usage(&pages), None);
+    }
 
     #[test]
     fn typed_paperless_errors_drive_classification() {
