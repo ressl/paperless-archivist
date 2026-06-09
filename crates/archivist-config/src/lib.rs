@@ -109,6 +109,13 @@ pub struct AppConfig {
     /// by sending this exact value in the `X-Webhook-Secret` header.
     #[arg(long, env = "ARCHIVIST_WEBHOOK_SECRET")]
     pub webhook_secret: Option<SecretString>,
+
+    /// Bearer token for the Prometheus `/metrics` endpoint. The endpoint sits
+    /// outside the session auth so scrapers can reach it, but it discloses
+    /// operational internals and every hit runs aggregate queries — when this
+    /// is unset the endpoint is disabled and responds `503`.
+    #[arg(long, env = "ARCHIVIST_METRICS_TOKEN")]
+    pub metrics_token: Option<SecretString>,
 }
 
 impl AppConfig {

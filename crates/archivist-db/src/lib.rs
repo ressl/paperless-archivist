@@ -6574,7 +6574,9 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
           (select count(*)::bigint from pipeline_runs where status in ('queued', 'running', 'waiting_review', 'applying')) as runs_active,
           -- Total event count keeps an exact count(*); switch to a pg_class
           -- reltuples estimate if this scan ever becomes a hot spot.
-          (select count(*)::bigint from audit_events) as audit_events,
+          -- Planner estimate instead of a full count(*): audit_events is
+          -- unbounded and this query runs on every /metrics scrape.
+          (select greatest(reltuples, 0)::bigint from pg_class where oid = 'audit_events'::regclass) as audit_events,
           (select count(*)::bigint from audit_events where event_type = 'workflow.selector_ran') as selector_runs_total,
           coalesce((
             select sum(coalesce((after ->> 'queued')::bigint, 0))::bigint

@@ -380,6 +380,12 @@ Worker behavior:
 
 Workers are safe to scale horizontally.
 
+Metrics: `GET /metrics` (Prometheus text format) requires
+`Authorization: Bearer <ARCHIVIST_METRICS_TOKEN>`; with the variable unset the
+endpoint responds `503`. Configure the same token as `bearer_token` in the
+Prometheus scrape job. The `paperless_archivist_audit_events` gauge is an
+approximate row count from planner statistics.
+
 Shutdown: the worker handles both SIGINT and SIGTERM (Kubernetes pod
 termination). On signal it stops claiming new jobs and drains in-flight work
 for up to 25 seconds so jobs finish terminally instead of expiring their

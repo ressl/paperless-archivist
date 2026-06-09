@@ -513,7 +513,28 @@ async fn readyz(State(state): State<AppState>) -> ApiResult<&'static str> {
     Ok("ready")
 }
 
-async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
+async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
+    // /metrics sits outside the session-auth middleware so Prometheus can
+    // scrape it, but it discloses operational internals (queue depth, failure
+    // counts, latencies) and every hit runs aggregate queries. Require the
+    // dedicated scrape token; disabled (503) when unconfigured — same
+    // contract as the inbound webhook.
+    let Some(expected) = state.config.metrics_token.as_ref() else {
+        return Err(ApiError::service_unavailable(
+            "metrics disabled: set ARCHIVIST_METRICS_TOKEN",
+        ));
+    };
+    let provided = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let expected = expected.expose_secret();
+    if expected.len() != provided.len()
+        || !bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+    {
+        return Err(ApiError::unauthorized("invalid metrics token"));
+    }
     let snapshot = db_metrics_snapshot(&state.pool).await?;
     // Migrated series now live in `metrics_counters` (real monotone counters that
     // survive audit retention). Read them here and serve them as `# TYPE counter`
@@ -542,11 +563,12 @@ async fn metrics(State(state): State<AppState>) -> ApiResult<Response> {
             "# HELP paperless_archivist_runs_active Active pipeline runs\n",
             "# TYPE paperless_archivist_runs_active gauge\n",
             "paperless_archivist_runs_active {}\n",
-            // Derived as a live COUNT over `audit_events`, which is hard-deleted
-            // by retention. The value can therefore decrease, so it is a gauge —
-            // declaring it a counter would make Prometheus misread retention
-            // pruning as a counter reset and corrupt rate() results.
-            "# HELP paperless_archivist_audit_events Audit events currently retained\n",
+            // Approximate row count from planner statistics (reltuples), not a
+            // live COUNT — audit_events is unbounded and this runs on every
+            // scrape. Retention prunes the table, so the value can decrease:
+            // it stays a gauge (a counter would make Prometheus misread
+            // retention pruning as a counter reset and corrupt rate()).
+            "# HELP paperless_archivist_audit_events Audit events currently retained (approximate)\n",
             "# TYPE paperless_archivist_audit_events gauge\n",
             "paperless_archivist_audit_events {}\n",
             // selector_* and job_retries_* are now real monotone counters backed
@@ -7103,6 +7125,7 @@ mod tests {
             auth_rate_limit: 10,
             auth_rate_limit_window_seconds: 60,
             webhook_secret: None,
+            metrics_token: None,
         }
     }
 
