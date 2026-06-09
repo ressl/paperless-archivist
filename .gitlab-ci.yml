@@ -4,6 +4,20 @@ stages:
   - build
   - scan
 
+# Avoid duplicate pipelines: run for branch pushes only when no MR is open, and
+# for merge_request_event; tags always run. interruptible lets a newer push
+# cancel a superseded pipeline. (#276)
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+default:
+  interruptible: true
+
 variables:
   RUST_IMAGE: rust:1.96-bookworm
   NODE_IMAGE: node:26-bookworm
@@ -67,15 +81,33 @@ public:rust:clippy:
 public:rust:audit:
   stage: scan
   extends: .rust_public_base
+  # Cache the compiled cargo-audit/cargo-deny binaries so they aren't rebuilt
+  # from source on every pipeline. (#276)
+  cache:
+    key: cargo-security-tools
+    paths:
+      - .cargo-tools/bin/
+  variables:
+    CARGO_INSTALL_ROOT: $CI_PROJECT_DIR/.cargo-tools
+  before_script:
+    - export PATH="$CI_PROJECT_DIR/.cargo-tools/bin:$PATH"
   script:
-    - cargo install cargo-audit --locked
+    - command -v cargo-audit || cargo install cargo-audit --locked
     - cargo audit
 
 public:rust:deny:
   stage: scan
   extends: .rust_public_base
+  cache:
+    key: cargo-security-tools
+    paths:
+      - .cargo-tools/bin/
+  variables:
+    CARGO_INSTALL_ROOT: $CI_PROJECT_DIR/.cargo-tools
+  before_script:
+    - export PATH="$CI_PROJECT_DIR/.cargo-tools/bin:$PATH"
   script:
-    - cargo install cargo-deny --locked
+    - command -v cargo-deny || cargo install cargo-deny --locked
     - cargo deny check
 
 frontend:openapi-client:
@@ -94,6 +126,15 @@ frontend:typecheck:
     - .default_retry
   script:
     - pnpm typecheck
+
+# i18n_translation_parity.mjs is wired up but was never run in CI. (#276)
+frontend:i18n:
+  stage: test
+  extends:
+    - .frontend_base
+    - .default_retry
+  script:
+    - pnpm i18n:check
 
 frontend:accessibility:
   stage: test

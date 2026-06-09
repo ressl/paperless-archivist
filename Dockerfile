@@ -13,7 +13,17 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
-RUN cargo build --release --locked --workspace
+# BuildKit cache mounts for the cargo registry/git caches and the target dir so
+# a source-only change reuses compiled dependencies instead of rebuilding the
+# whole graph (#276). The final binaries are copied out of the cached target
+# dir before it is unmounted, since a cache mount is not present in later
+# stages. syntax=docker/dockerfile:1.7 (declared at the top) enables this.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked --workspace \
+    && mkdir -p /out \
+    && cp target/release/archivist-api target/release/archivist-worker /out/
 
 FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 AS runtime
 # apt-get upgrade picks up Debian Security patches for libraries that ship
@@ -28,8 +38,8 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --create-home archivist
 WORKDIR /app
-COPY --from=rust-build /app/target/release/archivist-api /usr/local/bin/archivist-api
-COPY --from=rust-build /app/target/release/archivist-worker /usr/local/bin/archivist-worker
+COPY --from=rust-build /out/archivist-api /usr/local/bin/archivist-api
+COPY --from=rust-build /out/archivist-worker /usr/local/bin/archivist-worker
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 COPY migrations /app/migrations
 ENV ARCHIVIST_STATIC_DIR=/app/frontend/dist
