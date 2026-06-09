@@ -269,6 +269,14 @@ async fn main() -> Result<()> {
     migrate(&pool).await?;
     ensure_bootstrap_admin(&pool, &config).await?;
 
+    if !config.cookie_secure {
+        warn!(
+            "ARCHIVIST_COOKIE_SECURE is false: session and CSRF cookies are not marked Secure \
+             and will be sent over plain HTTP. Set ARCHIVIST_COOKIE_SECURE=true in any \
+             production deployment behind TLS."
+        );
+    }
+
     let state = AppState {
         pool,
         config: Arc::new(config.clone()),
@@ -6479,8 +6487,12 @@ fn oidc_scopes(config: &AppConfig) -> Vec<String> {
 
 fn safe_return_to(value: Option<&str>) -> Option<String> {
     let value = value.unwrap_or("/");
+    // Reject backslashes too: browsers normalize `\` to `/` per the WHATWG URL
+    // spec, so `/\evil.com` becomes the protocol-relative `//evil.com` and
+    // redirects off-origin (CWE-601). #271
     if value.starts_with('/')
         && !value.starts_with("//")
+        && !value.contains('\\')
         && !value.contains('\r')
         && !value.contains('\n')
     {

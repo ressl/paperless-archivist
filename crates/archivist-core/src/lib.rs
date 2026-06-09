@@ -3828,13 +3828,18 @@ pub struct AuditEventInput {
 }
 
 pub fn redact_secret(value: &str) -> String {
-    if value.is_empty() {
+    // Operate on chars, not bytes: byte slicing (`&value[..4]`) panics when a
+    // multi-byte UTF-8 character straddles the offset. #271
+    let chars: Vec<char> = value.chars().collect();
+    if chars.is_empty() {
         return String::new();
     }
-    if value.len() <= 8 {
+    if chars.len() <= 8 {
         return "********".to_owned();
     }
-    format!("{}...{}", &value[..4], &value[value.len() - 4..])
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}...{tail}")
 }
 
 pub fn redact_sensitive_json(value: &mut Value) {
@@ -4105,6 +4110,18 @@ fn next_char_boundary(value: &str, mut index: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_secret_is_utf8_safe() {
+        assert_eq!(redact_secret(""), "");
+        assert_eq!(redact_secret("short"), "********");
+        assert_eq!(redact_secret("sk-abcdefghij"), "sk-a...ghij");
+        // Multi-byte characters straddling the 4-char head/tail must not panic.
+        let secret = "🔐🔐🔐🔐middle🗝🗝🗝🗝";
+        let redacted = redact_secret(secret);
+        assert!(redacted.starts_with("🔐🔐🔐🔐..."));
+        assert!(redacted.ends_with("🗝🗝🗝🗝"));
+    }
 
     #[test]
     fn coerce_integer_field_rejects_non_integer_and_strips_separators() {

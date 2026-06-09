@@ -326,15 +326,23 @@ impl PaperlessClient {
         if !status.is_success() {
             // A concurrent worker may have created the tag between our list and
             // POST, in which case Paperless rejects the duplicate name with a
-            // 4xx. Refetch and reuse the existing tag instead of failing.
-            if status.is_client_error()
-                && let Some(tag) = self
-                    .list_tags()
-                    .await?
-                    .into_iter()
-                    .find(|tag| tag.name.to_lowercase() == wanted)
-            {
-                return Ok(tag);
+            // 4xx. Refetch and reuse the existing tag instead of failing. Retry
+            // the lookup with a short backoff: under read-replica lag the
+            // winner's row may not be visible on the first refetch. #271
+            if status.is_client_error() {
+                for backoff_ms in [0_u64, 250, 750] {
+                    if backoff_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    }
+                    if let Some(tag) = self
+                        .list_tags()
+                        .await?
+                        .into_iter()
+                        .find(|tag| tag.name.to_lowercase() == wanted)
+                    {
+                        return Ok(tag);
+                    }
+                }
             }
             let body = response.text().await.unwrap_or_default();
             return Err(PaperlessError::from_status(status.as_u16(), body).into());

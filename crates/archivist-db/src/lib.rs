@@ -1176,6 +1176,13 @@ pub async fn find_api_token(pool: &DbPool, token_hash: &str) -> Result<Option<Ap
          where token_hash = $1
            and revoked_at is null
            and (expires_at is null or expires_at > now())
+           -- Neutralize tokens whose creator has been disabled: set_user_enabled
+           -- revokes sessions but not API tokens, so without this a disabled
+           -- operator's token kept full access. #271
+           and exists (
+             select 1 from users u
+              where u.id = api_tokens.created_by and u.enabled = true
+           )
         returning id, name, scopes, created_by
         "#,
     )
