@@ -10,12 +10,23 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # Restrict to the ingress-controller (and the monitoring namespace, which
+    # scrapes the token-gated /metrics endpoint) instead of every namespace.
+    # Adjust the namespace names to match your cluster (the defaults assume
+    # ingress-nginx and a `monitoring` namespace); the namespaces must carry
+    # the standard `kubernetes.io/metadata.name` label (on by default in
+    # Kubernetes >= 1.22).
     - from:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: ["ingress-nginx", "monitoring"]
       ports:
         - protocol: TCP
           port: 8080
   egress:
+    # In-cluster DNS.
     - to:
         - namespaceSelector: {}
       ports:
@@ -23,6 +34,7 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # In-cluster services: Postgres, Paperless-ngx, Ollama.
     - to:
         - namespaceSelector: {}
       ports:
@@ -32,5 +44,21 @@ spec:
           port: 8000
         - protocol: TCP
           port: 11434
+    # External HTTPS for cloud LLM providers (api.openai.com /
+    # api.anthropic.com) and an external OIDC issuer or Paperless. A
+    # namespaceSelector only matches in-cluster pods, so the previous 443 rule
+    # never matched the internet and these calls were dropped on any CNI that
+    # enforces NetworkPolicy. ipBlock 0.0.0.0/0 minus the private ranges keeps
+    # external egress while still denying it as an SSRF pivot into the cluster
+    # network.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
         - protocol: TCP
           port: 443
