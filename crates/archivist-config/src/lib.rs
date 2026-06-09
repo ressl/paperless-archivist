@@ -72,6 +72,12 @@ pub struct AppConfig {
     #[arg(long, env = "ARCHIVIST_OIDC_DEFAULT_ROLES", default_value = "viewer")]
     pub oidc_default_roles: String,
 
+    /// Allow linking an OIDC identity onto an existing local account whose
+    /// email equals the token's verified email claim. Off by default: an
+    /// email link permanently grants the OIDC subject that account's roles.
+    #[arg(long, env = "ARCHIVIST_OIDC_ALLOW_EMAIL_LINK", default_value_t = false)]
+    pub oidc_allow_email_link: bool,
+
     #[arg(long, env = "ARCHIVIST_SECRET_KEY")]
     pub secret_key: SecretString,
 

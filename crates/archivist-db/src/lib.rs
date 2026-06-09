@@ -98,10 +98,16 @@ pub struct OidcUserInput<'a> {
     pub provider: &'a str,
     pub subject: &'a str,
     pub username: &'a str,
+    /// Must be the VERIFIED email (token had `email_verified=true`) — it
+    /// drives account linking and gets persisted onto the user row.
     pub email: Option<&'a str>,
     pub disabled_password_hash: &'a str,
     pub roles: &'a [Role],
     pub allow_username_link: bool,
+    /// Gate for the email-match linking branch, mirroring
+    /// `allow_username_link`: linking grants the OIDC subject the matched
+    /// account's roles permanently, so it must be an explicit opt-in.
+    pub allow_email_link: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -645,7 +651,7 @@ pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result
            and external_subject is null
            and (
              ($3::boolean and lower(username) = lower($1))
-             or ($2::text is not null and lower(coalesce(email, '')) = lower($2::text))
+             or ($4::boolean and $2::text is not null and lower(coalesce(email, '')) = lower($2::text))
            )
          order by created_at
          limit 1
@@ -654,6 +660,7 @@ pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result
     .bind(input.username)
     .bind(input.email)
     .bind(input.allow_username_link)
+    .bind(input.allow_email_link)
     .fetch_optional(&mut *tx)
     .await?
     {

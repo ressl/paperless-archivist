@@ -739,6 +739,8 @@ struct OidcIdClaims {
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
+    email_verified: Option<bool>,
+    #[serde(default)]
     preferred_username: Option<String>,
     #[serde(default)]
     at_hash: Option<String>,
@@ -846,7 +848,12 @@ async fn oidc_callback(
     }
 
     let subject = claims.sub.as_str();
-    let email = claims.email.as_deref();
+    // OIDC Core §5.7: the email claim is only trustworthy when the IdP
+    // asserts email_verified=true. An unverified email must not influence
+    // admin-role mapping, account linking, or the derived username —
+    // otherwise an attacker who can set a free-form email at the IdP could
+    // escalate to the allowlisted admin or take over a local account.
+    let email = oidc_verified_email(&claims);
     let username = oidc_username(
         claims
             .preferred_username
@@ -867,6 +874,7 @@ async fn oidc_callback(
             disabled_password_hash: &disabled_password_hash,
             roles: &roles,
             allow_username_link,
+            allow_email_link: state.config.oidc_allow_email_link,
         },
     )
     .await?;
@@ -6335,6 +6343,15 @@ fn safe_return_to(value: Option<&str>) -> Option<String> {
     }
 }
 
+/// The email claim, but only when the IdP asserted `email_verified=true` —
+/// the only condition under which OIDC permits using it for authorization.
+fn oidc_verified_email(claims: &OidcIdClaims) -> Option<&str> {
+    claims
+        .email
+        .as_deref()
+        .filter(|_| claims.email_verified == Some(true))
+}
+
 fn oidc_username(value: &str) -> String {
     let mut username = value
         .trim()
@@ -6660,6 +6677,29 @@ mod tests {
         assert!(is_ollama_cloud("https://OLLAMA.com/"));
         assert!(!is_ollama_cloud("http://ollama:11434"));
         assert!(!is_ollama_cloud("http://localhost:11434"));
+    }
+
+    #[test]
+    fn oidc_email_is_only_used_when_verified() {
+        let mut claims = OidcIdClaims {
+            iss: "https://issuer.example.com".to_owned(),
+            sub: "subject-1".to_owned(),
+            aud: serde_json::Value::String("client".to_owned()),
+            exp: 0,
+            nonce: None,
+            email: Some("admin@example.com".to_owned()),
+            email_verified: Some(true),
+            preferred_username: None,
+            at_hash: None,
+        };
+        assert_eq!(oidc_verified_email(&claims), Some("admin@example.com"));
+
+        claims.email_verified = Some(false);
+        assert_eq!(oidc_verified_email(&claims), None);
+
+        // Absent email_verified must be treated as unverified.
+        claims.email_verified = None;
+        assert_eq!(oidc_verified_email(&claims), None);
     }
 
     #[test]
@@ -7056,6 +7096,7 @@ mod tests {
             oidc_scopes: "openid profile email".to_owned(),
             oidc_admin_users: String::new(),
             oidc_default_roles: "viewer".to_owned(),
+            oidc_allow_email_link: false,
             secret_key: SecretString::from("a 32 byte local secret for tests".to_owned()),
             static_dir: "frontend/dist".to_owned(),
             trust_proxy: false,

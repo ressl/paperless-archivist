@@ -100,6 +100,15 @@ normal Archivist server-side session. Role assignment is controlled by local
 configuration: an admin allowlist receives admin/operator/reviewer/auditor, and
 other new SSO users receive default roles.
 
+The `email` claim is only honored when the token carries
+`email_verified=true` (OIDC Core §5.7); an unverified or absent assertion
+means the email is ignored for admin-allowlist matching, account linking, and
+username derivation. Linking an OIDC identity onto an existing local account
+is gated twice: username-match linking requires the subject to already map to
+the admin allowlist, and email-match linking additionally requires the
+explicit opt-in `ARCHIVIST_OIDC_ALLOW_EMAIL_LINK=true` (default off), because
+a link permanently grants the OIDC subject the matched account's roles.
+
 ## 3. Authorization
 
 Use role-based access control.
