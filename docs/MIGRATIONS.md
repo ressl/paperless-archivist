@@ -65,6 +65,21 @@ When a migration has already run, treat database restore as the rollback path.
 Paperless remains the system of record, so verify any metadata writes with the
 Paperless audit/history available to your deployment.
 
+## Destructive Migration Policy
+
+A migration must not irreversibly delete operator-authored content (prompts,
+settings, mappings). Migration `0028_drop_legacy_prompt_stages.sql` deleted
+customised prompt rows and is the cautionary example. For future schema
+changes that retire such data:
+
+- copy the affected rows into an `_archive` table (or a JSON column) before
+  removing them, or
+- deactivate rather than delete (e.g. an `active = false` flag), so the
+  operator's content is recoverable after an upgrade.
+
+Index/constraint cleanups and pruning of regenerable/operational data
+(snapshots, caches, telemetry) are exempt — those carry no operator content.
+
 ## Migration Smoke Test Details
 
 The ignored Rust integration test lives at

@@ -7337,6 +7337,31 @@ pub async fn apply_security_retention(
         }
     }
 
+    // dashboard_snapshots accumulate one row every ~5 minutes forever (#273).
+    // Prune to the audit retention window in bounded batches, like the OCR
+    // cache above.
+    let mut dashboard_snapshots_deleted: i64 = 0;
+    loop {
+        let deleted = sqlx::query(
+            r#"
+            delete from dashboard_snapshots
+             where ctid in (
+               select ctid from dashboard_snapshots
+                where captured_at < $1
+                limit 5000
+             )
+            "#,
+        )
+        .bind(audit_cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected() as i64;
+        dashboard_snapshots_deleted += deleted;
+        if deleted < 5000 {
+            break;
+        }
+    }
+
     let mut tx = pool.begin().await?;
     let ai_artifacts_deleted = sqlx::query("delete from ai_artifacts where created_at < $1")
         .bind(artifact_cutoff)
@@ -7364,7 +7389,8 @@ pub async fn apply_security_retention(
                 "ai_artifact_retention_days": security.ai_artifact_retention_days,
                 "audit_events_deleted": audit_events_deleted,
                 "ai_artifacts_deleted": ai_artifacts_deleted,
-                "ocr_page_cache_deleted": ocr_page_cache_deleted
+                "ocr_page_cache_deleted": ocr_page_cache_deleted,
+                "dashboard_snapshots_deleted": dashboard_snapshots_deleted
             })),
             outcome: "success".to_owned(),
             error_message: None,
