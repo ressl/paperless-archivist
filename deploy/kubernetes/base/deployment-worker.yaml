@@ -18,6 +18,9 @@ spec:
         app.kubernetes.io/component: worker
     spec:
       serviceAccountName: paperless-archivist
+      # The worker drains in-flight jobs for up to 25s after SIGTERM before
+      # exiting; 60s leaves headroom over the 30s Kubernetes default.
+      terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

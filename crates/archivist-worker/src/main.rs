@@ -208,8 +208,31 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
 
     loop {
         tokio::select! {
-            _ = signal::ctrl_c() => {
-                info!(%worker_id, "worker shutdown requested");
+            _ = shutdown_signal() => {
+                info!(%worker_id, "worker shutdown requested; draining in-flight work");
+                // Stop claiming and give the in-flight tick/drain tasks up to
+                // 25s (inside the deployment's 60s grace period) to settle
+                // their jobs terminally. If something is still mid-LLM-call at
+                // the deadline we exit anyway — its lease expires and another
+                // replica reclaims it, which used to be the fate of EVERY
+                // in-flight job on deploy.
+                let drain_deadline = std::time::Instant::now() + Duration::from_secs(25);
+                while (job_processing_running.load(Ordering::Acquire)
+                    || autopilot_drain_running.load(Ordering::Acquire))
+                    && std::time::Instant::now() < drain_deadline
+                {
+                    sleep(Duration::from_millis(250)).await;
+                }
+                if job_processing_running.load(Ordering::Acquire)
+                    || autopilot_drain_running.load(Ordering::Acquire)
+                {
+                    warn!(
+                        %worker_id,
+                        "drain deadline reached with work still in flight; leases will expire and be reclaimed"
+                    );
+                } else {
+                    info!(%worker_id, "worker drained cleanly");
+                }
                 return Ok(());
             }
             _ = sleep(Duration::from_secs(5)) => {
@@ -1303,6 +1326,26 @@ async fn process_job(
             "stage {} is not directly executable by the worker",
             job.stage
         )),
+    }
+}
+
+/// Resolves on SIGINT (ctrl-c) or SIGTERM. Kubernetes terminates pods with
+/// SIGTERM; the worker previously only listened for SIGINT, so every rollout
+/// ran until SIGKILL and left in-flight jobs to expire their 300s leases,
+/// burning a retry attempt per job.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = signal::ctrl_c().await;
     }
 }
 

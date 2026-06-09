@@ -379,6 +379,14 @@ Worker behavior:
 - writes audit events for job, review, and apply actions
 
 Workers are safe to scale horizontally.
+
+Shutdown: the worker handles both SIGINT and SIGTERM (Kubernetes pod
+termination). On signal it stops claiming new jobs and drains in-flight work
+for up to 25 seconds so jobs finish terminally instead of expiring their
+leases; keep `terminationGracePeriodSeconds` at 60 or higher for the worker
+deployment (the bundled manifest sets 60). If work is still in flight at the
+drain deadline the worker exits anyway and the 300s lease reclaim takes over.
+
 Every job log line includes a trace ID equal to the pipeline run ID, plus job
 ID, document ID, stage, attempt, duration, and failure class. The Dashboard live
 panel shows the same trace ID prefix for active jobs so operators can correlate
