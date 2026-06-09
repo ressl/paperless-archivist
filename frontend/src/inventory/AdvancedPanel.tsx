@@ -1,6 +1,6 @@
 import type { languageOptions } from '../data/worldLanguages';
 import { useI18n } from '../i18n/I18nProvider';
-import { FormField } from '../lib/ui';
+import { CommaListInput, FormField } from '../lib/ui';
 import { RUN_STATUS_OPTIONS, STATUS_OPTIONS, type Filters } from './types';
 
 type AdvancedPanelProps = {
@@ -66,27 +66,15 @@ export function AdvancedPanel({ filters, setFilters, languages }: AdvancedPanelP
         </div>
       </fieldset>
       <FormField label={t('inventory.filter.tags_include')}>
-        <input
-          type="text"
-          value={filters.tags_include.join(', ')}
-          onChange={(event) =>
-            setFilters((f) => ({
-              ...f,
-              tags_include: event.target.value.split(',').map((s) => s.trim()).filter(Boolean),
-            }))
-          }
+        <CommaListInput
+          values={filters.tags_include}
+          onCommit={(tags_include) => setFilters((f) => ({ ...f, tags_include }))}
         />
       </FormField>
       <FormField label={t('inventory.filter.tags_exclude')}>
-        <input
-          type="text"
-          value={filters.tags_exclude.join(', ')}
-          onChange={(event) =>
-            setFilters((f) => ({
-              ...f,
-              tags_exclude: event.target.value.split(',').map((s) => s.trim()).filter(Boolean),
-            }))
-          }
+        <CommaListInput
+          values={filters.tags_exclude}
+          onCommit={(tags_exclude) => setFilters((f) => ({ ...f, tags_exclude }))}
         />
       </FormField>
       <FormField label={t('inventory.filter.language')}>

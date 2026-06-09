@@ -1,9 +1,9 @@
 import { useId } from 'react';
 import type { RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
-import { FormField, Section } from '../../lib/ui';
+import { CommaListInput, FormField, Section } from '../../lib/ui';
 import { workflowModeDescription, workflowModeOptions } from '../../lib/workflow';
-import { optionalPositiveInteger, splitTags } from './helpers';
+import { optionalPositiveInteger } from './helpers';
 
 export function WorkflowProcessingSection({
   value,
@@ -68,18 +68,16 @@ export function WorkflowProcessingSection({
         />
       </FormField>
       <FormField label={t('settings.workflow.include_tags')} htmlFor={ids.include}>
-        <input
-          id={ids.include}
-          value={value.rules.include_tags.join(', ')}
-          onChange={(event) => onChange({ rules: { ...value.rules, include_tags: splitTags(event.target.value) } })}
+        <CommaListInput
+          values={value.rules.include_tags}
+          onCommit={(include_tags) => onChange({ rules: { ...value.rules, include_tags } })}
           placeholder={t('settings.workflow.optional_tags')}
         />
       </FormField>
       <FormField label={t('settings.workflow.exclude_tags')} htmlFor={ids.exclude}>
-        <input
-          id={ids.exclude}
-          value={value.rules.exclude_tags.join(', ')}
-          onChange={(event) => onChange({ rules: { ...value.rules, exclude_tags: splitTags(event.target.value) } })}
+        <CommaListInput
+          values={value.rules.exclude_tags}
+          onCommit={(exclude_tags) => onChange({ rules: { ...value.rules, exclude_tags } })}
           placeholder={t('settings.workflow.optional_tags')}
         />
       </FormField>

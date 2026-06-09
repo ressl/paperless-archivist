@@ -70,14 +70,17 @@ export function Reviews({ setError, setSuccess }: { setError: (error: string | n
 
   const autoFixAll = async () => {
     if (items.length === 0) return;
-    const preview = await api.autoFixReviewPreview(items.length);
-    const confirmed = window.confirm(
-      t('review.auto_fix_confirm', {
-        count: preview.total_pending,
-      })
-    );
-    if (!confirmed) return;
+    // Run the preview INSIDE the error wrapper. Previously it was awaited
+    // before run(), so a failed preview escaped as an unhandled rejection —
+    // no banner, no busy reset, the button just did nothing. (#266)
     await run(setBusy, setError, async () => {
+      const preview = await api.autoFixReviewPreview(items.length);
+      const confirmed = window.confirm(
+        t('review.auto_fix_confirm', {
+          count: preview.total_pending,
+        })
+      );
+      if (!confirmed) return;
       const result = await api.autoFixReviewBulk(items.length);
       setSelected([]);
       await load();

@@ -13,7 +13,7 @@ import {
   Shield,
   UserPlus
 } from 'lucide-react';
-import { api, Me, OidcConfig } from './api/client';
+import { api, Me, OidcConfig, setUnauthorizedHandler } from './api/client';
 import { buildInfo, buildInfoLabel } from './buildInfo';
 import { useI18n } from './i18n/I18nProvider';
 import { ErrorBoundary } from './lib/ErrorBoundary';
@@ -43,6 +43,16 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [debugConsoleEnabled, setDebugConsoleEnabled] = useState(false);
+
+  useEffect(() => {
+    // When any request sees a 401 (expired session), drop back to the login
+    // screen; this also unmounts the pollers so they stop spamming errors.
+    setUnauthorizedHandler(() => {
+      setMe(null);
+      setError(null);
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   useEffect(() => {
     api

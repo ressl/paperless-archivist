@@ -96,19 +96,38 @@ export function useDashboardStats(
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [counts, setCounts] = useState<Counts>(DEFAULT_COUNTS);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
+  // Monotonic request id so a slow response for an old range can't overwrite
+  // the data for a newer one (out-of-order guard).
+  const requestIdRef = useRef(0);
 
   const reload = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     try {
       const data = await api.dashboard(range);
+      if (requestId !== requestIdRef.current) return;
       setCounts(data.counts);
       setStats(data.stats);
       setLastLoadedAt(new Date().toISOString());
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       setError(localizedErrorMessage(err, t));
     }
   }, [range, setError, t]);
 
   useVisibleInterval(reload, DASHBOARD_REFRESH_INTERVAL_MS);
+
+  // Refetch immediately when the range changes. useVisibleInterval only fires
+  // on mount and on its interval, so without this a range switch shows the
+  // previous range's data (under the new label) for up to 30s. The initial
+  // mount fetch is already done by useVisibleInterval, so skip the first run.
+  const isFirstRangeEffect = useRef(true);
+  useEffect(() => {
+    if (isFirstRangeEffect.current) {
+      isFirstRangeEffect.current = false;
+      return;
+    }
+    void reload();
+  }, [reload]);
 
   const updateStats = useCallback(
     (updater: (current: DashboardStats | null) => DashboardStats | null) => {

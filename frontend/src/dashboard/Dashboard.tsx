@@ -164,9 +164,22 @@ export function Dashboard({
 
   // Wire the stage-matrix stage names to cross-tab navigation. When no
   // `onNavigate` is provided the matrix renders plain labels instead of dead
-  // links (issue #230).
+  // links (issue #230). Map the stage to the inventory status filter the
+  // Inventory page actually parses — `?stage=` was never read, so the link
+  // opened an unfiltered list (#267). Pre-select the actionable statuses
+  // (in-flight or stuck at that stage).
   const handleStageSelect = useMemo(
-    () => (onNavigate ? (stage: string) => onNavigate('inventory', `?stage=${stage}`) : undefined),
+    () =>
+      onNavigate
+        ? (stage: string) => {
+            const statusKey =
+              stage === 'ocr' ? 'ocr_status' : stage === 'metadata' ? 'metadata_status' : null;
+            const search = statusKey
+              ? `?${statusKey}=queued,running,failed,waiting_review`
+              : '';
+            onNavigate('inventory', search);
+          }
+        : undefined,
     [onNavigate]
   );
 

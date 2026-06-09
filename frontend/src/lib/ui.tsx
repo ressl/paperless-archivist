@@ -2,6 +2,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   type ButtonHTMLAttributes,
   type ReactNode,
   type RefObject
@@ -51,6 +52,51 @@ export function FormField({ label, help, htmlFor, children }: { label: string; h
       {children}
       {help && <span className="form-field-help">{help}</span>}
     </label>
+  );
+}
+
+/**
+ * Text input for a comma-separated list of values. Holds the raw string while
+ * the user types and only parses on blur, so separators and spaces are
+ * actually typeable — a controlled `value={list.join(', ')}` that re-parses on
+ * every keystroke makes commas vanish (you can only paste). Commits the parsed,
+ * trimmed, non-empty values to `onCommit`. (#265)
+ */
+export function CommaListInput({
+  values,
+  onCommit,
+  placeholder,
+  className
+}: {
+  values: string[];
+  onCommit: (values: string[]) => void;
+  placeholder?: string;
+  className?: string;
+}) {
+  const joined = values.join(', ');
+  const [raw, setRaw] = useState(joined);
+  // Resync when the committed value changes externally (e.g. a filter reset).
+  // During typing the parent value is unchanged, so this does not clobber input.
+  useEffect(() => {
+    setRaw(joined);
+  }, [joined]);
+  const commit = () => {
+    onCommit(
+      raw
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean)
+    );
+  };
+  return (
+    <input
+      type="text"
+      className={className}
+      placeholder={placeholder}
+      value={raw}
+      onChange={(event) => setRaw(event.target.value)}
+      onBlur={commit}
+    />
   );
 }
 

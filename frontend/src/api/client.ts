@@ -775,6 +775,15 @@ function csrfToken(): string | undefined {
   return match ? decodeURIComponent(match.slice('pa_csrf='.length)) : undefined;
 }
 
+// Invoked whenever any request gets a 401, so the app can drop back to the
+// login screen instead of every poller (dashboard, debug console) re-raising
+// "Unauthorized" into the error banner forever after the session expires.
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has('content-type')) {
@@ -797,6 +806,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (body.error) message = body.error;
     } catch {
       // ignore non-JSON errors
+    }
+    // A 401 on any call but the login attempts themselves means the session
+    // expired; notify the app so it returns to the login screen.
+    if (response.status === 401 && !path.startsWith('/api/auth/')) {
+      unauthorizedHandler?.();
     }
     throw new Error(message);
   }

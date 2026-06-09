@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useEffect, useId, useState } from 'react';
 import type { RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
 import { FormField, Section } from '../../lib/ui';
@@ -17,6 +17,14 @@ export function FieldsSection({
     confidence: useId(),
     mappings: useId()
   };
+  // Hold the raw textarea text while editing and only parse on blur. Parsing
+  // on every keystroke (parse -> serialize round-trip) swallowed Enter and
+  // blank lines, so a new mapping line could not be started by keyboard. (#265)
+  const serializedMappings = serializeFieldMappings(value.mappings);
+  const [mappingsDraft, setMappingsDraft] = useState(serializedMappings);
+  useEffect(() => {
+    setMappingsDraft(serializedMappings);
+  }, [serializedMappings]);
   return (
     <Section title={t('settings.workflow.section.fields')}>
       <FormField label={t('settings.workflow.max_fields')} htmlFor={ids.maxFields}>
@@ -48,8 +56,9 @@ export function FieldsSection({
         <textarea
           id={ids.mappings}
           rows={5}
-          value={serializeFieldMappings(value.mappings)}
-          onChange={(event) => onChange({ mappings: parseFieldMappings(event.target.value) })}
+          value={mappingsDraft}
+          onChange={(event) => setMappingsDraft(event.target.value)}
+          onBlur={() => onChange({ mappings: parseFieldMappings(mappingsDraft) })}
           placeholder={t('settings.workflow.field_mappings_placeholder')}
         />
       </FormField>
