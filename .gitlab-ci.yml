@@ -7,9 +7,14 @@ stages:
 variables:
   RUST_IMAGE: rust:1.96-bookworm
   NODE_IMAGE: node:26-bookworm
+  GITLEAKS_VERSION: v8.30.1
+  GITLEAKS_CONFIG: policy/gitleaks.toml
+  # CONTAINER_* parameterise the release image build, which is performed
+  # manually (tag + manual image build) rather than in this pipeline — see
+  # docs/RELEASE_CHECKLIST.md. They are read by the group-level container-build
+  # template when present; no job in THIS file consumes them.
   CONTAINER_CONTEXT: "."
   CONTAINER_DOCKERFILE: "Dockerfile"
-  GITLEAKS_CONFIG: policy/gitleaks.toml
 
 .default_retry:
   retry:
@@ -126,3 +131,19 @@ frontend:audit:
     - .default_retry
   script:
     - pnpm audit --audit-level high
+
+# Enforce secret scanning in-pipeline using policy/gitleaks.toml. Previously
+# GITLEAKS_CONFIG was declared but no job consumed it, so the policy was only
+# enforced if a group-level template happened to inject a gitleaks job. This
+# job makes the scan explicit and self-contained (#270). GIT_DEPTH: 0 fetches
+# full history so gitleaks scans every commit, not just the tip.
+secret-scan:gitleaks:
+  stage: scan
+  image:
+    name: "zricethezav/gitleaks:$GITLEAKS_VERSION"
+    entrypoint: [""]
+  extends: .default_retry
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - gitleaks detect --source . --config "$GITLEAKS_CONFIG" --redact --verbose
