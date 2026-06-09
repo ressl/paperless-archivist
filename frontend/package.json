@@ -11,7 +11,7 @@
     "test:a11y": "vitest run --reporter=verbose",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
-    "dev": "vite --host 0.0.0.0"
+    "dev": "vite"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^6.0.0",

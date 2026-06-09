@@ -37,6 +37,9 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [diagnoseDocumentId, setDiagnoseDocumentId] = useState<number | null>(null);
+  // Mirrors diagnoseDocumentId so the async trace fetch can detect that the
+  // user opened a different document while it was in flight. (#272)
+  const diagnoseDocumentIdRef = useRef<number | null>(null);
   const [diagnoseTrace, setDiagnoseTrace] = useState<MetadataTrace | null>(null);
   const [diagnoseBusy, setDiagnoseBusy] = useState(false);
   const [diagnoseMissing, setDiagnoseMissing] = useState(false);
@@ -183,14 +186,19 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
 
   const openDiagnose = useCallback(
     async (documentId: number) => {
+      diagnoseDocumentIdRef.current = documentId;
       setDiagnoseDocumentId(documentId);
       setDiagnoseTrace(null);
       setDiagnoseMissing(false);
       setDiagnoseBusy(true);
       try {
         const trace = await api.inventoryMetadataTrace(documentId);
+        // Opening diagnose for B while A's slower trace is still in flight must
+        // not render A's trace under B's header. (#272)
+        if (diagnoseDocumentIdRef.current !== documentId) return;
         setDiagnoseTrace(trace);
       } catch (err) {
+        if (diagnoseDocumentIdRef.current !== documentId) return;
         const message = err instanceof Error ? err.message : '';
         if (message.toLowerCase().includes('no metadata run')) {
           setDiagnoseMissing(true);
@@ -199,13 +207,16 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
           setDiagnoseDocumentId(null);
         }
       } finally {
-        setDiagnoseBusy(false);
+        if (diagnoseDocumentIdRef.current === documentId) {
+          setDiagnoseBusy(false);
+        }
       }
     },
     [setError, t]
   );
 
   const closeDiagnose = useCallback(() => {
+    diagnoseDocumentIdRef.current = null;
     setDiagnoseDocumentId(null);
     setDiagnoseTrace(null);
     setDiagnoseMissing(false);

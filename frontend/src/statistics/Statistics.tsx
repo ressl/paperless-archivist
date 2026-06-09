@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -43,7 +43,14 @@ const BUCKET_LABEL_KEYS: Record<StatisticsBucket, MessageKey> = {
 const ALL_TIME_FROM = '2000-01-01';
 
 function isoDay(date: Date): string {
-  return date.toISOString().slice(0, 10);
+  // Local calendar day, not UTC: toISOString() returns the UTC date, so for a
+  // CET/CEST user shortly after local midnight `isoDay(new Date())` was
+  // yesterday — excluding today's data and breaking the custom-range check.
+  // (#272)
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function presetFrom(preset: RangePreset): string {
@@ -71,16 +78,26 @@ export function Statistics({ setError }: { setError: (error: string | null) => v
   const [data, setData] = useState<StatisticsResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Out-of-order guard: a slow "all" response must not land after a fast
+  // "24h" one and overwrite it. (#272)
+  const requestIdRef = useRef(0);
   const load = useCallback(() => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     return api
       .statistics({ from, to, bucket })
       .then((result) => {
+        if (requestId !== requestIdRef.current) return;
         setData(result);
         setError(null);
       })
-      .catch((err) => setError(localizedErrorMessage(err, t)))
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        if (requestId !== requestIdRef.current) return;
+        setError(localizedErrorMessage(err, t));
+      })
+      .finally(() => {
+        if (requestId === requestIdRef.current) setLoading(false);
+      });
   }, [from, to, bucket, setError, t]);
 
   useEffect(() => {

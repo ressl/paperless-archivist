@@ -138,7 +138,7 @@ export function App() {
             <div className="nav-group">
               <span className="nav-group-label">{t('nav.group.system')}</span>
               {canReadAudit && <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => selectTab('audit')} />}
-              {debugConsoleEnabled && <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => selectTab('debug')} />}
+              {debugConsoleEnabled && canReadAudit && <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => selectTab('debug')} />}
             </div>
           )}
         </nav>
@@ -152,8 +152,14 @@ export function App() {
           className="ghost-button"
           title={t('nav.logout')}
           onClick={async () => {
-            await api.logout();
-            setMe(null);
+            // Clear the session client-side regardless of the request outcome:
+            // cookie invalidation is server-side, and a failed logout call
+            // shouldn't strand the user in a logged-in UI. (#272)
+            try {
+              await api.logout();
+            } finally {
+              setMe(null);
+            }
           }}
         >
           <LogOut size={18} /> {t('nav.logout')}
@@ -255,7 +261,7 @@ export function App() {
             </Suspense>
           </ErrorBoundary>
         )}
-        {tab === 'debug' && debugConsoleEnabled && (
+        {tab === 'debug' && debugConsoleEnabled && canReadAudit && (
           <ErrorBoundary>
             <Suspense fallback={lazyFallback}>
               <DebugConsole setError={setError} />
@@ -270,7 +276,7 @@ export function App() {
 
 function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   const { t } = useI18n();
-  const [username, setUsername] = useState('admin');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [oidc, setOidc] = useState<OidcConfig | null>(null);
   const [error, setError] = useState<string | null>(null);

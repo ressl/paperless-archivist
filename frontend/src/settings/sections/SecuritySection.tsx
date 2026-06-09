@@ -2,6 +2,7 @@ import { useId } from 'react';
 import type { RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
 import { FormField, Section } from '../../lib/ui';
+import { clampInteger } from './helpers';
 
 export function SecuritySection({
   value,
@@ -27,7 +28,7 @@ export function SecuritySection({
           min="30"
           max="3650"
           value={value.audit_retention_days}
-          onChange={(event) => onChange({ audit_retention_days: Number(event.target.value) })}
+          onChange={(event) => onChange({ audit_retention_days: clampInteger(event.target.value, 30, 3650, 30) })}
         />
       </FormField>
       <FormField label={t('settings.security.ai_artifact_retention')} htmlFor={ids.artifactRetention}>
@@ -37,7 +38,7 @@ export function SecuritySection({
           min="1"
           max="365"
           value={value.ai_artifact_retention_days}
-          onChange={(event) => onChange({ ai_artifact_retention_days: Number(event.target.value) })}
+          onChange={(event) => onChange({ ai_artifact_retention_days: clampInteger(event.target.value, 1, 365, 1) })}
         />
       </FormField>
       <FormField
@@ -72,7 +73,7 @@ export function SecuritySection({
           min="1"
           max="365"
           value={value.api_token_default_ttl_days}
-          onChange={(event) => onChange({ api_token_default_ttl_days: Number(event.target.value) })}
+          onChange={(event) => onChange({ api_token_default_ttl_days: clampInteger(event.target.value, 1, 365, 1) })}
         />
       </FormField>
       <FormField label={t('settings.security.token_max_ttl')} htmlFor={ids.maxTtl}>
@@ -82,7 +83,7 @@ export function SecuritySection({
           min="1"
           max="3650"
           value={value.api_token_max_ttl_days}
-          onChange={(event) => onChange({ api_token_max_ttl_days: Number(event.target.value) })}
+          onChange={(event) => onChange({ api_token_max_ttl_days: clampInteger(event.target.value, 1, 3650, 1) })}
         />
       </FormField>
     </Section>

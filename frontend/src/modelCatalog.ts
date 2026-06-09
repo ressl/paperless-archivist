@@ -23,7 +23,10 @@ const ollamaCloudProvider: AiProvider = {
   default_text_model: 'glm-5.1',
   default_vision_model: 'qwen3-vl:235b-instruct',
   secret_id: null,
-  enabled: true
+  // Injected as a UI suggestion only — must stay disabled so merely opening
+  // Settings doesn't persist an enabled, unconfigured external provider on the
+  // next save. The operator enables it explicitly after adding a key. (#272)
+  enabled: false
 };
 
 const localOllamaTextModels: ModelOption[] = [

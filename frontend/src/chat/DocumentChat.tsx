@@ -28,12 +28,26 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
   }, []);
 
   useEffect(() => {
-    if (activeSessionId) {
-      void loadMessages(activeSessionId);
-    } else {
+    if (!activeSessionId) {
       setMessages([]);
+      return;
     }
-  }, [activeSessionId]);
+    // Guard against out-of-order responses when switching sessions quickly:
+    // a slow fetch for a previously-selected session must not overwrite the
+    // now-active session's messages. (#272)
+    let active = true;
+    api
+      .chatMessages(activeSessionId)
+      .then((data) => {
+        if (active) setMessages(data.items);
+      })
+      .catch((err) => {
+        if (active) setError(localizedErrorMessage(err, t));
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeSessionId, t]);
 
   const createSession = async () => {
     const created = await api.createChatSession(sessionTitle);
