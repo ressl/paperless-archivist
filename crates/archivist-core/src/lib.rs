@@ -2737,14 +2737,34 @@ fn coerce_integer_value(value: &serde_json::Value) -> Option<serde_json::Value> 
             }
         }
         Value::String(text) => {
-            // Strip spaces and thousands separators ('.' / ',' / ' '), then
-            // require the remainder to be a clean integer — "1/2013" keeps its
-            // slash and fails, while " 4.466 " collapses to 4466.
-            let stripped: String = text
+            // Spaces and apostrophes only ever group thousands.
+            let cleaned: String = text
+                .trim()
                 .chars()
-                .filter(|character| !matches!(character, '.' | ',' | ' '))
+                .filter(|character| !matches!(character, ' ' | '\'' | '\u{2019}'))
                 .collect();
-            stripped.parse::<i64>().ok().map(Value::from)
+            static PLAIN_RE: LazyLock<Regex> =
+                LazyLock::new(|| Regex::new(r"^-?\d+$").expect("valid integer regex"));
+            // '.'/',' are accepted only as full 3-digit grouping ("4.466",
+            // "1.234.567"). A trailing 1-2 digit group is a decimal separator
+            // ("12.5", "3.14") and must reject instead of being silently
+            // stripped into a different number (12.5 used to become 125).
+            static GROUPED_RE: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r"^-?\d{1,3}(?:[.,]\d{3})+$").expect("valid grouped integer regex")
+            });
+            if PLAIN_RE.is_match(&cleaned) {
+                cleaned.parse::<i64>().ok().map(Value::from)
+            } else if GROUPED_RE.is_match(&cleaned) {
+                cleaned
+                    .chars()
+                    .filter(|character| !matches!(character, '.' | ','))
+                    .collect::<String>()
+                    .parse::<i64>()
+                    .ok()
+                    .map(Value::from)
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -4102,6 +4122,28 @@ mod tests {
         assert_eq!(
             coerce_custom_field_value(Some("integer"), &json!(" 4.466 ")),
             Some(Value::from(4466_i64))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!("1.234.567")),
+            Some(Value::from(1_234_567_i64))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!("-7")),
+            Some(Value::from(-7_i64))
+        );
+        // Decimal-looking strings reject instead of being mangled ("12.5"
+        // used to become 125).
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!("12.5")),
+            None
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!("3.14")),
+            None
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("integer"), &json!("1,5")),
+            None
         );
         // Plain JSON numbers pass through; fractional numbers are rejected.
         assert_eq!(

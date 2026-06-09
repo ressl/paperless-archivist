@@ -2105,7 +2105,9 @@ async fn process_metadata(
     {
         match validate_title_suggestion(
             title.clone(),
-            160,
+            // Paperless-ngx Document.title is CharField(max_length=128);
+            // anything longer passes validation here but 400s on PATCH.
+            128,
             settings.effective_tuning().title_confidence_threshold,
         ) {
             Ok(valid) => {
