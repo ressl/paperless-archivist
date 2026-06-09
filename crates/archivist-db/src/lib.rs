@@ -7060,12 +7060,15 @@ async fn append_audit_tx(
     sqlx::query("select pg_advisory_xact_lock(hashtext('paperless_archivist_audit_events'))")
         .execute(&mut **tx)
         .await?;
+    // Order by chain_position (a sequence assigned under this same advisory
+    // lock), not created_at: the writing process's wall clock is unreliable
+    // across pods, but chain_position monotonically follows append order. #254.
     let prev_event_hash: Option<String> = sqlx::query(
         r#"
         select event_hash
           from audit_events
          where event_hash is not null
-         order by created_at desc, id desc
+         order by chain_position desc
          limit 1
         "#,
     )
@@ -7186,7 +7189,7 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
                prev_event_hash, event_hash
           from audit_events
          where event_hash is not null
-         order by created_at asc, id asc
+         order by chain_position asc
         "#,
     )
     .fetch(pool);
