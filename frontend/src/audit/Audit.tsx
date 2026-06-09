@@ -67,7 +67,8 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
           <p>
             {t('audit.retention_summary', {
               artifacts: formatNumber(retentionResult.ai_artifacts_deleted),
-              events: formatNumber(retentionResult.audit_events_deleted)
+              events: formatNumber(retentionResult.audit_events_deleted),
+              ocr_pages: formatNumber(retentionResult.ocr_page_cache_deleted)
             })}
           </p>
         </div>

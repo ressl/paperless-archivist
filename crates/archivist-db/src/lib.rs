@@ -210,6 +210,7 @@ pub struct AuditIntegrityReport {
 pub struct RetentionResult {
     pub audit_events_deleted: i64,
     pub ai_artifacts_deleted: i64,
+    pub ocr_page_cache_deleted: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7209,6 +7210,32 @@ pub async fn apply_security_retention(
     let now = Utc::now();
     let artifact_cutoff = now - ChronoDuration::days(security.ai_artifact_retention_days);
     let audit_cutoff = now - ChronoDuration::days(security.audit_retention_days);
+
+    // ocr_page_cache holds the full OCR text of every processed page and must
+    // not outlive the artifact retention. Deleted in bounded batches outside
+    // the audit transaction so a years-old backlog can't hold one giant lock.
+    let mut ocr_page_cache_deleted: i64 = 0;
+    loop {
+        let deleted = sqlx::query(
+            r#"
+            delete from ocr_page_cache
+             where ctid in (
+               select ctid from ocr_page_cache
+                where created_at < $1
+                limit 5000
+             )
+            "#,
+        )
+        .bind(artifact_cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected() as i64;
+        ocr_page_cache_deleted += deleted;
+        if deleted < 5000 {
+            break;
+        }
+    }
+
     let mut tx = pool.begin().await?;
     let ai_artifacts_deleted = sqlx::query("delete from ai_artifacts where created_at < $1")
         .bind(artifact_cutoff)
@@ -7235,7 +7262,8 @@ pub async fn apply_security_retention(
                 "audit_retention_days": security.audit_retention_days,
                 "ai_artifact_retention_days": security.ai_artifact_retention_days,
                 "audit_events_deleted": audit_events_deleted,
-                "ai_artifacts_deleted": ai_artifacts_deleted
+                "ai_artifacts_deleted": ai_artifacts_deleted,
+                "ocr_page_cache_deleted": ocr_page_cache_deleted
             })),
             outcome: "success".to_owned(),
             error_message: None,
@@ -7249,6 +7277,7 @@ pub async fn apply_security_retention(
     Ok(RetentionResult {
         audit_events_deleted,
         ai_artifacts_deleted,
+        ocr_page_cache_deleted,
     })
 }
 

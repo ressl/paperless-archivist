@@ -640,6 +640,7 @@ export type AuditIntegrityReport = {
 export type RetentionResult = {
   audit_events_deleted: number;
   ai_artifacts_deleted: number;
+  ocr_page_cache_deleted: number;
 };
 
 export type Prompt = {

@@ -713,10 +713,11 @@ components:
         broken_reason: { type: [string, "null"] }
     RetentionResult:
       type: object
-      required: [audit_events_deleted, ai_artifacts_deleted]
+      required: [audit_events_deleted, ai_artifacts_deleted, ocr_page_cache_deleted]
       properties:
         audit_events_deleted: { type: integer, format: int64 }
         ai_artifacts_deleted: { type: integer, format: int64 }
+        ocr_page_cache_deleted: { type: integer, format: int64 }
     RecoveryCandidate:
       type: object
       additionalProperties: false

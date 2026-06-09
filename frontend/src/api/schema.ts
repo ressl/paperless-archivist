@@ -2825,6 +2825,8 @@ export interface components {
             audit_events_deleted: number;
             /** Format: int64 */
             ai_artifacts_deleted: number;
+            /** Format: int64 */
+            ocr_page_cache_deleted: number;
         };
         RecoveryCandidate: {
             /** Format: uuid */
