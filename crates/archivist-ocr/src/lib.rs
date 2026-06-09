@@ -10,6 +10,14 @@ const PDF_RENDER_DPI: u16 = 120;
 const PDF_RENDER_BASE_BUDGET: Duration = Duration::from_secs(30);
 /// Additional budget granted per requested page to allow large documents to render.
 const PDF_RENDER_PER_PAGE_BUDGET: Duration = Duration::from_secs(10);
+/// Per-page ceiling on a rendered PNG. A page with a pathologically large
+/// MediaBox renders to a huge raster at 120 DPI; the file size is checked from
+/// metadata before it is read into memory, so an oversize page is rejected
+/// rather than buffered. A normal A4 page at 120 DPI is well under 5 MB.
+const MAX_RENDERED_PAGE_BYTES: u64 = 50 * 1024 * 1024;
+/// Ceiling on the total rendered bytes held in memory across all pages of one
+/// document, bounding peak memory under concurrent OCR jobs.
+const MAX_RENDERED_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
@@ -100,12 +108,17 @@ async fn render_pdf_with_pdftoppm(
     }
 
     let mut pages = Vec::new();
+    let mut total_bytes: u64 = 0;
     let mut entries = tokio::fs::read_dir(tempdir.path())
         .await
         .context("read OCR temp directory")?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) == Some("png") {
+            // Check the size from metadata BEFORE reading, so an oversize
+            // raster is rejected instead of loaded into memory.
+            let len = entry.metadata().await?.len();
+            total_bytes = accumulate_rendered_page_size(total_bytes, len)?;
             let bytes = tokio::fs::read(&path).await?;
             pages.push(RenderedPage {
                 path,
@@ -121,6 +134,25 @@ async fn render_pdf_with_pdftoppm(
         "rendered PDF pages for OCR"
     );
     Ok(pages)
+}
+
+/// Enforce the per-page and running-total rendered-byte ceilings, returning
+/// the updated running total or an error naming the breached cap. Pulled out
+/// of the render loop so the bounds logic is unit-testable without rendering a
+/// pathological PDF. #256.
+fn accumulate_rendered_page_size(running_total: u64, page_len: u64) -> Result<u64> {
+    if page_len > MAX_RENDERED_PAGE_BYTES {
+        return Err(anyhow!(
+            "rendered OCR page is {page_len} bytes, exceeding the {MAX_RENDERED_PAGE_BYTES}-byte per-page cap"
+        ));
+    }
+    let total = running_total.saturating_add(page_len);
+    if total > MAX_RENDERED_TOTAL_BYTES {
+        return Err(anyhow!(
+            "rendered OCR pages exceed the {MAX_RENDERED_TOTAL_BYTES}-byte total cap"
+        ));
+    }
+    Ok(total)
 }
 
 pub fn normalize_ocr_pages(page_texts: &[String]) -> String {
@@ -214,5 +246,21 @@ mod tests {
     fn strip_code_fences_is_noop_on_clean_text() {
         let page = "Use the `--flag` switch to enable it.\nSecond line.";
         assert_eq!(strip_code_fences(page), page);
+    }
+
+    #[test]
+    fn rendered_page_size_caps_enforced() {
+        // Normal pages accumulate.
+        let total = accumulate_rendered_page_size(0, 4 * 1024 * 1024).unwrap();
+        assert_eq!(total, 4 * 1024 * 1024);
+
+        // A single oversize page is rejected (per-page cap).
+        assert!(accumulate_rendered_page_size(0, MAX_RENDERED_PAGE_BYTES + 1).is_err());
+
+        // Many in-cap pages that together exceed the total cap are rejected.
+        assert!(
+            accumulate_rendered_page_size(MAX_RENDERED_TOTAL_BYTES, 1).is_err(),
+            "running total over the cap must error"
+        );
     }
 }

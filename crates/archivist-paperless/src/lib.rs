@@ -116,6 +116,24 @@ impl From<reqwest::Error> for PaperlessError {
 /// needs considerably more headroom before it should be considered transient.
 const DOWNLOAD_TIMEOUT_MULTIPLIER: u32 = 10;
 
+/// Hard ceiling on the size of a downloaded original. The body is streamed and
+/// aborted once this is exceeded so a malicious or accidentally huge document
+/// cannot exhaust worker memory. 250 MB comfortably covers real scanned PDFs.
+const MAX_DOWNLOAD_BYTES: u64 = 250 * 1024 * 1024;
+
+/// Accumulate a streamed download chunk against the byte cap, returning the
+/// updated running total or an error. Extracted so the bound is unit-testable
+/// without a 250 MB transfer. #256.
+fn accumulate_download_size(running_total: u64, chunk_len: u64, cap: u64) -> Result<u64> {
+    let total = running_total.saturating_add(chunk_len);
+    if total > cap {
+        return Err(anyhow!(
+            "Paperless original exceeds the {cap}-byte download cap"
+        ));
+    }
+    Ok(total)
+}
+
 #[derive(Clone)]
 pub struct PaperlessClient {
     base_url: Url,
@@ -238,11 +256,24 @@ impl PaperlessClient {
             let body = response.text().await.unwrap_or_default();
             return Err(PaperlessError::from_status(status.as_u16(), body).into());
         }
-        response
-            .bytes()
-            .await
-            .map_err(PaperlessError::from)
-            .map_err(Into::into)
+        // Reject early on an advertised oversize body, then stream and enforce
+        // the cap as bytes arrive (Content-Length may be absent or lie), so we
+        // never buffer an unbounded original in memory.
+        if let Some(len) = response.content_length()
+            && len > MAX_DOWNLOAD_BYTES
+        {
+            return Err(anyhow!(
+                "Paperless original is {len} bytes, exceeding the {MAX_DOWNLOAD_BYTES}-byte download cap"
+            ));
+        }
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut total: u64 = 0;
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await.map_err(PaperlessError::from)? {
+            total = accumulate_download_size(total, chunk.len() as u64, MAX_DOWNLOAD_BYTES)?;
+            buffer.extend_from_slice(&chunk);
+        }
+        Ok(Bytes::from(buffer))
     }
 
     pub async fn patch_document(
@@ -498,6 +529,19 @@ pub struct PaperlessDocumentDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_size_accumulation_enforces_cap() {
+        // Under the cap accumulates.
+        assert_eq!(accumulate_download_size(0, 100, 1000).unwrap(), 100);
+        assert_eq!(accumulate_download_size(900, 100, 1000).unwrap(), 1000);
+        // The chunk that tips over the cap errors.
+        assert!(accumulate_download_size(1000, 1, 1000).is_err());
+        let message = accumulate_download_size(0, 2000, 1000)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("download cap"), "got: {message}");
+    }
 
     #[test]
     fn gateway_404_is_transient() {

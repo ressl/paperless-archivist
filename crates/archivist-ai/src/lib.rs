@@ -698,7 +698,13 @@ impl TextProvider for OllamaClient {
 impl VisionProvider for OllamaClient {
     async fn vision(&self, request: VisionRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let payload = build_ollama_vision_payload(&request);
+        let model = request.model.clone();
+        // Base64-encoding multi-MB page images is CPU-bound; run it on the
+        // blocking pool so it doesn't stall the async runtime (and the
+        // worker's tick/heartbeat loop) under concurrent OCR. #256.
+        let payload = tokio::task::spawn_blocking(move || build_ollama_vision_payload(&request))
+            .await
+            .context("encode Ollama vision payload")?;
         let response = self
             .client
             .post(format!("{}/api/chat", self.base_url))
@@ -723,7 +729,7 @@ impl VisionProvider for OllamaClient {
             .to_owned();
         Ok(AiResponse {
             provider: self.provider_name.clone(),
-            model: request.model,
+            model,
             text,
             raw_response: raw,
             duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
@@ -828,26 +834,32 @@ impl TextProvider for OpenAiCompatibleClient {
 impl VisionProvider for OpenAiCompatibleClient {
     async fn vision(&self, request: VisionRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let mut content = vec![json!({ "type": "text", "text": request.prompt })];
-        for image in &request.images {
-            content.push(json!({
-                "type": "image_url",
-                "image_url": {
-                    "url": format!(
-                        "data:{};base64,{}",
-                        image.mime_type,
-                        BASE64.encode(&image.bytes)
-                    )
-                }
-            }));
-        }
-        let payload = json!({
-            "model": request.model,
-            "temperature": request.temperature,
-            "messages": [
-                { "role": "user", "content": content }
-            ]
-        });
+        let model = request.model.clone();
+        // Base64-encode page images off the async runtime; see Ollama vision. #256.
+        let payload = tokio::task::spawn_blocking(move || {
+            let mut content = vec![json!({ "type": "text", "text": request.prompt })];
+            for image in &request.images {
+                content.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!(
+                            "data:{};base64,{}",
+                            image.mime_type,
+                            BASE64.encode(&image.bytes)
+                        )
+                    }
+                }));
+            }
+            json!({
+                "model": request.model,
+                "temperature": request.temperature,
+                "messages": [
+                    { "role": "user", "content": content }
+                ]
+            })
+        })
+        .await
+        .context("encode OpenAI-compatible vision payload")?;
         let response = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
@@ -877,7 +889,7 @@ impl VisionProvider for OpenAiCompatibleClient {
             .to_owned();
         Ok(AiResponse {
             provider: self.provider_name.clone(),
-            model: request.model,
+            model,
             text,
             raw_response: raw,
             duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
@@ -1156,26 +1168,32 @@ impl TextProvider for AnthropicClient {
 impl VisionProvider for AnthropicClient {
     async fn vision(&self, request: VisionRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let mut content = vec![json!({ "type": "text", "text": request.prompt })];
-        for image in &request.images {
-            content.push(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": image.mime_type,
-                    "data": BASE64.encode(&image.bytes)
-                }
-            }));
-        }
-        let payload = json!({
-            "model": request.model,
-            "max_tokens": 4096,
-            "temperature": request.temperature,
-            "messages": [
-                { "role": "user", "content": content }
-            ]
-        });
-        self.send_messages(payload, request.model, started).await
+        let model = request.model.clone();
+        // Base64-encode page images off the async runtime; see Ollama vision. #256.
+        let payload = tokio::task::spawn_blocking(move || {
+            let mut content = vec![json!({ "type": "text", "text": request.prompt })];
+            for image in &request.images {
+                content.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.mime_type,
+                        "data": BASE64.encode(&image.bytes)
+                    }
+                }));
+            }
+            json!({
+                "model": request.model,
+                "max_tokens": 4096,
+                "temperature": request.temperature,
+                "messages": [
+                    { "role": "user", "content": content }
+                ]
+            })
+        })
+        .await
+        .context("encode Anthropic vision payload")?;
+        self.send_messages(payload, model, started).await
     }
 }
 
