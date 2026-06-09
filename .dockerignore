@@ -2,6 +2,14 @@ target
 frontend/node_modules
 frontend/dist
 .git
-.env
-.env.*
+**/.env
+**/.env.*
 .DS_Store
+# Real family documents pulled from prod plus live dev tokens — these must
+# never reach the Docker build context (remote builders, context caching,
+# or a future `COPY . .` would expose them).
+dev-samples
+scripts/.dev-local-state.json
+scripts/.dev-local-cookies.txt
+docs
+.claude

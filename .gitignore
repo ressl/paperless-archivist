@@ -14,6 +14,8 @@
 # Dev-local stack: real secrets and sample documents pulled from prod must never
 # be committed. The `.example` variants are committed (the global ignore
 # `.env.*` would otherwise hide them, so re-include them explicitly).
+/deploy/compose/.env
+!/deploy/compose/.env.example
 /deploy/compose/.env.dev-local
 !/deploy/compose/.env.dev-local.example
 /dev-samples/
