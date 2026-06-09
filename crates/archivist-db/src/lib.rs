@@ -7822,17 +7822,6 @@ pub struct StuckRunStatusFixSummary {
     pub runs_reset: i64,
 }
 
-/// One-shot, idempotent helper that fixes `pipeline_runs.status='running'`
-/// rows whose underlying jobs are all in a settled state (no `running` job
-/// for that run). v1.5.4+ left these behind because `complete_job` only
-/// flipped the run to `succeeded` when ALL stages were done; intermediate
-/// stage successes (e.g. OCR done with metadata still queued) silently
-/// stayed on `running`, surfacing as "N stuck run(s)" on the dashboard.
-///
-/// v1.5.7 fixes the live path in `complete_job` so new runs don't get
-/// trapped, AND this helper cleans up the historical residue. Targets:
-///   * runs with status='running' AND no jobs.status='running' for that
-///     run — flip to 'queued' if any queued job exists, else 'succeeded'.
 /// Recover review items stranded in `applying`: a worker or API request that
 /// crashed between claiming a row (for a human apply or autopilot drain) and
 /// recording the terminal status leaves the row owned-but-never-finished, and
@@ -7859,6 +7848,17 @@ pub async fn reset_stale_applying_reviews(pool: &DbPool, older_than_seconds: i64
     Ok(reset)
 }
 
+/// One-shot, idempotent helper that fixes `pipeline_runs.status='running'`
+/// rows whose underlying jobs are all in a settled state (no `running` job
+/// for that run). v1.5.4+ left these behind because `complete_job` only
+/// flipped the run to `succeeded` when ALL stages were done; intermediate
+/// stage successes (e.g. OCR done with metadata still queued) silently
+/// stayed on `running`, surfacing as "N stuck run(s)" on the dashboard.
+///
+/// v1.5.7 fixes the live path in `complete_job` so new runs don't get
+/// trapped, AND this helper cleans up the historical residue. Targets:
+/// runs with status='running' AND no jobs.status='running' for that run —
+/// flip to 'queued' if any queued job exists, else 'succeeded'.
 pub async fn reset_stuck_running_pipeline_runs(pool: &DbPool) -> Result<StuckRunStatusFixSummary> {
     let mut tx = pool.begin().await?;
     // Two phases: (a) flip to 'queued' if there's at least one queued job for
