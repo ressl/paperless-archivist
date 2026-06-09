@@ -5758,9 +5758,30 @@ async fn revoke_api_token(
     )
 )]
 async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -> Result<()> {
-    let Some(review) = archivist_db::pending_review_for_apply(&state.pool, review_id).await? else {
+    let Some(review) = archivist_db::claim_review_for_apply(&state.pool, review_id).await? else {
         return Ok(());
     };
+    // review.status holds the pre-claim status ('approved'/'edited'). The row
+    // is now 'applying', which fences out a concurrent apply / autopilot
+    // drain. If any step below fails, restore that prior status so the
+    // operator can retry instead of the row being stuck in 'applying'.
+    let prior_status = review.status.clone();
+    let result = apply_claimed_review(state, &review, actor_id).await;
+    if result.is_err() {
+        // Best-effort release of our claim; a success path already moved the
+        // row to 'applied', so this no-ops there.
+        let _ =
+            archivist_db::revert_review_from_applying(&state.pool, review_id, &prior_status).await;
+    }
+    result
+}
+
+async fn apply_claimed_review(
+    state: &AppState,
+    review: &archivist_db::ReviewItemRecord,
+    actor_id: Uuid,
+) -> Result<()> {
+    let review_id = review.id;
     Span::current().record("run_id", tracing::field::display(review.run_id));
     Span::current().record("paperless_document_id", review.paperless_document_id);
     let patch_value = review
@@ -5773,7 +5794,7 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
     } else {
         false
     };
-    add_completion_and_remove_trigger_tags(state, &review, &mut patch, final_run_stage).await?;
+    add_completion_and_remove_trigger_tags(state, review, &mut patch, final_run_stage).await?;
     let client = paperless_client(&state.pool, &state.config).await?;
     let document = client.get_document(review.paperless_document_id).await?;
     prune_unchanged_patch_fields(&mut patch, &document);
@@ -5809,6 +5830,8 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
         )
         .await?;
         increment_metric_counter(&state.pool, "apply_failure_total", 1).await?;
+        // The caller (`apply_review_patch`) releases the `applying` claim on
+        // any Err return, so the row reverts to its prior status for retry.
         return Err(error);
     }
     let duration_ms = apply_started.elapsed().as_millis() as u64;

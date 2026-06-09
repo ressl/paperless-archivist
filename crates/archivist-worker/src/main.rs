@@ -27,9 +27,9 @@ use archivist_db::{
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
     named_entity_id_for_name, paperless_sync_cursor, queue_missing_pipeline,
     rebalance_backfilled_metadata_priorities, record_dashboard_snapshot, record_document_language,
-    requeue_vision_crashed_jobs, reset_stuck_running_pipeline_runs, resolve_secret,
-    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_id_pairs_for_names,
-    tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
+    requeue_vision_crashed_jobs, reset_stale_applying_reviews, reset_stuck_running_pipeline_runs,
+    resolve_secret, revert_review_to_pending_after_failed_drain, selector_document_budget,
+    tag_id_pairs_for_names, tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{
@@ -206,6 +206,20 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         Err(error) => warn!(error = %error, "startup stuck-runs reset failed"),
     }
 
+    // Recover review items stranded in 'applying' by a crash between claim and
+    // apply (#253). 300s comfortably exceeds a healthy apply, so anything
+    // older was abandoned.
+    match reset_stale_applying_reviews(&pool, 300).await {
+        Ok(count) if count > 0 => {
+            info!(
+                count,
+                "reverted review items stranded in 'applying' back to 'pending'"
+            )
+        }
+        Ok(_) => {}
+        Err(error) => warn!(error = %error, "startup stale-applying review reset failed"),
+    }
+
     loop {
         tokio::select! {
             _ = shutdown_signal() => {
@@ -276,6 +290,21 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                     && let Err(error) = record_dashboard_snapshot_tick(&pool).await
                 {
                     warn!(error = %error, "dashboard snapshot tick failed");
+                }
+                // Recover review items stranded in 'applying' by a crash
+                // mid-apply (#253), once per minute. 300s exceeds a healthy
+                // apply, so anything older was abandoned.
+                if tick % 12 == 9 {
+                    match reset_stale_applying_reviews(&pool, 300).await {
+                        Ok(count) if count > 0 => warn!(
+                            count,
+                            "reverted review items stranded in 'applying' back to 'pending'"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(error = %error, "stale-applying review sweep failed")
+                        }
+                    }
                 }
                 // Autopilot review drain: when the runtime is in full_auto, any review_items
                 // still sitting in `pending` are auto-applied here, respecting the same safety
@@ -572,7 +601,14 @@ async fn process_available_jobs(
                                 // short-circuit — decrement the attempt and set
                                 // `run_after = cooldown_until` so the job comes
                                 // back once the provider is plausibly available.
-                                match release_lease_for_cooldown(&pool, &job, cooldown_until).await {
+                                match release_lease_for_cooldown(
+                                    &pool,
+                                    &job,
+                                    &lease_owner,
+                                    cooldown_until,
+                                )
+                                .await
+                                {
                                     Ok(()) => {
                                         warn!(
                                             error = ?error,
@@ -1017,25 +1053,39 @@ async fn active_cooldown_for_stage(
 async fn release_lease_for_cooldown(
     pool: &DbPool,
     job: &JobRecord,
+    lease_owner: &str,
     cooldown_until: DateTime<Utc>,
 ) -> Result<()> {
-    sqlx::query(
+    // Fence on lease ownership and the running state (like complete_job /
+    // fail_job): a worker whose lease was already reclaimed must not requeue
+    // and decrement attempts on a job another replica is now legitimately
+    // running. #253.
+    let released = sqlx::query(
         r#"
         update jobs
            set status      = 'queued',
-               run_after   = $2,
+               run_after   = $3,
                attempts    = greatest(attempts - 1, 0),
                lease_owner = null,
                lease_until = null,
                updated_at  = now()
          where id = $1
+           and lease_owner = $2
+           and status = 'running'
         "#,
     )
     .bind(job.id)
+    .bind(lease_owner)
     .bind(cooldown_until)
     .execute(pool)
     .await
     .context("release lease for provider cooldown")?;
+    if released.rows_affected() == 0 {
+        warn!(
+            job_id = %job.id,
+            "skipped cooldown lease release: lease no longer owned by this worker"
+        );
+    }
     Ok(())
 }
 
@@ -1313,7 +1363,7 @@ async fn process_job(
             until = %active.cooldown_until,
             "provider cooldown active; releasing lease without burning an attempt"
         );
-        release_lease_for_cooldown(pool, job, active.cooldown_until).await?;
+        release_lease_for_cooldown(pool, job, lease_owner, active.cooldown_until).await?;
         return Ok(());
     }
 

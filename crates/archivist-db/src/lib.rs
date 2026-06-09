@@ -5737,16 +5737,27 @@ pub async fn review_decision(
     Ok(())
 }
 
-pub async fn pending_review_for_apply(
+/// Atomically claim an approved/edited review item for application by moving
+/// it to the intermediate `applying` status, returning the record with its
+/// *prior* status (so a failed apply can revert precisely). Returns `None`
+/// when no row is in an applyable status — i.e. another apply (a second
+/// operator, or the autopilot drain) already owns it. This is the fence that
+/// prevents a document being PATCHed to Paperless twice. #253.
+pub async fn claim_review_for_apply(
     pool: &DbPool,
     review_id: Uuid,
 ) -> Result<Option<ReviewItemRecord>> {
     let row = sqlx::query(
         r#"
-        select id, run_id, job_id, paperless_document_id, stage, status,
-               suggested_patch, edited_patch, validation_warnings, created_at
-          from review_items
+        with prev as (
+          select status from review_items where id = $1
+        )
+        update review_items
+           set status = 'applying'
          where id = $1 and status in ('approved', 'edited')
+        returning id, run_id, job_id, paperless_document_id, stage,
+                  (select status from prev) as status,
+                  suggested_patch, edited_patch, validation_warnings, created_at
         "#,
     )
     .bind(review_id)
@@ -5775,20 +5786,27 @@ pub async fn pending_review_for_apply(
 
 pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let row = sqlx::query(
+    // Gate on `applying`: the caller claimed the row via `claim_review_for_apply`
+    // before patching Paperless, so a terminal transition is only valid from
+    // that owned state. A missing row means another actor already finished it.
+    let Some(row) = sqlx::query(
         r#"
         update review_items
            set status = 'applied',
                reviewed_by = coalesce(reviewed_by, $2),
                reviewed_at = coalesce(reviewed_at, now())
-         where id = $1
+         where id = $1 and status = 'applying'
         returning run_id, job_id, paperless_document_id, stage
         "#,
     )
     .bind(review_id)
     .bind(actor_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(());
+    };
 
     let job_id: Option<Uuid> = row.try_get("job_id")?;
     if let Some(job_id) = job_id {
@@ -5943,10 +5961,13 @@ pub async fn claim_pending_review_for_autopilot_drain(
     review_id: Uuid,
 ) -> Result<Option<ReviewItemRecord>> {
     let mut tx = pool.begin().await?;
+    // Claim straight into `applying` (not `approved`): the drain is about to
+    // PATCH Paperless, so the row must be in the owned state that blocks a
+    // concurrent human apply from patching the same document. #253.
     let Some(row) = sqlx::query(
         r#"
         update review_items
-           set status = 'approved',
+           set status = 'applying',
                reviewed_at = now()
          where id = $1 and status = 'pending'
         returning id, run_id, job_id, paperless_document_id, stage, status,
@@ -6013,18 +6034,24 @@ pub async fn claim_pending_review_for_autopilot_drain(
 /// human-approve path.
 pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let row = sqlx::query(
+    // Gate on `applying` (the status the drain claims into), mirroring
+    // `mark_review_applied`. #253.
+    let Some(row) = sqlx::query(
         r#"
         update review_items
            set status = 'applied',
                reviewed_at = coalesce(reviewed_at, now())
-         where id = $1
+         where id = $1 and status = 'applying'
         returning run_id, job_id, paperless_document_id, stage
         "#,
     )
     .bind(review_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(());
+    };
 
     let job_id: Option<Uuid> = row.try_get("job_id")?;
     if let Some(job_id) = job_id {
@@ -6139,10 +6166,32 @@ pub async fn revert_review_to_pending_after_failed_drain(
         update review_items
            set status = 'pending',
                reviewed_at = null
-         where id = $1 and status = 'approved'
+         where id = $1 and status = 'applying'
         "#,
     )
     .bind(review_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Release a human-apply claim after the Paperless PATCH failed: move the row
+/// from `applying` back to the status it had before the claim so the operator
+/// can retry. #253.
+pub async fn revert_review_from_applying(
+    pool: &DbPool,
+    review_id: Uuid,
+    to_status: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update review_items
+           set status = $2
+         where id = $1 and status = 'applying'
+        "#,
+    )
+    .bind(review_id)
+    .bind(to_status)
     .execute(pool)
     .await?;
     Ok(())
@@ -7784,6 +7833,32 @@ pub struct StuckRunStatusFixSummary {
 /// trapped, AND this helper cleans up the historical residue. Targets:
 ///   * runs with status='running' AND no jobs.status='running' for that
 ///     run — flip to 'queued' if any queued job exists, else 'succeeded'.
+/// Recover review items stranded in `applying`: a worker or API request that
+/// crashed between claiming a row (for a human apply or autopilot drain) and
+/// recording the terminal status leaves the row owned-but-never-finished, and
+/// neither the drain (lists `pending`) nor the operator (lists
+/// `approved`/`edited`) would ever pick it up again. A row in `applying`
+/// older than `older_than_seconds` is reverted to `pending` so the next drain
+/// tick (or a fresh operator apply after re-approval) retries it. The Paperless
+/// PATCH is idempotent on redo (it overwrites the same fields), so re-applying
+/// is safe. Returns the number of rows recovered. #253.
+pub async fn reset_stale_applying_reviews(pool: &DbPool, older_than_seconds: i64) -> Result<i64> {
+    let reset = sqlx::query(
+        r#"
+        update review_items
+           set status = 'pending',
+               reviewed_at = null
+         where status = 'applying'
+           and reviewed_at < now() - make_interval(secs => $1)
+        "#,
+    )
+    .bind(older_than_seconds as f64)
+    .execute(pool)
+    .await?
+    .rows_affected() as i64;
+    Ok(reset)
+}
+
 pub async fn reset_stuck_running_pipeline_runs(pool: &DbPool) -> Result<StuckRunStatusFixSummary> {
     let mut tx = pool.begin().await?;
     // Two phases: (a) flip to 'queued' if there's at least one queued job for
