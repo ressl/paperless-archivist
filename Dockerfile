@@ -36,4 +36,8 @@ ENV ARCHIVIST_STATIC_DIR=/app/frontend/dist
 ENV ARCHIVIST_MIGRATIONS_DIR=/app/migrations
 USER 10001:10001
 EXPOSE 8080
+# k8s uses its own probes, but this gives `docker run` / compose users a health
+# signal. curl is already installed for the runtime. (#274)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 ENTRYPOINT ["/usr/local/bin/archivist-api"]

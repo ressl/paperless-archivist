@@ -4,6 +4,15 @@ Status: v1.0 launch checklist
 
 Use this checklist before tagging a GA release.
 
+## Version Bump
+
+Keep the three version identities in lockstep with the release tag `vX.Y.Z`:
+
+- [ ] `version` in `[workspace.package]` of the root `Cargo.toml` (all crates
+      inherit it via `version.workspace = true`)
+- [ ] `info.version` in `openapi/openapi.yaml`
+- [ ] `version` in `frontend/package.json`
+
 ## Code And Tests
 
 - [ ] `cargo fmt --all -- --check`

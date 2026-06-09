@@ -68,7 +68,10 @@ async fn concurrent_apply_claims_are_mutually_exclusive() {
         .expect("second claim");
     assert!(first.is_some());
     assert_eq!(first.unwrap().status, "approved");
-    assert!(second.is_none(), "second concurrent apply must be fenced out");
+    assert!(
+        second.is_none(),
+        "second concurrent apply must be fenced out"
+    );
 
     let status: String = sqlx::query_scalar("select status from review_items where id = $1")
         .bind(review_id)
@@ -126,11 +129,13 @@ async fn stale_applying_rows_are_recovered() {
         .await
         .expect("claim");
     // Backdate the claim so it counts as stranded.
-    sqlx::query("update review_items set reviewed_at = now() - interval '10 minutes' where id = $1")
-        .bind(review_id)
-        .execute(&pool)
-        .await
-        .expect("backdate");
+    sqlx::query(
+        "update review_items set reviewed_at = now() - interval '10 minutes' where id = $1",
+    )
+    .bind(review_id)
+    .execute(&pool)
+    .await
+    .expect("backdate");
 
     let recovered = reset_stale_applying_reviews(&pool, 300)
         .await

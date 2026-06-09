@@ -86,7 +86,7 @@ services:
         condition: service_healthy
 
   paperless-redis:
-    image: docker.io/library/redis:7
+    image: docker.io/library/redis:7.4.9
     restart: unless-stopped
     networks:
       - archivist-internal
@@ -94,7 +94,7 @@ services:
       - paperless-redis-data:/data
 
   paperless-ngx:
-    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    image: ghcr.io/paperless-ngx/paperless-ngx:2.20.15
     restart: unless-stopped
     depends_on:
       postgres:

@@ -4,6 +4,16 @@ on:
   push:
   pull_request:
 
+# Least-privilege default token (only needs to read the repo). (#274)
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same ref so a push doesn't pile up duplicate
+# in-flight pipelines (push + pull_request both fire on PR commits).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,7 +39,13 @@ jobs:
         working-directory: frontend
       - run: pnpm generate:client
         working-directory: frontend
+      # Fail if the committed client is out of date with the OpenAPI spec
+      # (parity with the GitLab pipeline). (#274)
+      - run: git diff --exit-code -- src/api/schema.ts
+        working-directory: frontend
       - run: pnpm accessibility:check
+        working-directory: frontend
+      - run: pnpm test:a11y
         working-directory: frontend
       - run: pnpm typecheck
         working-directory: frontend

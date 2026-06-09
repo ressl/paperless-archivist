@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="${SEED_VENV_DIR:-/tmp/dev-local-seed-venv}"
+VENV_DIR="${SEED_VENV_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}/paperless-archivist/seed-venv}"
 
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
   echo "[dev-local-seed] bootstrapping venv at ${VENV_DIR} ..."
