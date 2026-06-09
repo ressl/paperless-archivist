@@ -2937,48 +2937,79 @@ fn latest_hard_failure(recent_failures: &[DashboardLiveFailure]) -> Option<&Dash
         .find(|failure| failure.status == "failed" || failure.failure_kind == "failed")
 }
 
-async fn provider_usage(pool: &DbPool, start: DateTime<Utc>) -> Result<Vec<ProviderUsageStats>> {
+pub async fn provider_usage(
+    pool: &DbPool,
+    start: DateTime<Utc>,
+) -> Result<Vec<ProviderUsageStats>> {
     let rows = sqlx::query(
         r#"
-        select provider,
-               model,
-               stage,
-               count(*)::bigint as request_count,
-               coalesce(avg(duration_ms), 0)::double precision as avg_duration_ms,
-               coalesce(percentile_cont(0.95) within group (order by duration_ms), 0)::bigint as p95_duration_ms,
-               coalesce(sum(
-                 case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
-                 case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
-                 -- Ollama reports tokens top-level, not under `usage`. Guard every
-                 -- cast: releases up to v1.11.2 redacted numeric usage values to the
-                 -- string "[REDACTED]", and prompt_eval_count may be an object.
-                 case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
-                      then (response ->> 'prompt_eval_count')::bigint else 0 end
-               ), 0)::bigint as input_tokens,
-               coalesce(sum(
-                 case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
-                 case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
-                 case when response ->> 'eval_count' ~ '^[0-9]+$'
-                      then (response ->> 'eval_count')::bigint else 0 end
-               ), 0)::bigint as output_tokens,
-               count(distinct feedback.id)::bigint as feedback_count,
-               count(distinct feedback.id) filter (
-                 where feedback.event_type in ('review.approved', 'review.edited')
-               )::bigint as positive_feedback,
-               count(distinct feedback.id) filter (
-                 where feedback.event_type = 'review.rejected'
-               )::bigint as negative_feedback
-          from ai_artifacts ai
-          -- Bound the join to the same range as ai_artifacts. Reviews that
-          -- arrive after the window has closed will not be counted; we trade
-          -- that off for not scanning the entire audit history each render.
-          left join audit_events feedback
-            on feedback.job_id = ai.job_id
-           and feedback.event_type in ('review.approved', 'review.edited', 'review.rejected')
-           and feedback.created_at >= $1
-         where ai.created_at >= $1
-         group by provider, model, stage
-         order by request_count desc, provider, model, stage
+        with artifacts as (
+          select provider, model, stage, job_id, duration_ms, response
+            from ai_artifacts
+           where created_at >= $1
+        ),
+        -- Aggregate artifacts WITHOUT joining feedback, so request/token/
+        -- latency stats are not multiplied by the number of feedback events
+        -- per job (the fan-out bug). #260.
+        usage as (
+          select provider,
+                 model,
+                 stage,
+                 count(*)::bigint as request_count,
+                 coalesce(avg(duration_ms), 0)::double precision as avg_duration_ms,
+                 coalesce(percentile_cont(0.95) within group (order by duration_ms), 0)::bigint as p95_duration_ms,
+                 coalesce(sum(
+                   case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
+                   case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
+                   -- Ollama reports tokens top-level, not under `usage`. Guard every
+                   -- cast: releases up to v1.11.2 redacted numeric usage values to the
+                   -- string "[REDACTED]", and prompt_eval_count may be an object.
+                   case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
+                        then (response ->> 'prompt_eval_count')::bigint else 0 end
+                 ), 0)::bigint as input_tokens,
+                 coalesce(sum(
+                   case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
+                   case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
+                   case when response ->> 'eval_count' ~ '^[0-9]+$'
+                        then (response ->> 'eval_count')::bigint else 0 end
+                 ), 0)::bigint as output_tokens
+            from artifacts
+           group by provider, model, stage
+        ),
+        -- Feedback aggregated separately, keyed by the distinct artifact
+        -- (provider, model, stage, job_id) tuples so each feedback event is
+        -- counted once per cell. Bounded to the same range as the artifacts.
+        feedback as (
+          select a.provider, a.model, a.stage,
+                 count(distinct f.id)::bigint as feedback_count,
+                 count(distinct f.id) filter (
+                   where f.event_type in ('review.approved', 'review.edited')
+                 )::bigint as positive_feedback,
+                 count(distinct f.id) filter (
+                   where f.event_type = 'review.rejected'
+                 )::bigint as negative_feedback
+            from (select distinct provider, model, stage, job_id from artifacts) a
+            join audit_events f
+              on f.job_id = a.job_id
+             and f.event_type in ('review.approved', 'review.edited', 'review.rejected')
+             and f.created_at >= $1
+           group by a.provider, a.model, a.stage
+        )
+        select u.provider,
+               u.model,
+               u.stage,
+               u.request_count,
+               u.avg_duration_ms,
+               u.p95_duration_ms,
+               u.input_tokens,
+               u.output_tokens,
+               coalesce(fb.feedback_count, 0)::bigint as feedback_count,
+               coalesce(fb.positive_feedback, 0)::bigint as positive_feedback,
+               coalesce(fb.negative_feedback, 0)::bigint as negative_feedback
+          from usage u
+          left join feedback fb
+            on fb.provider = u.provider and fb.model = u.model and fb.stage = u.stage
+         order by u.request_count desc, u.provider, u.model, u.stage
          limit 50
         "#,
     )
