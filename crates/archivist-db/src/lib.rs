@@ -7362,17 +7362,50 @@ pub async fn apply_security_retention(
         }
     }
 
-    let mut tx = pool.begin().await?;
-    let ai_artifacts_deleted = sqlx::query("delete from ai_artifacts where created_at < $1")
+    // Batch the artifact/audit deletes too (#275): a single unbounded DELETE
+    // holds a long lock and bloats one transaction on a large backlog. The
+    // audit chain tolerates a truncated prefix, so deleting the old rows
+    // before appending the retention event keeps the chain consistent.
+    let mut ai_artifacts_deleted: i64 = 0;
+    loop {
+        let deleted = sqlx::query(
+            r#"
+            delete from ai_artifacts
+             where ctid in (
+               select ctid from ai_artifacts where created_at < $1 limit 5000
+             )
+            "#,
+        )
         .bind(artifact_cutoff)
-        .execute(&mut *tx)
+        .execute(pool)
         .await?
         .rows_affected() as i64;
-    let audit_events_deleted = sqlx::query("delete from audit_events where created_at < $1")
+        ai_artifacts_deleted += deleted;
+        if deleted < 5000 {
+            break;
+        }
+    }
+    let mut audit_events_deleted: i64 = 0;
+    loop {
+        let deleted = sqlx::query(
+            r#"
+            delete from audit_events
+             where ctid in (
+               select ctid from audit_events where created_at < $1 limit 5000
+             )
+            "#,
+        )
         .bind(audit_cutoff)
-        .execute(&mut *tx)
+        .execute(pool)
         .await?
         .rows_affected() as i64;
+        audit_events_deleted += deleted;
+        if deleted < 5000 {
+            break;
+        }
+    }
+
+    let mut tx = pool.begin().await?;
     append_audit_tx(
         &mut tx,
         AuditEventInput {
