@@ -46,7 +46,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::{Argon2, Params};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, patch, post, put};
@@ -313,6 +313,9 @@ fn init_tracing(filter: &str) {
 }
 
 fn router(state: AppState) -> Router {
+    // HSTS is only meaningful (and safe) over TLS; reuse the app's existing
+    // "behind TLS" signal so local HTTP dev never emits it. #288
+    let cookie_secure = state.config.cookie_secure;
     // Most API writes are tiny JSON bodies. Large payloads
     // (settings, prompts, chat) are overridden per-route below.
     const DEFAULT_BODY_LIMIT: usize = 64 * 1024;
@@ -458,7 +461,18 @@ fn router(state: AppState) -> Router {
         )
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT));
 
-    Router::new()
+    // Content-Security-Policy for a same-origin SPA + JSON API. `script-src
+    // 'self'` (no inline scripts in the built index.html) neutralizes any
+    // future XSS sink; `connect-src 'self'` matches the relative /api fetches;
+    // `frame-ancestors 'none'` supersedes X-Frame-Options on modern browsers.
+    // `style-src 'unsafe-inline'` is needed because React/Recharts set inline
+    // styles. #288
+    const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'none'; \
+         object-src 'none'; frame-ancestors 'none'; script-src 'self'; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; \
+         connect-src 'self'; form-action 'self'";
+
+    let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
@@ -479,7 +493,26 @@ fn router(state: AppState) -> Router {
             header::REFERRER_POLICY,
             HeaderValue::from_static("same-origin"),
         ))
-        .with_state(state)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static(
+                "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+            ),
+        ));
+    // HSTS only over TLS (otherwise a browser would pin a no-TLS dev origin).
+    let app = if cookie_secure {
+        app.layer(SetResponseHeaderLayer::if_not_present(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+        ))
+    } else {
+        app
+    };
+    app.with_state(state)
 }
 
 async fn ensure_bootstrap_admin(pool: &DbPool, config: &AppConfig) -> Result<()> {
