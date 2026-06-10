@@ -1553,7 +1553,7 @@ async fn process_ocr(
         let request = VisionRequest {
             model: provider.model.clone(),
             temperature: 0.0,
-            num_ctx: ollama_num_ctx_for_provider(
+            num_ctx: ollama_vision_num_ctx_for_provider(
                 &provider,
                 settings
                     .effective_tuning_for_stage(Stage::Ocr)
@@ -4077,6 +4077,22 @@ fn ollama_num_ctx_for_provider(provider: &StageProvider, configured: Option<i64>
     }
 }
 
+/// Minimum Ollama vision `num_ctx`: below this, glm-ocr-class models crash the
+/// runtime (GGML_ASSERT). The startup bump only raises the GLOBAL
+/// `ai.ollama_vision_num_ctx`; a per-provider tuning override (e.g. the
+/// local-Ollama preset pins 4096) wins over the global in resolution and would
+/// smuggle a too-small value through, so floor it at the point of use. #293
+const OLLAMA_VISION_NUM_CTX_FLOOR: i64 = 16384;
+
+/// Resolve the Ollama vision `num_ctx`, never returning a value below the
+/// GGML-safe floor.
+fn ollama_vision_num_ctx_for_provider(
+    provider: &StageProvider,
+    configured: Option<i64>,
+) -> Option<i64> {
+    ollama_num_ctx_for_provider(provider, configured).map(|n| n.max(OLLAMA_VISION_NUM_CTX_FLOOR))
+}
+
 async fn chat_with_provider(
     pool: &DbPool,
     config: &AppConfig,
@@ -4209,6 +4225,35 @@ mod tests {
     fn sum_vision_usage_returns_none_without_tokens() {
         let pages = vec![json!({ "response": "text only" }), json!({})];
         assert_eq!(sum_vision_usage(&pages), None);
+    }
+
+    #[test]
+    fn ollama_vision_num_ctx_floors_below_ggml_minimum() {
+        let provider = |kind| StageProvider {
+            name: "p".to_owned(),
+            kind,
+            base_url: "http://x".to_owned(),
+            model: "m".to_owned(),
+            secret_id: None,
+            reasoning_effort: ReasoningEffort::default(),
+        };
+        let ollama = provider(AiProviderKind::Ollama);
+        // A preset pinning 4096 is floored up to the GGML-safe minimum.
+        assert_eq!(
+            ollama_vision_num_ctx_for_provider(&ollama, Some(4096)),
+            Some(OLLAMA_VISION_NUM_CTX_FLOOR)
+        );
+        // A value already at/above the floor passes through.
+        assert_eq!(
+            ollama_vision_num_ctx_for_provider(&ollama, Some(32768)),
+            Some(32768)
+        );
+        // None stays None (use the client default); non-Ollama is always None.
+        assert_eq!(ollama_vision_num_ctx_for_provider(&ollama, None), None);
+        assert_eq!(
+            ollama_vision_num_ctx_for_provider(&provider(AiProviderKind::Openai), Some(4096)),
+            None
+        );
     }
 
     #[test]
