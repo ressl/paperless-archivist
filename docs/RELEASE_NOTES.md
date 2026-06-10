@@ -6,6 +6,62 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.12.1 — Re-audit remediation (post-v1.12.0)
+
+Resolves the entire 2026-06-10 re-audit backlog (19 issues, #279–#297; report
+in `docs/reviews/2026-06-10-re-audit.md`) — a second adversarial pass over the
+v1.12.0 changes plus the running deployment. No schema migrations.
+
+**⚠️ Operator action on upgrade:**
+
+- A pre-existing critical bug that v1.12.0 made visible is fixed: the provider
+  quota cooldown was stored under the literal `"ollama"` but looked up by the
+  configured provider name, so an exhausted cloud provider was hammered
+  indefinitely (#279). After upgrading, confirm the worker no longer loops on a
+  quota-exhausted provider.
+- Keep `ARCHIVIST_METRICS_TOKEN` set in the deployment — `/metrics` returns
+  `503` until it is present (#281); an empty value is now rejected at startup.
+- The bundled manifests now set an emptyDir `sizeLimit` on `/tmp` (worker 1Gi,
+  api 512Mi) and keep the worker at `terminationGracePeriodSeconds: 60` with
+  `memory: 4Gi`. If your deployment overlay pins older values (30s / 1Gi),
+  re-sync them (#297).
+
+**Security & auth:** HSTS/CSP/Permissions-Policy response headers (#288); OIDC
+roles now replace on login so allowlist removal de-provisions (#289);
+`paperless.public_url` is scheme-validated against `javascript:` stored-XSS
+(#290); auth hardening — username-link trust, lockout timing, `/api/auth` body
+cap, OIDC error leak (#291); exact-name secret keys are redacted regardless of
+value type (#295).
+
+**OCR memory & disk safety:** the image fast-path now honors the render caps
+(#282); caps are calibrated to the worker memory limit (#283); a `pdfinfo`
+pixel pre-check rejects a giant-MediaBox disk-fill bomb before pdftoppm renders
+it (#297).
+
+**Worker/AI robustness:** quota signals are no longer swallowed in the doc-type
+pre-pass/consensus (#280); `Retry-After` can shorten the cooldown and quota
+matching is narrowed (#292); per-provider `num_ctx` is floored above the GGML
+minimum for vision (#293); typed Ollama 4xx are treated as permanent (#294);
+the doc-type prompt fences untrusted text and stale-applying recovery keys off
+the claim time (#295).
+
+**Data integrity:** audit retention deletes by `chain_position` to match the
+hash-chain verification rather than `created_at` (#285).
+
+**Frontend:** the per-keystroke integer clamp is replaced with a
+commit-on-blur `NumberField` across all settings (#284); one-time API token
+Copy & dismiss, alert navigation falls back to the dashboard for roles that
+cannot render the target tab, review approve/reject double-click guard, memo
+title refresh, settings "Saved" reset, logout rejection swallow, label
+association, dead-dependency removal, dashboard poll race guard (#296); chat
+session-switch guard (#286); stale unauthorized banner cleared on re-login
+(#287); the Prompt Workbench page is now fully localized across all seven
+languages (#297).
+
+**Rollback:** no schema migrations were introduced, so rolling back to the
+v1.12.0 image is safe. Migrations `0033`–`0036` from v1.12.0 remain applied and
+are backward-compatible.
+
 ## v1.12.0 — Full-code audit remediation
 
 Resolves the entire 2026-06-09 full-code audit backlog (32 issues, #246–#277;
