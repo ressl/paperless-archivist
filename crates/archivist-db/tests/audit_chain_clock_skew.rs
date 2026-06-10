@@ -5,9 +5,12 @@
 //!
 //! Run locally with `DATABASE_URL=postgres://... cargo test -p archivist-db -- --ignored`.
 
-use archivist_core::AuditEventInput;
-use archivist_db::{DbPool, append_audit, connect, migrate, verify_audit_integrity};
+use archivist_core::{AuditEventInput, RuntimeSettings};
+use archivist_db::{
+    DbPool, append_audit, apply_security_retention, connect, migrate, verify_audit_integrity,
+};
 use sqlx::Executor;
+use uuid::Uuid;
 
 async fn fresh_pool() -> Option<DbPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -93,4 +96,69 @@ async fn audit_chain_links_and_verifies_by_append_order_not_clock() {
         report.broken_reason, report.broken_event_id
     );
     assert_eq!(report.checked_events, 5);
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn retention_deletes_a_chain_prefix_not_a_created_at_prefix() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+
+    for i in 0..6 {
+        append_audit(&pool, event(&format!("test.event_{i}")))
+            .await
+            .expect("append audit event");
+    }
+
+    // Scramble created_at so it is non-monotonic vs chain_position, with an
+    // inversion straddling the retention cutoff: chain_position 4 is OLDER than
+    // chain_position 3. Cutoff is 50 days. A created_at-based delete would
+    // remove chain_position 1,2,4 (older than 50d) but keep 3,5,6 — leaving a
+    // hole, since 5's prev_event_hash points at the deleted 4. The
+    // chain_position-prefix delete must instead drop only 1,2 (everything below
+    // the oldest row still in the window, chain_position 3).
+    let ages_days = [100_i64, 90, 10, 80, 5, 1]; // indexed by chain_position-1
+    for (idx, age) in ages_days.iter().enumerate() {
+        sqlx::query(
+            "update audit_events set created_at = now() - make_interval(days => $1) where chain_position = $2",
+        )
+        .bind(*age as i32)
+        .bind((idx + 1) as i64)
+        .execute(&pool)
+        .await
+        .expect("rewrite created_at");
+    }
+
+    let mut settings = RuntimeSettings::default();
+    settings.security.audit_retention_days = 50;
+    settings.security.ai_artifact_retention_days = 365;
+
+    let result = apply_security_retention(&pool, &settings, Uuid::now_v7())
+        .await
+        .expect("apply retention");
+    assert_eq!(
+        result.audit_events_deleted, 2,
+        "must delete only the chain prefix 1,2"
+    );
+
+    // The survivors must be a contiguous chain_position prefix with no hole:
+    // chain_position 1,2 deleted; 3,4,5,6 (and the new retention event 7) kept.
+    // A created_at-based delete would have removed 4 (old created_at) while
+    // keeping 3,5,6 — leaving a hole. We assert the survivor set directly
+    // rather than via verify_audit_integrity, because rewriting created_at
+    // above invalidates each event's own hash (created_at is part of the hash)
+    // — that is a test artifact, not the production scenario where each pod
+    // writes its own consistent created_at.
+    let survivors: Vec<i64> = sqlx::query_scalar(
+        "select chain_position from audit_events where event_type like 'test.event_%' order by chain_position",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("surviving chain positions");
+    assert_eq!(
+        survivors,
+        vec![3, 4, 5, 6],
+        "retention must drop the chain prefix 1,2 and keep a contiguous 3..6 (no hole at 4)"
+    );
 }

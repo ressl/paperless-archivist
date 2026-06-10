@@ -7385,17 +7385,31 @@ pub async fn apply_security_retention(
             break;
         }
     }
+    // Delete a true chain_position PREFIX, not a created_at prefix (#285). The
+    // chain verifies in chain_position order (#254), so deleting by created_at
+    // under cross-pod clock skew could remove a lower-chain_position row while
+    // keeping a higher one, leaving a hole that verify reports as a broken
+    // chain. Compute the smallest chain_position we must keep (the oldest row
+    // still inside the retention window) and delete everything strictly below
+    // it; if nothing is inside the window the whole table is expired.
+    let keep_boundary: i64 = sqlx::query_scalar(
+        "select coalesce(min(chain_position), $2) from audit_events where created_at >= $1",
+    )
+    .bind(audit_cutoff)
+    .bind(i64::MAX)
+    .fetch_one(pool)
+    .await?;
     let mut audit_events_deleted: i64 = 0;
     loop {
         let deleted = sqlx::query(
             r#"
             delete from audit_events
              where ctid in (
-               select ctid from audit_events where created_at < $1 limit 5000
+               select ctid from audit_events where chain_position < $1 limit 5000
              )
             "#,
         )
-        .bind(audit_cutoff)
+        .bind(keep_boundary)
         .execute(pool)
         .await?
         .rows_affected() as i64;
