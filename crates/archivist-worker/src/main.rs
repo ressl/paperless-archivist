@@ -2025,6 +2025,14 @@ async fn process_metadata(
     // empty or the classifier fails — main prompt then runs without the hint.
     let doc_type_category = match classify_document_type(pool, config, settings, &content).await {
         Ok(category) => category,
+        // A quota signal must propagate so the provider cooldown is persisted
+        // and the stage isn't followed by a second doomed call against the
+        // exhausted provider. Everything else degrades to the generic prompt. #280
+        Err(error)
+            if classify_processing_failure(&error) == ProcessingFailureClass::ProviderQuota =>
+        {
+            return Err(error);
+        }
         Err(error) => {
             warn!(
                 document_id = job.paperless_document_id,
@@ -2799,6 +2807,13 @@ async fn run_consensus_check(
 
     let response = match chat_with_provider(pool, config, &provider, request).await {
         Ok(r) => r,
+        // Propagate a quota signal so a cooldown is recorded; a non-quota
+        // secondary-call failure stays a graceful no-opinion. #280
+        Err(error)
+            if classify_processing_failure(&error) == ProcessingFailureClass::ProviderQuota =>
+        {
+            return Err(error);
+        }
         Err(error) => {
             warn!(
                 document_id = job.paperless_document_id,
