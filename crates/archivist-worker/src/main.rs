@@ -584,6 +584,10 @@ async fn process_available_jobs(
                 .await;
                 if let Err(error) = &result {
                     let failure_class = classify_processing_failure(error);
+                    // Set when a quota cooldown/release fails with a transient DB
+                    // error: the document must NOT be permanently failed for a
+                    // quota that resets — make the fallback fail_job retryable. #295
+                    let mut force_retryable = false;
                     if failure_class == ProcessingFailureClass::ProviderQuota {
                         // The provider replied with a usage-cap signal.
                         // Persist a cooldown so subsequent claims of jobs
@@ -622,15 +626,19 @@ async fn process_available_jobs(
                                     Err(release_err) => {
                                         // Releasing failed — fall through to the
                                         // normal fail path so the job does not
-                                        // silently stay leased.
+                                        // silently stay leased, but as retryable
+                                        // (a transient DB error, not a real
+                                        // permanent failure).
+                                        force_retryable = true;
                                         warn!(
                                             error = %release_err,
-                                            "failed to release lease after quota-exhausted failure; falling back to fail_job"
+                                            "failed to release lease after quota-exhausted failure; falling back to retryable fail_job"
                                         );
                                     }
                                 }
                             }
                             Err(cooldown_err) => {
+                                force_retryable = true;
                                 warn!(
                                     error = %cooldown_err,
                                     "failed to persist provider cooldown after quota-exhausted failure"
@@ -669,7 +677,7 @@ async fn process_available_jobs(
                         &job,
                         &lease_owner,
                         &format!("{:#}", error),
-                        failure_class.is_retryable(),
+                        failure_class.is_retryable() || force_retryable,
                     )
                     .await;
                 } else {
@@ -2033,12 +2041,24 @@ async fn process_metadata(
     // stays under the token budget. Field names are typically a short curated
     // list so they bypass filtering.
     let allowed_list_max = settings.effective_tuning().allowed_list_max as usize;
-    let allowed_correspondents =
-        archivist_core::prefilter_allowed_list(&content, &allowed_correspondents, allowed_list_max);
-    let allowed_document_types =
-        archivist_core::prefilter_allowed_list(&content, &allowed_document_types, allowed_list_max);
-    let allowed_tags =
-        archivist_core::prefilter_allowed_list(&content, &allowed_tags, allowed_list_max);
+    // Lowercase the (potentially large) content ONCE and share it across the
+    // three prefilter passes instead of re-lowercasing it each time. #295
+    let content_lower = content.to_lowercase();
+    let allowed_correspondents = archivist_core::prefilter_allowed_list_lower(
+        &content_lower,
+        &allowed_correspondents,
+        allowed_list_max,
+    );
+    let allowed_document_types = archivist_core::prefilter_allowed_list_lower(
+        &content_lower,
+        &allowed_document_types,
+        allowed_list_max,
+    );
+    let allowed_tags = archivist_core::prefilter_allowed_list_lower(
+        &content_lower,
+        &allowed_tags,
+        allowed_list_max,
+    );
 
     // v1.5.13: cheap pre-pass classifier to give the main metadata prompt a
     // document-type-specific hint. Skips the call gracefully when content is

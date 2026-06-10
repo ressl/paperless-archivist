@@ -5807,7 +5807,11 @@ pub async fn claim_review_for_apply(
           select status from review_items where id = $1
         )
         update review_items
-           set status = 'applying'
+           -- Re-stamp reviewed_at so the stale-applying recovery sweep (which
+           -- keys its 300s timer off reviewed_at) measures from the claim, not
+           -- the original approval — otherwise a slow apply could be reverted
+           -- mid-flight and double-applied. #295
+           set status = 'applying', reviewed_at = now()
          where id = $1 and status in ('approved', 'edited')
         returning id, run_id, job_id, paperless_document_id, stage,
                   (select status from prev) as status,

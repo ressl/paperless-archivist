@@ -1118,6 +1118,10 @@ impl PaperlessSettings {
             self.active_archive = "default".to_owned();
         }
         self.delta_sync_overlap_minutes = self.delta_sync_overlap_minutes.clamp(0, 1440);
+        // Cap the request timeout: a very large value lets a single hung apply
+        // outlive the 300s stale-applying recovery window and get reverted +
+        // double-applied. 120s matches the on-demand credential-test clamp. #295
+        self.timeout_seconds = self.timeout_seconds.clamp(1, 120);
         if self.archive_profiles.is_empty() {
             self.archive_profiles.push(PaperlessArchiveProfile {
                 name: self.active_archive.clone(),
@@ -3843,7 +3847,11 @@ pub fn redact_secret(value: &str) -> String {
 }
 
 pub fn redact_sensitive_json(value: &mut Value) {
-    const SENSITIVE: &[&str] = &[
+    // Substring-sensitive keys: a STRING value under these is redacted. A
+    // number/bool is NOT, because a key like `prompt_tokens` / `tokens_capped`
+    // contains "token" but is a usage counter/flag, never a credential —
+    // redacting it would destroy token statistics.
+    const SENSITIVE_SUBSTRING: &[&str] = &[
         "authorization",
         "api_key",
         "apikey",
@@ -3852,17 +3860,37 @@ pub fn redact_sensitive_json(value: &mut Value) {
         "password",
         "paperless_token",
     ];
+    // Exact secret key names: the value is redacted regardless of type, so a
+    // numeric-valued credential (e.g. a numeric PIN under `"token"`) can't slip
+    // through the number/bool exemption above. #295
+    const SECRET_EXACT: &[&str] = &[
+        "authorization",
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "paperless_token",
+        "client_secret",
+        "access_token",
+        "refresh_token",
+        "id_token",
+    ];
 
     match value {
         Value::Object(map) => {
             for (key, nested) in map {
-                let sensitive_key = SENSITIVE
+                let lower = key.to_ascii_lowercase();
+                // Exact secret key names redact regardless of value type (so a
+                // numeric-valued credential can't slip through); substring
+                // matches only redact string values, leaving numeric/bool
+                // config like `token_ttl_seconds` intact. #295
+                let redact_exact = SECRET_EXACT.contains(&lower.as_str());
+                let redact_substring = SENSITIVE_SUBSTRING
                     .iter()
-                    .any(|needle| key.to_ascii_lowercase().contains(needle));
-                // Numbers and booleans under a sensitive-looking key are usage
-                // counters (`prompt_tokens`, `eval_count`, …), never credentials —
-                // redacting them would permanently destroy token statistics.
-                if sensitive_key && !matches!(nested, Value::Number(_) | Value::Bool(_)) {
+                    .any(|needle| lower.contains(needle))
+                    && !matches!(nested, Value::Number(_) | Value::Bool(_));
+                if redact_exact || redact_substring {
                     *nested = Value::String("[REDACTED]".to_owned());
                 } else {
                     redact_sensitive_json(nested);
@@ -5085,7 +5113,10 @@ mod tests {
             "api_key": "sk-secret",
             "authorization": "Bearer abc",
             "paperless_token": "tok-123",
-            "options": { "token": "raw-secret", "num_ctx": 4096 }
+            "options": { "token": "raw-secret", "num_ctx": 4096 },
+            // A numeric-valued credential under an EXACT secret key must be
+            // redacted, not preserved by the counter exemption. #295
+            "secret": 12345678
         });
         redact_sensitive_json(&mut value);
 
@@ -5099,5 +5130,6 @@ mod tests {
         assert_eq!(value["paperless_token"], "[REDACTED]");
         assert_eq!(value["options"]["token"], "[REDACTED]");
         assert_eq!(value["options"]["num_ctx"], 4096);
+        assert_eq!(value["secret"], "[REDACTED]");
     }
 }
