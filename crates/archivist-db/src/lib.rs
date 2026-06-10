@@ -7954,6 +7954,94 @@ pub async fn bump_vision_num_ctx_if_too_small(pool: &DbPool) -> Result<VisionNum
     })
 }
 
+/// Summary of a one-shot bump pass for the text `num_ctx` runtime setting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextNumCtxBumpSummary {
+    pub previous: Option<i64>,
+    pub current: i64,
+    pub bumped: bool,
+}
+
+/// One-shot, idempotent helper that raises `ai.ollama_text_num_ctx` to a 16384
+/// floor. The text default was 8192 with no floor (the vision path got one in
+/// v1.5.1, the text path never did), so a large metadata prompt — the OCR text
+/// plus the candidate correspondent/type/tag lists — could overflow the 8192
+/// window and fail every metadata job permanently with
+/// `exceed_context_size_error`. 16384 gives headroom for a bounded prompt;
+/// operators who already raised it past the floor are left alone.
+pub async fn bump_text_num_ctx_if_too_small(pool: &DbPool) -> Result<TextNumCtxBumpSummary> {
+    const FLOOR: i64 = 16384;
+
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        select (value #>> '{ai,ollama_text_num_ctx}')::bigint as num_ctx
+          from settings
+         where key = 'runtime'
+         for update
+        "#,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let previous: Option<i64> = row.and_then(|r| r.try_get("num_ctx").ok());
+    let should_bump = match previous {
+        Some(v) => v < FLOOR,
+        None => true,
+    };
+
+    if !should_bump {
+        tx.commit().await?;
+        return Ok(TextNumCtxBumpSummary {
+            previous,
+            current: previous.unwrap_or(FLOOR),
+            bumped: false,
+        });
+    }
+
+    sqlx::query(
+        r#"
+        update settings
+           set value = jsonb_set(value, '{ai,ollama_text_num_ctx}', to_jsonb($1::bigint)),
+               updated_at = now()
+         where key = 'runtime'
+        "#,
+    )
+    .bind(FLOOR)
+    .execute(&mut *tx)
+    .await?;
+
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "worker.text_num_ctx_bumped".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: previous.map(|v| json!({ "ollama_text_num_ctx": v })),
+            after: Some(json!({ "ollama_text_num_ctx": FLOOR })),
+            metadata: Some(json!({
+                "trigger": "startup_one_shot",
+                "reason": "text_context_overflow_at_8192",
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(TextNumCtxBumpSummary {
+        previous,
+        current: FLOOR,
+        bumped: true,
+    })
+}
+
 /// Summary of a one-shot pass that resets stuck `pipeline_runs.status`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StuckRunStatusFixSummary {

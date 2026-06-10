@@ -18,10 +18,11 @@ use archivist_core::{
 };
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit,
-    backfill_metadata_stage_for_ocr_only_runs, bump_vision_num_ctx_if_too_small, claim_jobs,
-    claim_notification_delivery, claim_pending_review_for_autopilot_drain, complete_job, connect,
-    create_review_item, create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job,
-    get_active_prompt, get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
+    backfill_metadata_stage_for_ocr_only_runs, bump_text_num_ctx_if_too_small,
+    bump_vision_num_ctx_if_too_small, claim_jobs, claim_notification_delivery,
+    claim_pending_review_for_autopilot_drain, complete_job, connect, create_review_item,
+    create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job, get_active_prompt,
+    get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
     get_workflow_safety_status, increment_metric_counter, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
@@ -150,6 +151,20 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         ),
         Ok(_) => info!("ai.ollama_vision_num_ctx already at or above 32768; no bump"),
         Err(error) => warn!(error = %error, "startup vision num_ctx bump failed"),
+    }
+
+    // One-shot: raise the text num_ctx to a 16384 floor. The text path never
+    // had a floor (unlike vision), so the 8192 default let a large metadata
+    // prompt (OCR + candidate lists) overflow the context and fail every
+    // metadata job permanently. Operators who already raised it are untouched.
+    match bump_text_num_ctx_if_too_small(&pool).await {
+        Ok(summary) if summary.bumped => info!(
+            previous = ?summary.previous,
+            current = summary.current,
+            "bumped ai.ollama_text_num_ctx to 16384 to give the text model context headroom"
+        ),
+        Ok(_) => info!("ai.ollama_text_num_ctx already at or above 16384; no bump"),
+        Err(error) => warn!(error = %error, "startup text num_ctx bump failed"),
     }
 
     // One-shot: lift failed OCR jobs killed by the GGML vision-runtime crash signature back

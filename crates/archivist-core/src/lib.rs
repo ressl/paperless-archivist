@@ -930,9 +930,22 @@ impl RuntimeSettings {
             max_tags: tuning
                 .and_then(|tuning| tuning.max_tags)
                 .unwrap_or(self.tagging.max_tags as u32),
-            allowed_list_max: tuning
-                .and_then(|tuning| tuning.allowed_list_max)
-                .unwrap_or(self.metadata.allowed_list_max as u32),
+            allowed_list_max: {
+                // `prefilter_allowed_list` treats max=0 as UNLIMITED, which on
+                // a large Paperless instance dumps the entire correspondent/
+                // type/tag lists into the metadata prompt and overflows the
+                // model context. Treat a configured/resolved 0 as "use the
+                // built-in default cap" on the worker path so an unset/zeroed
+                // value can't blow up the prompt.
+                let resolved = tuning
+                    .and_then(|tuning| tuning.allowed_list_max)
+                    .unwrap_or(self.metadata.allowed_list_max as u32);
+                if resolved == 0 {
+                    DEFAULT_METADATA_ALLOWED_LIST_MAX as u32
+                } else {
+                    resolved
+                }
+            },
         }
     }
 }
@@ -4893,6 +4906,25 @@ mod tests {
         assert_eq!(tuning.vision_num_ctx, Some(4096));
         assert_eq!(tuning.hourly_document_limit, Some(200));
         assert_eq!(tuning.daily_document_limit, Some(2000));
+    }
+
+    #[test]
+    fn effective_tuning_treats_zero_allowed_list_max_as_default_not_unlimited() {
+        // `prefilter_allowed_list` reads max=0 as UNLIMITED, which overflows the
+        // metadata prompt; a configured/resolved 0 must coerce to the default cap.
+        let mut settings = settings_with_two_providers();
+        settings.ai.default_provider = "ollama".to_owned();
+        settings.ai.providers[0].tuning.allowed_list_max = None; // fall back to global
+        settings.metadata.allowed_list_max = 0; // the footgun value
+        assert_eq!(
+            settings.effective_tuning().allowed_list_max,
+            DEFAULT_METADATA_ALLOWED_LIST_MAX as u32,
+            "a zeroed allowed_list_max must resolve to the default cap, not unlimited"
+        );
+
+        // A positive value is respected as-is.
+        settings.ai.providers[0].tuning.allowed_list_max = Some(250);
+        assert_eq!(settings.effective_tuning().allowed_list_max, 250);
     }
 
     #[test]
