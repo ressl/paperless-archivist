@@ -671,7 +671,7 @@ impl TextProvider for OllamaClient {
             .context("call Ollama chat")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body("ollama", response).await?;
+            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
             return Err(anyhow!("Ollama chat returned {status}: {body}"));
         }
         let raw: Value = response
@@ -714,7 +714,7 @@ impl VisionProvider for OllamaClient {
             .context("call Ollama vision")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body("ollama", response).await?;
+            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
             return Err(anyhow!("Ollama vision returned {status}: {body}"));
         }
         let raw: Value = response

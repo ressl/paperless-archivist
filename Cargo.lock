@@ -124,6 +124,7 @@ dependencies = [
  "anyhow",
  "archivist-core",
  "async-trait",
+ "axum",
  "base64",
  "chrono",
  "reqwest",
