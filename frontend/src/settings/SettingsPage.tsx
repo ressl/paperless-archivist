@@ -150,8 +150,12 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
     );
   }
 
-  const update = (updater: (settings: RuntimeSettings) => RuntimeSettings) =>
+  const update = (updater: (settings: RuntimeSettings) => RuntimeSettings) => {
+    // Any further edit invalidates the "Saved" confirmation so it can't linger
+    // over a now-dirty form. (#296)
+    setResult(null);
     setSettings((current) => (current ? updater(current) : current));
+  };
 
   // Per-slice patch helpers keep the section components purely presentational:
   // each receives its own slice + a typed onChange that merges a partial patch.
@@ -376,7 +380,10 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           value={settings.paperless}
           onChange={updatePaperless}
           token={token}
-          onTokenChange={setToken}
+          onTokenChange={(value) => {
+            setResult(null);
+            setToken(value);
+          }}
           test={paperlessTest}
           onTest={runPaperlessTest}
         />
@@ -400,7 +407,10 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           value={settings.notifications}
           onChange={updateNotifications}
           webhook={notificationWebhook}
-          onWebhookChange={setNotificationWebhook}
+          onWebhookChange={(value) => {
+            setResult(null);
+            setNotificationWebhook(value);
+          }}
           test={notificationTest}
           onTest={runNotificationTest}
         />
@@ -417,7 +427,10 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             globals={settings}
             ollamaState={ollamaModels[index]}
             secret={providerSecrets[index] ?? ''}
-            onSecretChange={(value) => setProviderSecrets((current) => ({ ...current, [index]: value }))}
+            onSecretChange={(value) => {
+              setResult(null);
+              setProviderSecrets((current) => ({ ...current, [index]: value }));
+            }}
             onChangeProvider={(patch) => updateProvider(index, patch)}
             onChangeTuning={(patch) => updateProviderTuning(index, patch)}
             onResetTuningBlock={(fields) => resetProviderTuningBlock(index, fields)}

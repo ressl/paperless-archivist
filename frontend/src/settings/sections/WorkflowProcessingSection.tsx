@@ -69,6 +69,7 @@ export function WorkflowProcessingSection({
       </FormField>
       <FormField label={t('settings.workflow.include_tags')} htmlFor={ids.include}>
         <CommaListInput
+          id={ids.include}
           values={value.rules.include_tags}
           onCommit={(include_tags) => onChange({ rules: { ...value.rules, include_tags } })}
           placeholder={t('settings.workflow.optional_tags')}
@@ -76,6 +77,7 @@ export function WorkflowProcessingSection({
       </FormField>
       <FormField label={t('settings.workflow.exclude_tags')} htmlFor={ids.exclude}>
         <CommaListInput
+          id={ids.exclude}
           values={value.rules.exclude_tags}
           onCommit={(exclude_tags) => onChange({ rules: { ...value.rules, exclude_tags } })}
           placeholder={t('settings.workflow.optional_tags')}

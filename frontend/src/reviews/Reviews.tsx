@@ -189,13 +189,22 @@ function ReviewCard({ item, selected, onSelect, onReload, onAutoFix, setError, t
     }, t);
   }, [patch, edit, item.id, onReload, setError, t]);
 
+  // Wrap approve/reject in the shared busy guard so `disabled={busy}` actually
+  // blocks a double-click — otherwise a second click fired a duplicate POST
+  // before onReload removed the card. (#296)
   const approve = useCallback(
-    () => api.approveReview(item.id).then(onReload).catch((err) => setError(localizedErrorMessage(err, t))),
+    () => run(setBusy, setError, async () => {
+      await api.approveReview(item.id);
+      onReload();
+    }, t),
     [item.id, onReload, setError, t]
   );
 
   const reject = useCallback(
-    () => api.rejectReview(item.id).then(onReload).catch((err) => setError(localizedErrorMessage(err, t))),
+    () => run(setBusy, setError, async () => {
+      await api.rejectReview(item.id);
+      onReload();
+    }, t),
     [item.id, onReload, setError, t]
   );
 
@@ -296,6 +305,7 @@ const ReviewCardMemo = memo(
       a.stage === b.stage &&
       a.created_at === b.created_at &&
       a.paperless_document_id === b.paperless_document_id &&
+      a.paperless_title === b.paperless_title &&
       a.suggested_patch === b.suggested_patch &&
       a.edited_patch === b.edited_patch &&
       a.validation_warnings === b.validation_warnings &&

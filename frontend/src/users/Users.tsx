@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { KeyRound, Power, RotateCcw, UserPlus, X } from 'lucide-react';
+import { Copy, KeyRound, Power, RotateCcw, UserPlus, X } from 'lucide-react';
 import { api, ApiToken, Role, SessionItem, UserItem } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { Button, NumberField, PageHeader, localizedErrorMessage } from '../lib/ui';
@@ -162,7 +162,35 @@ export function Users({ setError }: { setError: (error: string | null) => void }
         />
         <Button variant="primary" icon={<KeyRound size={16} />}>{t('users.create_token')}</Button>
       </form>
-      {newToken && <pre className="token-once">{newToken}</pre>}
+      {newToken && (
+        <div className="token-once">
+          <small className="field-hint">{t('users.token_once_hint')}</small>
+          <pre>{newToken}</pre>
+          <div className="token-once-actions">
+            <Button
+              variant="primary"
+              icon={<Copy size={16} />}
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(newToken);
+                  setNewToken(null);
+                } catch {
+                  setError(t('users.token_copy_failed'));
+                }
+              }}
+            >
+              {t('users.token_copy')}
+            </Button>
+            <Button
+              variant="secondary"
+              icon={<X size={16} />}
+              title={t('generic.dismiss')}
+              aria-label={t('generic.dismiss')}
+              onClick={() => setNewToken(null)}
+            />
+          </div>
+        </div>
+      )}
       <div className="table-wrap">
         <table>
           <thead><tr><th>{t('users.col_name')}</th><th>{t('users.col_scopes')}</th><th>{t('users.col_expires')}</th><th>{t('users.col_last_used')}</th><th>{t('users.col_status')}</th><th>{t('users.col_action')}</th></tr></thead>

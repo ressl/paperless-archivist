@@ -158,21 +158,30 @@ export function useDashboardLive(
   const [live, setLive] = useState<DashboardLiveStatus | null>(null);
   const [recovery, setRecovery] = useState<{ older_than_seconds: number; items: RecoveryCandidate[] } | null>(null);
 
+  // Monotonic request sequence per poll: the 5s tick can issue a new request
+  // before the previous one resolves, so an older (slower) response must not
+  // clobber a newer snapshot. Apply state only if this is still the latest
+  // request issued. (#296)
+  const liveSeqRef = useRef(0);
+  const recoverySeqRef = useRef(0);
+
   const reload = useCallback(async () => {
+    const seq = ++liveSeqRef.current;
     try {
       const data = await api.dashboardLive();
-      setLive(data);
+      if (seq === liveSeqRef.current) setLive(data);
     } catch (err) {
-      setError(localizedErrorMessage(err, t));
+      if (seq === liveSeqRef.current) setError(localizedErrorMessage(err, t));
     }
   }, [setError, t]);
 
   const reloadRecovery = useCallback(async () => {
+    const seq = ++recoverySeqRef.current;
     try {
       const data = await api.recoveryStatus();
-      setRecovery(data);
+      if (seq === recoverySeqRef.current) setRecovery(data);
     } catch (err) {
-      setError(localizedErrorMessage(err, t));
+      if (seq === recoverySeqRef.current) setError(localizedErrorMessage(err, t));
     }
   }, [setError, t]);
 

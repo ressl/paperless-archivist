@@ -3262,6 +3262,22 @@ legend {
   border-radius: 6px;
   background: var(--brass-soft);
   color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.token-once pre {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: var(--font-mono, monospace);
+}
+
+.token-once-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
 }
 
 @media (max-width: 860px) {

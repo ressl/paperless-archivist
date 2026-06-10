@@ -103,6 +103,30 @@ export function App() {
   const canReadAudit = me.permissions.read_audit;
   const canManageUsers = me.permissions.manage_users;
 
+  // Mirror the render gates below: a cross-tab navigation (e.g. from a
+  // dashboard alert) to a tab the user can't render would otherwise drop them
+  // on a blank workspace. (#296)
+  const canViewTab = (candidate: Tab): boolean => {
+    switch (candidate) {
+      case 'statistics':
+        return canReadDashboard;
+      case 'chat':
+        return canUseChat;
+      case 'settings':
+      case 'prompts':
+        return canReadSettings;
+      case 'audit':
+        return canReadAudit;
+      case 'users':
+        return canManageUsers;
+      case 'debug':
+        return debugConsoleEnabled && canReadAudit;
+      default:
+        // dashboard, inventory, reviews are ungated for any signed-in user.
+        return true;
+    }
+  };
+
   // Switch tabs and drop any stale global error so a banner from one tab does
   // not bleed into the next one.
   const selectTab = (next: Tab) => {
@@ -169,6 +193,10 @@ export function App() {
             // shouldn't strand the user in a logged-in UI. (#272)
             try {
               await api.logout();
+            } catch {
+              // Best-effort: the cookie is invalidated server-side and we clear
+              // client state below regardless. Swallow so a failed logout call
+              // doesn't surface as an unhandled promise rejection. (#296)
             } finally {
               setMe(null);
             }
@@ -210,7 +238,9 @@ export function App() {
                   nextTab === 'audit' || nextTab === 'users' ||
                   nextTab === 'debug'
                 ) {
-                  setTab(nextTab);
+                  // Fall back to the dashboard rather than a blank workspace if
+                  // the target tab isn't visible for this role. (#296)
+                  setTab(canViewTab(nextTab) ? nextTab : 'dashboard');
                 }
               }}
             />
