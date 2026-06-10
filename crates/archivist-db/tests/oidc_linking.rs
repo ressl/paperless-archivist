@@ -80,3 +80,54 @@ async fn oidc_email_linking_requires_explicit_opt_in() {
     assert_eq!(linked.username, "local-admin");
     assert!(linked.roles.contains(&Role::Admin));
 }
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn oidc_login_replaces_roles_so_allowlist_removal_demotes() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+
+    // First login as an admin (e.g. matched the admin allowlist).
+    let admin = upsert_oidc_user(
+        &pool,
+        OidcUserInput {
+            provider: "zitadel",
+            subject: "subject-demote",
+            username: "oidc-admin",
+            email: None,
+            disabled_password_hash: "disabled-hash",
+            roles: &[Role::Admin, Role::Operator, Role::Reviewer, Role::Auditor],
+            allow_username_link: false,
+            allow_email_link: false,
+        },
+    )
+    .await
+    .expect("first login");
+    assert!(admin.roles.contains(&Role::Admin));
+
+    // Next login after the operator removed them from the allowlist: the
+    // computed roles are now just the default. Roles must be REPLACED, not
+    // merged, so the stale Admin grant is gone.
+    let demoted = upsert_oidc_user(
+        &pool,
+        OidcUserInput {
+            provider: "zitadel",
+            subject: "subject-demote",
+            username: "oidc-admin",
+            email: None,
+            disabled_password_hash: "disabled-hash",
+            roles: &[Role::Viewer],
+            allow_username_link: false,
+            allow_email_link: false,
+        },
+    )
+    .await
+    .expect("second login");
+    assert_eq!(demoted.id, admin.id);
+    assert_eq!(
+        demoted.roles,
+        vec![Role::Viewer],
+        "allowlist removal must demote"
+    );
+}

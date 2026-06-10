@@ -703,12 +703,23 @@ pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result
         }
     }
 
-    let mut roles = load_user_roles_tx(&mut tx, user_id).await?;
-    for role in input.roles {
-        if !roles.contains(role) {
-            roles.push(role.clone());
+    // Role resolution (#289). On the FIRST link of an existing local account
+    // keep the operator's local grants and add the IdP-computed roles, so
+    // linking doesn't unexpectedly demote. For a new or RETURNING OIDC user the
+    // roles are authoritative-from-IdP: REPLACE with the freshly-computed
+    // `input.roles` so removal from ARCHIVIST_OIDC_ADMIN_USERS demotes on the
+    // next login (the previous additive merge left stale Admin rows forever).
+    let mut roles = if linked_existing {
+        let mut existing = load_user_roles_tx(&mut tx, user_id).await?;
+        for role in input.roles {
+            if !existing.contains(role) {
+                existing.push(role.clone());
+            }
         }
-    }
+        existing
+    } else {
+        input.roles.to_vec()
+    };
     if roles.is_empty() {
         roles.push(Role::Viewer);
     }
