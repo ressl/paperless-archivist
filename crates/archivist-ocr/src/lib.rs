@@ -42,6 +42,11 @@ pub async fn render_document_pages(
         .to_ascii_lowercase();
 
     if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+        // Image inputs go straight to the vision model without rendering, but
+        // they still get loaded into memory (and base64-encoded), so the
+        // per-page byte cap must apply here too — the PDF path is not the only
+        // way to feed a huge raster into the worker. #282
+        accumulate_rendered_page_size(0, document_bytes.len() as u64)?;
         let mime_type = mime_guess::from_ext(&extension)
             .first_or_octet_stream()
             .to_string();
@@ -246,6 +251,24 @@ mod tests {
     fn strip_code_fences_is_noop_on_clean_text() {
         let page = "Use the `--flag` switch to enable it.\nSecond line.";
         assert_eq!(strip_code_fences(page), page);
+    }
+
+    #[tokio::test]
+    async fn image_input_is_rejected_over_the_per_page_cap() {
+        // A small image passes through without rendering.
+        let small = vec![0u8; 1024];
+        let pages = render_document_pages(&small, Some("scan.png"), 4)
+            .await
+            .expect("small image ok");
+        assert_eq!(pages.len(), 1);
+
+        // An oversize image is rejected by the per-page cap (not buffered onward).
+        let huge = vec![0u8; (MAX_RENDERED_PAGE_BYTES + 1) as usize];
+        assert!(
+            render_document_pages(&huge, Some("scan.jpg"), 4)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
