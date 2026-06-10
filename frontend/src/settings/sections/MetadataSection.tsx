@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import type { RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
-import { FormField, Section } from '../../lib/ui';
+import { FormField, NumberField, Section } from '../../lib/ui';
 
 export function MetadataSection({
   value,
@@ -18,25 +18,27 @@ export function MetadataSection({
   return (
     <Section title={t('settings.workflow.section.metadata')}>
       <FormField label={t('settings.workflow.metadata_confidence')} htmlFor={ids.confidence}>
-        <input
+        <NumberField
           id={ids.confidence}
-          type="number"
-          min="0"
-          max="1"
-          step="0.05"
+          min={0}
+          max={1}
+          step={0.05}
+          integer={false}
           value={value.confidence_threshold}
-          onChange={(event) => onChange({ confidence_threshold: Number(event.target.value) })}
+          onCommit={(confidence_threshold) => onChange({ confidence_threshold })}
         />
       </FormField>
       <FormField label={t('settings.workflow.date_confidence')} htmlFor={ids.dateConfidence}>
-        <input
+        <NumberField
           id={ids.dateConfidence}
-          type="number"
-          min="0"
-          max="1"
-          step="0.05"
+          min={0}
+          max={1}
+          step={0.05}
+          integer={false}
           value={value.document_date_confidence_threshold}
-          onChange={(event) => onChange({ document_date_confidence_threshold: Number(event.target.value) })}
+          onCommit={(document_date_confidence_threshold) =>
+            onChange({ document_date_confidence_threshold })
+          }
         />
       </FormField>
       <label className="inline">

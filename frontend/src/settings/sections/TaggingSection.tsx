@@ -1,7 +1,7 @@
 import { useId, useMemo } from 'react';
 import type { RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
-import { FormField, Section } from '../../lib/ui';
+import { FormField, NumberField, Section } from '../../lib/ui';
 import { languageOptionLabel, languageOptions } from '../../data/worldLanguages';
 
 export function TaggingSection({
@@ -22,24 +22,23 @@ export function TaggingSection({
   return (
     <Section title={t('settings.workflow.section.tagging')}>
       <FormField label={t('settings.workflow.max_tags')} htmlFor={ids.maxTags}>
-        <input
+        <NumberField
           id={ids.maxTags}
-          type="number"
-          min="1"
-          max="20"
+          min={1}
+          max={20}
           value={value.max_tags}
-          onChange={(event) => onChange({ max_tags: Number(event.target.value) })}
+          onCommit={(max_tags) => onChange({ max_tags })}
         />
       </FormField>
       <FormField label={t('settings.workflow.tag_confidence')} htmlFor={ids.confidence}>
-        <input
+        <NumberField
           id={ids.confidence}
-          type="number"
-          min="0"
-          max="1"
-          step="0.05"
+          min={0}
+          max={1}
+          step={0.05}
+          integer={false}
           value={value.confidence_threshold}
-          onChange={(event) => onChange({ confidence_threshold: Number(event.target.value) })}
+          onCommit={(confidence_threshold) => onChange({ confidence_threshold })}
         />
       </FormField>
       <FormField

@@ -100,6 +100,66 @@ export function CommaListInput({
   );
 }
 
+/**
+ * Numeric input that holds a raw string draft while editing and only
+ * parses/clamps on blur. A controlled `value={number}` with
+ * `onChange={Number(...)}` clamps on every keystroke (so multi-digit values
+ * become untypeable) and turns a cleared field into `0`/`NaN`; this commits
+ * once, on blur, clamped into [min, max], falling back to `min` (or 0) for an
+ * empty/invalid entry, and shows the committed value back. (#284)
+ */
+export function NumberField({
+  value,
+  onCommit,
+  min,
+  max,
+  step,
+  integer = true,
+  id,
+  placeholder,
+  ariaLabel
+}: {
+  value: number;
+  onCommit: (value: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  integer?: boolean;
+  id?: string;
+  placeholder?: string;
+  ariaLabel?: string;
+}) {
+  const text = String(value);
+  const [raw, setRaw] = useState(text);
+  useEffect(() => {
+    setRaw(text);
+  }, [text]);
+  const commit = () => {
+    const trimmed = raw.trim();
+    let next = trimmed === '' ? NaN : Number(trimmed);
+    if (!Number.isFinite(next)) next = min ?? 0;
+    if (integer) next = Math.round(next);
+    if (min != null) next = Math.max(min, next);
+    if (max != null) next = Math.min(max, next);
+    onCommit(next);
+    setRaw(String(next));
+  };
+  return (
+    <input
+      type="number"
+      id={id}
+      min={min}
+      max={max}
+      step={step ?? (integer ? 1 : undefined)}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+      value={raw}
+      onChange={(event) => setRaw(event.target.value)}
+      onBlur={commit}
+    />
+  );
+}
+
 /** A single KPI / metric tile with an optional good/bad-aware delta. */
 export function KpiCard({
   label,

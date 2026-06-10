@@ -33,18 +33,6 @@ export function optionalPositiveInteger(value: string) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-/**
- * Parse a required integer field and clamp it into [min, max], falling back to
- * `fallback` for empty/invalid input. Plain `Number(event.target.value)`
- * yields 0 for a cleared field and HTML min/max are never enforced (the Save
- * button is not a form submit), so this keeps out-of-range values (e.g. a
- * 0-day retention) from being saved. (#272)
- */
-export function clampInteger(value: string, min: number, max: number, fallback: number): number {
-  const parsed = Number(value);
-  if (value.trim() === '' || !Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, Math.round(parsed)));
-}
 
 export function splitTags(value: string) {
   return value

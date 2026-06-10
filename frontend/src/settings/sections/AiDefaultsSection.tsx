@@ -2,7 +2,7 @@ import { useId } from 'react';
 import { Activity } from 'lucide-react';
 import type { ModelCatalogEntry, RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
-import { Button, FormField, Section } from '../../lib/ui';
+import { Button, FormField, NumberField, Section } from '../../lib/ui';
 import { ConnectionTestFeedback } from './ConnectionTestFeedback';
 import { ProviderModelSelect } from './ProviderModelSelect';
 import type { ConnectionTestState, ModelProviderDescriptor, OllamaModelLoadState } from './types';
@@ -107,14 +107,13 @@ export function AiDefaultsSection({
         help={t('settings.ai.ollama_vision_num_ctx_hint')}
         htmlFor={ids.visionCtx}
       >
-        <input
+        <NumberField
           id={ids.visionCtx}
-          type="number"
-          min="2048"
-          max="131072"
-          step="1024"
+          min={2048}
+          max={131072}
+          step={1024}
           value={ai.ollama_vision_num_ctx ?? 16384}
-          onChange={(event) => onChange({ ollama_vision_num_ctx: Number(event.target.value) })}
+          onCommit={(ollama_vision_num_ctx) => onChange({ ollama_vision_num_ctx })}
         />
       </FormField>
       <FormField
@@ -122,14 +121,13 @@ export function AiDefaultsSection({
         help={t('settings.ai.ollama_text_num_ctx_hint')}
         htmlFor={ids.textCtx}
       >
-        <input
+        <NumberField
           id={ids.textCtx}
-          type="number"
-          min="2048"
-          max="131072"
-          step="1024"
+          min={2048}
+          max={131072}
+          step={1024}
           value={ai.ollama_text_num_ctx ?? 8192}
-          onChange={(event) => onChange({ ollama_text_num_ctx: Number(event.target.value) })}
+          onCommit={(ollama_text_num_ctx) => onChange({ ollama_text_num_ctx })}
         />
       </FormField>
       <Button variant="secondary" icon={<Activity size={16} />} title={t('generic.test')} disabled={testing} onClick={onTest}>

@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from 'react';
 import type { RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
-import { FormField, Section } from '../../lib/ui';
+import { FormField, NumberField, Section } from '../../lib/ui';
 import { parseFieldMappings, serializeFieldMappings } from './helpers';
 
 export function FieldsSection({
@@ -28,24 +28,23 @@ export function FieldsSection({
   return (
     <Section title={t('settings.workflow.section.fields')}>
       <FormField label={t('settings.workflow.max_fields')} htmlFor={ids.maxFields}>
-        <input
+        <NumberField
           id={ids.maxFields}
-          type="number"
-          min="1"
-          max="50"
+          min={1}
+          max={50}
           value={value.max_fields}
-          onChange={(event) => onChange({ max_fields: Number(event.target.value) })}
+          onCommit={(max_fields) => onChange({ max_fields })}
         />
       </FormField>
       <FormField label={t('settings.workflow.field_confidence')} htmlFor={ids.confidence}>
-        <input
+        <NumberField
           id={ids.confidence}
-          type="number"
-          min="0"
-          max="1"
-          step="0.05"
+          min={0}
+          max={1}
+          step={0.05}
+          integer={false}
           value={value.confidence_threshold}
-          onChange={(event) => onChange({ confidence_threshold: Number(event.target.value) })}
+          onCommit={(confidence_threshold) => onChange({ confidence_threshold })}
         />
       </FormField>
       <FormField

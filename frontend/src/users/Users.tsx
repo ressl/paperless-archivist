@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { KeyRound, Power, RotateCcw, UserPlus, X } from 'lucide-react';
 import { api, ApiToken, Role, SessionItem, UserItem } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
-import { Button, PageHeader, localizedErrorMessage } from '../lib/ui';
+import { Button, NumberField, PageHeader, localizedErrorMessage } from '../lib/ui';
 
 const ALL_ROLES: Role[] = ['viewer', 'reviewer', 'operator', 'auditor', 'admin'];
 
@@ -153,13 +153,12 @@ export function Users({ setError }: { setError: (error: string | null) => void }
       }}>
         <input value={tokenName} onChange={(event) => setTokenName(event.target.value)} placeholder={t('users.token_name')} aria-label={t('users.token_name')} />
         <input value={tokenScopes} onChange={(event) => setTokenScopes(event.target.value)} placeholder={t('users.token_scopes_placeholder')} aria-label={t('users.token_scopes')} />
-        <input
-          type="number"
-          min="1"
-          max="3650"
+        <NumberField
+          min={1}
+          max={3650}
           value={tokenExpiresInDays}
-          onChange={(event) => setTokenExpiresInDays(Number(event.target.value))}
-          aria-label={t('users.token_expiry_days')}
+          onCommit={setTokenExpiresInDays}
+          ariaLabel={t('users.token_expiry_days')}
         />
         <Button variant="primary" icon={<KeyRound size={16} />}>{t('users.create_token')}</Button>
       </form>

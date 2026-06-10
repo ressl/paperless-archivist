@@ -2,7 +2,7 @@ import { useId } from 'react';
 import { Database } from 'lucide-react';
 import type { RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
-import { Button, FormField, Section } from '../../lib/ui';
+import { Button, FormField, NumberField, Section } from '../../lib/ui';
 import { ConnectionTestFeedback } from './ConnectionTestFeedback';
 import type { ConnectionTestState } from './types';
 
@@ -64,13 +64,12 @@ export function PaperlessSection({
         {t('settings.paperless.delta_sync')}
       </label>
       <FormField label={t('settings.paperless.delta_overlap')} htmlFor={ids.overlap}>
-        <input
+        <NumberField
           id={ids.overlap}
-          type="number"
-          min="0"
-          max="1440"
+          min={0}
+          max={1440}
           value={value.delta_sync_overlap_minutes}
-          onChange={(event) => onChange({ delta_sync_overlap_minutes: Number(event.target.value) })}
+          onCommit={(delta_sync_overlap_minutes) => onChange({ delta_sync_overlap_minutes })}
         />
       </FormField>
       <FormField label={t('settings.paperless.active_archive')} htmlFor={ids.archive}>

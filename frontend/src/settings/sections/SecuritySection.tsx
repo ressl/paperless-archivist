@@ -1,8 +1,7 @@
 import { useId } from 'react';
 import type { RuntimeSettings } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
-import { FormField, Section } from '../../lib/ui';
-import { clampInteger } from './helpers';
+import { FormField, NumberField, Section } from '../../lib/ui';
 
 export function SecuritySection({
   value,
@@ -22,23 +21,21 @@ export function SecuritySection({
   return (
     <Section title={t('settings.security')}>
       <FormField label={t('settings.security.audit_retention')} htmlFor={ids.auditRetention}>
-        <input
+        <NumberField
           id={ids.auditRetention}
-          type="number"
-          min="30"
-          max="3650"
+          min={30}
+          max={3650}
           value={value.audit_retention_days}
-          onChange={(event) => onChange({ audit_retention_days: clampInteger(event.target.value, 30, 3650, 30) })}
+          onCommit={(audit_retention_days) => onChange({ audit_retention_days })}
         />
       </FormField>
       <FormField label={t('settings.security.ai_artifact_retention')} htmlFor={ids.artifactRetention}>
-        <input
+        <NumberField
           id={ids.artifactRetention}
-          type="number"
-          min="1"
-          max="365"
+          min={1}
+          max={365}
           value={value.ai_artifact_retention_days}
-          onChange={(event) => onChange({ ai_artifact_retention_days: clampInteger(event.target.value, 1, 365, 1) })}
+          onCommit={(ai_artifact_retention_days) => onChange({ ai_artifact_retention_days })}
         />
       </FormField>
       <FormField
@@ -67,23 +64,21 @@ export function SecuritySection({
         {t('settings.security.token_expiry_required')}
       </label>
       <FormField label={t('settings.security.token_default_ttl')} htmlFor={ids.defaultTtl}>
-        <input
+        <NumberField
           id={ids.defaultTtl}
-          type="number"
-          min="1"
-          max="365"
+          min={1}
+          max={365}
           value={value.api_token_default_ttl_days}
-          onChange={(event) => onChange({ api_token_default_ttl_days: clampInteger(event.target.value, 1, 365, 1) })}
+          onCommit={(api_token_default_ttl_days) => onChange({ api_token_default_ttl_days })}
         />
       </FormField>
       <FormField label={t('settings.security.token_max_ttl')} htmlFor={ids.maxTtl}>
-        <input
+        <NumberField
           id={ids.maxTtl}
-          type="number"
-          min="1"
-          max="3650"
+          min={1}
+          max={3650}
           value={value.api_token_max_ttl_days}
-          onChange={(event) => onChange({ api_token_max_ttl_days: clampInteger(event.target.value, 1, 3650, 1) })}
+          onCommit={(api_token_max_ttl_days) => onChange({ api_token_max_ttl_days })}
         />
       </FormField>
     </Section>
