@@ -927,14 +927,30 @@ fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass 
 /// upgrade-or-wait quota. Operators can lift it early via the dashboard
 /// "Entsperren" action.
 const DEFAULT_PROVIDER_QUOTA_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+/// Floor/ceiling applied to a provider-supplied `Retry-After` so a tiny value
+/// can't thrash the claim loop and a huge one can't park a provider for weeks.
+const MIN_PROVIDER_QUOTA_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const MAX_PROVIDER_QUOTA_COOLDOWN: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Walk `error` for an `AiProviderError::QuotaExhausted` and persist a
-/// cooldown row keyed on its `provider` field. The cooldown end is
-/// `max(now + retry_after_seconds, now + DEFAULT_PROVIDER_QUOTA_COOLDOWN)`
-/// so a server-supplied `Retry-After: 30` doesn't shorten the operator's
-/// intent of "back off for a while". Falls back to the job's stage
-/// provider name if no typed quota error is found in the chain (shouldn't
-/// happen with the v1.5.27 typed surface but keeps the helper robust).
+/// cooldown row keyed on its `provider` field. When the provider supplied a
+/// `Retry-After`, honor it (clamped to [MIN, MAX]); otherwise default to
+/// `DEFAULT_PROVIDER_QUOTA_COOLDOWN`. Previously `retry_after.max(DEFAULT)`
+/// meant a `Retry-After: 60` still produced a 24 h cooldown — a short throttle
+/// mis-read as a hard cap parked the provider (and every claimed job's
+/// run_after) for a day. #292. Falls back to the job's stage provider name if
+/// no typed quota error is found in the chain.
+/// Resolve the cooldown duration from a provider-supplied `Retry-After`: honor
+/// it clamped to [MIN, MAX], or default when absent. Pulled out for unit
+/// testing. #292
+fn quota_cooldown_duration(retry_after_secs: Option<u64>) -> Duration {
+    match retry_after_secs {
+        Some(secs) => Duration::from_secs(secs)
+            .clamp(MIN_PROVIDER_QUOTA_COOLDOWN, MAX_PROVIDER_QUOTA_COOLDOWN),
+        None => DEFAULT_PROVIDER_QUOTA_COOLDOWN,
+    }
+}
+
 async fn record_quota_cooldown_for_failure(
     pool: &DbPool,
     settings: &RuntimeSettings,
@@ -949,10 +965,7 @@ async fn record_quota_cooldown_for_failure(
                 error.to_string(),
             )
         });
-    let retry_after = retry_after_secs
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_PROVIDER_QUOTA_COOLDOWN);
-    let cooldown = retry_after.max(DEFAULT_PROVIDER_QUOTA_COOLDOWN);
+    let cooldown = quota_cooldown_duration(retry_after_secs);
     let cooldown_until = Utc::now() + ChronoDuration::from_std(cooldown).unwrap_or_default();
     let reason = format!(
         "{} (job {}, stage {})",
@@ -4196,6 +4209,31 @@ mod tests {
     fn sum_vision_usage_returns_none_without_tokens() {
         let pages = vec![json!({ "response": "text only" }), json!({})];
         assert_eq!(sum_vision_usage(&pages), None);
+    }
+
+    #[test]
+    fn quota_cooldown_honors_and_clamps_retry_after() {
+        // Absent Retry-After -> the long default.
+        assert_eq!(
+            quota_cooldown_duration(None),
+            DEFAULT_PROVIDER_QUOTA_COOLDOWN
+        );
+        // A short Retry-After is honored (clamped up to the floor), NOT widened
+        // to the 24h default as before.
+        assert_eq!(
+            quota_cooldown_duration(Some(60)),
+            MIN_PROVIDER_QUOTA_COOLDOWN
+        );
+        // A mid value passes through.
+        assert_eq!(
+            quota_cooldown_duration(Some(3600)),
+            Duration::from_secs(3600)
+        );
+        // An absurd value is capped.
+        assert_eq!(
+            quota_cooldown_duration(Some(60 * 24 * 60 * 60)),
+            MAX_PROVIDER_QUOTA_COOLDOWN
+        );
     }
 
     #[test]

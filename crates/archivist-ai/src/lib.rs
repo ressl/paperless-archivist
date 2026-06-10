@@ -81,13 +81,22 @@ impl AiProviderError {
     /// "quota"/"usage limit" wording so OpenAI / Anthropic 429s with
     /// hard-cap messaging route to the same backoff path.
     pub fn is_quota_signal(body: &str) -> bool {
+        // Require hard-cap wording, not a bare "quota": a 429 that merely
+        // mentions quota (e.g. "rate limit, check your quota") is a transient
+        // throttle, not an exhausted plan, and must stay retryable. #292
         let lower = body.to_ascii_lowercase();
         lower.contains("usage limit")
             || lower.contains("quota exceeded")
-            || lower.contains("quota")
+            || lower.contains("exceeded your current quota") // OpenAI
+            || lower.contains("insufficient_quota") // OpenAI error code
             || lower.contains("monthly limit")
             || lower.contains("weekly limit")
             || lower.contains("daily limit")
+            || lower.contains("upgrade for higher limits") // Ollama Cloud
+            // "quota" only when paired with an unambiguous exhaustion word
+            // (not "rate limit … check your quota", which is a throttle).
+            || (lower.contains("quota")
+                && (lower.contains("deplet") || lower.contains("exhaust")))
     }
 }
 
