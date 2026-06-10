@@ -68,4 +68,8 @@ spec:
               mountPath: /tmp
       volumes:
         - name: tmp
-          emptyDir: {}
+          # The API buffers downloads in memory rather than on disk, so /tmp
+          # sees little use; a bound still prevents an unexpected disk-fill on
+          # the only writable path under readOnlyRootFilesystem. #297
+          emptyDir:
+            sizeLimit: 512Mi

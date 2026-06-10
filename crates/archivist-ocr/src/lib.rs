@@ -26,6 +26,15 @@ const MAX_RENDERED_PAGE_BYTES: u64 = 24 * 1024 * 1024;
 /// Ceiling on the total rendered bytes held in memory across all pages of one
 /// document, bounding peak memory under concurrent OCR jobs.
 const MAX_RENDERED_TOTAL_BYTES: u64 = 96 * 1024 * 1024;
+/// Defense-in-depth ceiling on the rendered raster's long side, in pixels. A
+/// pathological PDF can declare an enormous MediaBox that rasterizes to a
+/// multi-gigabyte PNG at `PDF_RENDER_DPI` and fills `/tmp` *before* the
+/// post-render byte cap (which checks file metadata) can reject it. We probe
+/// the page geometry with `pdfinfo` and reject up front when it would exceed
+/// this. The largest ISO page, A0, is ~5616 px on the long side at 120 DPI, so
+/// 10000 clears every standard format with margin while still catching the
+/// runaway. The k8s `/tmp` `sizeLimit` is the infra-level backstop. #297
+const MAX_RENDER_PIXELS_LONG_SIDE: u64 = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
@@ -84,6 +93,10 @@ async fn render_pdf_with_pdftoppm(
     tokio::fs::write(&input, document_bytes)
         .await
         .context("write OCR input PDF")?;
+
+    // Disk-fill guard: reject a pathological MediaBox before pdftoppm renders
+    // it to a giant raster. #297
+    reject_oversized_pages(&input).await?;
 
     let render_budget =
         PDF_RENDER_BASE_BUDGET + PDF_RENDER_PER_PAGE_BUDGET.saturating_mul(u32::from(page_limit));
@@ -147,6 +160,68 @@ async fn render_pdf_with_pdftoppm(
         "rendered PDF pages for OCR"
     );
     Ok(pages)
+}
+
+/// Probe page geometry with `pdfinfo` and reject the document if any page would
+/// rasterize beyond [`MAX_RENDER_PIXELS_LONG_SIDE`] at [`PDF_RENDER_DPI`]. This
+/// stops a giant-MediaBox disk-fill bomb before pdftoppm writes the raster. If
+/// `pdfinfo` is unavailable or can't parse the file (e.g. encrypted/corrupt),
+/// we let pdftoppm surface the real error rather than blocking here. #297
+async fn reject_oversized_pages(input: &Path) -> Result<()> {
+    let output = match Command::new("pdfinfo").arg(input).output().await {
+        Ok(output) => output,
+        // pdfinfo missing from the image: skip the pre-check rather than fail
+        // every render; the byte cap + /tmp sizeLimit still bound the blast.
+        Err(error) => {
+            warn!(%error, "pdfinfo unavailable; skipping render pixel pre-check");
+            return Ok(());
+        }
+    };
+    if !output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(long_side_pts) = pdfinfo_max_page_long_side_pts(&stdout) else {
+        return Ok(());
+    };
+    let long_side_px = (long_side_pts / 72.0 * f64::from(PDF_RENDER_DPI)) as u64;
+    if long_side_px > MAX_RENDER_PIXELS_LONG_SIDE {
+        return Err(anyhow!(
+            "PDF page is {long_side_px}px on the long side at {PDF_RENDER_DPI} DPI, exceeding the {MAX_RENDER_PIXELS_LONG_SIDE}px render cap"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse the largest page long-side (in PDF points) from `pdfinfo` output.
+/// Handles the single-page `Page size:` line and the per-page `Page  N size:`
+/// lines that newer pdfinfo prints for documents with varying page sizes.
+fn pdfinfo_max_page_long_side_pts(info: &str) -> Option<f64> {
+    let mut max_long: Option<f64> = None;
+    for line in info.lines() {
+        let trimmed = line.trim_start();
+        // Match both "Page size:" and "Page    3 size:".
+        if !(trimmed.starts_with("Page size:")
+            || (trimmed.starts_with("Page ") && trimmed.contains("size:")))
+        {
+            continue;
+        }
+        let Some(after) = trimmed.split("size:").nth(1) else {
+            continue;
+        };
+        // "   595.32 x 841.92 pts (A4)" -> width, "x", height, ...
+        let mut tokens = after.split_whitespace();
+        let Some(width) = tokens.next().and_then(|value| value.parse::<f64>().ok()) else {
+            continue;
+        };
+        let _ = tokens.next(); // the literal "x"
+        let Some(height) = tokens.next().and_then(|value| value.parse::<f64>().ok()) else {
+            continue;
+        };
+        let long = width.max(height);
+        max_long = Some(max_long.map_or(long, |current| current.max(long)));
+    }
+    max_long
 }
 
 /// Enforce the per-page and running-total rendered-byte ceilings, returning
@@ -292,6 +367,36 @@ mod tests {
         assert!(
             accumulate_rendered_page_size(MAX_RENDERED_TOTAL_BYTES, 1).is_err(),
             "running total over the cap must error"
+        );
+    }
+
+    #[test]
+    fn pdfinfo_page_size_parses_single_and_multi_page() {
+        // Single "Page size:" line (uniform pages).
+        let a4 =
+            "Title:          test\nPages:          3\nPage size:      595.32 x 841.92 pts (A4)\n";
+        let long = pdfinfo_max_page_long_side_pts(a4).expect("A4 parsed");
+        assert!((long - 841.92).abs() < 0.01);
+
+        // Per-page lines with varying sizes: the largest long side wins.
+        let varying =
+            "Page    1 size: 595.32 x 841.92 pts (A4)\nPage    2 size: 1190.0 x 1684.0 pts\n";
+        let long = pdfinfo_max_page_long_side_pts(varying).expect("varying parsed");
+        assert!((long - 1684.0).abs() < 0.01);
+
+        // No page-size line -> None (we skip the pre-check rather than guess).
+        assert!(pdfinfo_max_page_long_side_pts("Pages: 0\n").is_none());
+    }
+
+    #[test]
+    fn render_pixel_cap_threshold_matches_a0_and_rejects_runaway() {
+        let px = |pts: f64| (pts / 72.0 * f64::from(PDF_RENDER_DPI)) as u64;
+        // A0 (3370.4 pts long side) is the largest ISO format; it must pass.
+        assert!(px(3370.4) <= MAX_RENDER_PIXELS_LONG_SIDE, "A0 must render");
+        // A 40000 pt MediaBox (~55 in) is a runaway and must trip the cap.
+        assert!(
+            px(40_000.0) > MAX_RENDER_PIXELS_LONG_SIDE,
+            "runaway must trip"
         );
     }
 }

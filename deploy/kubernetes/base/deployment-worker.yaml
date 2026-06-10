@@ -65,4 +65,9 @@ spec:
               mountPath: /tmp
       volumes:
         - name: tmp
-          emptyDir: {}
+          # Bound the OCR scratch volume so a pathological render (or a burst of
+          # large page rasters) can't fill the node's disk; the pod is evicted
+          # instead. Generous over the 96 MiB in-memory render cap to allow
+          # multi-page documents plus the worker heartbeat file. #297
+          emptyDir:
+            sizeLimit: 1Gi

@@ -69,7 +69,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
       setUsage(usageData.items);
       setExperiments(experimentData.items);
     } catch (err) {
-      setError(localizedErrorMessage(err, t, 'Could not load prompts'));
+      setError(localizedErrorMessage(err, t, t('prompts.load_error')));
     } finally {
       setLoading(false);
     }
@@ -110,17 +110,14 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   return (
     <section className="page">
       <div className="prompt-heading">
-        <PageHeader title="Prompt Workbench" />
-        <p>
-          Review active prompts, tune stage-specific behavior, test outputs, and roll back safely. Edits create a new
-          immutable version; older versions remain available.
-        </p>
+        <PageHeader title={t('prompts.workbench_title')} />
+        <p>{t('prompts.workbench_intro')}</p>
       </div>
       <div className="prompt-workbench">
-        <aside className="prompt-stage-rail" aria-label="Prompt stages">
+        <aside className="prompt-stage-rail" aria-label={t('prompts.stages_aria')}>
           <header>
-            <strong>Pipeline Stages</strong>
-            <span>{items.length} versions</span>
+            <strong>{t('prompts.pipeline_stages')}</strong>
+            <span>{t('prompts.versions_count', { count: items.length })}</span>
           </header>
           {promptStageOrder.map((entry) => {
             const help = promptStageHelp[entry];
@@ -140,9 +137,9 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
               >
                 <span>
                   <strong>{help.label}</strong>
-                  <em>{active ? `${active.name} v${active.version}` : 'No prompt yet'}</em>
+                  <em>{active ? `${active.name} v${active.version}` : t('prompts.no_prompt_yet')}</em>
                 </span>
-                <small>{prompts.length} versions · {usageCount} runs</small>
+                <small>{t('prompts.stage_summary', { versions: prompts.length, runs: usageCount })}</small>
               </button>
             );
           })}
@@ -152,27 +149,27 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
             <div>
               <div className="prompt-title-row">
                 <h3>{stageHelp.label}</h3>
-                <PromptInfoTooltip label={`${stageHelp.label} guidance`} help={stageHelp} />
+                <PromptInfoTooltip label={t('prompts.stage_guidance', { stage: stageHelp.label })} help={stageHelp} />
               </div>
               <p>{stageHelp.purpose}</p>
             </div>
             <div className="prompt-header-status">
               {selectedPrompt?.active ? <Status value="active" /> : <Status value="draft" />}
-              {promptDirty && <span className="dirty-pill">unsaved edits</span>}
+              {promptDirty && <span className="dirty-pill">{t('prompts.unsaved_edits')}</span>}
             </div>
           </header>
           {loading ? (
-            <div className="empty-state">Loading prompts...</div>
+            <div className="empty-state">{t('prompts.loading')}</div>
           ) : (
             <>
               <div className="prompt-editor-grid">
                 <label>
-                  Version
+                  {t('prompts.version')}
                   <select
                     value={selectedPrompt?.id ?? ''}
                     onChange={(event) => setSelectedPromptId(event.target.value || null)}
                   >
-                    {stagePrompts.length === 0 && <option value="">New prompt</option>}
+                    {stagePrompts.length === 0 && <option value="">{t('prompts.new_prompt')}</option>}
                     {stagePrompts.map((prompt) => (
                       <option key={prompt.id} value={prompt.id}>
                         {promptOptionLabel(prompt)}
@@ -181,16 +178,16 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   </select>
                 </label>
                 <label>
-                  Prompt name
+                  {t('prompts.name')}
                   <input value={editorName} onChange={(event) => setEditorName(event.target.value)} />
                 </label>
                 <label className="inline prompt-activate-check">
                   <input type="checkbox" checked={activate} onChange={(event) => setActivate(event.target.checked)} />
-                  Activate after save
+                  {t('prompts.activate_after_save')}
                 </label>
               </div>
               <label className="prompt-editor-field">
-                Prompt content
+                {t('prompts.content')}
                 <textarea
                   value={editorContent}
                   onChange={(event) => setEditorContent(event.target.value)}
@@ -217,7 +214,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                     })
                   }
                 >
-                  {saving ? 'Saving...' : 'Save New Version'}
+                  {saving ? t('prompts.saving') : t('prompts.save_new_version')}
                 </Button>
                 <Button
                   variant="secondary"
@@ -228,7 +225,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                     setEditorContent(selectedPrompt?.content ?? '');
                   }}
                 >
-                  Reset
+                  {t('prompts.reset')}
                 </Button>
                 <Button
                   variant="secondary"
@@ -242,14 +239,14 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                     })
                   }
                 >
-                  {activating ? 'Activating...' : 'Activate Selected'}
+                  {activating ? t('prompts.activating') : t('prompts.activate_selected')}
                 </Button>
               </div>
               <div className="prompt-stats-grid">
-                <PromptStat label="Lines" value={promptStats.lines} />
-                <PromptStat label="Words" value={promptStats.words} />
-                <PromptStat label="Characters" value={promptStats.characters} />
-                <PromptStat label="Runs" value={selectedUsage?.run_count ?? 0} />
+                <PromptStat label={t('prompts.stat_lines')} value={promptStats.lines} />
+                <PromptStat label={t('prompts.stat_words')} value={promptStats.words} />
+                <PromptStat label={t('prompts.stat_characters')} value={promptStats.characters} />
+                <PromptStat label={t('prompts.runs')} value={selectedUsage?.run_count ?? 0} />
               </div>
             </>
           )}
@@ -257,8 +254,8 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
         <aside className="prompt-lab-card">
           <section>
             <div className="prompt-section-title">
-              <strong>Stage Guide</strong>
-              <PromptInfoTooltip label="Prompt editing rules" help={stageHelp} compact />
+              <strong>{t('prompts.stage_guide')}</strong>
+              <PromptInfoTooltip label={t('prompts.editing_rules')} help={stageHelp} compact />
             </div>
             <p>{stageHelp.expectedOutput}</p>
             <ul>
@@ -267,24 +264,24 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
           </section>
           <section>
             <div className="prompt-section-title">
-              <strong>Usage</strong>
+              <strong>{t('prompts.usage')}</strong>
               <History size={16} />
             </div>
             {selectedUsage ? (
               <dl className="prompt-usage">
-                <div><dt>Runs</dt><dd>{selectedUsage.run_count}</dd></div>
-                <div><dt>Jobs</dt><dd>{selectedUsage.job_count}</dd></div>
-                <div><dt>Last used</dt><dd>{selectedUsage.last_used_at ? formatDateTime(selectedUsage.last_used_at) : '-'}</dd></div>
-                <div><dt>Model</dt><dd>{[selectedUsage.last_provider, selectedUsage.last_model].filter(Boolean).join(' / ') || '-'}</dd></div>
-                <div><dt>Avg duration</dt><dd>{formatMs(selectedUsage.avg_duration_ms)}</dd></div>
+                <div><dt>{t('prompts.runs')}</dt><dd>{selectedUsage.run_count}</dd></div>
+                <div><dt>{t('prompts.usage_jobs')}</dt><dd>{selectedUsage.job_count}</dd></div>
+                <div><dt>{t('prompts.usage_last_used')}</dt><dd>{selectedUsage.last_used_at ? formatDateTime(selectedUsage.last_used_at) : '-'}</dd></div>
+                <div><dt>{t('prompts.usage_model')}</dt><dd>{[selectedUsage.last_provider, selectedUsage.last_model].filter(Boolean).join(' / ') || '-'}</dd></div>
+                <div><dt>{t('prompts.usage_avg_duration')}</dt><dd>{formatMs(selectedUsage.avg_duration_ms)}</dd></div>
               </dl>
             ) : (
-              <p className="field-hint">This prompt version has not been used by a worker run yet.</p>
+              <p className="field-hint">{t('prompts.usage_empty')}</p>
             )}
           </section>
           <section>
             <div className="prompt-section-title">
-              <strong>Version History</strong>
+              <strong>{t('prompts.version_history')}</strong>
               <span>{stagePrompts.length}</span>
             </div>
             <div className="prompt-version-list">
@@ -296,10 +293,10 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   onClick={() => setSelectedPromptId(prompt.id)}
                 >
                   <span>{prompt.name} v{prompt.version}</span>
-                  <small>{prompt.active ? 'active' : formatDateTime(prompt.created_at)}</small>
+                  <small>{prompt.active ? t('prompts.active_marker') : formatDateTime(prompt.created_at)}</small>
                 </button>
               ))}
-              {stagePrompts.length === 0 && <p className="field-hint">No prompt exists for this stage yet.</p>}
+              {stagePrompts.length === 0 && <p className="field-hint">{t('prompts.stage_empty')}</p>}
             </div>
           </section>
         </aside>
@@ -307,20 +304,20 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
       <div className="prompt-lab-grid">
         <section className="prompt-test-card">
           <header className="prompt-section-title">
-            <strong>Prompt Test Runner</strong>
+            <strong>{t('prompts.test_runner')}</strong>
             <span>{stageHelp.shortLabel}</span>
           </header>
           <div className="prompt-test-grid">
             <label>
-              Test document ID
-              <input value={sampleDocumentId} onChange={(event) => setSampleDocumentId(event.target.value)} placeholder="optional" />
+              {t('prompts.test_document_id')}
+              <input value={sampleDocumentId} onChange={(event) => setSampleDocumentId(event.target.value)} placeholder={t('prompts.optional')} />
             </label>
             <label className="wide">
-              Test sample text
+              {t('prompts.test_sample_text')}
               <textarea
                 value={sampleText}
                 onChange={(event) => setSampleText(event.target.value)}
-                placeholder="Optional; overrides document ID for prompt tests."
+                placeholder={t('prompts.test_sample_placeholder')}
               />
             </label>
           </div>
@@ -340,7 +337,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
               setTestResult(result);
             })}
           >
-            {testing ? 'Testing...' : 'Test Current Editor'}
+            {testing ? t('prompts.testing') : t('prompts.test_current_editor')}
           </Button>
           {testResult && (
             <section className="test-result">
@@ -360,11 +357,11 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                 </ul>
               )}
               <details open>
-                <summary>Parsed output</summary>
+                <summary>{t('prompts.parsed_output')}</summary>
                 <pre>{JSON.stringify(testResult.parsed ?? null, null, 2)}</pre>
               </details>
               <details>
-                <summary>Raw model response</summary>
+                <summary>{t('prompts.raw_response')}</summary>
                 <pre>{testResult.raw_text}</pre>
               </details>
             </section>
@@ -372,13 +369,13 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
         </section>
         <section className="prompt-compare-card">
           <header className="prompt-section-title">
-            <strong>Version Compare</strong>
+            <strong>{t('prompts.version_compare')}</strong>
             <GitCompare size={16} />
           </header>
           <label>
-            Compare against
+            {t('prompts.compare_against')}
             <select value={comparePromptId ?? ''} onChange={(event) => setComparePromptId(event.target.value || null)}>
-              <option value="">No comparison</option>
+              <option value="">{t('prompts.no_comparison')}</option>
               {stagePrompts
                 .filter((prompt) => prompt.id !== selectedPrompt?.id)
                 .map((prompt) => (
@@ -389,9 +386,9 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
           {diffStats ? (
             <>
               <div className="prompt-diff-summary">
-                <PromptStat label="Changed lines" value={diffStats.changedLines} />
-                <PromptStat label="Added lines" value={diffStats.addedLines} />
-                <PromptStat label="Removed lines" value={diffStats.removedLines} />
+                <PromptStat label={t('prompts.diff_changed')} value={diffStats.changedLines} />
+                <PromptStat label={t('prompts.diff_added')} value={diffStats.addedLines} />
+                <PromptStat label={t('prompts.diff_removed')} value={diffStats.removedLines} />
               </div>
               <div className="prompt-diff">
                 <div>
@@ -399,13 +396,13 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   <pre>{comparePrompt?.content}</pre>
                 </div>
                 <div>
-                  <strong>Current editor</strong>
+                  <strong>{t('prompts.current_editor')}</strong>
                   <pre>{editorContent}</pre>
                 </div>
               </div>
             </>
           ) : (
-            <p className="field-hint">Select another version to compare it with the current editor content.</p>
+            <p className="field-hint">{t('prompts.compare_empty')}</p>
           )}
         </section>
       </div>
