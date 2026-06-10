@@ -448,7 +448,10 @@ fn router(state: AppState) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_rate_limit_middleware,
-        ));
+        ))
+        // Login/OIDC bodies are tiny; cap them so an unauthenticated caller
+        // can't push axum's 2 MB default. #291
+        .layer(DefaultBodyLimit::max(16 * 1024));
 
     // Machine-to-machine webhooks. These deliberately sit OUTSIDE the
     // `auth_middleware` layer (no user session); each handler authenticates via
@@ -1011,15 +1014,16 @@ async fn login(
         .await?;
         return Err(ApiError::unauthorized("invalid credentials"));
     };
+    // Always run the password verification first (even for locked/disabled
+    // accounts) so none of the rejection paths can be told apart from a wrong
+    // password by response latency. #291
+    let password_ok = verify_password(&user, &request.password)?;
     if user
         .locked_until
         .is_some_and(|locked_until| locked_until > Utc::now())
     {
         return Err(ApiError::unauthorized("invalid credentials"));
     }
-    // Always run the password verification (even for disabled accounts) so the
-    // `!enabled` case can't be told apart from a wrong password by timing.
-    let password_ok = verify_password(&user, &request.password)?;
     if !user.enabled || !password_ok {
         record_login_failure(
             &state.pool,
@@ -6361,16 +6365,27 @@ async fn oidc_discover(
         "{}/.well-known/openid-configuration",
         issuer_url.trim_end_matches('/')
     );
+    // Log upstream detail (issuer URL, connection info) server-side but return
+    // a generic message — these endpoints are publicly reachable. #291
     let metadata = http_client
         .get(&discovery_url)
         .send()
         .await
-        .map_err(|error| ApiError::internal(format!("OIDC discovery request failed: {error}")))?
+        .map_err(|error| {
+            tracing::error!(%error, "OIDC discovery request failed");
+            ApiError::internal("OIDC discovery failed")
+        })?
         .error_for_status()
-        .map_err(|error| ApiError::internal(format!("OIDC discovery failed: {error}")))?
+        .map_err(|error| {
+            tracing::error!(%error, "OIDC discovery returned an error status");
+            ApiError::internal("OIDC discovery failed")
+        })?
         .json::<OidcProviderMetadata>()
         .await
-        .map_err(|error| ApiError::internal(format!("OIDC discovery parse failed: {error}")))?;
+        .map_err(|error| {
+            tracing::error!(%error, "OIDC discovery parse failed");
+            ApiError::internal("OIDC discovery failed")
+        })?;
     if metadata.issuer.trim_end_matches('/') != issuer_url.trim_end_matches('/') {
         return Err(ApiError::unauthorized("OIDC issuer mismatch"));
     }
@@ -6424,13 +6439,20 @@ async fn oidc_exchange_code(
         ])
         .send()
         .await
-        .map_err(|error| ApiError::unauthorized(format!("OIDC code exchange failed: {error}")))?
+        .map_err(|error| {
+            tracing::error!(%error, "OIDC code exchange request failed");
+            ApiError::unauthorized("OIDC code exchange failed")
+        })?
         .error_for_status()
-        .map_err(|error| ApiError::unauthorized(format!("OIDC code exchange failed: {error}")))?
+        .map_err(|error| {
+            tracing::error!(%error, "OIDC code exchange returned an error status");
+            ApiError::unauthorized("OIDC code exchange failed")
+        })?
         .json::<OidcTokenResponse>()
         .await
         .map_err(|error| {
-            ApiError::unauthorized(format!("OIDC token response parse failed: {error}"))
+            tracing::error!(%error, "OIDC token response parse failed");
+            ApiError::unauthorized("OIDC code exchange failed")
         })
 }
 
@@ -6611,6 +6633,11 @@ fn oidc_roles(config: &AppConfig, username: &str, email: Option<&str>) -> ApiRes
         .map_err(|error| ApiError::internal(format!("invalid OIDC role config: {error}")))
 }
 
+// NOTE (#291): the `username` matched here is derived from the IdP's
+// `preferred_username` claim. The email path is gated on `email_verified`, but
+// username matching trusts the IdP to keep `preferred_username` unique and
+// non-user-settable (true for ZITADEL). For an IdP that lets users choose it,
+// prefer allowlisting by verified email or the immutable `sub`.
 fn oidc_is_admin(config: &AppConfig, username: &str, email: Option<&str>) -> bool {
     let username = username.to_ascii_lowercase();
     let email = email.map(str::to_ascii_lowercase);
