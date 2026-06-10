@@ -1408,6 +1408,23 @@ async fn update_settings(
                 ApiError::bad_request(format!("Paperless base URL: {}", error.message))
             })?;
     }
+    // public_url is rendered as a clickable link in the browser (not an
+    // outbound server request), so it needs http/https scheme validation — not
+    // the SSRF/dangerous-IP check (an intranet public_url is legitimate) — to
+    // stop a settings admin planting a `javascript:` URL that executes for
+    // lower-privileged users viewing the inventory. #290
+    if let Some(public_url) = request.settings.paperless.public_url.as_deref() {
+        let public_url = public_url.trim();
+        if !public_url.is_empty() {
+            let parsed = Url::parse(public_url)
+                .map_err(|_| ApiError::bad_request("Paperless public URL is not a valid URL"))?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(ApiError::bad_request(
+                    "Paperless public URL scheme must be http or https",
+                ));
+            }
+        }
+    }
     // Disabled providers/profiles may carry placeholder URLs (the seeded
     // `openai-compatible` example points at localhost); they are not active
     // outbound targets, and enabling one is itself a settings save — the
