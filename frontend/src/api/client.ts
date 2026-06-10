@@ -984,9 +984,14 @@ export const api = {
   listProviderCooldowns: () =>
     request<{ cooldowns: ProviderCooldown[] }>('/api/operations/provider-cooldowns'),
   clearProviderCooldown: (providerName?: string) =>
-    request<{ cleared: number }>('/api/operations/provider-cooldowns/clear', {
+    request<{ cleared: number; released: number }>('/api/operations/provider-cooldowns/clear', {
       method: 'POST',
       body: JSON.stringify({ provider_name: providerName ?? null }),
+    }),
+  releaseScheduledRetries: () =>
+    request<{ released: number }>('/api/operations/release-scheduled-retries', {
+      method: 'POST',
+      body: JSON.stringify({}),
     }),
   audit: (limit?: number) =>
     request<{ items: AuditEvent[] }>(

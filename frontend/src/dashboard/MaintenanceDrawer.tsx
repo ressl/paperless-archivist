@@ -8,7 +8,8 @@ import {
   RefreshCw,
   RotateCcw,
   Tags,
-  X
+  X,
+  Zap
 } from 'lucide-react';
 import {
   CompletionTagReconcileResult,
@@ -23,13 +24,15 @@ function RecoveryPanel({
   busy,
   onRefresh,
   onRecoverLeases,
-  onRecoverRuns
+  onRecoverRuns,
+  onReleaseScheduled
 }: {
   recovery: { older_than_seconds: number; items: RecoveryCandidate[] } | null;
   busy: boolean;
   onRefresh: () => void;
   onRecoverLeases: () => void;
   onRecoverRuns: () => void;
+  onReleaseScheduled: () => void;
 }) {
   const { t, formatNumber } = useI18n();
   const items = recovery?.items ?? [];
@@ -55,7 +58,11 @@ function RecoveryPanel({
         <button type="button" disabled={busy || stuckRuns === 0} onClick={onRecoverRuns}>
           <AlertTriangle size={16} /> {t('dashboard.recovery.recover_runs')}
         </button>
+        <button type="button" disabled={busy} onClick={onReleaseScheduled}>
+          <Zap size={16} /> {t('dashboard.recovery.release_scheduled')}
+        </button>
       </div>
+      <p className="field-hint">{t('dashboard.recovery.release_scheduled_hint')}</p>
     </section>
   );
 }
@@ -132,6 +139,7 @@ export function MaintenanceDrawer({
   onRefreshRecovery,
   onRecoverLeases,
   onRecoverRuns,
+  onReleaseScheduled,
   onCheckConsistency,
   onDryRunReconcile,
   onApplyReconcile,
@@ -150,6 +158,7 @@ export function MaintenanceDrawer({
   onRefreshRecovery: () => void;
   onRecoverLeases: () => void;
   onRecoverRuns: () => void;
+  onReleaseScheduled: () => void;
   onCheckConsistency: () => void;
   onDryRunReconcile: () => void;
   onApplyReconcile: () => void;
@@ -186,6 +195,7 @@ export function MaintenanceDrawer({
           onRefresh={onRefreshRecovery}
           onRecoverLeases={onRecoverLeases}
           onRecoverRuns={onRecoverRuns}
+          onReleaseScheduled={onReleaseScheduled}
         />
         <PaperlessMaintenancePanel
           consistency={consistency}

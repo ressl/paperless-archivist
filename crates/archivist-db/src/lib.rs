@@ -8493,6 +8493,31 @@ pub async fn clear_all_provider_cooldowns(pool: &DbPool) -> Result<u64> {
     Ok(res.rows_affected())
 }
 
+/// Wake jobs that a provider cooldown (or other backoff) deferred into the
+/// future by resetting `run_after` to now, so the worker claims them on the
+/// next poll instead of waiting out the full cooldown window. Targets only
+/// `queued` jobs whose `run_after` is still in the future; in-flight and
+/// already-eligible jobs are untouched, and `attempts` is preserved (this
+/// reschedules, it does not reset the retry budget). Returns the number
+/// released. Called by the manual "release parked jobs" operation, folded into
+/// the cooldown-lift action, and triggered on an AI model/provider change so a
+/// parked backlog immediately runs under the new configuration.
+pub async fn release_scheduled_retries(pool: &DbPool) -> Result<u64> {
+    let res = sqlx::query(
+        r#"
+        update jobs
+           set run_after = now(),
+               updated_at = now()
+         where status = 'queued'
+           and run_after > now()
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("release scheduled job retries")?;
+    Ok(res.rows_affected())
+}
+
 /// All currently-active cooldowns, ordered by remaining time (longest
 /// first). Used by the dashboard to surface "provider X paused" warnings.
 pub async fn list_active_provider_cooldowns(pool: &DbPool) -> Result<Vec<AiProviderCooldown>> {

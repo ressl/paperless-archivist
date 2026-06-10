@@ -415,6 +415,10 @@ fn router(state: AppState) -> Router {
             "/operations/provider-cooldowns/clear",
             post(clear_provider_cooldowns_endpoint),
         )
+        .route(
+            "/operations/release-scheduled-retries",
+            post(release_scheduled_retries_endpoint),
+        )
         .route("/audit", get(audit_events))
         .route("/audit/export.csv", get(audit_export))
         .route("/audit/integrity", get(audit_integrity))
@@ -1525,8 +1529,56 @@ async fn update_settings(
         .await?;
         request.settings.notifications.webhook_url_secret_id = Some(secret_id);
     }
+    // Capture the AI model identity before the save so we can detect a switch
+    // and react to it below. A failed read just disables the optimization.
+    let previous_models = get_runtime_settings(&state.pool)
+        .await
+        .ok()
+        .map(|settings| {
+            (
+                settings.ai.default_provider,
+                settings.ai.default_text_model,
+                settings.ai.default_vision_model,
+            )
+        });
+
     update_runtime_settings(&state.pool, &request.settings, actor_id).await?;
     info!(%actor_id, "runtime settings updated");
+
+    // When the operator switches the AI model/provider, a backlog that an old
+    // provider's cooldown parked (run_after pushed far into the future) would
+    // otherwise keep waiting out that now-irrelevant cooldown. Operators expect
+    // a model switch to take effect immediately, so drop the stale cooldowns
+    // and wake the parked jobs to rerun under the new model right away.
+    let new_ai = &request.settings.ai;
+    let model_changed = previous_models
+        .as_ref()
+        .is_some_and(|(provider, text, vision)| {
+            provider != &new_ai.default_provider
+                || text != &new_ai.default_text_model
+                || vision != &new_ai.default_vision_model
+        });
+    if model_changed {
+        let cleared = archivist_db::clear_all_provider_cooldowns(&state.pool)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(error = %error, "failed to clear cooldowns after model change");
+                0
+            });
+        let released = archivist_db::release_scheduled_retries(&state.pool)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(error = %error, "failed to release parked jobs after model change");
+                0
+            });
+        info!(
+            %actor_id,
+            cleared,
+            released,
+            "AI model changed; cleared provider cooldowns and released parked jobs"
+        );
+    }
+
     Ok(Json(request.settings))
 }
 
@@ -5433,6 +5485,10 @@ async fn clear_provider_cooldowns_endpoint(
         Some(name) => archivist_db::clear_provider_cooldown(&state.pool, name).await?,
         None => archivist_db::clear_all_provider_cooldowns(&state.pool).await?,
     };
+    // Lifting a cooldown must also wake the jobs it parked: their `run_after`
+    // sits at the (now-irrelevant) cooldown end, so without this the queue
+    // would keep waiting it out despite the cooldown being gone. (prod-blocked)
+    let released = archivist_db::release_scheduled_retries(&state.pool).await?;
     let _ = archivist_db::append_audit(
         &state.pool,
         archivist_core::AuditEventInput {
@@ -5446,6 +5502,7 @@ async fn clear_provider_cooldowns_endpoint(
             after: Some(json!({
                 "provider_name": request.provider_name,
                 "cleared": cleared,
+                "released": released,
             })),
             metadata: None,
             outcome: "success".to_owned(),
@@ -5455,7 +5512,45 @@ async fn clear_provider_cooldowns_endpoint(
         },
     )
     .await;
-    Ok(Json(json!({ "cleared": cleared })))
+    Ok(Json(json!({ "cleared": cleared, "released": released })))
+}
+
+/// Wake jobs that a provider cooldown (or other backoff) deferred into the
+/// future, so the worker claims them immediately instead of waiting out the
+/// cooldown window. Operator-triggered counterpart to the automatic release on
+/// a model change; also reachable from the dashboard.
+async fn release_scheduled_retries_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteRuns)?;
+    let actor_id = require_user_session(
+        &auth.0,
+        "releasing scheduled retries requires a user session",
+    )?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
+    let released = archivist_db::release_scheduled_retries(&state.pool).await?;
+    info!(%actor_id, released, "operator released scheduled job retries");
+    let _ = archivist_db::append_audit(
+        &state.pool,
+        archivist_core::AuditEventInput {
+            event_type: "operations.scheduled_retries_released".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({ "released": released })),
+            metadata: None,
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await;
+    Ok(Json(json!({ "released": released })))
 }
 
 #[derive(Debug, Deserialize)]

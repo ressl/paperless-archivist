@@ -152,6 +152,13 @@ export function Dashboard({
     );
     await loadLive();
   };
+  const releaseScheduledRetries = async () => {
+    const result = await api.releaseScheduledRetries();
+    setSuccess(
+      t('dashboard.alert.scheduled_released', { count: String(result.released) })
+    );
+    await Promise.all([load(), loadLive()]);
+  };
   const checkPaperlessConsistency = async () => {
     const result = await api.paperlessConsistency();
     setConsistency(result);
@@ -313,6 +320,7 @@ export function Dashboard({
           onRefreshRecovery={() => void run(setRecoveryBusy, setError, loadRecovery, t)}
           onRecoverLeases={() => void run(setRecoveryBusy, setError, recoverStaleLeases, t)}
           onRecoverRuns={() => void run(setRecoveryBusy, setError, recoverStuckRuns, t)}
+          onReleaseScheduled={() => void run(setRecoveryBusy, setError, releaseScheduledRetries, t)}
           onCheckConsistency={() => void run(setPaperlessToolsBusy, setError, checkPaperlessConsistency, t)}
           onDryRunReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(true), t)}
           onApplyReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(false), t)}
