@@ -170,6 +170,28 @@ impl AppConfig {
                 ));
             }
         }
+        // A present-but-empty bearer/webhook secret would make the constant-time
+        // compare accept an empty credential — reject it rather than silently
+        // exposing the endpoint. Absent (None) is fine: the endpoint is then
+        // disabled (503) by design. #281
+        if self
+            .metrics_token
+            .as_ref()
+            .is_some_and(|secret| secret.expose_secret().trim().is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "ARCHIVIST_METRICS_TOKEN must not be empty (unset it to disable /metrics)",
+            ));
+        }
+        if self
+            .webhook_secret
+            .as_ref()
+            .is_some_and(|secret| secret.expose_secret().trim().is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "ARCHIVIST_WEBHOOK_SECRET must not be empty (unset it to disable the webhook)",
+            ));
+        }
         Ok(())
     }
 }
