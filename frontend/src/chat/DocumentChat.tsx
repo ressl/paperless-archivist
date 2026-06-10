@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MessageSquare, Send } from 'lucide-react';
 import { api, DocumentChatMessage, DocumentChatSession } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
@@ -8,6 +8,10 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
   const { t, formatDateTime } = useI18n();
   const [sessions, setSessions] = useState<DocumentChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  // Mirror of activeSessionId so the slow post-send refresh can tell whether
+  // the user switched sessions during the LLM round-trip. (#286)
+  const activeSessionIdRef = useRef<string | null>(null);
+  activeSessionIdRef.current = activeSessionId;
   const [messages, setMessages] = useState<DocumentChatMessage[]>([]);
   const [sessionTitle, setSessionTitle] = useState(t('chat.default_session_title'));
   const [question, setQuestion] = useState('');
@@ -77,7 +81,13 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
       max_sources: 6
     });
     setQuestion('');
-    await Promise.all([loadSessions(), loadMessages(sessionId)]);
+    await loadSessions();
+    // Only refresh the message list if the user is still viewing the session
+    // we sent into — otherwise a slow answer would overwrite the session they
+    // switched to. (#286)
+    if (activeSessionIdRef.current === sessionId) {
+      await loadMessages(sessionId);
+    }
   };
 
   return (

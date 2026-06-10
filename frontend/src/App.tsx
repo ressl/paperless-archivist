@@ -82,7 +82,19 @@ export function App() {
   }, [me]);
 
   if (loading) return <div className="boot">{t('app.loading')}</div>;
-  if (!me) return <Login onLogin={setMe} />;
+  if (!me)
+    return (
+      <Login
+        onLogin={(loggedIn) => {
+          // Clear any banner left over from the 401 that sent us here, so a
+          // fresh login doesn't mount the workspace with a stale
+          // "Unauthorized" error. (#287)
+          setError(null);
+          setSuccess(null);
+          setMe(loggedIn);
+        }}
+      />
+    );
 
   const canReadDashboard = me.permissions.read_dashboard;
   const canUseChat = me.roles.some((role) => role === 'admin' || role === 'reviewer' || role === 'operator');
