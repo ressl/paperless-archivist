@@ -118,8 +118,10 @@ const DOWNLOAD_TIMEOUT_MULTIPLIER: u32 = 10;
 
 /// Hard ceiling on the size of a downloaded original. The body is streamed and
 /// aborted once this is exceeded so a malicious or accidentally huge document
-/// cannot exhaust worker memory. 250 MB comfortably covers real scanned PDFs.
-const MAX_DOWNLOAD_BYTES: u64 = 250 * 1024 * 1024;
+/// cannot exhaust worker memory. 128 MB covers real scanned PDFs while keeping
+/// the OCR per-job memory peak within a 1 GiB worker at concurrency 2 (see the
+/// calibration note in archivist-ocr). #283
+const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Accumulate a streamed download chunk against the byte cap, returning the
 /// updated running total or an error. Extracted so the bound is unit-testable

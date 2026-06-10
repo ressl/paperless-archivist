@@ -1452,6 +1452,13 @@ async fn process_ocr(
             .ocr_page_limit,
     )
     .await?;
+    // The original download bytes (up to the download cap) are only needed for
+    // rendering and the artifact input hash. Compute the hash now and drop the
+    // bytes so they aren't held in memory for the whole per-page vision loop —
+    // that loop already holds the rendered pages plus per-page base64 copies.
+    // #283
+    let input_hash = hash_bytes(&original);
+    drop(original);
     if pages.is_empty() {
         return Err(anyhow!("document rendered zero OCR pages"));
     }
@@ -1638,7 +1645,7 @@ async fn process_ocr(
             provider: &provider.name,
             model: &provider.model,
             prompt_id: prompt.as_ref().map(|prompt| prompt.id),
-            input_hash: &hash_bytes(&original),
+            input_hash: &input_hash,
             request: None,
             response: Some({
                 let mut response = json!({ "pages": raw_responses });

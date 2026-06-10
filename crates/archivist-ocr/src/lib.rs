@@ -14,10 +14,18 @@ const PDF_RENDER_PER_PAGE_BUDGET: Duration = Duration::from_secs(10);
 /// MediaBox renders to a huge raster at 120 DPI; the file size is checked from
 /// metadata before it is read into memory, so an oversize page is rejected
 /// rather than buffered. A normal A4 page at 120 DPI is well under 5 MB.
-const MAX_RENDERED_PAGE_BYTES: u64 = 50 * 1024 * 1024;
+///
+/// Calibration (#283): the in-flight vision call holds, for one page, ~4.7x its
+/// bytes (the page, a fallback clone, the base64 string, the serialized request
+/// body). With the download cap + total render cap, the worst-case per-job peak
+/// is roughly `download + total_render + 4.7*page`. For the default 1 GiB / 2
+/// concurrent workers (~384 MiB budget per job after baseline) these caps keep
+/// a single job's peak around ~330 MiB. Raise the worker memory limit (or lower
+/// `ARCHIVIST_WORKER_CONCURRENCY`) before raising these.
+const MAX_RENDERED_PAGE_BYTES: u64 = 24 * 1024 * 1024;
 /// Ceiling on the total rendered bytes held in memory across all pages of one
 /// document, bounding peak memory under concurrent OCR jobs.
-const MAX_RENDERED_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
+const MAX_RENDERED_TOTAL_BYTES: u64 = 96 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
