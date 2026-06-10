@@ -1,23 +1,71 @@
 # Release Notes
 
-> Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth.
-> `frontend/package.json` tracks the UI release alongside the tag (currently
-> `1.5.35`). The Rust workspace `Cargo.toml` files remain at the pre-GA
-> internal version `0.3.2`; bumping them does not change the release.
+> Versioning policy: the Git tag (`vX.Y.Z`) is the source of truth. As of
+> v1.12.0 the three version identities are bumped together at release time and
+> all track the tag: the Rust workspace `[workspace.package].version`,
+> `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
+> `docs/RELEASE_CHECKLIST.md`.
 
-## Unreleased
+## v1.12.0 — Full-code audit remediation
 
-### Token-usage redaction destroyed provider token statistics (#246)
+Resolves the entire 2026-06-09 full-code audit backlog (32 issues, #246–#277;
+report in `docs/reviews/2026-06-09-full-code-audit.md`). Highlights below; each
+fix carries tests and is detailed in its GitLab issue.
 
-Releases up to v1.11.2 redacted numeric `usage.*` token counts in stored AI
-artifacts to the string `"[REDACTED]"` (and, in `redacted` storage mode,
-summarized `prompt_tokens` / `prompt_eval_count` into objects). Token counts
-recorded for OpenAI-compatible / Anthropic providers during that window are
-unrecoverable — usage and cost statistics report 0 input/output tokens for
-those historical rows. New artifacts keep numeric counters in every storage
-mode, and all aggregate queries now guard the casts so the legacy rows
-aggregate as 0 instead of failing the Statistics page and dashboard with
-`22P02`.
+**⚠️ Operator action on upgrade:**
+
+- `/metrics` now requires `Authorization: Bearer <ARCHIVIST_METRICS_TOKEN>` and
+  returns `503` until the variable is set — add it to the deployment secret and
+  configure it as the Prometheus scrape `bearer_token` (#251).
+- OIDC email-match account linking is now opt-in via
+  `ARCHIVIST_OIDC_ALLOW_EMAIL_LINK=true` (default off) and requires
+  `email_verified=true`; set it only if you rely on linking SSO identities to
+  existing local accounts by email (#247).
+- Schema migrations `0033`–`0036` apply automatically on startup (review-item
+  `applying` status, audit chain-position backfill, duplicate-index drop,
+  search/prompt indexes).
+- The worker drains in-flight jobs on SIGTERM; keep the worker
+  `terminationGracePeriodSeconds` at 60+ (the bundled manifest sets it) (#257).
+
+**Security & data integrity:** numeric token counters are no longer redacted to
+`"[REDACTED]"` and the usage/cost queries guard their casts, so the Statistics
+page and dashboard no longer fail with `22P02` and new token data survives
+(#246); OIDC honours `email_verified` for admin mapping and linking (#247); the
+metadata stage heartbeats its lease and the review-apply path is fenced against
+double-apply / double-PATCH (#248, #253); SSRF validation runs when outbound
+URLs are persisted, not only on the test buttons (#252); real dev documents and
+tokens are excluded from the Docker build context (#250).
+
+**Pipeline & correctness:** monetary custom fields coerce to the Paperless wire
+format instead of being dropped (#249); titles cap at Paperless's 128 chars and
+integer coercion no longer mangles decimals (#258); the OCR pipeline bounds
+download and render memory and encodes vision images off the async runtime
+(#256); `ocr_page_cache` and `dashboard_snapshots` are pruned by retention
+(#255, #273); the audit hash chain orders by a monotonic sequence instead of
+wall-clock so cross-node clock skew can't fake an integrity failure (#254).
+
+**Statistics:** OCR/vision token usage is counted, `provider_usage` no longer
+inflates on feedback-event fan-out, the dashboard cost series counts Ollama
+tokens, and `model_errors_total` includes the metadata stage (#259–#262).
+
+**Frontend:** 401s return to the login screen instead of looping error banners;
+the dashboard refetches on range change; comma-separated filter/settings inputs
+are typeable; the Reviews auto-fix preview error is surfaced; stage-matrix links
+filter the inventory (#263–#267); plus out-of-order guards, local-day date math,
+safe logout, debug-tab gating, and input clamping (#272).
+
+**Infrastructure & supply chain:** NetworkPolicy allows external HTTPS egress
+and narrows ingress (#268); base images are digest-pinned and GitHub Actions
+SHA-pinned with Renovate maintaining them (#269); an explicit gitleaks job
+enforces secret scanning (#270); base-image/compose pins, a Dockerfile
+`HEALTHCHECK`, BuildKit cargo caching, and GitLab pipeline dedupe (#274, #276).
+
+**Backend hardening & performance:** backslash open-redirect fix, API tokens
+neutralised when their creator is disabled, UTF-8-safe `redact_secret`, tag-race
+retry (#271); trigram search indexes, an `ai_artifacts(prompt_id)` index, and
+batched retention deletes (#275). A few non-critical performance rewrites
+(audit advisory-lock removal, correlated-subquery series rewrites) are
+deferred to a benchmark-driven pass — see #275.
 
 ## v1.5.35 — Refresh the seeded `fields` system prompt to the v1.5.28 redesign
 
