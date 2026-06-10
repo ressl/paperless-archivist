@@ -6,6 +6,23 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.12.3 — Configurable AI request timeout
+
+The per-request HTTP timeout for AI provider calls was hardcoded at 180 s.
+Slow local models on modest hardware (e.g. a 27B-class model on a single GPU)
+can legitimately exceed that on a single chat/vision call, which then fails as
+a transient timeout and the job never completes.
+
+- New per-provider tuning field **`request_timeout_seconds`** (Settings →
+  provider tuning → Resource caps), `Option<u32>`; unset or `0` inherits the
+  built-in default of 180 s. Wired through the Ollama, OpenAI-compatible and
+  Anthropic clients for both chat and vision calls.
+- No schema migrations; rollback to v1.12.2 is safe.
+
+Note: raising the timeout lets a slow model finish, but for batch-draining a
+large backlog a smaller/faster model is usually the better lever — a model
+that needs minutes per document is impractical at scale on a single GPU.
+
 ## v1.12.2 — Queue self-healing & metadata context overflow
 
 Operational hardening after a prod incident where the metadata stage failed
