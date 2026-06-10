@@ -6,6 +6,37 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.12.2 — Queue self-healing & metadata context overflow
+
+Operational hardening after a prod incident where the metadata stage failed
+every job with `exceed_context_size_error`: an `allowed_list_max=0` setting
+(which the prefilter reads as *unlimited*) packed the full
+correspondent/type/tag lists into the prompt and overflowed the 8192-token
+text context, while a provider cooldown had separately parked the whole
+backlog with a far-future `run_after`.
+
+**⚠️ Operator action on upgrade:** the worker raises `ai.ollama_text_num_ctx`
+to a **16384 floor** on startup (mirroring the existing vision floor); a value
+already above the floor is left untouched. Re-check VRAM headroom if you run
+many concurrent workers.
+
+- **No more "unlimited" allowed-lists:** a resolved `metadata.allowed_list_max`
+  of `0` is now treated as the built-in default cap (20) on the worker path
+  instead of unlimited, so the candidate lists can't blow up the prompt.
+- **Text num_ctx floor:** new one-shot startup bump
+  (`bump_text_num_ctx_if_too_small`) raises a too-small `ollama_text_num_ctx`
+  to 16384 — the text path previously had no floor (only vision did).
+- **Queue self-healing:** a new `release_scheduled_retries` operation resets
+  the future `run_after` of cooldown-parked jobs. It is exposed as
+  `POST /operations/release-scheduled-retries` and a **"Release parked jobs"**
+  button in the dashboard maintenance drawer, is folded into the
+  cooldown-lift action (lifting a cooldown now also wakes the jobs it parked),
+  and runs automatically when the AI **model/provider is changed** so a switch
+  takes effect immediately instead of after the old cooldown elapses.
+
+**Rollback:** no schema migrations; rolling back to v1.12.1 is safe (the
+startup num_ctx bump leaves a persisted value that the older build also honors).
+
 ## v1.12.1 — Re-audit remediation (post-v1.12.0)
 
 Resolves the entire 2026-06-10 re-audit backlog (19 issues, #279–#297; report
