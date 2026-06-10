@@ -445,6 +445,7 @@ const plMessages: Record<MessageKey, string> = {
   'settings.tuning.field.fields_confidence_threshold': 'Próg pewności pól',
   'settings.tuning.field.max_tags': 'Maksymalna liczba tagów',
   'settings.tuning.field.allowed_list_max': 'Maksimum dozwolonej listy',
+  'settings.tuning.field.request_timeout_seconds': 'Limit czasu żądania (sekundy)',
   'settings.tuning.field.version': 'Wersja',
   'settings.tuning.field.loaded_models': 'Załadowane modele',
   'settings.workflow': 'Workflow',

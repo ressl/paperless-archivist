@@ -774,6 +774,15 @@ pub struct OpenAiCompatibleClient {
 
 impl OpenAiCompatibleClient {
     pub fn new(provider_name: &str, base_url: &str, api_key: Option<SecretString>) -> Result<Self> {
+        Self::new_with_timeout(provider_name, base_url, api_key, Duration::from_secs(180))
+    }
+
+    pub fn new_with_timeout(
+        provider_name: &str,
+        base_url: &str,
+        api_key: Option<SecretString>,
+        timeout: Duration,
+    ) -> Result<Self> {
         let mut headers = HeaderMap::new();
         if let Some(api_key) = api_key {
             let value = format!("Bearer {}", api_key.expose_secret());
@@ -781,7 +790,7 @@ impl OpenAiCompatibleClient {
         }
         let client = reqwest::Client::builder()
             .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(180))
+            .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an
             // accepted residual risk for this operator-configured provider host
@@ -951,6 +960,15 @@ pub struct AnthropicClient {
 
 impl AnthropicClient {
     pub fn new(provider_name: &str, base_url: &str, api_key: SecretString) -> Result<Self> {
+        Self::new_with_timeout(provider_name, base_url, api_key, Duration::from_secs(180))
+    }
+
+    pub fn new_with_timeout(
+        provider_name: &str,
+        base_url: &str,
+        api_key: SecretString,
+        timeout: Duration,
+    ) -> Result<Self> {
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("x-api-key"),
@@ -962,7 +980,7 @@ impl AnthropicClient {
         );
         let client = reqwest::Client::builder()
             .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(180))
+            .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an
             // accepted residual risk for this operator-configured provider host

@@ -445,6 +445,7 @@ const itMessages: Record<MessageKey, string> = {
   'settings.tuning.field.fields_confidence_threshold': 'Soglia di confidenza campi',
   'settings.tuning.field.max_tags': 'Tag massimi',
   'settings.tuning.field.allowed_list_max': 'Massimo lista consentita',
+  'settings.tuning.field.request_timeout_seconds': 'Timeout richiesta (secondi)',
   'settings.tuning.field.version': 'Versione',
   'settings.tuning.field.loaded_models': 'Modelli caricati',
   'settings.workflow': 'Workflow',

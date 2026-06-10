@@ -445,6 +445,7 @@ const frMessages: Record<MessageKey, string> = {
   'settings.tuning.field.fields_confidence_threshold': 'Seuil de confiance champs',
   'settings.tuning.field.max_tags': "Nombre maximum d'étiquettes",
   'settings.tuning.field.allowed_list_max': 'Maximum de la liste autorisée',
+  'settings.tuning.field.request_timeout_seconds': "Délai d'expiration des requêtes (secondes)",
   'settings.tuning.field.version': 'Version',
   'settings.tuning.field.loaded_models': 'Modèles chargés',
   'settings.workflow': 'Workflow',

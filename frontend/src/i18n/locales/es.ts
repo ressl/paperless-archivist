@@ -445,6 +445,7 @@ const esMessages: Record<MessageKey, string> = {
   'settings.tuning.field.fields_confidence_threshold': 'Umbral de confianza de campos',
   'settings.tuning.field.max_tags': 'Máximo de etiquetas',
   'settings.tuning.field.allowed_list_max': 'Máximo de lista permitida',
+  'settings.tuning.field.request_timeout_seconds': 'Tiempo de espera de solicitud (segundos)',
   'settings.tuning.field.version': 'Versión',
   'settings.tuning.field.loaded_models': 'Modelos cargados',
   'settings.workflow': 'Workflow',

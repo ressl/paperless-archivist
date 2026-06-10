@@ -40,7 +40,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     tags_confidence_threshold: null,
     fields_confidence_threshold: null,
     max_tags: null,
-    allowed_list_max: null
+    allowed_list_max: null,
+    request_timeout_seconds: null
   },
   ollama_cloud: {
     worker_concurrency: 4,
@@ -59,7 +60,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     tags_confidence_threshold: null,
     fields_confidence_threshold: null,
     max_tags: null,
-    allowed_list_max: null
+    allowed_list_max: null,
+    request_timeout_seconds: null
   },
   openai: {
     worker_concurrency: 8,
@@ -78,7 +80,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     tags_confidence_threshold: null,
     fields_confidence_threshold: null,
     max_tags: null,
-    allowed_list_max: null
+    allowed_list_max: null,
+    request_timeout_seconds: null
   },
   anthropic: {
     worker_concurrency: 4,
@@ -97,7 +100,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     tags_confidence_threshold: null,
     fields_confidence_threshold: null,
     max_tags: null,
-    allowed_list_max: null
+    allowed_list_max: null,
+    request_timeout_seconds: null
   },
   openai_compatible: {
     worker_concurrency: 4,
@@ -116,7 +120,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     tags_confidence_threshold: null,
     fields_confidence_threshold: null,
     max_tags: null,
-    allowed_list_max: null
+    allowed_list_max: null,
+    request_timeout_seconds: null
   }
 };
 
@@ -134,7 +139,8 @@ export const PERFORMANCE_FIELDS = [
 export const CAPS_FIELDS = [
   'ocr_page_limit',
   'hourly_document_limit',
-  'daily_document_limit'
+  'daily_document_limit',
+  'request_timeout_seconds'
 ] as const satisfies readonly (keyof ProviderTuning)[];
 
 export const THRESHOLD_FIELDS = [
@@ -262,6 +268,14 @@ export function TuningDisclosure({
             min={0}
             step={1}
             onChange={(value) => onChangeTuning({ daily_document_limit: value })}
+          />
+          <TuningNumberField
+            field="request_timeout_seconds"
+            value={tuning.request_timeout_seconds}
+            defaultValue={180}
+            min={1}
+            step={10}
+            onChange={(value) => onChangeTuning({ request_timeout_seconds: value })}
           />
         </TuningSection>
         <TuningSection titleKey="settings.tuning.section.thresholds" onReset={() => onResetBlock(THRESHOLD_FIELDS)}>

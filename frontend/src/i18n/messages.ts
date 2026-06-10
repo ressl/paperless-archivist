@@ -443,6 +443,7 @@ export const enMessages = {
   'settings.tuning.field.fields_confidence_threshold': 'Fields confidence threshold',
   'settings.tuning.field.max_tags': 'Max tags',
   'settings.tuning.field.allowed_list_max': 'Allowed list max',
+  'settings.tuning.field.request_timeout_seconds': 'Request timeout (seconds)',
   'settings.tuning.field.version': 'Version',
   'settings.tuning.field.loaded_models': 'Loaded models',
   'settings.workflow': 'Workflow',

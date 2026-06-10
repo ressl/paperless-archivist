@@ -46,6 +46,7 @@ export type ProviderTuning = {
   fields_confidence_threshold?: number | null;
   max_tags?: number | null;
   allowed_list_max?: number | null;
+  request_timeout_seconds?: number | null;
 };
 
 export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';

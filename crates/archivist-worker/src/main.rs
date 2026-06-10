@@ -3978,6 +3978,7 @@ struct StageProvider {
     model: String,
     secret_id: Option<Uuid>,
     reasoning_effort: ReasoningEffort,
+    request_timeout_seconds: u32,
 }
 
 fn provider_for_stage(
@@ -4015,6 +4016,12 @@ fn provider_for_stage(
         .model_for_stage_provider(&provider, stage, vision);
     let base_url = provider_base_url(&provider.kind, &provider.base_url);
     let reasoning_effort = provider.tuning.reasoning_effort.unwrap_or_default();
+    // Per-request AI timeout: a 0/unset value inherits the built-in default.
+    let request_timeout_seconds = provider
+        .tuning
+        .request_timeout_seconds
+        .filter(|secs| *secs > 0)
+        .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS);
     Ok(StageProvider {
         name: provider.name,
         kind: provider.kind,
@@ -4022,6 +4029,7 @@ fn provider_for_stage(
         model,
         secret_id: provider.secret_id,
         reasoning_effort,
+        request_timeout_seconds,
     })
 }
 
@@ -4134,20 +4142,23 @@ async fn chat_with_provider(
     provider: &StageProvider,
     request: ChatRequest,
 ) -> Result<AiResponse> {
+    let timeout = Duration::from_secs(u64::from(provider.request_timeout_seconds));
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client = OllamaClient::new(
+            let client = OllamaClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
                 provider_secret(pool, config, provider).await?,
+                timeout,
             )?;
             client.chat(request).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
-            let client = OpenAiCompatibleClient::new(
+            let client = OpenAiCompatibleClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
                 provider_secret(pool, config, provider).await?,
+                timeout,
             )?;
             client.chat(request).await
         }
@@ -4157,7 +4168,12 @@ async fn chat_with_provider(
                 .ok_or_else(|| {
                     anyhow!("AI provider '{}' requires an API key secret", provider.name)
                 })?;
-            let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
+            let client = AnthropicClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                secret,
+                timeout,
+            )?;
             client.chat(request).await
         }
     }
@@ -4192,29 +4208,33 @@ async fn build_vision_client(
     config: &AppConfig,
     provider: &StageProvider,
 ) -> Result<VisionClient> {
+    let timeout = Duration::from_secs(u64::from(provider.request_timeout_seconds));
     match provider.kind {
-        AiProviderKind::Ollama => Ok(VisionClient::Ollama(OllamaClient::new(
+        AiProviderKind::Ollama => Ok(VisionClient::Ollama(OllamaClient::new_with_timeout(
             &provider.name,
             &provider.base_url,
             provider_secret(pool, config, provider).await?,
+            timeout,
         )?)),
-        AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
-            Ok(VisionClient::OpenAiCompatible(OpenAiCompatibleClient::new(
+        AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => Ok(
+            VisionClient::OpenAiCompatible(OpenAiCompatibleClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
                 provider_secret(pool, config, provider).await?,
-            )?))
-        }
+                timeout,
+            )?),
+        ),
         AiProviderKind::Anthropic => {
             let secret = provider_secret(pool, config, provider)
                 .await?
                 .ok_or_else(|| {
                     anyhow!("AI provider '{}' requires an API key secret", provider.name)
                 })?;
-            Ok(VisionClient::Anthropic(AnthropicClient::new(
+            Ok(VisionClient::Anthropic(AnthropicClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
                 secret,
+                timeout,
             )?))
         }
     }
@@ -4299,6 +4319,7 @@ mod tests {
             model: "m".to_owned(),
             secret_id: None,
             reasoning_effort: ReasoningEffort::default(),
+            request_timeout_seconds: archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS,
         };
         let ollama = provider(AiProviderKind::Ollama);
         // A preset pinning 4096 is floored up to the GGML-safe minimum.

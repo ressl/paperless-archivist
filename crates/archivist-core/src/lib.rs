@@ -946,6 +946,10 @@ impl RuntimeSettings {
                     resolved
                 }
             },
+            request_timeout_seconds: tuning
+                .and_then(|tuning| tuning.request_timeout_seconds)
+                .filter(|secs| *secs > 0)
+                .unwrap_or(DEFAULT_AI_REQUEST_TIMEOUT_SECS),
         }
     }
 }
@@ -1768,6 +1772,12 @@ pub struct ProviderTuning {
     pub max_tags: Option<u32>,
     #[serde(default)]
     pub allowed_list_max: Option<u32>,
+    /// Per-request HTTP timeout for AI provider calls, in seconds. None (or 0)
+    /// = inherit the built-in default ([`DEFAULT_AI_REQUEST_TIMEOUT_SECS`]).
+    /// Raise it for slow local models on modest hardware; a single chat/vision
+    /// call that exceeds this is failed as a transient timeout and retried.
+    #[serde(default)]
+    pub request_timeout_seconds: Option<u32>,
 }
 
 /// Resolved tuning: every field collapsed to a concrete value the worker /
@@ -1792,6 +1802,7 @@ pub struct EffectiveTuning {
     pub fields_confidence_threshold: f32,
     pub max_tags: u32,
     pub allowed_list_max: u32,
+    pub request_timeout_seconds: u32,
 }
 
 impl AiProviderSettings {
@@ -1839,6 +1850,7 @@ impl AiProviderSettings {
                 fields_confidence_threshold: None,
                 max_tags: None,
                 allowed_list_max: None,
+                request_timeout_seconds: None,
             },
         }
     }
@@ -1898,6 +1910,7 @@ impl AiProviderSettings {
                 fields_confidence_threshold: None,
                 max_tags: None,
                 allowed_list_max: None,
+                request_timeout_seconds: None,
             },
         }
     }
@@ -2166,6 +2179,11 @@ pub struct MetadataSettings {
 /// gets meaningful candidates instead of a giant flat list that dilutes
 /// attention and inflates token cost.
 pub const DEFAULT_METADATA_ALLOWED_LIST_MAX: usize = 20;
+
+/// Default per-request HTTP timeout for AI provider calls, in seconds, when a
+/// provider's `request_timeout_seconds` tuning is unset. Slow local models on
+/// modest hardware may legitimately need a higher value.
+pub const DEFAULT_AI_REQUEST_TIMEOUT_SECS: u32 = 180;
 
 /// Normalize a per-field confidence-threshold override.
 ///
@@ -4925,6 +4943,27 @@ mod tests {
         // A positive value is respected as-is.
         settings.ai.providers[0].tuning.allowed_list_max = Some(250);
         assert_eq!(settings.effective_tuning().allowed_list_max, 250);
+    }
+
+    #[test]
+    fn effective_tuning_resolves_request_timeout_with_default_and_floor() {
+        let mut settings = settings_with_two_providers();
+        settings.ai.default_provider = "ollama".to_owned();
+        // Unset → built-in default.
+        settings.ai.providers[0].tuning.request_timeout_seconds = None;
+        assert_eq!(
+            settings.effective_tuning().request_timeout_seconds,
+            DEFAULT_AI_REQUEST_TIMEOUT_SECS
+        );
+        // 0 is treated as unset (never an infinite timeout).
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(0);
+        assert_eq!(
+            settings.effective_tuning().request_timeout_seconds,
+            DEFAULT_AI_REQUEST_TIMEOUT_SECS
+        );
+        // A positive override is respected.
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(600);
+        assert_eq!(settings.effective_tuning().request_timeout_seconds, 600);
     }
 
     #[test]

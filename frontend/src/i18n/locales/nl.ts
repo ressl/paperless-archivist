@@ -445,6 +445,7 @@ const nlMessages: Record<MessageKey, string> = {
   'settings.tuning.field.fields_confidence_threshold': 'Drempel velden-betrouwbaarheid',
   'settings.tuning.field.max_tags': 'Max tags',
   'settings.tuning.field.allowed_list_max': 'Maximaal toegestane lijstwaarden',
+  'settings.tuning.field.request_timeout_seconds': 'Aanvraagtime-out (seconden)',
   'settings.tuning.field.version': 'Versie',
   'settings.tuning.field.loaded_models': 'Geladen modellen',
   'settings.workflow': 'Workflow',

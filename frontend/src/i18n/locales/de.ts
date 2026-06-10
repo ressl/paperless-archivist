@@ -445,6 +445,7 @@ const deMessages: Record<MessageKey, string> = {
   'settings.tuning.field.fields_confidence_threshold': 'Felder-Konfidenzschwelle',
   'settings.tuning.field.max_tags': 'Maximale Tags',
   'settings.tuning.field.allowed_list_max': 'Maximale erlaubte Listenwerte',
+  'settings.tuning.field.request_timeout_seconds': 'Anfrage-Timeout (Sekunden)',
   'settings.tuning.field.version': 'Version',
   'settings.tuning.field.loaded_models': 'Geladene Modelle',
   'settings.workflow': 'Workflow',
