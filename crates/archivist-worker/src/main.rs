@@ -4228,6 +4228,34 @@ mod tests {
     }
 
     #[test]
+    fn typed_ollama_4xx_is_permanent_despite_ollama_in_message() {
+        // A typed Client 404 from the Ollama client (carrying the word
+        // "ollama" via the context) must classify Permanent, not Transient —
+        // the substring table treats "ollama" as a transient marker, so before
+        // typing this it burned the whole retry budget. #294
+        let err = anyhow::Error::new(AiProviderError::Client {
+            status: 404,
+            body: "model not found".to_owned(),
+        })
+        .context("Ollama vision call");
+        assert_eq!(
+            classify_processing_failure(&err),
+            ProcessingFailureClass::Permanent
+        );
+
+        // A typed 503 still classifies Transient.
+        let server = anyhow::Error::new(AiProviderError::Server {
+            status: 503,
+            body: "unavailable".to_owned(),
+        })
+        .context("Ollama chat call");
+        assert_eq!(
+            classify_processing_failure(&server),
+            ProcessingFailureClass::Transient
+        );
+    }
+
+    #[test]
     fn ollama_vision_num_ctx_floors_below_ggml_minimum() {
         let provider = |kind| StageProvider {
             name: "p".to_owned(),

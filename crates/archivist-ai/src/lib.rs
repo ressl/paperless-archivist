@@ -64,6 +64,19 @@ pub enum AiProviderError {
 }
 
 impl AiProviderError {
+    /// Build a typed error from a non-success HTTP status + body so the
+    /// worker's classifier uses the typed surface (5xx = transient Server,
+    /// other = permanent Client) instead of substring-matching the message —
+    /// where the provider name "ollama" was itself a transient marker, so an
+    /// Ollama 401/404 burned the whole retry budget. #294
+    pub fn from_http(status: u16, body: String) -> Self {
+        if (500..=599).contains(&status) {
+            Self::Server { status, body }
+        } else {
+            Self::Client { status, body }
+        }
+    }
+
     /// Whether the worker should retry this failure with backoff.
     pub fn is_transient(&self) -> bool {
         match self {
@@ -681,7 +694,10 @@ impl TextProvider for OllamaClient {
         let status = response.status();
         if !status.is_success() {
             let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(anyhow!("Ollama chat returned {status}: {body}"));
+            return Err(
+                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
+                    .context("Ollama chat call"),
+            );
         }
         let raw: Value = response
             .json()
@@ -724,7 +740,10 @@ impl VisionProvider for OllamaClient {
         let status = response.status();
         if !status.is_success() {
             let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(anyhow!("Ollama vision returned {status}: {body}"));
+            return Err(
+                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
+                    .context("Ollama vision call"),
+            );
         }
         let raw: Value = response
             .json()
@@ -814,7 +833,10 @@ impl TextProvider for OpenAiCompatibleClient {
         let status = response.status();
         if !status.is_success() {
             let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(anyhow!("OpenAI-compatible chat returned {status}: {body}"));
+            return Err(
+                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
+                    .context("OpenAI-compatible chat call"),
+            );
         }
         let raw: Value = response
             .json()
@@ -879,9 +901,10 @@ impl VisionProvider for OpenAiCompatibleClient {
         let status = response.status();
         if !status.is_success() {
             let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(anyhow!(
-                "OpenAI-compatible vision returned {status}: {body}"
-            ));
+            return Err(
+                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
+                    .context("OpenAI-compatible vision call"),
+            );
         }
         let raw: Value = response
             .json()
@@ -1010,7 +1033,10 @@ impl AnthropicClient {
         let status = response.status();
         if !status.is_success() {
             let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(anyhow!("Anthropic messages returned {status}: {body}"));
+            return Err(
+                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
+                    .context("Anthropic messages call"),
+            );
         }
         let raw: Value = response.json().await.context("decode Anthropic response")?;
         let text = if structured {
@@ -2284,6 +2310,21 @@ mod tests {
         // retry transiently) must NOT be classified as a quota cap.
         let body = "{\"error\":\"too many requests, please retry shortly\"}";
         assert!(!AiProviderError::is_quota_signal(body));
+    }
+
+    #[test]
+    fn from_http_maps_status_to_client_or_server() {
+        // 5xx -> Server (transient/retryable); 4xx -> Client (permanent).
+        assert!(matches!(
+            AiProviderError::from_http(503, "down".to_owned()),
+            AiProviderError::Server { status: 503, .. }
+        ));
+        assert!(AiProviderError::from_http(503, String::new()).is_transient());
+        assert!(matches!(
+            AiProviderError::from_http(404, "not found".to_owned()),
+            AiProviderError::Client { status: 404, .. }
+        ));
+        assert!(!AiProviderError::from_http(401, String::new()).is_transient());
     }
 
     #[test]
