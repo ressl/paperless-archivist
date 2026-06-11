@@ -609,7 +609,7 @@ async fn process_available_jobs(
         Err(error) => {
             warn!(error = ?error, "failed to construct Paperless client for batch; failing claimed jobs");
             for job in &jobs {
-                let _ = fail_job(pool, job, worker_id, &format!("{:#}", error), true).await;
+                let _ = fail_job(pool, job, worker_id, &format!("{:#}", error), true, None).await;
             }
             return Ok(());
         }
@@ -740,6 +740,7 @@ async fn process_available_jobs(
                         &lease_owner,
                         &format!("{:#}", error),
                         failure_class.is_retryable() || force_retryable,
+                        failure_class.retry_ceiling(),
                     )
                     .await;
                 } else {
@@ -901,6 +902,14 @@ async fn send_notification_webhook(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessingFailureClass {
     Transient,
+    /// A transient failure of the Paperless *gateway/infrastructure* — the
+    /// system of record is briefly unreachable (network, timeout, 5xx, or a
+    /// gateway-404 mid-restart, #245). Distinct from `Transient` because an
+    /// upstream outage blocks *every* job at once, so failing each document
+    /// against its small `max_attempts` budget permanently loses the whole
+    /// backlog for an outage longer than ~1 h. Retried against a higher,
+    /// bounded ceiling instead so the documents ride the outage out. #305.
+    TransientInfra,
     Permanent,
     /// Provider replied with a hard usage-cap signal (Ollama Cloud weekly,
     /// OpenAI tier monthly, …). Not retryable — the worker writes a
@@ -911,17 +920,36 @@ enum ProcessingFailureClass {
 
 impl ProcessingFailureClass {
     fn is_retryable(self) -> bool {
-        matches!(self, Self::Transient)
+        matches!(self, Self::Transient | Self::TransientInfra)
+    }
+
+    /// Retry-budget ceiling for `fail_job`: `None` uses the per-job
+    /// `max_attempts`; `TransientInfra` raises it to ride out an upstream
+    /// outage (bounded — see [`PAPERLESS_INFRA_RETRY_CEILING`]).
+    fn retry_ceiling(self) -> Option<i32> {
+        match self {
+            Self::TransientInfra => Some(PAPERLESS_INFRA_RETRY_CEILING),
+            _ => None,
+        }
     }
 
     fn as_str(self) -> &'static str {
         match self {
             Self::Transient => "transient",
+            Self::TransientInfra => "transient_infra",
             Self::Permanent => "permanent",
             Self::ProviderQuota => "provider_quota",
         }
     }
 }
+
+/// Bounded retry ceiling for a Paperless infrastructure outage
+/// (`ProcessingFailureClass::TransientInfra`). With `fail_job`'s exponential
+/// backoff capped at ~32 min, 20 attempts span ~8.5 h — long enough to ride
+/// out a realistic gateway outage/restart, short enough that a *permanently*
+/// broken gateway still surfaces as a failed job instead of looping forever
+/// (unlike the provider-cooldown release, which is unbounded by design). #305.
+const PAPERLESS_INFRA_RETRY_CEILING: i32 = 20;
 
 /// Decide whether `error` should be retried with backoff (Transient) or marked
 /// permanent. The function first walks the error chain looking for typed
@@ -933,8 +961,12 @@ impl ProcessingFailureClass {
 fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass {
     for cause in error.chain() {
         if let Some(paperless_error) = cause.downcast_ref::<PaperlessError>() {
+            // A transient Paperless failure is an *infrastructure* outage of the
+            // system of record (network/timeout/5xx/gateway-404) — it blocks
+            // every job, so grant the higher bounded retry budget rather than
+            // burning each document's small `max_attempts`. #305.
             return if paperless_error.is_transient() {
-                ProcessingFailureClass::Transient
+                ProcessingFailureClass::TransientInfra
             } else {
                 ProcessingFailureClass::Permanent
             };
@@ -4516,22 +4548,32 @@ mod tests {
 
     #[test]
     fn typed_paperless_errors_drive_classification() {
+        // A transient Paperless failure is an infrastructure outage of the
+        // system of record: classified as TransientInfra so it retries against
+        // the higher, bounded ceiling instead of each document's small budget. #305.
         let transient: anyhow::Error =
             anyhow::Error::new(PaperlessError::Timeout("waiting for paperless".to_owned()))
                 .context("higher-level wrap that does not mention transient keywords");
-        assert!(matches!(
-            classify_processing_failure(&transient),
-            ProcessingFailureClass::Transient
-        ));
+        let class = classify_processing_failure(&transient);
+        assert_eq!(class, ProcessingFailureClass::TransientInfra);
+        assert!(class.is_retryable(), "an upstream outage is retryable");
+        assert_eq!(
+            class.retry_ceiling(),
+            Some(PAPERLESS_INFRA_RETRY_CEILING),
+            "infra failures ride the outage out on the elevated ceiling"
+        );
 
         let permanent: anyhow::Error = anyhow::Error::new(PaperlessError::Client {
             status: 422,
             body: "no transient keyword here".to_owned(),
         });
-        assert!(matches!(
-            classify_processing_failure(&permanent),
-            ProcessingFailureClass::Permanent
-        ));
+        let permanent_class = classify_processing_failure(&permanent);
+        assert_eq!(permanent_class, ProcessingFailureClass::Permanent);
+        assert_eq!(
+            permanent_class.retry_ceiling(),
+            None,
+            "a permanent client error keeps the normal (no-override) budget"
+        );
     }
 
     #[test]

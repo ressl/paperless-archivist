@@ -5450,8 +5450,19 @@ pub async fn fail_job(
     lease_owner: &str,
     error: &str,
     retryable: bool,
+    retry_ceiling: Option<i32>,
 ) -> Result<bool> {
-    let retry = retryable && job.attempts < job.max_attempts;
+    // A transient *infrastructure* failure (e.g. the Paperless gateway briefly
+    // unreachable, #245) may pass a `retry_ceiling` higher than the per-job
+    // `max_attempts`: the document is blameless for an upstream outage, so it
+    // should ride the outage out instead of burning its small retry budget and
+    // failing permanently. `None` keeps the normal budget; the ceiling never
+    // *lowers* it. Bounded (not unbounded like the cooldown release) so a
+    // permanently-broken gateway still fails eventually. #305.
+    let ceiling = retry_ceiling
+        .map(|c| c.max(job.max_attempts))
+        .unwrap_or(job.max_attempts);
+    let retry = retryable && job.attempts < ceiling;
     let status = if retry { "queued" } else { "failed" };
     let base_delay = (2_i64.pow(job.attempts.clamp(0, 6) as u32)) * 30;
     // +/-25% uniform jitter avoids thundering-herd retries when many workers

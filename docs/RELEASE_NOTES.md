@@ -6,6 +6,34 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.12.5 — Transient Paperless outages no longer exhaust the retry budget
+
+Completes the code half of **#305** (the prod re-queue of the 20 affected
+documents was done during the v1.12.4 window). A transient **Paperless
+infrastructure** failure — the system of record briefly unreachable
+(network/timeout, a 5xx, or the gateway-404 a fronting proxy returns
+mid-restart, #245) — blocks *every* job at once. Previously each retry burned
+one of the document's small `max_attempts` (default 3), so an outage longer
+than ~1 h permanently failed the whole backlog.
+
+- New failure class **`TransientInfra`**: a transient *typed* `PaperlessError`
+  is now classified separately from a generic transient and retried against a
+  **bounded** ceiling (`PAPERLESS_INFRA_RETRY_CEILING = 20`) instead of
+  `max_attempts`. With `fail_job`'s exponential backoff capped at ~32 min, that
+  spans ~8.5 h — long enough to ride out a realistic gateway outage/restart,
+  short enough that a *permanently* broken gateway still surfaces as a failed
+  job (unlike the provider-cooldown release, which is unbounded by design).
+- The ceiling **raises** the bar, it does not reset it: `attempts` is preserved
+  across retries, so the document still fails eventually if the outage never
+  ends. AI-provider transients and the untyped substring fallback keep the
+  normal per-job budget — only a typed Paperless infra failure gets the
+  elevated ceiling.
+- `fail_job` gained an optional `retry_ceiling` parameter (`None` = normal
+  budget); a new DB integration test plus an updated worker-classification unit
+  test cover both paths.
+
+**No schema migration; rollback to v1.12.4 is safe.**
+
 ## v1.12.4 — Prod audit remediation (PostgreSQL 18 + schema cleanup)
 
 Resolves the full 2026-06-10 production audit backlog (#299–#317; sanitized
