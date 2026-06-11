@@ -17,7 +17,7 @@ use archivist_core::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Timelike, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -2166,11 +2166,25 @@ pub struct InventoryUpsert {
     pub current_tag_ids: Vec<i32>,
     pub correspondent_id: Option<i32>,
     pub document_type_id: Option<i32>,
-    pub document_date: Option<String>,
+    /// Typed since migration 0043 (document_inventory.document_date is a real
+    /// `date` now); built from the Paperless `created` field via
+    /// [`parse_paperless_document_date`].
+    pub document_date: Option<NaiveDate>,
     pub paperless_modified_at: Option<DateTime<Utc>>,
     pub has_ocr_completion_tag: bool,
     pub has_tagging_completion_tag: bool,
     pub has_full_completion_tag: bool,
+}
+
+/// Parse the Paperless `created` field into the typed inventory document
+/// date. Paperless reports a plain ISO date on current releases (verified on
+/// the live data: every row matches `YYYY-MM-DD`); older releases used a full
+/// RFC3339 timestamp — accept both by reading the leading date. Lenient by
+/// design: a malformed value yields None instead of failing the whole sync.
+pub fn parse_paperless_document_date(created: Option<&str>) -> Option<NaiveDate> {
+    let raw = created?.trim();
+    let prefix = raw.get(..10)?;
+    NaiveDate::parse_from_str(prefix, "%Y-%m-%d").ok()
 }
 
 /// Sync upsert for the document inventory.
@@ -2251,7 +2265,7 @@ pub async fn upsert_inventory_item(
     .bind(&item.current_tag_ids)
     .bind(item.correspondent_id)
     .bind(item.document_type_id)
-    .bind(&item.document_date)
+    .bind(item.document_date)
     .bind(item.paperless_modified_at)
     .bind(item.has_ocr_completion_tag)
     .bind(item.has_tagging_completion_tag)
@@ -4181,8 +4195,12 @@ pub struct InventoryQuery {
     /// None of the listed tag names may be present on `current_tags`.
     pub tags_exclude: Vec<String>,
     pub language: Option<String>,
-    pub date_from: Option<String>,
-    pub date_to: Option<String>,
+    /// Inclusive lower bound on the typed `document_date` column. The API
+    /// handler parses (and 400s) the raw query string, so the SQL layer only
+    /// ever sees a valid date.
+    pub date_from: Option<NaiveDate>,
+    /// Inclusive upper bound on `document_date`.
+    pub date_to: Option<NaiveDate>,
     pub has_error: Option<bool>,
     pub needs_review: Option<bool>,
 }
@@ -4257,13 +4275,11 @@ fn push_inventory_filters(builder: &mut QueryBuilder<Postgres>, query: &Inventor
             .push(" and detected_language = ")
             .push_bind(lang.clone());
     }
-    if let Some(from) = query.date_from.as_ref().filter(|s| !s.is_empty()) {
-        builder
-            .push(" and document_date >= ")
-            .push_bind(from.clone());
+    if let Some(from) = query.date_from {
+        builder.push(" and document_date >= ").push_bind(from);
     }
-    if let Some(to) = query.date_to.as_ref().filter(|s| !s.is_empty()) {
-        builder.push(" and document_date <= ").push_bind(to.clone());
+    if let Some(to) = query.date_to {
+        builder.push(" and document_date <= ").push_bind(to);
     }
     if let Some(has_error) = query.has_error {
         if has_error {
@@ -9465,6 +9481,26 @@ mod tests {
             (0, 0)
         );
         assert_eq!(ai_response_token_usage(None), (0, 0));
+    }
+
+    #[test]
+    fn paperless_document_date_parses_dates_and_timestamps_leniently() {
+        // Current Paperless reports a plain ISO date; older releases sent a
+        // full RFC3339 timestamp. Both must yield the date; junk yields None
+        // instead of failing the sync. #315
+        let expected = NaiveDate::from_ymd_opt(2026, 6, 1);
+        assert_eq!(parse_paperless_document_date(Some("2026-06-01")), expected);
+        assert_eq!(
+            parse_paperless_document_date(Some("2026-06-01T00:00:00+02:00")),
+            expected
+        );
+        assert_eq!(
+            parse_paperless_document_date(Some(" 2026-06-01 ")),
+            expected
+        );
+        assert_eq!(parse_paperless_document_date(Some("01.06.2026")), None);
+        assert_eq!(parse_paperless_document_date(Some("")), None);
+        assert_eq!(parse_paperless_document_date(None), None);
     }
 
     #[test]

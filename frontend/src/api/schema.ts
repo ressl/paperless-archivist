@@ -1200,6 +1200,10 @@ export interface paths {
                 query?: {
                     limit?: number;
                     offset?: number;
+                    /** @description Inclusive lower bound on document_date (YYYY-MM-DD). A present but unparseable value is rejected with 400. */
+                    date_from?: string;
+                    /** @description Inclusive upper bound on document_date (YYYY-MM-DD). A present but unparseable value is rejected with 400. */
+                    date_to?: string;
                 };
                 header?: never;
                 path?: never;
@@ -1209,6 +1213,13 @@ export interface paths {
             responses: {
                 /** @description Inventory page */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Unparseable date_from/date_to filter */
+                400: {
                     headers: {
                         [name: string]: unknown;
                     };

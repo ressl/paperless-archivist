@@ -3731,6 +3731,23 @@ fn split_csv(value: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Parse an inventory `date_from`/`date_to` filter. Absent or blank means "no
+/// filter"; a present but unparseable value is rejected with 400 instead of
+/// being silently ignored (same contract as the statistics range, #312). The
+/// column is a real `date` since migration 0043, so only `YYYY-MM-DD` is
+/// meaningful here.
+fn parse_inventory_date_filter(
+    name: &str,
+    raw: Option<&str>,
+) -> Result<Option<chrono::NaiveDate>, ApiError> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some(value) => chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .map(Some)
+            .map_err(|_| ApiError::bad_request(format!("'{name}' must be a YYYY-MM-DD date"))),
+    }
+}
+
 async fn inventory(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -3748,8 +3765,8 @@ async fn inventory(
         tags_include: split_csv(query.tag),
         tags_exclude: split_csv(query.not_tag),
         language: query.lang.filter(|s| !s.is_empty()),
-        date_from: query.date_from.filter(|s| !s.is_empty()),
-        date_to: query.date_to.filter(|s| !s.is_empty()),
+        date_from: parse_inventory_date_filter("date_from", query.date_from.as_deref())?,
+        date_to: parse_inventory_date_filter("date_to", query.date_to.as_deref())?,
         has_error: query.has_error,
         needs_review: query.needs_review,
     };
@@ -3947,10 +3964,7 @@ impl MetadataField {
                 .document_type
                 .as_deref()
                 .is_some_and(|v| !v.is_empty()),
-            Self::DocumentDate => current
-                .document_date
-                .as_deref()
-                .is_some_and(|v| !v.is_empty()),
+            Self::DocumentDate => current.document_date.is_some(),
             // Tags & custom-fields don't gate on overwrite. The metadata
             // stage ALWAYS merges into the existing tag set (see
             // OldTagStrategy::KeepExisting) and custom-fields stage just
@@ -3985,7 +3999,8 @@ struct CurrentState {
     title: Option<String>,
     correspondent: Option<String>,
     document_type: Option<String>,
-    document_date: Option<String>,
+    /// Typed since migration 0043; serialized as "YYYY-MM-DD" in to_json.
+    document_date: Option<chrono::NaiveDate>,
     tags: Vec<String>,
 }
 
@@ -6468,7 +6483,9 @@ async fn sync_paperless_inventory(
                 current_tag_ids: document.tags.clone(),
                 correspondent_id: document.correspondent,
                 document_type_id: document.document_type,
-                document_date: document.created.clone(),
+                document_date: archivist_db::parse_paperless_document_date(
+                    document.created.as_deref(),
+                ),
                 paperless_modified_at: parse_paperless_datetime(document.modified.as_deref()),
                 has_ocr_completion_tag: tag_names
                     .iter()
@@ -7221,6 +7238,27 @@ mod tests {
             Some(utc(2026, 6, 11, 8, 30, 0))
         );
         assert_eq!(parse_stat_datetime("not-a-date", StatBound::End), None);
+    }
+
+    #[test]
+    fn inventory_date_filters_parse_or_reject() {
+        // #315: absent/blank means "no filter"; present-but-garbage is a 400
+        // (same contract as the statistics range, #312) instead of silently
+        // matching nothing against the typed date column.
+        assert_eq!(
+            parse_inventory_date_filter("date_from", None).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_inventory_date_filter("date_from", Some("  ")).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_inventory_date_filter("date_from", Some("2026-06-11")).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 11)
+        );
+        assert!(parse_inventory_date_filter("date_to", Some("11.06.2026")).is_err());
+        assert!(parse_inventory_date_filter("date_to", Some("2026-13-40")).is_err());
     }
 
     #[test]
@@ -8196,7 +8234,7 @@ mod metadata_trace_tests {
             title: Some("Original Title".to_owned()),
             correspondent: Some("Existing Co".to_owned()),
             document_type: Some("Existing Type".to_owned()),
-            document_date: Some("2020-01-01".to_owned()),
+            document_date: chrono::NaiveDate::from_ymd_opt(2020, 1, 1),
             tags: vec!["existing".to_owned()],
         }
     }

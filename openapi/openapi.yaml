@@ -1439,9 +1439,25 @@ paths:
         - name: offset
           in: query
           schema: { type: integer, default: 0 }
+        - name: date_from
+          in: query
+          required: false
+          schema: { type: string, format: date }
+          description: >-
+            Inclusive lower bound on document_date (YYYY-MM-DD). A present but
+            unparseable value is rejected with 400.
+        - name: date_to
+          in: query
+          required: false
+          schema: { type: string, format: date }
+          description: >-
+            Inclusive upper bound on document_date (YYYY-MM-DD). A present but
+            unparseable value is rejected with 400.
       responses:
         "200":
           description: Inventory page
+        "400":
+          description: Unparseable date_from/date_to filter
   /api/ai/runtime-hints:
     get:
       summary: Live runtime hints for a provider (loaded model, VRAM, version)

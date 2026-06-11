@@ -12,7 +12,7 @@ use archivist_db::{
     migrate, upsert_inventory_item, upsert_paperless_custom_field, upsert_paperless_named_entity,
     upsert_paperless_tag,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use sqlx::{Executor, Row};
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -69,7 +69,7 @@ fn inventory_item() -> InventoryUpsert {
         current_tag_ids: vec![1, 2],
         correspondent_id: Some(7),
         document_type_id: Some(3),
-        document_date: Some("2026-06-01".to_owned()),
+        document_date: NaiveDate::from_ymd_opt(2026, 6, 1),
         paperless_modified_at: None,
         has_ocr_completion_tag: false,
         has_tagging_completion_tag: false,

@@ -3967,7 +3967,9 @@ async fn sync_metadata(
                 current_tag_ids: document.tags.clone(),
                 correspondent_id: document.correspondent,
                 document_type_id: document.document_type,
-                document_date: document.created.clone(),
+                document_date: archivist_db::parse_paperless_document_date(
+                    document.created.as_deref(),
+                ),
                 paperless_modified_at: None,
                 has_ocr_completion_tag: tag_names
                     .iter()

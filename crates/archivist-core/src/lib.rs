@@ -3995,7 +3995,9 @@ pub struct DocumentInventoryItem {
     pub next_required_stage: Option<String>,
     pub needs_review: bool,
     pub complete: bool,
-    pub document_date: Option<String>,
+    /// Typed since migration 0043; serde keeps the wire format a plain
+    /// "YYYY-MM-DD" string, so API consumers are unaffected.
+    pub document_date: Option<NaiveDate>,
     pub detected_language: Option<String>,
     pub detected_language_confidence: Option<f32>,
     pub detected_language_source: Option<String>,
