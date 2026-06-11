@@ -1021,6 +1021,9 @@ fn quota_cooldown_duration(retry_after_secs: Option<u64>) -> Duration {
     }
 }
 
+/// Returns the EFFECTIVE cooldown end — when an existing longer cooldown
+/// wins over the requested one, that is what the caller parks the
+/// triggering job's `run_after` on. #317
 async fn record_quota_cooldown_for_failure(
     pool: &DbPool,
     settings: &RuntimeSettings,
@@ -1043,10 +1046,19 @@ async fn record_quota_cooldown_for_failure(
         job.id,
         job.stage
     );
-    archivist_db::upsert_provider_cooldown(pool, &provider_name, cooldown_until, &reason).await?;
+    // The upsert keeps the longer of (existing, requested) cooldown and
+    // reports which case happened (fresh / extended / already covered), so
+    // the log and audit trail show whether this 429 actually moved the
+    // window — and the job is parked on the EFFECTIVE expiry, not on a
+    // requested value an existing longer cooldown overrules. #317
+    let upsert =
+        archivist_db::upsert_provider_cooldown(pool, &provider_name, cooldown_until, &reason)
+            .await?;
     warn!(
         provider = %provider_name,
-        until = %cooldown_until,
+        until = %upsert.effective_until,
+        outcome = upsert.outcome.as_str(),
+        previous_until = ?upsert.previous_until,
         retry_after_secs,
         "provider quota exhausted; persisted cooldown — claim cycles will skip this provider until expiry"
     );
@@ -1062,7 +1074,10 @@ async fn record_quota_cooldown_for_failure(
             before: None,
             after: Some(json!({
                 "provider": provider_name,
-                "cooldown_until": cooldown_until,
+                "cooldown_until": upsert.effective_until,
+                "requested_cooldown_until": cooldown_until,
+                "previous_cooldown_until": upsert.previous_until,
+                "cooldown_outcome": upsert.outcome.as_str(),
                 "retry_after_secs": retry_after_secs,
             })),
             metadata: None,
@@ -1073,7 +1088,7 @@ async fn record_quota_cooldown_for_failure(
         },
     )
     .await;
-    Ok(cooldown_until)
+    Ok(upsert.effective_until)
 }
 
 fn extract_quota_signal(error: &anyhow::Error) -> Option<(String, Option<u64>, String)> {

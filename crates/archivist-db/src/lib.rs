@@ -8791,17 +8791,59 @@ pub struct AiProviderCooldown {
     pub set_at: DateTime<Utc>,
 }
 
+/// What [`upsert_provider_cooldown`] actually did. PostgreSQL 18's
+/// `RETURNING old`/`new` lets the single upsert statement report this in one
+/// round trip — previously it ended in `.execute()` and the call site could
+/// not distinguish a fresh cooldown from an extension or a no-op against an
+/// existing longer window (#317).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCooldownUpsert {
+    pub outcome: CooldownUpsertOutcome,
+    /// The cooldown end actually persisted: `greatest(existing, requested)`.
+    /// Can be later than the requested value — callers parking jobs on the
+    /// cooldown should use this, not the value they passed in.
+    pub effective_until: DateTime<Utc>,
+    /// The pre-upsert cooldown end (`None` when freshly inserted).
+    pub previous_until: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CooldownUpsertOutcome {
+    /// No cooldown row existed; a fresh one was inserted.
+    Inserted,
+    /// An existing cooldown was extended to the (later) requested end.
+    Extended,
+    /// An existing equal-or-longer cooldown already covered the requested
+    /// window; only `reason` and `updated_at` were refreshed.
+    Unchanged,
+}
+
+impl CooldownUpsertOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inserted => "inserted",
+            Self::Extended => "extended",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
 /// Upsert a cooldown for `provider_name`. If a cooldown row already exists,
 /// the longer of (existing, new) wins — operator-set or quota-derived
 /// cooldowns shouldn't be silently shortened by a follow-up 429 that
-/// arrived with a smaller Retry-After.
+/// arrived with a smaller Retry-After. The returned
+/// [`ProviderCooldownUpsert`] reports which of the three cases happened and
+/// the effective cooldown end, so the caller can log/audit it.
 pub async fn upsert_provider_cooldown(
     pool: &DbPool,
     provider_name: &str,
     cooldown_until: DateTime<Utc>,
     reason: &str,
-) -> Result<()> {
-    sqlx::query(
+) -> Result<ProviderCooldownUpsert> {
+    // `old` is all-NULL on the insert arm and the pre-update row on the
+    // conflict arm (PG18 RETURNING old/new); `cooldown_until` is NOT NULL,
+    // so `old.cooldown_until IS NULL` identifies a fresh insert.
+    let row = sqlx::query(
         r#"
         insert into ai_provider_cooldowns (provider_name, cooldown_until, reason)
         values ($1, $2, $3)
@@ -8809,15 +8851,28 @@ pub async fn upsert_provider_cooldown(
           set cooldown_until = greatest(ai_provider_cooldowns.cooldown_until, excluded.cooldown_until),
               reason = excluded.reason,
               updated_at = now()
+        returning old.cooldown_until as previous_until,
+                  new.cooldown_until as effective_until
         "#,
     )
     .bind(provider_name)
     .bind(cooldown_until)
     .bind(reason)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .context("upsert ai_provider_cooldowns")?;
-    Ok(())
+    let previous_until: Option<DateTime<Utc>> = row.try_get("previous_until")?;
+    let effective_until: DateTime<Utc> = row.try_get("effective_until")?;
+    let outcome = match previous_until {
+        None => CooldownUpsertOutcome::Inserted,
+        Some(previous) if effective_until > previous => CooldownUpsertOutcome::Extended,
+        Some(_) => CooldownUpsertOutcome::Unchanged,
+    };
+    Ok(ProviderCooldownUpsert {
+        outcome,
+        effective_until,
+        previous_until,
+    })
 }
 
 /// Returns the cooldown end timestamp for `provider_name` if the cooldown
