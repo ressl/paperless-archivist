@@ -8900,6 +8900,37 @@ pub async fn release_scheduled_retries(pool: &DbPool) -> Result<u64> {
     Ok(res.rows_affected())
 }
 
+/// Upper bound of the regular transient-retry backoff window: `fail_job`
+/// delays at most 2^6 * 30 s = 32 min, plus +25 % jitter = 2400 s. A queued
+/// job parked further out than this cannot have got there via the per-job
+/// retry backoff; in practice that is a provider-cooldown park
+/// (`run_after = cooldown_until`, minutes to days out).
+const MAX_TRANSIENT_RETRY_BACKOFF_SECONDS: f64 = 2400.0;
+
+/// Scoped variant of [`release_scheduled_retries`] for the automatic release
+/// on an AI model/provider change: wakes only jobs parked beyond the regular
+/// transient-retry backoff horizon — i.e. cooldown parks — and leaves
+/// unrelated in-flight backoff+jitter retries on their schedule, so a
+/// settings save does not collapse the thundering-herd spacing of transient
+/// retries (#313). A job parked under a shorter-than-horizon cooldown stays
+/// parked at most until that (now cleared) cooldown would have ended anyway.
+pub async fn release_cooldown_parked_retries(pool: &DbPool) -> Result<u64> {
+    let res = sqlx::query(
+        r#"
+        update jobs
+           set run_after = now(),
+               updated_at = now()
+         where status = 'queued'
+           and run_after > now() + make_interval(secs => $1)
+        "#,
+    )
+    .bind(MAX_TRANSIENT_RETRY_BACKOFF_SECONDS)
+    .execute(pool)
+    .await
+    .context("release cooldown-parked job retries")?;
+    Ok(res.rows_affected())
+}
+
 /// All currently-active cooldowns, ordered by remaining time (longest
 /// first). Used by the dashboard to surface "provider X paused" warnings.
 pub async fn list_active_provider_cooldowns(pool: &DbPool) -> Result<Vec<AiProviderCooldown>> {

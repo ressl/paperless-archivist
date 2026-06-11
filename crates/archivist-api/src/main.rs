@@ -1560,6 +1560,13 @@ async fn update_settings(
             )
         });
 
+    // Persist — and below, return — the NORMALIZED settings so the PUT
+    // response, the audit payload and the next GET all agree (mirrors
+    // update_workflow_controls). Previously the raw request was stored
+    // verbatim and normalization only happened on read, so a clamped value
+    // came back different on the next GET than the response the frontend
+    // adopted as state (#313).
+    request.settings = request.settings.normalized();
     update_runtime_settings(&state.pool, &request.settings, actor_id).await?;
     info!(%actor_id, "runtime settings updated");
 
@@ -1567,7 +1574,10 @@ async fn update_settings(
     // provider's cooldown parked (run_after pushed far into the future) would
     // otherwise keep waiting out that now-irrelevant cooldown. Operators expect
     // a model switch to take effect immediately, so drop the stale cooldowns
-    // and wake the parked jobs to rerun under the new model right away.
+    // and wake the parked jobs to rerun under the new model right away. The
+    // release is scoped to cooldown-parked jobs (run_after beyond the regular
+    // retry-backoff horizon) so a model switch does not also collapse the
+    // backoff+jitter spacing of unrelated transient retries (#313).
     let new_ai = &request.settings.ai;
     let model_changed = previous_models
         .as_ref()
@@ -1583,7 +1593,7 @@ async fn update_settings(
                 warn!(error = %error, "failed to clear cooldowns after model change");
                 0
             });
-        let released = archivist_db::release_scheduled_retries(&state.pool)
+        let released = archivist_db::release_cooldown_parked_retries(&state.pool)
             .await
             .unwrap_or_else(|error| {
                 warn!(error = %error, "failed to release parked jobs after model change");
@@ -1593,7 +1603,7 @@ async fn update_settings(
             %actor_id,
             cleared,
             released,
-            "AI model changed; cleared provider cooldowns and released parked jobs"
+            "AI model changed; cleared provider cooldowns and released cooldown-parked jobs"
         );
     }
 
@@ -5645,7 +5655,11 @@ async fn clear_provider_cooldowns_endpoint(
     auth: Authenticated,
     Json(request): Json<ClearProviderCooldownRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteSettings)?;
+    // WriteRuns, not WriteSettings: cooldown manipulation is queue/run
+    // recovery, and unblock_jobs_endpoint already wipes cooldowns under
+    // WriteRuns — requiring more here only forced operators through the
+    // unblock detour for the exact same effect (#313).
+    require(&auth.0, Permission::WriteRuns)?;
     let actor_id = require_user_session(&auth.0, "clearing cooldowns requires a user session")?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     let cleared = match request.provider_name.as_deref() {
@@ -5686,6 +5700,7 @@ async fn clear_provider_cooldowns_endpoint(
 /// future, so the worker claims them immediately instead of waiting out the
 /// cooldown window. Operator-triggered counterpart to the automatic release on
 /// a model change; also reachable from the dashboard.
+#[tracing::instrument(skip(state, auth), fields(user_id = tracing::field::Empty))]
 async fn release_scheduled_retries_endpoint(
     State(state): State<AppState>,
     auth: Authenticated,
