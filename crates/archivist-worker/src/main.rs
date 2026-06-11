@@ -2857,7 +2857,7 @@ async fn run_consensus_check(
     };
     provider.model = secondary_model.clone();
     request.model = secondary_model.clone();
-    request.num_ctx = ollama_num_ctx_for_provider(&provider, tuning.text_num_ctx);
+    request.num_ctx = ollama_text_num_ctx_for_provider(&provider, tuning.text_num_ctx);
     request.reasoning_effort = Some(provider.reasoning_effort);
 
     let response = match chat_with_provider(pool, config, &provider, request).await {
@@ -4100,10 +4100,10 @@ async fn chat_for_stage(
     request.model = provider.model.clone();
     // Local-runner context window: only applies to Ollama. Remote providers
     // (OpenAI / Anthropic / OpenAI-compatible) ignore the field — see
-    // `build_ollama_chat_payload`. 8k covers the 16k-char metadata prompts
-    // with comfortable headroom over Ollama's 4096-token default.
+    // `build_ollama_chat_payload`. Floored at the point of use so a
+    // too-small per-provider override can't truncate the metadata prompts.
     request.num_ctx =
-        ollama_num_ctx_for_provider(&provider, settings.effective_tuning().text_num_ctx);
+        ollama_text_num_ctx_for_provider(&provider, settings.effective_tuning().text_num_ctx);
     request.reasoning_effort = Some(provider.reasoning_effort);
     chat_with_provider(pool, config, &provider, request).await
 }
@@ -4118,6 +4118,25 @@ fn ollama_num_ctx_for_provider(provider: &StageProvider, configured: Option<i64>
         AiProviderKind::Ollama => configured,
         _ => None,
     }
+}
+
+/// Minimum Ollama text `num_ctx`: metadata prompts embed up to 16k chars of
+/// document content plus the candidate correspondent/type/tag lists, which
+/// overflow a 4096-token window and fail with `exceed_context_size_error`
+/// (the v1.12.2 incident). The startup bump only raises the GLOBAL
+/// `ai.ollama_text_num_ctx`; a per-provider tuning override (the shipped
+/// Ollama preset pinned 4096) wins over the global in resolution and would
+/// smuggle a too-small value through, so floor it at the point of use exactly
+/// like the vision path. #304
+const OLLAMA_TEXT_NUM_CTX_FLOOR: i64 = 16384;
+
+/// Resolve the Ollama text `num_ctx`, never returning a value below the
+/// prompt-safe floor.
+fn ollama_text_num_ctx_for_provider(
+    provider: &StageProvider,
+    configured: Option<i64>,
+) -> Option<i64> {
+    ollama_num_ctx_for_provider(provider, configured).map(|n| n.max(OLLAMA_TEXT_NUM_CTX_FLOOR))
 }
 
 /// Minimum Ollama vision `num_ctx`: below this, glm-ocr-class models crash the
@@ -4310,9 +4329,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ollama_vision_num_ctx_floors_below_ggml_minimum() {
-        let provider = |kind| StageProvider {
+    fn stage_provider(kind: AiProviderKind) -> StageProvider {
+        StageProvider {
             name: "p".to_owned(),
             kind,
             base_url: "http://x".to_owned(),
@@ -4320,8 +4338,12 @@ mod tests {
             secret_id: None,
             reasoning_effort: ReasoningEffort::default(),
             request_timeout_seconds: archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS,
-        };
-        let ollama = provider(AiProviderKind::Ollama);
+        }
+    }
+
+    #[test]
+    fn ollama_vision_num_ctx_floors_below_ggml_minimum() {
+        let ollama = stage_provider(AiProviderKind::Ollama);
         // A preset pinning 4096 is floored up to the GGML-safe minimum.
         assert_eq!(
             ollama_vision_num_ctx_for_provider(&ollama, Some(4096)),
@@ -4335,7 +4357,33 @@ mod tests {
         // None stays None (use the client default); non-Ollama is always None.
         assert_eq!(ollama_vision_num_ctx_for_provider(&ollama, None), None);
         assert_eq!(
-            ollama_vision_num_ctx_for_provider(&provider(AiProviderKind::Openai), Some(4096)),
+            ollama_vision_num_ctx_for_provider(&stage_provider(AiProviderKind::Openai), Some(4096)),
+            None
+        );
+    }
+
+    #[test]
+    fn ollama_text_num_ctx_floors_below_prompt_minimum() {
+        // A per-provider override pinning 4096 (the pre-#304 Ollama preset)
+        // must be floored at the point of use, mirroring the vision path —
+        // `resolve_tuning` prefers the provider value over the bumped global.
+        let ollama = stage_provider(AiProviderKind::Ollama);
+        assert_eq!(
+            ollama_text_num_ctx_for_provider(&ollama, Some(4096)),
+            Some(OLLAMA_TEXT_NUM_CTX_FLOOR)
+        );
+        // A value already at/above the floor passes through.
+        assert_eq!(
+            ollama_text_num_ctx_for_provider(&ollama, Some(32768)),
+            Some(32768)
+        );
+        // None stays None (use the client default); non-Ollama is always None.
+        assert_eq!(ollama_text_num_ctx_for_provider(&ollama, None), None);
+        assert_eq!(
+            ollama_text_num_ctx_for_provider(
+                &stage_provider(AiProviderKind::Anthropic),
+                Some(4096)
+            ),
             None
         );
     }
