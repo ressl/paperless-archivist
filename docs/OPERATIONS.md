@@ -451,6 +451,7 @@ The service exports:
 - pending reviews, active runs, and audit event count
 - automatic selector run count and queued-document count
 - retry-scheduled count
+- provider quota-exhausted event count (`paperless_archivist_provider_quota_total`)
 - model-stage error count
 - Paperless apply success/failure count
 - Paperless apply latency count, sum, and p95
@@ -459,6 +460,8 @@ Recommended initial alert rules:
 
 - `paperless_archivist_jobs_failed > 0` for 15 minutes
 - `increase(paperless_archivist_job_retries_scheduled_total[30m]) > 10`
+- `increase(paperless_archivist_provider_quota_total[1h]) > 0` — a provider hit
+  its usage cap; the backlog is parked on a cooldown until it resets (#311)
 - `paperless_archivist_model_errors_total > 0` for 15 minutes
 - `paperless_archivist_apply_latency_ms_p95 > 10000` for 15 minutes
 - `paperless_archivist_runs_active > 0` with no successful jobs for 60 minutes

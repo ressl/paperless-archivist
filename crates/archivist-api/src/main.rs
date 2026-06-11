@@ -631,6 +631,13 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult
             "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures (monotone counter)\n",
             "# TYPE paperless_archivist_job_retries_scheduled_total counter\n",
             "paperless_archivist_job_retries_scheduled_total {}\n",
+            // Provider quota-exhausted events: the rate of this counter is the
+            // signal the #311 quota alert targets. Incremented once per job that
+            // a provider rejects with a usage-cap signal (before the cooldown is
+            // recorded), so a sustained rate means a provider is capped.
+            "# HELP paperless_archivist_provider_quota_total Provider quota-exhausted events (monotone counter)\n",
+            "# TYPE paperless_archivist_provider_quota_total counter\n",
+            "paperless_archivist_provider_quota_total {}\n",
             // model_errors_total is a live COUNT over the (non-prunable) `jobs`
             // table; it can decrease as rows are reprocessed, so it stays a gauge.
             "# HELP paperless_archivist_model_errors_total Jobs with model-stage error messages\n",
@@ -682,6 +689,7 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult
         counter("selector_runs_total"),
         counter("selector_documents_queued_total"),
         counter("job_retries_scheduled_total"),
+        counter("provider_quota_total"),
         snapshot.model_errors_total,
         counter("apply_success_total"),
         counter("apply_failure_total"),

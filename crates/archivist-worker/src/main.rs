@@ -651,6 +651,14 @@ async fn process_available_jobs(
                     // quota that resets — make the fallback fail_job retryable. #295
                     let mut force_retryable = false;
                     if failure_class == ProcessingFailureClass::ProviderQuota {
+                        // Count the quota-exhausted event so its rate is alertable
+                        // (#311). Best-effort: a counter write must never mask the
+                        // underlying failure handling below.
+                        if let Err(metric_err) =
+                            increment_metric_counter(&pool, "provider_quota_total", 1).await
+                        {
+                            warn!(error = %metric_err, "failed to increment provider_quota_total");
+                        }
                         // The provider replied with a usage-cap signal.
                         // Persist a cooldown so subsequent claims of jobs
                         // routed to the same provider release their lease

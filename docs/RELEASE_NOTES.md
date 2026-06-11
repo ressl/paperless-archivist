@@ -6,6 +6,23 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.12.7 — Alertable provider-quota metric (#311 code half)
+
+`/metrics` now exports **`paperless_archivist_provider_quota_total`**, a
+monotone counter incremented once per job that a provider rejects with a
+usage-cap signal (before the cooldown is recorded). This is the metric the
+#311 quota-rate alert needs — previously no quota signal was exported, so the
+alert had nothing to target.
+
+- The counter is exposed from the first scrape (value `0`) so a
+  `rate()`/`increase()` alert can be wired immediately.
+- `docs/OPERATIONS.md` gains the metric in the exports list and a sample rule:
+  `increase(paperless_archivist_provider_quota_total[1h]) > 0`.
+
+The remaining half of #311 stays an operator/deploy-repo action: set
+`ARCHIVIST_METRICS_TOKEN` (the endpoint is `503` until it is set) and add the
+alert rule to your monitoring stack. No schema migration; rollback is safe.
+
 ## v1.12.6 — OIDC roles are finally read from the IdP (real #299 fix)
 
 The v1.12.4 hardening of #299 fixed the *allowlist* path (match the immutable
