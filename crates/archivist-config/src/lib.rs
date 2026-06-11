@@ -72,6 +72,34 @@ pub struct AppConfig {
     #[arg(long, env = "ARCHIVIST_OIDC_DEFAULT_ROLES", default_value = "viewer")]
     pub oidc_default_roles: String,
 
+    /// ID-token claim to read the user's IdP roles from. ZITADEL's default
+    /// project-roles claim is a JSON object whose KEYS are the granted role
+    /// names (`{"archivist-admin": {"<orgid>": "<domain>"}}`); the value may
+    /// also be a JSON array or a space/comma-delimited string. When this exact
+    /// claim is absent the well-known ZITADEL project-roles claims are also
+    /// probed, so the default works whether roles land in the generic or the
+    /// project-scoped claim. Requires the IdP to assert roles into the ID
+    /// token (ZITADEL: "Assert Roles on Authentication" + roles in ID token).
+    #[arg(
+        long,
+        env = "ARCHIVIST_OIDC_ROLES_CLAIM",
+        default_value = "urn:zitadel:iam:org:project:roles"
+    )]
+    pub oidc_roles_claim: String,
+
+    /// Mapping from IdP role strings to this app's roles
+    /// (`admin`/`operator`/`reviewer`/`auditor`/`viewer`), e.g.
+    /// `archivist-admin=admin,archivist-reviewer=reviewer`. The IdP side is
+    /// matched case-insensitively; an IdP role with no mapping is ignored, so
+    /// the IdP can never grant a privilege the operator did not map (no
+    /// escalation). The default encodes the `archivist-<role>` convention.
+    #[arg(
+        long,
+        env = "ARCHIVIST_OIDC_ROLE_MAPPINGS",
+        default_value = "archivist-admin=admin,archivist-operator=operator,archivist-reviewer=reviewer,archivist-auditor=auditor,archivist-viewer=viewer"
+    )]
+    pub oidc_role_mappings: String,
+
     /// Allow linking an OIDC identity onto an existing local account whose
     /// email equals the token's verified email claim. Off by default: an
     /// email link permanently grants the OIDC subject that account's roles.

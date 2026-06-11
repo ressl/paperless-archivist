@@ -5109,6 +5109,8 @@ mod tests {
             oidc_scopes: "openid profile email".to_owned(),
             oidc_admin_users: String::new(),
             oidc_default_roles: "viewer".to_owned(),
+            oidc_roles_claim: "urn:zitadel:iam:org:project:roles".to_owned(),
+            oidc_role_mappings: "archivist-admin=admin".to_owned(),
             oidc_allow_email_link: false,
             secret_key: SecretString::new("0123456789abcdef0123456789abcdef".to_owned().into()),
             static_dir: "frontend/dist".to_owned(),

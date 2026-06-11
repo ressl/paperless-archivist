@@ -43,6 +43,8 @@ services:
       ARCHIVIST_OIDC_REDIRECT_URI: ${ARCHIVIST_OIDC_REDIRECT_URI:-}
       ARCHIVIST_OIDC_ADMIN_USERS: ${ARCHIVIST_OIDC_ADMIN_USERS:-}
       ARCHIVIST_OIDC_DEFAULT_ROLES: ${ARCHIVIST_OIDC_DEFAULT_ROLES:-viewer}
+      ARCHIVIST_OIDC_ROLES_CLAIM: ${ARCHIVIST_OIDC_ROLES_CLAIM:-urn:zitadel:iam:org:project:roles}
+      ARCHIVIST_OIDC_ROLE_MAPPINGS: ${ARCHIVIST_OIDC_ROLE_MAPPINGS:-archivist-admin=admin,archivist-operator=operator,archivist-reviewer=reviewer,archivist-auditor=auditor,archivist-viewer=viewer}
       ARCHIVIST_LOG_LEVEL: ${ARCHIVIST_LOG_LEVEL:-info}
     ports:
       - "127.0.0.1:8080:8080"

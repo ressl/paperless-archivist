@@ -6,6 +6,49 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.12.6 — OIDC roles are finally read from the IdP (real #299 fix)
+
+The v1.12.4 hardening of #299 fixed the *allowlist* path (match the immutable
+`sub`, preserve roles on degraded claims) but missed the actual root cause: the
+app **never read the roles claim from the ID token at all**. `OidcIdClaims`
+discarded it and `oidc_roles` derived roles only from
+`ARCHIVIST_OIDC_ADMIN_USERS` plus the static defaults. So a user whose IdP
+asserts `archivist-admin` still lost admin — exactly the reported symptom on the
+live v1.12.4.
+
+This release reads and maps the IdP's roles:
+
+- **`OidcIdClaims` now captures all claims** (via a flattened map), so the
+  operator-configurable roles claim is available even though its name is a
+  ZITADEL URN, not a fixed field.
+- **`ARCHIVIST_OIDC_ROLES_CLAIM`** (default `urn:zitadel:iam:org:project:roles`)
+  is read and parsed in all three shapes IdPs use: a ZITADEL object whose keys
+  are the granted roles, a JSON array, or a delimited string. When the exact
+  claim is absent the well-known ZITADEL project-roles claims (generic and
+  project-scoped `…:<projectid>:roles`) are probed too.
+- **`ARCHIVIST_OIDC_ROLE_MAPPINGS`** (default
+  `archivist-admin=admin,archivist-operator=operator,archivist-reviewer=reviewer,archivist-auditor=auditor,archivist-viewer=viewer`)
+  maps IdP role strings to app roles. **Unmapped IdP roles are ignored**, so the
+  IdP can never grant a role the operator did not map (no escalation).
+- **IdP roles are authoritative** and replace the stored roles on every login
+  (#289). The admin allowlist remains as an always-wins break-glass. The
+  degraded-claims preserve guard (#299) now only applies when the IdP asserted
+  *no* roles claim — an explicit roles claim wins, including a demotion.
+- **Self-diagnosis:** when a login carries no recognizable roles claim, the API
+  logs a WARN listing the claim *names* the token actually carried (never
+  values), so a misconfiguration is obvious from one log line.
+
+**⚠️ Operator action.** The IdP must assert roles **into the ID token**. In
+ZITADEL: enable the project's *Assert Roles on Authentication* and include roles
+in the ID token (*User Info inside ID Token*), and grant users the
+`archivist-<role>` project roles. Then admin is driven by the IdP and the
+`ARCHIVIST_OIDC_ADMIN_USERS` workaround is no longer needed. If a login still
+isn't admin, check the new WARN log for the claim names present and point
+`ARCHIVIST_OIDC_ROLES_CLAIM` at the right one. See `docs/OPERATIONS.md`.
+
+**No schema migration; rollback to v1.12.5 is safe** (roles then fall back to
+the allowlist/defaults again).
+
 ## v1.12.5 — Transient Paperless outages no longer exhaust the retry budget
 
 Completes the code half of **#305** (the prod re-queue of the 20 affected

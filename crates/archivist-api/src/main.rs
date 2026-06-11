@@ -814,6 +814,11 @@ struct OidcIdClaims {
     preferred_username: Option<String>,
     #[serde(default)]
     at_hash: Option<String>,
+    /// Every claim not captured by a named field above — including the IdP's
+    /// roles claim, whose name is operator-configurable and not a fixed Rust
+    /// field (ZITADEL uses URN-style claim names). Read via [`oidc_idp_roles`].
+    #[serde(flatten)]
+    additional: serde_json::Map<String, Value>,
 }
 
 async fn oidc_config(State(state): State<AppState>) -> Json<OidcConfigResponse> {
@@ -932,21 +937,38 @@ async fn oidc_callback(
             .or(email)
             .unwrap_or(subject),
     );
-    let roles = oidc_roles(&state.config, subject, &username, email)?;
+    let resolution = oidc_roles(&state.config, &claims, subject, &username, email)?;
+    let roles = resolution.roles;
     // Degraded ID token (#299): without preferred_username and a verified
-    // email the recomputed roles are derived from identities the admin
-    // allowlist can never match, so a returning user must keep their existing
-    // roles instead of being silently demoted. A subject match stays
-    // trustworthy (`sub` is present in every signed token), so an explicitly
-    // allowlisted subject still promotes.
-    let preserve_existing_roles = claims_degraded && !roles.contains(&Role::Admin);
-    if claims_degraded {
+    // email the *identity-derived* roles (allowlist by username/email) can't be
+    // matched, so a returning user must keep their existing roles instead of
+    // being silently demoted. This guard only applies when the roles are NOT
+    // authoritative — if the IdP asserted a roles claim (or the subject is
+    // allowlisted), those roles win, including a deliberate demotion. #289/#299.
+    let preserve_existing_roles =
+        !resolution.authoritative && claims_degraded && !roles.contains(&Role::Admin);
+    if claims_degraded && !resolution.authoritative {
         warn!(
             subject_hash = %hash_token(subject),
             email_claim_present = claims.email.is_some(),
-            "OIDC ID token carries neither preferred_username nor a verified email; \
-             existing roles are preserved unless the subject is allowlisted \
-             (configure the IdP to include profile/email claims in the ID token)"
+            "OIDC ID token carries neither preferred_username nor a verified email and no IdP \
+             roles claim; existing roles are preserved unless the subject is allowlisted \
+             (configure the IdP to include profile/email or roles claims in the ID token)"
+        );
+    }
+    if !resolution.idp_claim_present {
+        // Self-diagnosis for the common misconfiguration where the IdP is not
+        // asserting roles into the ID token (so role-based admin can't work).
+        // Log only the claim *names* present (never values) so an operator can
+        // see whether the roles claim is there and under what name. #299.
+        let available_claims: Vec<&str> = claims.additional.keys().map(String::as_str).collect();
+        warn!(
+            configured_roles_claim = %state.config.oidc_roles_claim,
+            available_claims = ?available_claims,
+            "OIDC ID token carried no recognizable roles claim; roles fall back to the admin \
+             allowlist/defaults. Enable role assertion into the ID token at the IdP (ZITADEL: \
+             'Assert Roles on Authentication'), or set ARCHIVIST_OIDC_ROLES_CLAIM to one of the \
+             claim names listed here."
         );
     }
     let allow_username_link = roles.contains(&Role::Admin);
@@ -6916,22 +6938,153 @@ fn oidc_username(value: &str) -> String {
     }
 }
 
+/// Outcome of resolving an OIDC login's roles.
+struct OidcRoleResolution {
+    roles: Vec<Role>,
+    /// True when the roles are authoritative for this login: the IdP asserted a
+    /// roles claim, or the subject is on the admin allowlist. When false the
+    /// roles are a fallback (the configured defaults) and a degraded token must
+    /// not be allowed to demote a returning user (#299).
+    authoritative: bool,
+    /// True when the ID token carried a recognizable roles claim at all
+    /// (independent of whether any role mapped). Drives the diagnostic that
+    /// tells an operator their IdP is not asserting roles into the ID token.
+    idp_claim_present: bool,
+}
+
+/// Resolve the effective roles for an OIDC login. Precedence:
+///
+/// 1. The admin allowlist (`ARCHIVIST_OIDC_ADMIN_USERS`) is a break-glass that
+///    always grants full admin — it keeps working even when the IdP stops
+///    asserting roles, and matches the immutable `sub` (#299).
+/// 2. Roles the IdP asserted in the configured roles claim, mapped through
+///    `ARCHIVIST_OIDC_ROLE_MAPPINGS`.
+///
+/// Their union is authoritative and replaces the stored roles on every login
+/// (#289). Only when neither source yields a role do the configured default
+/// roles apply, and that fallback is *not* authoritative.
 fn oidc_roles(
     config: &AppConfig,
+    claims: &OidcIdClaims,
     subject: &str,
     username: &str,
     email: Option<&str>,
-) -> ApiResult<Vec<Role>> {
-    if oidc_is_admin(config, subject, username, email) {
-        return Ok(vec![
-            Role::Admin,
-            Role::Operator,
-            Role::Reviewer,
-            Role::Auditor,
-        ]);
+) -> ApiResult<OidcRoleResolution> {
+    let mut roles: Vec<Role> = Vec::new();
+
+    let allowlisted = oidc_is_admin(config, subject, username, email);
+    if allowlisted {
+        roles.extend([Role::Admin, Role::Operator, Role::Reviewer, Role::Auditor]);
     }
-    parse_oidc_roles(&config.oidc_default_roles)
-        .map_err(|error| ApiError::internal(format!("invalid OIDC role config: {error}")))
+
+    let idp_roles = oidc_idp_roles(config, claims);
+    let idp_claim_present = idp_roles.is_some();
+    for role in idp_roles.into_iter().flatten() {
+        if !roles.contains(&role) {
+            roles.push(role);
+        }
+    }
+
+    let authoritative = allowlisted || idp_claim_present;
+    if roles.is_empty() {
+        roles = parse_oidc_roles(&config.oidc_default_roles)
+            .map_err(|error| ApiError::internal(format!("invalid OIDC role config: {error}")))?;
+    }
+
+    Ok(OidcRoleResolution {
+        roles,
+        authoritative,
+        idp_claim_present,
+    })
+}
+
+/// Read and map the roles the IdP asserted in the ID token.
+///
+/// Returns `None` when the token carries no recognizable roles claim — the
+/// caller treats that as "the IdP did not assert roles" and falls back without
+/// demoting a returning user. Returns `Some(roles)` when a roles claim is
+/// present; the vec may be empty if none of the asserted roles map to an app
+/// role. Unmapped IdP roles are dropped, so the IdP can never grant a role the
+/// operator did not explicitly map (no privilege escalation). #299.
+fn oidc_idp_roles(config: &AppConfig, claims: &OidcIdClaims) -> Option<Vec<Role>> {
+    let value = oidc_roles_claim_value(config, claims)?;
+    let mappings = parse_oidc_role_mappings(&config.oidc_role_mappings);
+    let mut roles = Vec::new();
+    for raw in extract_role_strings(value) {
+        let key = raw.trim().to_ascii_lowercase();
+        if let Some(role) = mappings.get(key.as_str())
+            && !roles.contains(role)
+        {
+            roles.push(role.clone());
+        }
+    }
+    Some(roles)
+}
+
+/// Locate the roles claim value in the token: the operator-configured claim
+/// name first, then the well-known ZITADEL project-roles claims — the generic
+/// `urn:zitadel:iam:org:project:roles` and any project-scoped
+/// `urn:zitadel:iam:org:project:<projectid>:roles`. This makes the default work
+/// whether the deployment surfaces roles in the generic or the scoped claim.
+fn oidc_roles_claim_value<'a>(config: &AppConfig, claims: &'a OidcIdClaims) -> Option<&'a Value> {
+    let configured = config.oidc_roles_claim.trim();
+    if !configured.is_empty()
+        && let Some(value) = claims.additional.get(configured)
+    {
+        return Some(value);
+    }
+    if let Some(value) = claims.additional.get("urn:zitadel:iam:org:project:roles") {
+        return Some(value);
+    }
+    claims
+        .additional
+        .iter()
+        .find(|(key, _)| key.starts_with("urn:zitadel:iam:org:project:") && key.ends_with(":roles"))
+        .map(|(_, value)| value)
+}
+
+/// Pull the raw role names out of a roles claim value, accepting the three
+/// shapes IdPs use: a ZITADEL-style object (the KEYS are the granted roles), a
+/// JSON array of strings, or a single space/comma-delimited string.
+fn extract_role_strings(value: &Value) -> Vec<String> {
+    match value {
+        Value::Object(map) => map.keys().cloned().collect(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_owned))
+            .collect(),
+        Value::String(text) => text
+            .split([',', ' ', '\n', '\t'])
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Parse `ARCHIVIST_OIDC_ROLE_MAPPINGS` (`idp-role=app-role,…`) into a lookup
+/// keyed by the lowercased IdP role. Malformed entries (no `=`, empty side, or
+/// an unknown app role) are skipped rather than failing the login.
+fn parse_oidc_role_mappings(value: &str) -> HashMap<String, Role> {
+    let mut map = HashMap::new();
+    for entry in value
+        .split([',', '\n', '\t'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Some((idp, app)) = entry.split_once('=') else {
+            continue;
+        };
+        let idp = idp.trim().to_ascii_lowercase();
+        if idp.is_empty() {
+            continue;
+        }
+        if let Ok(role) = app.trim().to_ascii_lowercase().parse::<Role>() {
+            map.insert(idp, role);
+        }
+    }
+    map
 }
 
 // NOTE (#291): the `username` matched here is derived from the IdP's
@@ -7426,6 +7579,7 @@ mod tests {
             email_verified: Some(true),
             preferred_username: None,
             at_hash: None,
+            additional: serde_json::Map::new(),
         };
         assert_eq!(oidc_verified_email(&claims), Some("admin@example.com"));
 
@@ -7770,17 +7924,54 @@ mod tests {
         assert_eq!(oidc_username("!!"), "oidc-user");
     }
 
+    fn oidc_test_claims() -> OidcIdClaims {
+        OidcIdClaims {
+            iss: "https://issuer.example.com".to_owned(),
+            sub: "subject-1".to_owned(),
+            aud: serde_json::Value::String("client".to_owned()),
+            exp: 0,
+            nonce: None,
+            email: None,
+            email_verified: None,
+            preferred_username: None,
+            at_hash: None,
+            additional: serde_json::Map::new(),
+        }
+    }
+
+    /// Claims carrying a roles claim `value` under claim name `claim`.
+    fn oidc_test_claims_with_roles(claim: &str, value: serde_json::Value) -> OidcIdClaims {
+        let mut claims = oidc_test_claims();
+        claims.additional.insert(claim.to_owned(), value);
+        claims
+    }
+
     #[test]
     fn oidc_admin_allowlist_gets_admin_roles() {
         let mut config = test_config();
         config.oidc_admin_users = "oidc-admin, admin@example.com".to_owned();
 
-        let roles = oidc_roles(&config, "subject-1", "oidc-admin", None).expect("roles parse");
+        let roles = oidc_roles(
+            &config,
+            &oidc_test_claims(),
+            "subject-1",
+            "oidc-admin",
+            None,
+        )
+        .expect("roles parse")
+        .roles;
         assert!(roles.contains(&Role::Admin));
         assert!(roles.contains(&Role::Auditor));
 
-        let email_roles = oidc_roles(&config, "subject-2", "someone", Some("admin@example.com"))
-            .expect("roles parse");
+        let email_roles = oidc_roles(
+            &config,
+            &oidc_test_claims(),
+            "subject-2",
+            "someone",
+            Some("admin@example.com"),
+        )
+        .expect("roles parse")
+        .roles;
         assert!(email_roles.contains(&Role::Admin));
     }
 
@@ -7791,14 +7982,139 @@ mod tests {
 
         // Degraded claims: username fell back to the raw subject, no email.
         // The allowlisted subject must still grant admin (#299).
-        let roles = oidc_roles(&config, "327680913418715137", "327680913418715137", None)
-            .expect("roles parse");
+        let roles = oidc_roles(
+            &config,
+            &oidc_test_claims(),
+            "327680913418715137",
+            "327680913418715137",
+            None,
+        )
+        .expect("roles parse")
+        .roles;
         assert!(roles.contains(&Role::Admin));
 
         // Subjects are matched verbatim — a different subject stays default.
-        let other = oidc_roles(&config, "999999999999999999", "999999999999999999", None)
-            .expect("roles parse");
+        let other = oidc_roles(
+            &config,
+            &oidc_test_claims(),
+            "999999999999999999",
+            "999999999999999999",
+            None,
+        )
+        .expect("roles parse")
+        .roles;
         assert!(!other.contains(&Role::Admin));
+    }
+
+    #[test]
+    fn oidc_reads_zitadel_project_roles_object_and_maps_admin() {
+        // The real bug: ZITADEL asserts project roles as an OBJECT keyed by
+        // role name. Previously these were dropped entirely; now archivist-admin
+        // maps to Admin. #299.
+        let config = test_config();
+        let claims = oidc_test_claims_with_roles(
+            "urn:zitadel:iam:org:project:roles",
+            serde_json::json!({
+                "archivist-admin": {"327680000000000000": "acme.zitadel.cloud"},
+                "archivist-reviewer": {"327680000000000000": "acme.zitadel.cloud"}
+            }),
+        );
+        let resolution = oidc_roles(
+            &config,
+            &claims,
+            "327680913418715137",
+            "327680913418715137",
+            None,
+        )
+        .expect("roles parse");
+        assert!(
+            resolution.roles.contains(&Role::Admin),
+            "archivist-admin maps to admin"
+        );
+        assert!(resolution.roles.contains(&Role::Reviewer));
+        assert!(
+            resolution.authoritative,
+            "an asserted roles claim is authoritative"
+        );
+        assert!(resolution.idp_claim_present);
+    }
+
+    #[test]
+    fn oidc_idp_admin_role_survives_degraded_identity() {
+        // The exact production scenario: ZITADEL sends archivist-admin but the
+        // token has no preferred_username and no verified email. The role claim
+        // must still grant admin (and be authoritative, so it is not preserved
+        // away). This is what v1.12.4 missed — it never read the roles claim.
+        let config = test_config();
+        let claims = oidc_test_claims_with_roles(
+            "urn:zitadel:iam:org:project:roles",
+            serde_json::json!({"archivist-admin": {"o": "d"}}),
+        );
+        assert!(
+            oidc_claims_degraded(&claims),
+            "no username and no verified email is degraded"
+        );
+        let resolution = oidc_roles(
+            &config,
+            &claims,
+            "327680913418715137",
+            "327680913418715137",
+            None,
+        )
+        .expect("roles parse");
+        assert!(resolution.roles.contains(&Role::Admin));
+        assert!(resolution.authoritative);
+    }
+
+    #[test]
+    fn oidc_maps_project_scoped_claim_and_array_shape() {
+        let config = test_config();
+        // Project-scoped claim name (…:<projectid>:roles) + array-of-strings.
+        let claims = oidc_test_claims_with_roles(
+            "urn:zitadel:iam:org:project:289000000000000000:roles",
+            serde_json::json!(["archivist-operator"]),
+        );
+        let resolution = oidc_roles(&config, &claims, "s", "u", None).expect("roles parse");
+        assert_eq!(resolution.roles, vec![Role::Operator]);
+        assert!(resolution.idp_claim_present);
+    }
+
+    #[test]
+    fn oidc_ignores_unmapped_idp_roles_no_escalation() {
+        let config = test_config();
+        let claims = oidc_test_claims_with_roles(
+            "urn:zitadel:iam:org:project:roles",
+            serde_json::json!({"some-unrelated-role": {}}),
+        );
+        let resolution = oidc_roles(&config, &claims, "s", "u", None).expect("roles parse");
+        // Claim present but nothing maps → authoritative empty, falls back to
+        // the default role, and crucially does NOT grant admin.
+        assert!(resolution.idp_claim_present);
+        assert!(resolution.authoritative);
+        assert!(!resolution.roles.contains(&Role::Admin));
+    }
+
+    #[test]
+    fn oidc_no_roles_claim_is_not_authoritative() {
+        let config = test_config();
+        let resolution =
+            oidc_roles(&config, &oidc_test_claims(), "s", "u", None).expect("roles parse");
+        assert!(!resolution.idp_claim_present);
+        assert!(
+            !resolution.authoritative,
+            "absent roles claim + no allowlist → fallback, must not demote a returning user"
+        );
+        assert_eq!(resolution.roles, vec![Role::Viewer]);
+    }
+
+    #[test]
+    fn oidc_role_mappings_parse_case_insensitively_and_skip_junk() {
+        let map = parse_oidc_role_mappings(
+            "Archivist-Admin=admin, archivist-reviewer=reviewer, junk, bad=notarole",
+        );
+        assert_eq!(map.get("archivist-admin"), Some(&Role::Admin));
+        assert_eq!(map.get("archivist-reviewer"), Some(&Role::Reviewer));
+        assert!(!map.contains_key("bad"), "an unknown app role is skipped");
     }
 
     #[test]
@@ -7813,6 +8129,7 @@ mod tests {
             email_verified: None,
             preferred_username: None,
             at_hash: None,
+            additional: serde_json::Map::new(),
         };
         // Unverified email + no preferred_username → degraded.
         assert!(oidc_claims_degraded(&claims));
@@ -7834,7 +8151,9 @@ mod tests {
         let mut config = test_config();
         config.oidc_default_roles = "viewer reviewer viewer".to_owned();
         assert_eq!(
-            oidc_roles(&config, "subject-1", "user", None).expect("roles parse"),
+            oidc_roles(&config, &oidc_test_claims(), "subject-1", "user", None)
+                .expect("roles parse")
+                .roles,
             vec![Role::Viewer, Role::Reviewer]
         );
     }
@@ -7876,6 +8195,8 @@ mod tests {
             oidc_scopes: "openid profile email".to_owned(),
             oidc_admin_users: String::new(),
             oidc_default_roles: "viewer".to_owned(),
+            oidc_roles_claim: "urn:zitadel:iam:org:project:roles".to_owned(),
+            oidc_role_mappings: "archivist-admin=admin,archivist-operator=operator,archivist-reviewer=reviewer,archivist-auditor=auditor,archivist-viewer=viewer".to_owned(),
             oidc_allow_email_link: false,
             secret_key: SecretString::from("a 32 byte local secret for tests".to_owned()),
             static_dir: "frontend/dist".to_owned(),

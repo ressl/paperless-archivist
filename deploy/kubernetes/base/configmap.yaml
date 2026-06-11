@@ -11,6 +11,11 @@ data:
   ARCHIVIST_OIDC_REDIRECT_URI: "https://paperless-archivist.example.com/api/auth/oidc/callback"
   ARCHIVIST_OIDC_ADMIN_USERS: "admin@example.com"
   ARCHIVIST_OIDC_DEFAULT_ROLES: "viewer"
+  # IdP role assertion (ZITADEL): roles in the ID token are mapped to app roles.
+  # Requires the IdP to assert roles into the ID token. Defaults fit the
+  # archivist-<role> convention; override only if your claim/role names differ.
+  ARCHIVIST_OIDC_ROLES_CLAIM: "urn:zitadel:iam:org:project:roles"
+  ARCHIVIST_OIDC_ROLE_MAPPINGS: "archivist-admin=admin,archivist-operator=operator,archivist-reviewer=reviewer,archivist-auditor=auditor,archivist-viewer=viewer"
   ARCHIVIST_WORKER_CONCURRENCY: "2"
   # Must comfortably exceed ARCHIVIST_WORKER_CONCURRENCY — each in-flight job
   # holds Postgres connections during its query bursts. Pool too small =

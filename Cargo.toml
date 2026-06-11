@@ -15,7 +15,7 @@ members = [
 # Single source of truth for the crate version. Aligned to the release tag so a
 # binary or the OpenAPI spec reports the running release; bump this (and
 # openapi/openapi.yaml + frontend/package.json) at release time. (#274)
-version = "1.12.5"
+version = "1.12.6"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/rressl/paperless-archivist"

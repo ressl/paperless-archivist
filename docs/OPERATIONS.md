@@ -125,10 +125,39 @@ redirect URI:
 https://paperless-archivist.example.com/api/auth/oidc/callback
 ```
 
-Set `ARCHIVIST_OIDC_ADMIN_USERS` to a comma- or whitespace-separated list of
-trusted usernames or email addresses. Matching users receive the admin,
-operator, reviewer, and auditor roles at login. Other new OIDC users receive
-`ARCHIVIST_OIDC_DEFAULT_ROLES`, which defaults to `viewer`.
+There are two ways to grant roles, and they combine:
+
+**1. IdP roles (recommended).** The app reads the roles your IdP asserts in the
+ID token and maps them to its own roles. For ZITADEL this works out of the box
+with the `archivist-<role>` convention — create project roles `archivist-admin`,
+`archivist-operator`, `archivist-reviewer`, `archivist-auditor`,
+`archivist-viewer` and grant them to users.
+
+- The IdP **must assert roles into the ID token**. In ZITADEL: enable the
+  project's *Assert Roles on Authentication* and make sure roles are included in
+  the ID token (the *User Info inside ID Token* application setting). Without
+  this the token carries no roles claim and role-based admin cannot work.
+- `ARCHIVIST_OIDC_ROLES_CLAIM` (default `urn:zitadel:iam:org:project:roles`) is
+  the claim read. The default also probes the project-scoped ZITADEL claim, so
+  it usually needs no change. If a login still has no roles, the API logs a
+  WARN listing the claim names the token actually carried — set this variable to
+  the right one.
+- `ARCHIVIST_OIDC_ROLE_MAPPINGS` (default
+  `archivist-admin=admin,archivist-operator=operator,archivist-reviewer=reviewer,archivist-auditor=auditor,archivist-viewer=viewer`)
+  maps IdP role strings to app roles. An IdP role with no mapping is ignored, so
+  the IdP can never grant a role you did not map. IdP roles are **authoritative**:
+  they replace the stored roles on every login (remove `archivist-admin` in the
+  IdP and the next login drops admin).
+
+**2. Admin allowlist (break-glass).** Set `ARCHIVIST_OIDC_ADMIN_USERS` to a
+comma- or whitespace-separated list of trusted immutable `sub` values, usernames,
+or verified email addresses. Matching users receive admin, operator, reviewer,
+and auditor at login regardless of IdP roles — use it to bootstrap the first
+admin or recover if IdP role assertion breaks. Prefer the immutable `sub` (it
+keeps working even when a token omits `preferred_username`/verified email).
+
+Users matched by neither source receive `ARCHIVIST_OIDC_DEFAULT_ROLES`
+(default `viewer`).
 
 For non-private Kubernetes users, start from
 [`deploy/kubernetes/README.md`](../deploy/kubernetes/README.md). The package
