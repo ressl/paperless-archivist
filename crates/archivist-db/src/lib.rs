@@ -3079,15 +3079,42 @@ pub async fn provider_usage(
                    -- cast: releases up to v1.11.2 redacted numeric usage values to the
                    -- string "[REDACTED]", and prompt_eval_count may be an object.
                    case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
-                        then (response ->> 'prompt_eval_count')::bigint else 0 end
+                        then (response ->> 'prompt_eval_count')::bigint else 0 end +
+                   page_usage.input_tokens
                  ), 0)::bigint as input_tokens,
                  coalesce(sum(
                    case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
                    case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
                    case when response ->> 'eval_count' ~ '^[0-9]+$'
-                        then (response ->> 'eval_count')::bigint else 0 end
+                        then (response ->> 'eval_count')::bigint else 0 end +
+                   page_usage.output_tokens
                  ), 0)::bigint as output_tokens
             from artifacts
+            -- Pre-v1.12 OCR artifacts keep the per-page provider responses
+            -- under `pages` without the flattened top-level `usage` block, so
+            -- the top-level reads above count them as 0 tokens. Sum the nested
+            -- per-page counters instead; artifacts that do carry a top-level
+            -- `usage` (everything written since #259) are skipped so they are
+            -- not double counted. #300
+            cross join lateral (
+              select
+                coalesce(sum(
+                  case when page.value #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,prompt_tokens}')::bigint else 0 end +
+                  case when page.value #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,input_tokens}')::bigint else 0 end +
+                  case when page.value ->> 'prompt_eval_count' ~ '^[0-9]+$' then (page.value ->> 'prompt_eval_count')::bigint else 0 end
+                ), 0)::bigint as input_tokens,
+                coalesce(sum(
+                  case when page.value #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,completion_tokens}')::bigint else 0 end +
+                  case when page.value #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,output_tokens}')::bigint else 0 end +
+                  case when page.value ->> 'eval_count' ~ '^[0-9]+$' then (page.value ->> 'eval_count')::bigint else 0 end
+                ), 0)::bigint as output_tokens
+              from jsonb_array_elements(
+                case when jsonb_typeof(artifacts.response -> 'pages') = 'array'
+                          and artifacts.response -> 'usage' is null
+                     then artifacts.response -> 'pages'
+                     else '[]'::jsonb end
+              ) as page(value)
+            ) page_usage
            group by provider, model, stage
         ),
         -- Feedback aggregated separately, keyed by the distinct artifact
@@ -3189,17 +3216,42 @@ pub async fn provider_bucket_entries(
             -- eval_count), not under `usage`. Guard the cast: prompt_eval_count
             -- may be redacted to a JSON object, so only sum plain integers.
             case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
-                 then (response ->> 'prompt_eval_count')::bigint else 0 end
+                 then (response ->> 'prompt_eval_count')::bigint else 0 end +
+            page_usage.input_tokens
           ), 0)::bigint as input_tokens,
           coalesce(sum(
             case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
             case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
             case when response ->> 'eval_count' ~ '^[0-9]+$'
-                 then (response ->> 'eval_count')::bigint else 0 end
+                 then (response ->> 'eval_count')::bigint else 0 end +
+            page_usage.output_tokens
           ), 0)::bigint as output_tokens,
           avg(duration_ms)::double precision as avg_duration_ms,
           count(*)::bigint as request_count
         from ai_artifacts ai
+        -- Pre-v1.12 OCR artifacts only carry per-page token counters under
+        -- `pages`; sum those when no flattened top-level `usage` exists (which
+        -- everything written since #259 has — those rows must not be double
+        -- counted). #300
+        cross join lateral (
+          select
+            coalesce(sum(
+              case when page.value #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,prompt_tokens}')::bigint else 0 end +
+              case when page.value #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,input_tokens}')::bigint else 0 end +
+              case when page.value ->> 'prompt_eval_count' ~ '^[0-9]+$' then (page.value ->> 'prompt_eval_count')::bigint else 0 end
+            ), 0)::bigint as input_tokens,
+            coalesce(sum(
+              case when page.value #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,completion_tokens}')::bigint else 0 end +
+              case when page.value #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,output_tokens}')::bigint else 0 end +
+              case when page.value ->> 'eval_count' ~ '^[0-9]+$' then (page.value ->> 'eval_count')::bigint else 0 end
+            ), 0)::bigint as output_tokens
+          from jsonb_array_elements(
+            case when jsonb_typeof(ai.response -> 'pages') = 'array'
+                      and ai.response -> 'usage' is null
+                 then ai.response -> 'pages'
+                 else '[]'::jsonb end
+          ) as page(value)
+        ) page_usage
         where ai.created_at >= $1
           and ai.created_at < $2
         group by 1, 2, 3, 4
@@ -3252,7 +3304,8 @@ pub struct StatisticsUsageRow {
 /// AI-usage cells over a custom `[from, to)` range, bucketed by `trunc`
 /// (a validated date_trunc unit: hour/day/week/month). Token extraction mirrors
 /// `provider_bucket_entries` — OpenAI `usage.*` plus Ollama top-level
-/// `prompt_eval_count`/`eval_count`, with the redaction guard.
+/// `prompt_eval_count`/`eval_count`, with the redaction guard, plus the
+/// per-page `pages[]` fallback for pre-v1.12 OCR artifacts (#300).
 pub async fn statistics_usage_rows(
     pool: &DbPool,
     from: DateTime<Utc>,
@@ -3271,17 +3324,42 @@ pub async fn statistics_usage_rows(
             case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
             case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
             case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
-                 then (response ->> 'prompt_eval_count')::bigint else 0 end
+                 then (response ->> 'prompt_eval_count')::bigint else 0 end +
+            page_usage.input_tokens
           ), 0)::bigint as input_tokens,
           coalesce(sum(
             case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
             case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
             case when response ->> 'eval_count' ~ '^[0-9]+$'
-                 then (response ->> 'eval_count')::bigint else 0 end
+                 then (response ->> 'eval_count')::bigint else 0 end +
+            page_usage.output_tokens
           ), 0)::bigint as output_tokens,
           avg(duration_ms)::double precision as avg_duration_ms,
           percentile_cont(0.95) within group (order by duration_ms)::double precision as p95_duration_ms
         from ai_artifacts ai
+        -- Pre-v1.12 OCR artifacts only carry per-page token counters under
+        -- `pages`; sum those when no flattened top-level `usage` exists (which
+        -- everything written since #259 has — those rows must not be double
+        -- counted). #300
+        cross join lateral (
+          select
+            coalesce(sum(
+              case when page.value #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,prompt_tokens}')::bigint else 0 end +
+              case when page.value #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,input_tokens}')::bigint else 0 end +
+              case when page.value ->> 'prompt_eval_count' ~ '^[0-9]+$' then (page.value ->> 'prompt_eval_count')::bigint else 0 end
+            ), 0)::bigint as input_tokens,
+            coalesce(sum(
+              case when page.value #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,completion_tokens}')::bigint else 0 end +
+              case when page.value #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,output_tokens}')::bigint else 0 end +
+              case when page.value ->> 'eval_count' ~ '^[0-9]+$' then (page.value ->> 'eval_count')::bigint else 0 end
+            ), 0)::bigint as output_tokens
+          from jsonb_array_elements(
+            case when jsonb_typeof(ai.response -> 'pages') = 'array'
+                      and ai.response -> 'usage' is null
+                 then ai.response -> 'pages'
+                 else '[]'::jsonb end
+          ) as page(value)
+        ) page_usage
         where ai.created_at >= $1
           and ai.created_at < $2
         group by 1, 2, 3, 4
