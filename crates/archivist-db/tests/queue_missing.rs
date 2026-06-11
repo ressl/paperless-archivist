@@ -10,8 +10,15 @@ use archivist_db::{
     queue_missing_stage, tag_id_pairs_for_names,
 };
 use sqlx::Executor;
+use tokio::sync::{Mutex, MutexGuard};
 
-async fn fresh_pool() -> Option<DbPool> {
+/// The tests in this binary truncate shared tables and then assert on their
+/// global contents; run in parallel they race each other's truncate. Serialize
+/// them on a shared lock (held for the whole test via the returned guard).
+static DB_TABLE_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, DbPool)> {
+    let guard = DB_TABLE_LOCK.lock().await;
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = connect(&url, 10).await.expect("connect test database");
     migrate(&pool).await.expect("apply migrations");
@@ -24,7 +31,7 @@ async fn fresh_pool() -> Option<DbPool> {
     )
     .await
     .expect("truncate test tables");
-    Some(pool)
+    Some((guard, pool))
 }
 
 async fn seed_inventory(pool: &DbPool, count: i32, ocr_status: &str) {
@@ -52,7 +59,7 @@ async fn seed_inventory(pool: &DbPool, count: i32, ocr_status: &str) {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn queue_missing_stage_respects_sql_limit() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
     seed_inventory(&pool, 10, "unknown").await;
@@ -74,7 +81,7 @@ async fn queue_missing_stage_respects_sql_limit() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn queue_missing_pipeline_respects_budget() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
     seed_inventory(&pool, 10, "unknown").await;
@@ -107,7 +114,7 @@ async fn queue_missing_pipeline_respects_budget() {
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn queue_missing_pipeline_emits_combined_stage_runs() {
     use sqlx::Row;
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
     seed_inventory(&pool, 5, "unknown").await;
@@ -153,7 +160,7 @@ async fn queue_missing_pipeline_emits_combined_stage_runs() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn tag_id_pairs_for_names_is_case_insensitive_and_skips_unknown() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
     sqlx::query(
@@ -192,7 +199,7 @@ async fn tag_id_pairs_for_names_is_case_insensitive_and_skips_unknown() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn custom_field_ids_for_names_is_case_insensitive_and_skips_unknown() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
     sqlx::query(

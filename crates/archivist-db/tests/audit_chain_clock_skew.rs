@@ -10,16 +10,23 @@ use archivist_db::{
     DbPool, append_audit, apply_security_retention, connect, migrate, verify_audit_integrity,
 };
 use sqlx::Executor;
+use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
-async fn fresh_pool() -> Option<DbPool> {
+/// Both tests in this file truncate audit_events and then assert on its exact
+/// global contents; run in parallel they race each other's truncate. Serialize
+/// them on a shared lock (held for the whole test via the returned guard).
+static AUDIT_TABLE_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, DbPool)> {
+    let guard = AUDIT_TABLE_LOCK.lock().await;
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = connect(&url, 10).await.expect("connect test database");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(r#"truncate audit_events restart identity cascade;"#)
         .await
         .expect("truncate audit_events");
-    Some(pool)
+    Some((guard, pool))
 }
 
 fn event(event_type: &str) -> AuditEventInput {
@@ -43,7 +50,7 @@ fn event(event_type: &str) -> AuditEventInput {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn audit_chain_links_and_verifies_by_append_order_not_clock() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_audit_lock, pool)) = fresh_pool().await else {
         return;
     };
 
@@ -101,7 +108,7 @@ async fn audit_chain_links_and_verifies_by_append_order_not_clock() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn retention_deletes_a_chain_prefix_not_a_created_at_prefix() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_audit_lock, pool)) = fresh_pool().await else {
         return;
     };
 

@@ -11,8 +11,15 @@ use archivist_db::{
     DbPool, OidcUserInput, connect, create_user_with_roles, migrate, upsert_oidc_user,
 };
 use sqlx::{Executor, Row};
+use tokio::sync::{Mutex, MutexGuard};
 
-async fn fresh_pool() -> Option<DbPool> {
+/// The tests in this binary truncate shared tables and then assert on their
+/// global contents; run in parallel they race each other's truncate. Serialize
+/// them on a shared lock (held for the whole test via the returned guard).
+static DB_TABLE_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, DbPool)> {
+    let guard = DB_TABLE_LOCK.lock().await;
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = connect(&url, 10).await.expect("connect test database");
     migrate(&pool).await.expect("apply migrations");
@@ -22,7 +29,7 @@ async fn fresh_pool() -> Option<DbPool> {
     pool.execute(r#"truncate audit_events restart identity cascade;"#)
         .await
         .expect("truncate audit_events");
-    Some(pool)
+    Some((guard, pool))
 }
 
 async fn roles_replaced_events(pool: &DbPool) -> Vec<(serde_json::Value, serde_json::Value)> {
@@ -50,7 +57,7 @@ async fn roles_replaced_events(pool: &DbPool) -> Vec<(serde_json::Value, serde_j
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn oidc_email_linking_requires_explicit_opt_in() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
 
@@ -112,7 +119,7 @@ async fn oidc_email_linking_requires_explicit_opt_in() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn oidc_login_replaces_roles_so_allowlist_removal_demotes() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
 
@@ -188,7 +195,7 @@ async fn oidc_login_replaces_roles_so_allowlist_removal_demotes() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn oidc_degraded_claims_keep_existing_roles_for_returning_user() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
 
@@ -256,7 +263,7 @@ async fn oidc_degraded_claims_keep_existing_roles_for_returning_user() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn oidc_last_remaining_admin_is_not_demoted() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
 

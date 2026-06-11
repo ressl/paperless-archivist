@@ -11,9 +11,16 @@ use archivist_db::{
     reset_stale_applying_reviews, revert_review_from_applying,
 };
 use sqlx::Executor;
+use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
-async fn fresh_pool() -> Option<DbPool> {
+/// The tests in this binary truncate shared tables and then assert on their
+/// global contents; run in parallel they race each other's truncate. Serialize
+/// them on a shared lock (held for the whole test via the returned guard).
+static DB_TABLE_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, DbPool)> {
+    let guard = DB_TABLE_LOCK.lock().await;
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = connect(&url, 10).await.expect("connect test database");
     migrate(&pool).await.expect("apply migrations");
@@ -22,7 +29,7 @@ async fn fresh_pool() -> Option<DbPool> {
     )
     .await
     .expect("truncate test tables");
-    Some(pool)
+    Some((guard, pool))
 }
 
 async fn seed_review(pool: &DbPool, status: &str) -> Uuid {
@@ -54,7 +61,7 @@ async fn seed_review(pool: &DbPool, status: &str) -> Uuid {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn concurrent_apply_claims_are_mutually_exclusive() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
     let review_id = seed_review(&pool, "approved").await;
@@ -95,7 +102,7 @@ async fn concurrent_apply_claims_are_mutually_exclusive() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn autopilot_drain_claims_into_applying_and_blocks_human_apply() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
     let review_id = seed_review(&pool, "pending").await;
@@ -121,7 +128,7 @@ async fn autopilot_drain_claims_into_applying_and_blocks_human_apply() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn stale_applying_rows_are_recovered() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
     let review_id = seed_review(&pool, "approved").await;

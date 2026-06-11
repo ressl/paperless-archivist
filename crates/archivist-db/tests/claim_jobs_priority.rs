@@ -14,8 +14,15 @@ use archivist_db::{
     DbPool, age_derived_priority, claim_jobs, connect, create_run_with_jobs_with_priority, migrate,
 };
 use sqlx::Executor;
+use tokio::sync::{Mutex, MutexGuard};
 
-async fn fresh_pool() -> Option<DbPool> {
+/// The tests in this binary truncate shared tables and then assert on their
+/// global contents; run in parallel they race each other's truncate. Serialize
+/// them on a shared lock (held for the whole test via the returned guard).
+static DB_TABLE_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, DbPool)> {
+    let guard = DB_TABLE_LOCK.lock().await;
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = connect(&url, 10).await.expect("connect test database");
     migrate(&pool).await.expect("apply migrations");
@@ -26,7 +33,7 @@ async fn fresh_pool() -> Option<DbPool> {
     )
     .await
     .expect("truncate test tables");
-    Some(pool)
+    Some((guard, pool))
 }
 
 async fn seed_inventory(pool: &DbPool, document_id: i32) {
@@ -45,7 +52,7 @@ async fn seed_inventory(pool: &DbPool, document_id: i32) {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn claim_jobs_prefers_manual_then_newest_auto() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
 
@@ -126,7 +133,7 @@ async fn claim_jobs_prefers_manual_then_newest_auto() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn claim_jobs_preserves_stage_order_within_a_run() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         return;
     };
 

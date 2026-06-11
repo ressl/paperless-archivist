@@ -20,11 +20,18 @@ use archivist_db::{
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::{Value, json};
 use sqlx::{Executor, Row};
+use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 const BACKFILL_MIGRATION: &str = "0037_backfill_ocr_artifact_usage.sql";
 
-async fn fresh_pool() -> Option<DbPool> {
+/// The tests in this binary truncate shared tables and then assert on their
+/// global contents; run in parallel they race each other's truncate. Serialize
+/// them on a shared lock (held for the whole test via the returned guard).
+static DB_TABLE_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, DbPool)> {
+    let guard = DB_TABLE_LOCK.lock().await;
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = connect(&url, 10).await.expect("connect test database");
     migrate(&pool).await.expect("apply migrations");
@@ -35,7 +42,7 @@ async fn fresh_pool() -> Option<DbPool> {
     )
     .await
     .expect("truncate test tables");
-    Some(pool)
+    Some((guard, pool))
 }
 
 async fn seed_run(pool: &DbPool) -> Uuid {
@@ -182,7 +189,7 @@ async fn run_backfill(pool: &DbPool) {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn ocr_pages_tokens_are_counted_without_double_counting() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         eprintln!("DATABASE_URL not set; skipping");
         return;
     };
@@ -193,7 +200,7 @@ async fn ocr_pages_tokens_are_counted_without_double_counting() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn backfill_migration_flattens_legacy_ocr_usage() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         eprintln!("DATABASE_URL not set; skipping");
         return;
     };
@@ -241,7 +248,7 @@ async fn backfill_migration_flattens_legacy_ocr_usage() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn statistics_default_view_includes_rows_created_today() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
         eprintln!("DATABASE_URL not set; skipping");
         return;
     };
