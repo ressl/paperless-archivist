@@ -2031,6 +2031,16 @@ fn decrypt_secret(secret_key: &SecretString, ciphertext: &str) -> Result<String>
     String::from_utf8(plaintext).context("secret is not utf-8")
 }
 
+/// Sync upsert for Paperless tags.
+///
+/// The full-pass sync re-upserts every row each round, so the `do update` is
+/// guarded with `IS DISTINCT FROM` (#302): a payload identical to the stored
+/// row writes nothing instead of physically rewriting the tuple (previously
+/// ~98.5 % of all SQL statements and ~9.4 GB WAL/day were such no-ops). This
+/// shifts the meaning of `last_seen_at` on all four sync tables from "last
+/// time the sync saw this row" to "last time the synced payload changed";
+/// the column has no predicate consumers (display + sort tiebreak only), so
+/// the relaxation is safe.
 pub async fn upsert_paperless_tag(
     tx: &mut Transaction<'_, Postgres>,
     id: i32,
@@ -2050,6 +2060,9 @@ pub async fn upsert_paperless_tag(
                       is_workflow = excluded.is_workflow,
                       last_seen_at = now(),
                       updated_at = now()
+        where (paperless_tags.name, paperless_tags.slug, paperless_tags.color, paperless_tags.is_workflow)
+              is distinct from
+              (excluded.name, excluded.slug, excluded.color, excluded.is_workflow)
         "#,
     )
     .bind(id)
@@ -2074,6 +2087,7 @@ pub async fn upsert_paperless_named_entity(
         "paperless_custom_fields" => "paperless_custom_fields",
         _ => return Err(anyhow!("unsupported metadata table: {table}")),
     };
+    // No-op guard + last_seen_at semantics: see upsert_paperless_tag (#302).
     let sql = format!(
         r#"
         insert into {table} (id, name, last_seen_at, updated_at)
@@ -2082,6 +2096,7 @@ pub async fn upsert_paperless_named_entity(
         do update set name = excluded.name,
                       last_seen_at = now(),
                       updated_at = now()
+        where {table}.name is distinct from excluded.name
         "#
     );
     // SAFETY: `sql` is a static literal built above with no user-controlled
@@ -2109,6 +2124,9 @@ pub async fn upsert_paperless_custom_field(
                       data_type = excluded.data_type,
                       last_seen_at = now(),
                       updated_at = now()
+        where (paperless_custom_fields.name, paperless_custom_fields.data_type)
+              is distinct from
+              (excluded.name, excluded.data_type)
         "#,
     )
     .bind(id)
@@ -2135,6 +2153,14 @@ pub struct InventoryUpsert {
     pub has_full_completion_tag: bool,
 }
 
+/// Sync upsert for the document inventory.
+///
+/// No-op guard + last_seen_at semantics: see upsert_paperless_tag (#302). The
+/// guard compares every column the UPDATE would write — including the
+/// computed `ocr_status`/`tagging_status` ratchets and the `complete`
+/// overwrite — so it fires exactly when the row would actually change (e.g.
+/// re-ratcheting a status another writer downgraded), and skips the physical
+/// write otherwise.
 pub async fn upsert_inventory_item(
     tx: &mut Transaction<'_, Postgres>,
     item: &InventoryUpsert,
@@ -2176,6 +2202,35 @@ pub async fn upsert_inventory_item(
                       complete = excluded.has_full_completion_tag,
                       last_seen_at = now(),
                       updated_at = now()
+        where (document_inventory.title,
+               document_inventory.original_file_name,
+               document_inventory.current_tags,
+               document_inventory.current_tag_ids,
+               document_inventory.correspondent_id,
+               document_inventory.document_type_id,
+               document_inventory.document_date,
+               document_inventory.paperless_modified_at,
+               document_inventory.has_ocr_completion_tag,
+               document_inventory.has_tagging_completion_tag,
+               document_inventory.has_full_completion_tag,
+               document_inventory.ocr_status,
+               document_inventory.tagging_status,
+               document_inventory.complete)
+              is distinct from
+              (excluded.title,
+               excluded.original_file_name,
+               excluded.current_tags,
+               excluded.current_tag_ids,
+               excluded.correspondent_id,
+               excluded.document_type_id,
+               excluded.document_date,
+               excluded.paperless_modified_at,
+               excluded.has_ocr_completion_tag,
+               excluded.has_tagging_completion_tag,
+               excluded.has_full_completion_tag,
+               case when excluded.has_ocr_completion_tag then 'succeeded' else document_inventory.ocr_status end,
+               case when excluded.has_tagging_completion_tag then 'succeeded' else document_inventory.tagging_status end,
+               excluded.has_full_completion_tag)
         "#,
     )
     .bind(item.paperless_document_id)
