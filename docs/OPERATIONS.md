@@ -380,6 +380,14 @@ Worker behavior:
 
 Workers are safe to scale horizontally.
 
+Job leases are coupled to the AI request timeout: the lease window granted at
+claim and at every heartbeat bump is `max(300s, slowest enabled provider's
+request_timeout_seconds + 60s)`. A long configured timeout (for example 600s
+for slow local models) therefore never outlives the lease mid-call, which
+would otherwise let a second worker replica reclaim and double-process the
+job. Raising `request_timeout_seconds` automatically widens the lease — no
+separate lease setting exists.
+
 Metrics: `GET /metrics` (Prometheus text format) requires
 `Authorization: Bearer <ARCHIVIST_METRICS_TOKEN>`; with the variable unset the
 endpoint responds `503`. Configure the same token as `bearer_token` in the
@@ -391,7 +399,8 @@ termination). On signal it stops claiming new jobs and drains in-flight work
 for up to 25 seconds so jobs finish terminally instead of expiring their
 leases; keep `terminationGracePeriodSeconds` at 60 or higher for the worker
 deployment (the bundled manifest sets 60). If work is still in flight at the
-drain deadline the worker exits anyway and the 300s lease reclaim takes over.
+drain deadline the worker exits anyway and the lease reclaim takes over once
+the lease window (see above) expires.
 
 Every job log line includes a trace ID equal to the pipeline run ID, plus job
 ID, document ID, stage, attempt, duration, and failure class. The Dashboard live

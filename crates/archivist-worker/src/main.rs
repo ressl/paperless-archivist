@@ -479,6 +479,46 @@ async fn run_startup_vision_crash_requeue(pool: &DbPool) -> Result<()> {
     Ok(())
 }
 
+/// Baseline job-lease window in seconds. Claims and heartbeat bumps never
+/// grant less than this.
+const BASE_JOB_LEASE_SECONDS: i64 = 300;
+
+/// Margin added on top of the slowest configured AI request timeout when the
+/// lease is derived from it: heartbeats run BETWEEN AI calls, so one lease
+/// window must also cover the non-AI work around a maximal-length call
+/// (Paperless round-trips, page rendering, DB writes).
+const JOB_LEASE_TIMEOUT_MARGIN_SECONDS: i64 = 60;
+
+/// Lease window for `claim_jobs` / `bump_job_lease`, coupled to the AI
+/// request timeout: `max(300, slowest enabled provider timeout + margin)`.
+///
+/// `request_timeout_seconds` is operator-configurable (prod runs 600s for
+/// slow local models) while the lease used to be a hard-coded 300s — a
+/// single in-flight call could outlive the lease, letting a second replica
+/// reclaim and double-process the job mid-call. The lease follows the
+/// timeout (rather than clamping the timeout below the lease) because the
+/// configurable timeout exists precisely so calls may run long. Jobs are
+/// claimed before stage→provider resolution, so size the window for the
+/// slowest enabled provider rather than per-stage. #308
+fn job_lease_seconds(settings: &RuntimeSettings) -> i64 {
+    let slowest_timeout = settings
+        .ai
+        .providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .map(|provider| {
+            // Mirror `provider_for_stage`: 0/unset inherits the built-in default.
+            provider
+                .tuning
+                .request_timeout_seconds
+                .filter(|secs| *secs > 0)
+                .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+        })
+        .max()
+        .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS);
+    BASE_JOB_LEASE_SECONDS.max(i64::from(slowest_timeout) + JOB_LEASE_TIMEOUT_MARGIN_SECONDS)
+}
+
 async fn process_available_jobs(
     pool: &DbPool,
     config: &Arc<AppConfig>,
@@ -547,7 +587,13 @@ async fn process_available_jobs(
         return Ok(());
     }
 
-    let jobs = claim_jobs(pool, target_concurrency as i64, worker_id, 300).await?;
+    let jobs = claim_jobs(
+        pool,
+        target_concurrency as i64,
+        worker_id,
+        job_lease_seconds(&settings),
+    )
+    .await?;
     if jobs.is_empty() {
         return Ok(());
     }
@@ -1417,7 +1463,7 @@ async fn process_job(
 
 /// Resolves on SIGINT (ctrl-c) or SIGTERM. Kubernetes terminates pods with
 /// SIGTERM; the worker previously only listened for SIGINT, so every rollout
-/// ran until SIGKILL and left in-flight jobs to expire their 300s leases,
+/// ran until SIGKILL and left in-flight jobs to expire their leases,
 /// burning a retry attempt per job.
 async fn shutdown_signal() {
     #[cfg(unix)]
@@ -1644,12 +1690,14 @@ async fn process_ocr(
         raw_responses.push(response.raw_response);
 
         // Heartbeat the lease after each page. Multi-page vision OCR can run
-        // far longer than the lease window `claim_jobs` grants (300s), so
-        // without this a second replica would reclaim the "stale" lease and
-        // re-OCR the same document concurrently. Push `lease_until` forward by
-        // the same window; if the bump finds no matching row our lease was lost
+        // far longer than the lease window `claim_jobs` grants, so without
+        // this a second replica would reclaim the "stale" lease and re-OCR
+        // the same document concurrently. Push `lease_until` forward by the
+        // same window; if the bump finds no matching row our lease was lost
         // (another replica took over), so stop instead of double-applying.
-        if !archivist_db::bump_job_lease(pool, job.id, lease_owner, 300).await? {
+        if !archivist_db::bump_job_lease(pool, job.id, lease_owner, job_lease_seconds(settings))
+            .await?
+        {
             warn!(
                 job_id = %job.id,
                 document_id = job.paperless_document_id,
@@ -2144,10 +2192,11 @@ async fn process_metadata(
         apply_active_prompt_with_experiment(pool, Stage::Metadata, job.run_id, &mut request)
             .await?;
     // Heartbeat the lease before each long LLM call. The metadata stage can
-    // chain classifier + main call + consensus (each with a 180s client
-    // timeout) under one 300s lease; without renewing, a second replica
-    // reclaims the "stale" job mid-stage and processes it concurrently.
-    if !archivist_db::bump_job_lease(pool, job.id, lease_owner, 300).await? {
+    // chain classifier + main call + consensus (each up to the configured
+    // request timeout) under one lease window; without renewing, a second
+    // replica reclaims the "stale" job mid-stage and processes it concurrently.
+    if !archivist_db::bump_job_lease(pool, job.id, lease_owner, job_lease_seconds(settings)).await?
+    {
         warn!(
             job_id = %job.id,
             document_id = job.paperless_document_id,
@@ -2175,7 +2224,9 @@ async fn process_metadata(
         && settings.workflow.mode.auto_apply_validated_suggestions()
         && !settings.workflow.dry_run;
     let consensus_outcome = if consensus_enabled {
-        if !archivist_db::bump_job_lease(pool, job.id, lease_owner, 300).await? {
+        if !archivist_db::bump_job_lease(pool, job.id, lease_owner, job_lease_seconds(settings))
+            .await?
+        {
             warn!(
                 job_id = %job.id,
                 document_id = job.paperless_document_id,
@@ -2602,7 +2653,8 @@ async fn process_metadata(
     //     we still mark the job complete so the run drains.
     // Final heartbeat before side effects (review inserts / Paperless PATCH):
     // from here on a lost lease must stop this worker, not double-apply.
-    if !archivist_db::bump_job_lease(pool, job.id, lease_owner, 300).await? {
+    if !archivist_db::bump_job_lease(pool, job.id, lease_owner, job_lease_seconds(settings)).await?
+    {
         warn!(
             job_id = %job.id,
             document_id = job.paperless_document_id,
@@ -4386,6 +4438,49 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn job_lease_outlives_the_slowest_enabled_provider_timeout() {
+        // Default presets leave request_timeout_seconds unset → the 180s
+        // built-in default; the 300s baseline wins.
+        let mut settings = RuntimeSettings::default();
+        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+
+        // The prod shape from the audit: a 600s timeout used to outlive the
+        // hard-coded 300s lease mid-call. The lease must now cover the call
+        // plus the inter-heartbeat margin.
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(600);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            600 + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
+
+        // The slowest enabled provider sizes the window (jobs are claimed
+        // before stage→provider resolution).
+        settings.ai.providers[1].tuning.request_timeout_seconds = Some(900);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            900 + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
+
+        // Disabled providers can never serve a stage and must not stretch it.
+        settings.ai.providers[1].enabled = false;
+        assert_eq!(
+            job_lease_seconds(&settings),
+            600 + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
+
+        // 0 means "inherit the default", not a zero-second timeout; and a
+        // timeout short enough to fit the baseline keeps today's 300s.
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(0);
+        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(120);
+        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+
+        // No providers at all: fall back to the built-in default → baseline.
+        settings.ai.providers.clear();
+        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
     }
 
     #[test]
