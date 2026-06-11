@@ -796,6 +796,12 @@ struct OidcProviderMetadata {
     authorization_endpoint: String,
     token_endpoint: String,
     jwks_uri: String,
+    /// Optional per the discovery spec. Many IdPs (ZITADEL by default) return
+    /// profile/email/roles claims here rather than inlining them in the ID
+    /// token, so the callback fetches it to populate roles and the username/
+    /// email allowlist. #299.
+    #[serde(default)]
+    userinfo_endpoint: Option<String>,
     #[serde(default)]
     id_token_signing_alg_values_supported: Vec<String>,
 }
@@ -827,6 +833,36 @@ struct OidcIdClaims {
     /// field (ZITADEL uses URN-style claim names). Read via [`oidc_idp_roles`].
     #[serde(flatten)]
     additional: serde_json::Map<String, Value>,
+}
+
+impl OidcIdClaims {
+    /// Merge claims fetched from the IdP userinfo endpoint. The signed ID token
+    /// wins for identity fields it already carries; userinfo only FILLS gaps and
+    /// contributes claims the ID token lacked (notably the roles claim, which
+    /// ZITADEL returns from userinfo rather than the ID token by default). The
+    /// caller must have verified the userinfo `sub` equals the ID token `sub`.
+    fn merge_userinfo(&mut self, userinfo: serde_json::Map<String, Value>) {
+        if self.preferred_username.is_none()
+            && let Some(value) = userinfo.get("preferred_username").and_then(Value::as_str)
+        {
+            self.preferred_username = Some(value.to_owned());
+        }
+        if self.email.is_none()
+            && let Some(value) = userinfo.get("email").and_then(Value::as_str)
+        {
+            self.email = Some(value.to_owned());
+        }
+        if self.email_verified.is_none()
+            && let Some(value) = userinfo.get("email_verified").and_then(Value::as_bool)
+        {
+            self.email_verified = Some(value);
+        }
+        // Contribute any claim the ID token did not already carry (roles, etc.);
+        // never overwrite a signed ID-token claim.
+        for (key, value) in userinfo {
+            self.additional.entry(key).or_insert(value);
+        }
+    }
 }
 
 async fn oidc_config(State(state): State<AppState>) -> Json<OidcConfigResponse> {
@@ -912,7 +948,7 @@ async fn oidc_callback(
         &login_state.pkce_verifier,
     )
     .await?;
-    let claims = oidc_verify_id_token(
+    let mut claims = oidc_verify_id_token(
         &http_client,
         &provider_metadata,
         &values,
@@ -927,6 +963,29 @@ async fn oidc_callback(
         if !oidc_access_token_hash_matches(header.alg, &token_response.access_token, expected_hash)
         {
             return Err(ApiError::unauthorized("OIDC access token hash mismatch"));
+        }
+    }
+
+    // ZITADEL (and many IdPs) return profile/email/roles from the userinfo
+    // endpoint rather than inlining them in the ID token — a minimal ID token
+    // then carries only `sub`, which the username/email allowlist and the roles
+    // claim cannot match. Fetch userinfo (sub-verified, best-effort) and merge
+    // it so role-based admin and the allowlist work regardless of whether the
+    // IdP inlines user info into the ID token. #299.
+    if let Some(userinfo_endpoint) = provider_metadata.userinfo_endpoint.as_deref() {
+        let id_sub = claims.sub.clone();
+        match oidc_fetch_userinfo(
+            &http_client,
+            userinfo_endpoint,
+            &token_response.access_token,
+            &id_sub,
+        )
+        .await
+        {
+            Some(userinfo) => claims.merge_userinfo(userinfo),
+            None => warn!(
+                "OIDC userinfo fetch returned no usable claims; proceeding on the ID token alone"
+            ),
         }
     }
 
@@ -6832,6 +6891,37 @@ async fn oidc_verify_id_token(
     Ok(claims)
 }
 
+/// Fetch the IdP userinfo endpoint with the access token and return its claims.
+///
+/// Verifies the userinfo `sub` equals the ID token `sub` (OIDC Core §5.3.2) so a
+/// swapped or forged response cannot inject another user's identity or roles.
+/// Best-effort: any transport/parse error or sub mismatch yields `None`, and the
+/// caller proceeds on the signed ID token alone.
+async fn oidc_fetch_userinfo(
+    http_client: &HttpClient,
+    userinfo_endpoint: &str,
+    access_token: &str,
+    expected_sub: &str,
+) -> Option<serde_json::Map<String, Value>> {
+    let response = http_client
+        .get(userinfo_endpoint)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let claims = response
+        .json::<serde_json::Map<String, Value>>()
+        .await
+        .ok()?;
+    if claims.get("sub").and_then(Value::as_str) != Some(expected_sub) {
+        warn!("OIDC userinfo sub did not match the ID token sub; ignoring userinfo");
+        return None;
+    }
+    Some(claims)
+}
+
 fn oidc_access_token_hash_matches(alg: Algorithm, access_token: &str, expected_hash: &str) -> bool {
     let digest = match alg {
         Algorithm::RS256 | Algorithm::PS256 | Algorithm::ES256 => {
@@ -8113,6 +8203,89 @@ mod tests {
             "absent roles claim + no allowlist → fallback, must not demote a returning user"
         );
         assert_eq!(resolution.roles, vec![Role::Viewer]);
+    }
+
+    #[test]
+    fn merge_userinfo_fills_identity_and_roles_from_userinfo() {
+        // The exact production scenario: the ID token is minimal (only `sub`),
+        // while ZITADEL returns the username/email/roles from userinfo. After
+        // merge the token is no longer degraded and role-based admin works.
+        let config = test_config();
+        let mut claims = oidc_test_claims();
+        assert!(
+            oidc_claims_degraded(&claims),
+            "bare token (no username, no verified email) starts degraded"
+        );
+        claims.merge_userinfo(
+            serde_json::json!({
+                "sub": "100000000000000001",
+                "preferred_username": "rressl",
+                "email": "rr@example.com",
+                "email_verified": true,
+                "urn:zitadel:iam:org:project:roles": {"archivist-admin": {"o": "d"}}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        assert!(
+            !oidc_claims_degraded(&claims),
+            "userinfo supplied a usable username"
+        );
+        assert_eq!(claims.preferred_username.as_deref(), Some("rressl"));
+        assert_eq!(oidc_verified_email(&claims), Some("rr@example.com"));
+
+        let resolution = oidc_roles(
+            &config,
+            &claims,
+            "100000000000000001",
+            "rressl",
+            oidc_verified_email(&claims),
+        )
+        .expect("roles parse");
+        assert!(
+            resolution.roles.contains(&Role::Admin),
+            "the roles claim merged from userinfo grants admin"
+        );
+        assert!(resolution.authoritative);
+    }
+
+    #[test]
+    fn merge_userinfo_does_not_override_signed_id_token_fields() {
+        let mut claims = oidc_test_claims();
+        claims.preferred_username = Some("from-id-token".to_owned());
+        claims.merge_userinfo(
+            serde_json::json!({"sub": "subject-1", "preferred_username": "from-userinfo"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(
+            claims.preferred_username.as_deref(),
+            Some("from-id-token"),
+            "the signed ID token wins; userinfo only fills gaps"
+        );
+    }
+
+    #[test]
+    fn merge_userinfo_username_lets_the_allowlist_match() {
+        // Minimal token + allowlist by username: once userinfo fills the
+        // username, the allowlist matches even though the token sub is numeric.
+        let mut config = test_config();
+        config.oidc_admin_users = "rressl".to_owned();
+        let mut claims = oidc_test_claims();
+        claims.merge_userinfo(
+            serde_json::json!({"sub": "100000000000000001", "preferred_username": "rressl"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let resolution = oidc_roles(&config, &claims, "100000000000000001", "rressl", None)
+            .expect("roles parse");
+        assert!(
+            resolution.roles.contains(&Role::Admin),
+            "username allowlist matches after the userinfo merge"
+        );
     }
 
     #[test]

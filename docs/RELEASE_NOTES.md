@@ -6,6 +6,44 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.12.8 — Fetch OIDC userinfo (the real #299 admin fix)
+
+Diagnosed on the live v1.12.7 deployment: the ZITADEL **ID token is minimal** —
+it carried only `sub` plus `amr/auth_time/azp/client_id/iat/sid`, with **no
+`preferred_username`, no `email`, and no roles claim**. ZITADEL returns those
+from the **userinfo endpoint**, not the ID token, by default. So:
+
+- v1.12.6 read the ID token's roles claim — but there was none to read.
+- The `ARCHIVIST_OIDC_ADMIN_USERS` allowlist (a username and an email) couldn't
+  match either: with no `preferred_username` the derived username falls back to
+  the numeric `sub`, and there was no email claim — only the numeric `sub` was
+  present, which the allowlist entries don't equal.
+
+The fix completes the OIDC flow:
+
+- `OidcProviderMetadata` now parses `userinfo_endpoint`, and the callback
+  **fetches userinfo with the access token** and merges it into the claims.
+  `OidcIdClaims::merge_userinfo` fills `preferred_username`/`email`/
+  `email_verified` only when the signed ID token lacked them, and contributes
+  any other claim (notably the roles claim) without overwriting a signed one.
+- The userinfo `sub` is verified against the ID token `sub` (OIDC Core §5.3.2)
+  so a swapped response can't inject another identity. The fetch is best-effort:
+  on any error the login proceeds on the signed ID token alone.
+- With userinfo merged, both paths work: the roles claim (if the IdP asserts
+  one) maps to admin, **and** the username/email allowlist matches because
+  `preferred_username`/`email` are now populated.
+
+**⚠️ Operator note.** No config change is required for the common case — the
+default scopes (`openid profile email`) already yield `preferred_username` and
+`email` from userinfo, so an allowlist by username or email starts working
+immediately. For role-based admin, also grant the ZITADEL `archivist-<role>`
+project roles and assert them. **Immediate unblock without redeploying:** add
+the user's numeric `sub` to `ARCHIVIST_OIDC_ADMIN_USERS` (it is matched verbatim
+against `sub`).
+
+**No schema migration; rollback to v1.12.7 is safe** (the login then falls back
+to ID-token-only claims).
+
 ## v1.12.7 — Alertable provider-quota metric (#311 code half)
 
 `/metrics` now exports **`paperless_archivist_provider_quota_total`**, a
