@@ -3093,19 +3093,57 @@ async fn dashboard_live(
 struct StatisticsQuery {
     /// RFC3339 / `YYYY-MM-DD` start (inclusive). Defaults to `to - 30 days`.
     from: Option<String>,
-    /// RFC3339 / `YYYY-MM-DD` end (exclusive). Defaults to now.
+    /// RFC3339 / `YYYY-MM-DD` end (exclusive). A bare date means the END of
+    /// that day (next UTC midnight), so the named day is fully covered (#301).
+    /// Defaults to now.
     to: Option<String>,
     /// Bucket granularity: hour | day | week | month. Defaults to day.
     bucket: Option<String>,
 }
 
-fn parse_stat_datetime(raw: &str) -> Option<DateTime<Utc>> {
+/// How a bare `YYYY-MM-DD` statistics bound anchors within its day. RFC3339
+/// inputs carry their own time and are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatBound {
+    /// Inclusive range start: the named day's first instant (00:00:00 UTC).
+    Start,
+    /// Exclusive range end: the NEXT day's first instant, so the named day is
+    /// fully covered. Anchoring `to` at its own midnight made the current day
+    /// invisible (`to=<today>` excluded everything after 00:00) and turned
+    /// `from == to` into an empty range. #301
+    End,
+}
+
+fn parse_stat_datetime(raw: &str, bound: StatBound) -> Option<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
         return Some(dt.with_timezone(&Utc));
     }
     // Accept a bare date (YYYY-MM-DD) interpreted as UTC midnight.
-    let date = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
+    let mut date = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
+    if bound == StatBound::End {
+        date = date.succ_opt()?;
+    }
     Some(Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0)?))
+}
+
+/// Resolve the statistics range from the raw query parameters. Defaults:
+/// `to` = `now`, `from` = `to` - 30 days — so the default view always ends at
+/// the current instant and includes today's data.
+fn resolve_stat_range(
+    from: Option<&str>,
+    to: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
+    let to = to
+        .and_then(|raw| parse_stat_datetime(raw, StatBound::End))
+        .unwrap_or(now);
+    let from = from
+        .and_then(|raw| parse_stat_datetime(raw, StatBound::Start))
+        .unwrap_or(to - Duration::days(30));
+    if from >= to {
+        return Err(ApiError::bad_request("'from' must be before 'to'"));
+    }
+    Ok((from, to))
 }
 
 #[derive(Default, Clone)]
@@ -3162,19 +3200,7 @@ async fn statistics(
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::ReadDashboard)?;
     let now = Utc::now();
-    let to = query
-        .to
-        .as_deref()
-        .and_then(parse_stat_datetime)
-        .unwrap_or(now);
-    let from = query
-        .from
-        .as_deref()
-        .and_then(parse_stat_datetime)
-        .unwrap_or(to - Duration::days(30));
-    if from >= to {
-        return Err(ApiError::bad_request("'from' must be before 'to'"));
-    }
+    let (from, to) = resolve_stat_range(query.from.as_deref(), query.to.as_deref(), now)?;
     let bucket = match query.bucket.as_deref().unwrap_or("day") {
         b @ ("hour" | "day" | "week" | "month") => b.to_owned(),
         _ => {
@@ -7069,6 +7095,61 @@ mod tests {
         assert!(is_ollama_cloud("https://OLLAMA.com/"));
         assert!(!is_ollama_cloud("http://ollama:11434"));
         assert!(!is_ollama_cloud("http://localhost:11434"));
+    }
+
+    fn utc(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, min, s).unwrap()
+    }
+
+    #[test]
+    fn stat_bare_date_to_covers_the_whole_day() {
+        // #301: a bare `to` date is the EXCLUSIVE end of that day, a bare
+        // `from` its first instant. RFC3339 inputs keep their own time.
+        assert_eq!(
+            parse_stat_datetime("2026-06-11", StatBound::Start),
+            Some(utc(2026, 6, 11, 0, 0, 0))
+        );
+        assert_eq!(
+            parse_stat_datetime("2026-06-11", StatBound::End),
+            Some(utc(2026, 6, 12, 0, 0, 0))
+        );
+        assert_eq!(
+            parse_stat_datetime("2026-06-11T08:30:00Z", StatBound::End),
+            Some(utc(2026, 6, 11, 8, 30, 0))
+        );
+        assert_eq!(parse_stat_datetime("not-a-date", StatBound::End), None);
+    }
+
+    #[test]
+    fn statistics_default_view_includes_today() {
+        // Default view (no from/to): `to` is "now", so data recorded earlier
+        // today is inside the half-open [from, to) window. #301
+        let now = utc(2026, 6, 11, 15, 45, 0);
+        let (from, to) = resolve_stat_range(None, None, now).expect("default range");
+        assert_eq!(to, now);
+        assert_eq!(from, now - Duration::days(30));
+        let earlier_today = utc(2026, 6, 11, 0, 5, 0);
+        assert!(from <= earlier_today && earlier_today < to);
+
+        // The UI used to send `to=<today>` as a bare date; that must also
+        // cover the whole current day instead of cutting off at midnight.
+        let (_, to) = resolve_stat_range(None, Some("2026-06-11"), now).expect("bare to");
+        assert_eq!(to, utc(2026, 6, 12, 0, 0, 0));
+        assert!(now < to);
+    }
+
+    #[test]
+    fn statistics_single_day_range_is_valid() {
+        // #301: `from == to` on a bare date means "exactly that day", not an
+        // empty range rejected with 400.
+        let now = utc(2026, 6, 11, 15, 45, 0);
+        let (from, to) = resolve_stat_range(Some("2026-06-10"), Some("2026-06-10"), now)
+            .expect("single-day range");
+        assert_eq!(from, utc(2026, 6, 10, 0, 0, 0));
+        assert_eq!(to, utc(2026, 6, 11, 0, 0, 0));
+
+        // Inverted bounds are still rejected.
+        assert!(resolve_stat_range(Some("2026-06-11"), Some("2026-06-10"), now).is_err());
     }
 
     #[test]

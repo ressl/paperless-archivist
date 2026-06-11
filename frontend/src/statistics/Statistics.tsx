@@ -21,6 +21,11 @@ import { ChartPanel } from '../dashboard/Primitives';
 
 type RangePreset = '24h' | '7d' | '30d' | '90d' | 'all';
 
+// Either a rolling preset window or a custom pair of calendar dates.
+type RangeSelection =
+  | { kind: 'preset'; preset: RangePreset }
+  | { kind: 'custom'; from: string; to: string };
+
 const RANGE_PRESETS: Array<{ key: RangePreset; labelKey: MessageKey }> = [
   { key: '24h', labelKey: 'stats.range.24h' },
   { key: '7d', labelKey: 'stats.range.7d' },
@@ -28,6 +33,13 @@ const RANGE_PRESETS: Array<{ key: RangePreset; labelKey: MessageKey }> = [
   { key: '90d', labelKey: 'stats.range.90d' },
   { key: 'all', labelKey: 'stats.range.all' }
 ];
+
+const PRESET_HOURS: Record<Exclude<RangePreset, 'all'>, number> = {
+  '24h': 24,
+  '7d': 7 * 24,
+  '30d': 30 * 24,
+  '90d': 90 * 24
+};
 
 const BUCKETS: StatisticsBucket[] = ['day', 'week', 'month'];
 
@@ -38,8 +50,8 @@ const BUCKET_LABEL_KEYS: Record<StatisticsBucket, MessageKey> = {
   month: 'stats.bucket.month'
 };
 
-// All-time start. The backend clamps to the earliest record, so a far-past
-// date simply means "everything".
+// All-time start. The backend only has data buckets from the earliest record
+// onwards, so a far-past date simply means "everything".
 const ALL_TIME_FROM = '2000-01-01';
 
 function isoDay(date: Date): string {
@@ -53,27 +65,19 @@ function isoDay(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function presetFrom(preset: RangePreset): string {
-  const now = Date.now();
-  switch (preset) {
-    case '24h':
-      return isoDay(new Date(now - 24 * 60 * 60 * 1000));
-    case '7d':
-      return isoDay(new Date(now - 7 * 24 * 60 * 60 * 1000));
-    case '30d':
-      return isoDay(new Date(now - 30 * 24 * 60 * 60 * 1000));
-    case '90d':
-      return isoDay(new Date(now - 90 * 24 * 60 * 60 * 1000));
-    case 'all':
-      return ALL_TIME_FROM;
-  }
+// Presets are rolling windows anchored at the current instant: an RFC3339
+// `from` with NO `to`, which the backend defaults to "now". Sending bare
+// calendar dates here made `to=<today>` parse to today's UTC midnight —
+// hiding the entire current day — and turned "24h" into "since yesterday's
+// date". (#301)
+export function presetParams(preset: RangePreset, now: Date = new Date()): { from: string; to?: string } {
+  if (preset === 'all') return { from: ALL_TIME_FROM };
+  return { from: new Date(now.getTime() - PRESET_HOURS[preset] * 60 * 60 * 1000).toISOString() };
 }
 
 export function Statistics({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatNumber, formatDateTime } = useI18n();
-  const [preset, setPreset] = useState<RangePreset>('30d');
-  const [from, setFrom] = useState<string>(() => presetFrom('30d'));
-  const [to, setTo] = useState<string>(() => isoDay(new Date()));
+  const [range, setRange] = useState<RangeSelection>({ kind: 'preset', preset: '30d' });
   const [bucket, setBucket] = useState<StatisticsBucket>('day');
   const [data, setData] = useState<StatisticsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -84,8 +88,14 @@ export function Statistics({ setError }: { setError: (error: string | null) => v
   const load = useCallback(() => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
+    // Custom ranges send bare dates; the backend reads `to` as the end of
+    // that day, so a single-day range (from == to) works too. (#301)
+    const params =
+      range.kind === 'preset'
+        ? presetParams(range.preset)
+        : { from: range.from || undefined, to: range.to || undefined };
     return api
-      .statistics({ from, to, bucket })
+      .statistics({ ...params, bucket })
       .then((result) => {
         if (requestId !== requestIdRef.current) return;
         setData(result);
@@ -98,27 +108,28 @@ export function Statistics({ setError }: { setError: (error: string | null) => v
       .finally(() => {
         if (requestId === requestIdRef.current) setLoading(false);
       });
-  }, [from, to, bucket, setError, t]);
+  }, [range, bucket, setError, t]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const applyPreset = (next: RangePreset) => {
-    setPreset(next);
-    setFrom(presetFrom(next));
-    setTo(isoDay(new Date()));
-  };
+  // The date inputs always show the effective window: for presets that is the
+  // local calendar day of each rolling bound.
+  const displayFrom =
+    range.kind === 'custom'
+      ? range.from
+      : range.preset === 'all'
+        ? ALL_TIME_FROM
+        : isoDay(new Date(Date.now() - PRESET_HOURS[range.preset] * 60 * 60 * 1000));
+  const displayTo = range.kind === 'custom' ? range.to : isoDay(new Date());
 
-  // A free-form date change drops the preset highlight since the range is now custom.
-  const onFromChange = (value: string) => {
-    setPreset('30d');
-    setFrom(value);
-  };
-  const onToChange = (value: string) => {
-    setPreset('30d');
-    setTo(value);
-  };
+  const applyPreset = (next: RangePreset) => setRange({ kind: 'preset', preset: next });
+
+  // A free-form date edit switches to a custom range seeded from the
+  // displayed window, dropping the preset highlight.
+  const onFromChange = (value: string) => setRange({ kind: 'custom', from: value, to: displayTo });
+  const onToChange = (value: string) => setRange({ kind: 'custom', from: displayFrom, to: value });
 
   // Short, locale-aware axis labels keyed off the bucket granularity.
   const formatAxis = useCallback(
@@ -143,9 +154,6 @@ export function Statistics({ setError }: { setError: (error: string | null) => v
   );
 
   const summary = data?.summary;
-  const isCustom = !RANGE_PRESETS.some(
-    (p) => p.key === preset && presetFrom(p.key) === from && isoDay(new Date()) === to
-  );
 
   return (
     <section className="page">
@@ -157,8 +165,8 @@ export function Statistics({ setError }: { setError: (error: string | null) => v
             <button
               key={option.key}
               type="button"
-              className={!isCustom && preset === option.key ? 'active' : ''}
-              aria-pressed={!isCustom && preset === option.key}
+              className={range.kind === 'preset' && range.preset === option.key ? 'active' : ''}
+              aria-pressed={range.kind === 'preset' && range.preset === option.key}
               onClick={() => applyPreset(option.key)}
             >
               {t(option.labelKey)}
@@ -167,11 +175,21 @@ export function Statistics({ setError }: { setError: (error: string | null) => v
         </div>
         <label className="form-field">
           <span className="form-field-label">{t('stats.from')}</span>
-          <input type="date" value={from} max={to} onChange={(event) => onFromChange(event.target.value)} />
+          <input
+            type="date"
+            value={displayFrom}
+            max={displayTo}
+            onChange={(event) => onFromChange(event.target.value)}
+          />
         </label>
         <label className="form-field">
           <span className="form-field-label">{t('stats.to')}</span>
-          <input type="date" value={to} min={from} onChange={(event) => onToChange(event.target.value)} />
+          <input
+            type="date"
+            value={displayTo}
+            min={displayFrom}
+            onChange={(event) => onToChange(event.target.value)}
+          />
         </label>
         <div className="range-tabs" role="group" aria-label={t('stats.bucket_label')}>
           {BUCKETS.map((option) => (
