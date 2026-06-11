@@ -993,10 +993,22 @@ pub async fn find_session(pool: &DbPool, session_hash: &str) -> Result<Option<Se
     .await?;
 
     if let Some(row) = row {
-        sqlx::query("update sessions set last_seen_at = now() where id = $1")
-            .bind(row.try_get::<Uuid, _>("session_id")?)
-            .execute(pool)
-            .await?;
+        // #316: throttle the activity timestamp to one write per minute —
+        // unthrottled, every authenticated request committed this UPDATE,
+        // making it the most expensive part of the auth path. Safe: session
+        // validity reads only expires_at/revoked_at/u.enabled (above), and
+        // last_seen_at is display-only in the sessions list.
+        sqlx::query(
+            r#"
+            update sessions
+               set last_seen_at = now()
+             where id = $1
+               and (last_seen_at is null or last_seen_at < now() - interval '60 seconds')
+            "#,
+        )
+        .bind(row.try_get::<Uuid, _>("session_id")?)
+        .execute(pool)
+        .await?;
         let roles: Vec<String> = row.try_get("roles")?;
         Ok(Some(SessionPrincipal {
             session_id: row.try_get("session_id")?,

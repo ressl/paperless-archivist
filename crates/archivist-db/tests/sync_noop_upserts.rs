@@ -1,14 +1,18 @@
-//! DB-required integration tests for the sync no-op guards (#302): an upsert
-//! whose payload matches the stored row must not physically rewrite the
-//! tuple, and the inventory status ratchet must still fire on drift.
+//! DB-required integration tests for the sync no-op guards (#302) and the
+//! sessions.last_seen_at throttle (#316): an upsert whose payload matches the
+//! stored row must not physically rewrite the tuple, the inventory status
+//! ratchet must still fire on drift, and find_session must only refresh the
+//! activity timestamp once per minute.
 //!
 //! Run locally with `DATABASE_URL=postgres://... cargo test -p archivist-db -- --ignored`.
 
+use archivist_core::Role;
 use archivist_db::{
-    DbPool, InventoryUpsert, connect, migrate, upsert_inventory_item,
-    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+    DbPool, InventoryUpsert, connect, create_session, create_user_with_roles, find_session,
+    migrate, upsert_inventory_item, upsert_paperless_custom_field, upsert_paperless_named_entity,
+    upsert_paperless_tag,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sqlx::{Executor, Row};
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -267,5 +271,85 @@ async fn inventory_upsert_guard_preserves_status_ratchet_semantics() {
     assert!(
         !row.try_get::<bool, _>("complete").expect("complete"),
         "sync without the processed tag must overwrite complete back to false"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn find_session_throttles_last_seen_at_updates() {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
+        return;
+    };
+
+    let user_id = create_user_with_roles(
+        &pool,
+        "session-user",
+        None,
+        "local-password-hash",
+        &[Role::Viewer],
+        None,
+    )
+    .await
+    .expect("create user");
+    let session_id = create_session(
+        &pool,
+        user_id,
+        "throttle-session-hash",
+        "csrf-secret-hash",
+        Utc::now() + Duration::hours(1),
+    )
+    .await
+    .expect("create session");
+
+    async fn last_seen(pool: &DbPool, session_id: uuid::Uuid) -> Option<DateTime<Utc>> {
+        sqlx::query(r#"select last_seen_at from sessions where id = $1"#)
+            .bind(session_id)
+            .fetch_one(pool)
+            .await
+            .expect("fetch session")
+            .try_get("last_seen_at")
+            .expect("last_seen_at")
+    }
+
+    // First authenticated request: NULL → now().
+    let principal = find_session(&pool, "throttle-session-hash")
+        .await
+        .expect("find session")
+        .expect("session resolves");
+    assert_eq!(principal.user_id, user_id);
+    let first = last_seen(&pool, session_id)
+        .await
+        .expect("first lookup sets last_seen_at");
+
+    // Immediate follow-up requests are throttled: no write, same timestamp.
+    find_session(&pool, "throttle-session-hash")
+        .await
+        .expect("find session again")
+        .expect("session still resolves");
+    assert_eq!(
+        last_seen(&pool, session_id).await,
+        Some(first),
+        "a lookup within 60s must not rewrite last_seen_at"
+    );
+
+    // Once the stored timestamp is older than the 60s window, it refreshes.
+    pool.execute(
+        r#"update sessions set last_seen_at = now() - interval '2 minutes' where session_hash = 'throttle-session-hash'"#,
+    )
+    .await
+    .expect("backdate last_seen_at");
+    let backdated = last_seen(&pool, session_id)
+        .await
+        .expect("backdated value present");
+    find_session(&pool, "throttle-session-hash")
+        .await
+        .expect("find session after backdate")
+        .expect("session resolves after backdate");
+    let refreshed = last_seen(&pool, session_id)
+        .await
+        .expect("refreshed value present");
+    assert!(
+        refreshed > backdated,
+        "a lookup after the 60s window must refresh last_seen_at"
     );
 }
