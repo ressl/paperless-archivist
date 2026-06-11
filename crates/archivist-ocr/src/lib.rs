@@ -96,7 +96,7 @@ async fn render_pdf_with_pdftoppm(
 
     // Disk-fill guard: reject a pathological MediaBox before pdftoppm renders
     // it to a giant raster. #297
-    reject_oversized_pages(&input).await?;
+    reject_oversized_pages(&input, page_limit).await?;
 
     let render_budget =
         PDF_RENDER_BASE_BUDGET + PDF_RENDER_PER_PAGE_BUDGET.saturating_mul(u32::from(page_limit));
@@ -162,13 +162,26 @@ async fn render_pdf_with_pdftoppm(
     Ok(pages)
 }
 
-/// Probe page geometry with `pdfinfo` and reject the document if any page would
-/// rasterize beyond [`MAX_RENDER_PIXELS_LONG_SIDE`] at [`PDF_RENDER_DPI`]. This
-/// stops a giant-MediaBox disk-fill bomb before pdftoppm writes the raster. If
+/// Probe page geometry with `pdfinfo` and reject the document if any page in
+/// the rendered range (`1..=page_limit`) would rasterize beyond
+/// [`MAX_RENDER_PIXELS_LONG_SIDE`] at [`PDF_RENDER_DPI`]. This stops a
+/// giant-MediaBox disk-fill bomb before pdftoppm writes the raster. If
 /// `pdfinfo` is unavailable or can't parse the file (e.g. encrypted/corrupt),
 /// we let pdftoppm surface the real error rather than blocking here. #297
-async fn reject_oversized_pages(input: &Path) -> Result<()> {
-    let output = match Command::new("pdfinfo").arg(input).output().await {
+async fn reject_oversized_pages(input: &Path, page_limit: u16) -> Result<()> {
+    // Without -f/-l pdfinfo reports only page 1, so an oversized page 2..N
+    // slipped past the cap even though pdftoppm still rendered it. Probe
+    // exactly the range pdftoppm will rasterize; pdfinfo clamps -l beyond the
+    // page count and the parser handles the per-page `Page N size:` lines. #309
+    let probe = Command::new("pdfinfo")
+        .arg("-f")
+        .arg("1")
+        .arg("-l")
+        .arg(page_limit.to_string())
+        .arg(input)
+        .output()
+        .await;
+    let output = match probe {
         Ok(output) => output,
         // pdfinfo missing from the image: skip the pre-check rather than fail
         // every render; the byte cap + /tmp sizeLimit still bound the blast.
@@ -386,6 +399,64 @@ mod tests {
 
         // No page-size line -> None (we skip the pre-check rather than guess).
         assert!(pdfinfo_max_page_long_side_pts("Pages: 0\n").is_none());
+    }
+
+    /// Assemble a minimal two-page PDF (page 1 = A4, page 2 = caller-supplied
+    /// MediaBox) with a valid xref so pdfinfo parses it without repair.
+    fn two_page_pdf(second_media_box: &str) -> Vec<u8> {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>".to_owned(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [{second_media_box}] >>"),
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (index, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{body}\nendobj\n", index + 1));
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n", objects.len() + 1));
+        pdf.push_str("0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        pdf.into_bytes()
+    }
+
+    #[tokio::test]
+    async fn oversized_trailing_page_is_rejected_within_the_render_range() {
+        // #309: the probe must cover every page pdftoppm will render, not just
+        // page 1. Skipped when poppler is not installed (the production guard
+        // itself degrades to a no-op in that case, so there is nothing to test).
+        if Command::new("pdfinfo").arg("-v").output().await.is_err() {
+            eprintln!("pdfinfo not installed; skipping render-range probe test");
+            return;
+        }
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempdir.path().join("input.pdf");
+        // Page 1 is A4; page 2 declares a runaway 40000x40000 pt MediaBox.
+        std::fs::write(&input, two_page_pdf("0 0 40000 40000")).expect("write pdf");
+
+        // Page 2 falls inside the rendered range -> the pixel cap must trip.
+        let error = reject_oversized_pages(&input, 2)
+            .await
+            .expect_err("oversized page 2 must be rejected");
+        assert!(
+            error.to_string().contains("render cap"),
+            "unexpected error: {error}"
+        );
+        // A -l beyond the page count clamps and still sees page 2.
+        assert!(reject_oversized_pages(&input, 3).await.is_err());
+        // Page 2 is never rendered at page_limit=1 -> nothing to reject.
+        reject_oversized_pages(&input, 1)
+            .await
+            .expect("A4 page 1 alone is within the cap");
     }
 
     #[test]
