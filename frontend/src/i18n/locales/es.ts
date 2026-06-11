@@ -486,6 +486,8 @@ const esMessages: Record<MessageKey, string> = {
   'settings.security': 'Seguridad',
   'settings.security.audit_retention': 'Retención de auditoría en días',
   'settings.security.ai_artifact_retention': 'Retención de artefactos de IA en días',
+  'settings.security.runs_retention': 'Retención de ejecuciones del pipeline en días',
+  'settings.security.runs_retention.hint': 'Las ejecuciones terminales del pipeline más antiguas se eliminan junto con sus trabajos y artefactos de IA; el historial de revisiones y los eventos de auditoría se conservan.',
   'settings.security.ai_artifact_storage': 'Almacenamiento de artefactos de IA',
   'settings.security.storage.full': 'Requests/responses completos',
   'settings.security.storage.redacted': 'Requests/responses redactados',

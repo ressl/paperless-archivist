@@ -50,12 +50,13 @@ async fn provider_usage_does_not_fan_out_on_feedback() {
     .await
     .expect("insert job");
 
-    // One artifact with 50/20 tokens and a known duration.
+    // One artifact with 50/20 tokens (typed columns, as insert_ai_artifact
+    // writes them since migration 0040) and a known duration.
     sqlx::query(
         r#"
-        insert into ai_artifacts (run_id, job_id, stage, provider, model, input_hash, response, duration_ms)
+        insert into ai_artifacts (run_id, job_id, stage, provider, model, input_hash, response, duration_ms, input_tokens, output_tokens)
         values ($1, $2, 'metadata', 'openai', 'gpt-test', 'hash',
-                '{"usage": {"prompt_tokens": 50, "completion_tokens": 20}}'::jsonb, 1000)
+                '{"usage": {"prompt_tokens": 50, "completion_tokens": 20}}'::jsonb, 1000, 50, 20)
         "#,
     )
     .bind(run_id)

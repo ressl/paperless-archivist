@@ -1,14 +1,18 @@
-//! DB-required regression tests for the usage-statistics queries.
+//! DB-required regression tests for legacy redacted token counters.
 //!
 //! Releases up to v1.11.2 redacted numeric `usage.*` token counts in stored
-//! AI artifacts to the string "[REDACTED]"; the aggregate queries then failed
-//! with `22P02 invalid input syntax for type bigint` as soon as one such row
-//! was in range. These tests prove the queries tolerate legacy rows and still
-//! count numeric usage from healthy ones.
+//! AI artifacts to the string "[REDACTED]". The old query-time jsonb parse
+//! failed with `22P02 invalid input syntax for type bigint` on such rows;
+//! since migration 0040 the queries read typed columns, so the surviving
+//! regression risk is the 0040 BACKFILL choking on (or miscounting) redacted
+//! rows. These tests prove the backfill tolerates them and the queries still
+//! count numeric usage from healthy rows.
 //!
 //! Marked `#[ignore]` so the default `cargo test` run does not require a live
 //! PostgreSQL instance. To exercise them locally, run
 //! `DATABASE_URL=postgres://... cargo test -p archivist-db --test usage_stats_redaction -- --ignored`.
+
+use std::path::Path;
 
 use archivist_core::DashboardRange;
 use archivist_db::{DbPool, connect, migrate, provider_bucket_entries, statistics_usage_rows};
@@ -58,9 +62,21 @@ async fn seed_artifact(pool: &DbPool, run_id: Uuid, response: serde_json::Value)
     .expect("insert artifact");
 }
 
+async fn run_typed_backfill(pool: &DbPool) {
+    let dir = std::env::var("ARCHIVIST_MIGRATIONS_DIR").unwrap_or_else(|_| "migrations".to_owned());
+    let sql =
+        std::fs::read_to_string(Path::new(&dir).join("0040_ai_artifacts_typed_token_columns.sql"))
+            .expect("read 0040 migration; set ARCHIVIST_MIGRATIONS_DIR to the migrations dir");
+    // Trusted input: the SQL is our own migration file, executed verbatim.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(pool)
+        .await
+        .expect("apply 0040 backfill SQL");
+}
+
 #[tokio::test]
 #[ignore]
-async fn usage_queries_tolerate_legacy_redacted_strings() {
+async fn token_backfill_tolerates_legacy_redacted_strings() {
     let Some(pool) = fresh_pool().await else {
         eprintln!("DATABASE_URL not set; skipping");
         return;
@@ -89,12 +105,14 @@ async fn usage_queries_tolerate_legacy_redacted_strings() {
     )
     .await;
 
+    run_typed_backfill(&pool).await;
+
     let from = Utc::now() - Duration::hours(1);
     let to = Utc::now() + Duration::hours(1);
 
     let rows = statistics_usage_rows(&pool, from, to, "day")
         .await
-        .expect("statistics_usage_rows must tolerate legacy redacted rows");
+        .expect("statistics_usage_rows");
     let requests: i64 = rows.iter().map(|row| row.request_count).sum();
     let input: i64 = rows.iter().map(|row| row.input_tokens).sum();
     let output: i64 = rows.iter().map(|row| row.output_tokens).sum();
@@ -104,7 +122,7 @@ async fn usage_queries_tolerate_legacy_redacted_strings() {
 
     let buckets = provider_bucket_entries(&pool, from, to, DashboardRange::Last24Hours)
         .await
-        .expect("provider_bucket_entries must tolerate legacy redacted rows");
+        .expect("provider_bucket_entries");
     let bucket_input: i64 = buckets.iter().map(|entry| entry.input_tokens).sum();
     let bucket_output: i64 = buckets.iter().map(|entry| entry.output_tokens).sum();
     assert_eq!(bucket_input, 107);

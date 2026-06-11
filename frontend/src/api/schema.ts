@@ -2478,18 +2478,11 @@ export interface components {
             /** Format: int64 */
             missing_ocr: number;
             /** Format: int64 */
-            missing_tagging: number;
-            /** Format: int64 */
-            missing_title: number;
-            /** Format: int64 */
-            missing_correspondent: number;
-            /** Format: int64 */
-            missing_document_type: number;
-            /** Format: int64 */
-            missing_fields: number;
-            /** Format: int64 */
             waiting_review: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Documents whose ocr_status or metadata_status is 'failed'. The six per-field missing_* counters were removed with the fossil per-field status columns (migration 0039).
+             */
             failed: number;
             /** Format: int64 */
             running: number;
@@ -2948,6 +2941,11 @@ export interface components {
             ai_artifacts_deleted: number;
             /** Format: int64 */
             ocr_page_cache_deleted: number;
+            /**
+             * Format: int64
+             * @description Terminal pipeline runs pruned past runs_retention_days; their jobs and AI artifacts are deleted with them via CASCADE.
+             */
+            pipeline_runs_deleted: number;
         };
         RecoveryCandidate: {
             /** Format: uuid */

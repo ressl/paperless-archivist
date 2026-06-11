@@ -1007,6 +1007,12 @@ pub struct SecuritySettings {
     pub audit_retention_days: i64,
     #[serde(default = "default_ai_artifact_retention_days")]
     pub ai_artifact_retention_days: i64,
+    /// Terminal pipeline_runs (and, via CASCADE, their jobs and ai_artifacts)
+    /// older than this are pruned by apply_security_retention. Runs were the
+    /// last unbounded store (#310). Review items and audit events survive a
+    /// pruned run with their run_id set to NULL (migration 0041).
+    #[serde(default = "default_runs_retention_days")]
+    pub runs_retention_days: i64,
     #[serde(default)]
     pub ai_artifact_storage: AiArtifactStorageMode,
     #[serde(default = "default_api_token_expiry_required")]
@@ -1022,6 +1028,7 @@ impl Default for SecuritySettings {
         Self {
             audit_retention_days: default_audit_retention_days(),
             ai_artifact_retention_days: default_ai_artifact_retention_days(),
+            runs_retention_days: default_runs_retention_days(),
             ai_artifact_storage: AiArtifactStorageMode::Redacted,
             api_token_expiry_required: default_api_token_expiry_required(),
             api_token_default_ttl_days: default_api_token_default_ttl_days(),
@@ -1034,6 +1041,9 @@ impl SecuritySettings {
     pub fn normalized(mut self) -> Self {
         self.audit_retention_days = self.audit_retention_days.clamp(30, 3650);
         self.ai_artifact_retention_days = self.ai_artifact_retention_days.clamp(1, 365);
+        // Floor at 30 days so a typo can never wipe recent run history; the
+        // ai_artifacts CASCADE makes runs retention also an artifact ceiling.
+        self.runs_retention_days = self.runs_retention_days.clamp(30, 3650);
         self.api_token_default_ttl_days = self.api_token_default_ttl_days.clamp(1, 365);
         self.api_token_max_ttl_days = self.api_token_max_ttl_days.clamp(1, 3650);
         if self.api_token_default_ttl_days > self.api_token_max_ttl_days {
@@ -1068,6 +1078,10 @@ fn default_audit_retention_days() -> i64 {
 
 fn default_ai_artifact_retention_days() -> i64 {
     30
+}
+
+fn default_runs_retention_days() -> i64 {
+    365
 }
 
 fn default_api_token_expiry_required() -> bool {
@@ -3476,13 +3490,11 @@ pub struct BacklogCounts {
     pub total_documents: i64,
     pub complete: i64,
     pub missing_ocr: i64,
-    pub missing_tagging: i64,
-    pub missing_title: i64,
-    pub missing_correspondent: i64,
-    pub missing_document_type: i64,
-    pub missing_document_date: i64,
-    pub missing_fields: i64,
     pub waiting_review: i64,
+    /// Documents whose ocr_status or metadata_status is 'failed'. The six
+    /// per-field missing_* counters that used to sit here were derived from
+    /// the fossil per-field status columns dropped in migration 0039 (they
+    /// had reported the constant total since the v1.4.0 consolidation).
     pub failed: i64,
     pub running: i64,
     pub never_processed: i64,
@@ -3972,18 +3984,11 @@ pub struct DocumentInventoryItem {
     pub current_tags: Vec<String>,
     pub ocr_status: String,
     /// Consolidated v1.4+ Metadata stage status. The six legacy per-field
-    /// columns (tagging_status, title_status, correspondent_status,
-    /// document_type_status, document_date_status, fields_status) are no
-    /// longer written by the worker after the v1.4.0 stage consolidation;
-    /// they remain on the struct for backwards compatibility with old
-    /// dashboards but should not be displayed in fresh UI.
+    /// status fields (tagging/title/correspondent/document_type/
+    /// document_date/fields) were dropped together with their columns in
+    /// migration 0039 — nothing had written them since the v1.4.0 stage
+    /// consolidation and no UI displayed them.
     pub metadata_status: String,
-    pub tagging_status: String,
-    pub title_status: String,
-    pub correspondent_status: String,
-    pub document_type_status: String,
-    pub document_date_status: String,
-    pub fields_status: String,
     pub current_run_status: Option<String>,
     pub last_run_id: Option<Uuid>,
     pub last_error: Option<String>,
@@ -4806,6 +4811,7 @@ mod tests {
         let settings = SecuritySettings {
             audit_retention_days: 1,
             ai_artifact_retention_days: 0,
+            runs_retention_days: 1,
             api_token_default_ttl_days: 999,
             api_token_max_ttl_days: 30,
             ..Default::default()
@@ -4814,6 +4820,7 @@ mod tests {
 
         assert_eq!(settings.audit_retention_days, 30);
         assert_eq!(settings.ai_artifact_retention_days, 1);
+        assert_eq!(settings.runs_retention_days, 30);
         assert_eq!(settings.api_token_default_ttl_days, 30);
         assert_eq!(
             settings.ai_artifact_storage,

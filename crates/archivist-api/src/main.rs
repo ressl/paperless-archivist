@@ -5354,7 +5354,7 @@ async fn auto_fix_apply_one(
                     event_type: "review.auto_fix_applied".to_owned(),
                     actor_type: "user".to_owned(),
                     actor_id: Some(actor_id.to_string()),
-                    run_id: Some(item.run_id),
+                    run_id: item.run_id,
                     job_id: item.job_id,
                     paperless_document_id: Some(item.paperless_document_id),
                     before: None,
@@ -5377,7 +5377,7 @@ async fn auto_fix_apply_one(
                     event_type: "review.auto_fix_rejected".to_owned(),
                     actor_type: "user".to_owned(),
                     actor_id: Some(actor_id.to_string()),
-                    run_id: Some(item.run_id),
+                    run_id: item.run_id,
                     job_id: item.job_id,
                     paperless_document_id: Some(item.paperless_document_id),
                     before: None,
@@ -6100,15 +6100,19 @@ async fn apply_claimed_review(
     actor_id: Uuid,
 ) -> Result<()> {
     let review_id = review.id;
-    Span::current().record("run_id", tracing::field::display(review.run_id));
+    if let Some(run_id) = review.run_id {
+        Span::current().record("run_id", tracing::field::display(run_id));
+    }
     Span::current().record("paperless_document_id", review.paperless_document_id);
     let patch_value = review
         .edited_patch
         .clone()
         .unwrap_or_else(|| review.suggested_patch.clone());
     let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
-    let final_run_stage = if let Some(job_id) = review.job_id {
-        archivist_db::is_last_active_job(&state.pool, review.run_id, job_id).await?
+    // run_id is None only for review items whose run was pruned by retention
+    // (terminal runs only — a pending review keeps its run alive).
+    let final_run_stage = if let (Some(run_id), Some(job_id)) = (review.run_id, review.job_id) {
+        archivist_db::is_last_active_job(&state.pool, run_id, job_id).await?
     } else {
         false
     };
@@ -6130,7 +6134,7 @@ async fn apply_claimed_review(
                 event_type: "document.patch_apply_failed".to_owned(),
                 actor_type: "user".to_owned(),
                 actor_id: Some(actor_id.to_string()),
-                run_id: Some(review.run_id),
+                run_id: review.run_id,
                 job_id: review.job_id,
                 paperless_document_id: Some(review.paperless_document_id),
                 before: Some(before),
@@ -6159,7 +6163,7 @@ async fn apply_claimed_review(
             event_type: "document.patch_applied".to_owned(),
             actor_type: "user".to_owned(),
             actor_id: Some(actor_id.to_string()),
-            run_id: Some(review.run_id),
+            run_id: review.run_id,
             job_id: review.job_id,
             paperless_document_id: Some(review.paperless_document_id),
             before: Some(before),
@@ -6180,7 +6184,7 @@ async fn apply_claimed_review(
     archivist_db::mark_review_applied(&state.pool, review_id, actor_id).await?;
     info!(
         %review_id,
-        run_id = %review.run_id,
+        run_id = ?review.run_id,
         paperless_document_id = review.paperless_document_id,
         duration_ms,
         "review patch applied to Paperless"

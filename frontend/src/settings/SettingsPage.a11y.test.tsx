@@ -36,6 +36,7 @@ function settingsFixture(): RuntimeSettings {
     security: {
       audit_retention_days: 365,
       ai_artifact_retention_days: 30,
+      runs_retention_days: 365,
       ai_artifact_storage: 'redacted',
       api_token_expiry_required: false,
       api_token_default_ttl_days: 30,

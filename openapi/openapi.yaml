@@ -205,11 +205,6 @@ components:
         - total_documents
         - complete
         - missing_ocr
-        - missing_tagging
-        - missing_title
-        - missing_correspondent
-        - missing_document_type
-        - missing_fields
         - waiting_review
         - failed
         - running
@@ -218,13 +213,14 @@ components:
         total_documents: { type: integer, format: int64 }
         complete: { type: integer, format: int64 }
         missing_ocr: { type: integer, format: int64 }
-        missing_tagging: { type: integer, format: int64 }
-        missing_title: { type: integer, format: int64 }
-        missing_correspondent: { type: integer, format: int64 }
-        missing_document_type: { type: integer, format: int64 }
-        missing_fields: { type: integer, format: int64 }
         waiting_review: { type: integer, format: int64 }
-        failed: { type: integer, format: int64 }
+        failed:
+          type: integer
+          format: int64
+          description: >-
+            Documents whose ocr_status or metadata_status is 'failed'. The six
+            per-field missing_* counters were removed with the fossil
+            per-field status columns (migration 0039).
         running: { type: integer, format: int64 }
         never_processed: { type: integer, format: int64 }
     DashboardRangeOption:
@@ -786,11 +782,23 @@ components:
         broken_reason: { type: [string, "null"] }
     RetentionResult:
       type: object
-      required: [audit_events_deleted, ai_artifacts_deleted, ocr_page_cache_deleted]
+      required:
+        [
+          audit_events_deleted,
+          ai_artifacts_deleted,
+          ocr_page_cache_deleted,
+          pipeline_runs_deleted,
+        ]
       properties:
         audit_events_deleted: { type: integer, format: int64 }
         ai_artifacts_deleted: { type: integer, format: int64 }
         ocr_page_cache_deleted: { type: integer, format: int64 }
+        pipeline_runs_deleted:
+          type: integer
+          format: int64
+          description: >-
+            Terminal pipeline runs pruned past runs_retention_days; their jobs
+            and AI artifacts are deleted with them via CASCADE.
     RecoveryCandidate:
       type: object
       additionalProperties: false

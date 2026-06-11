@@ -484,6 +484,8 @@ export const enMessages = {
   'settings.security': 'Security',
   'settings.security.audit_retention': 'Audit retention days',
   'settings.security.ai_artifact_retention': 'AI artifact retention days',
+  'settings.security.runs_retention': 'Pipeline run retention days',
+  'settings.security.runs_retention.hint': 'Terminal pipeline runs older than this are pruned together with their jobs and AI artifacts; review history and audit events are kept.',
   'settings.security.ai_artifact_storage': 'AI artifact storage',
   'settings.security.storage.full': 'Full request/response',
   'settings.security.storage.redacted': 'Redacted request/response',

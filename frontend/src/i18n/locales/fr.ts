@@ -486,6 +486,8 @@ const frMessages: Record<MessageKey, string> = {
   'settings.security': 'Sécurité',
   'settings.security.audit_retention': 'Rétention audit en jours',
   'settings.security.ai_artifact_retention': 'Rétention des artefacts IA en jours',
+  'settings.security.runs_retention': 'Rétention des exécutions du pipeline en jours',
+  'settings.security.runs_retention.hint': 'Les exécutions terminées du pipeline plus anciennes sont supprimées avec leurs jobs et artefacts IA ; l’historique des révisions et les événements d’audit sont conservés.',
   'settings.security.ai_artifact_storage': 'Stockage des artefacts IA',
   'settings.security.storage.full': 'Requêtes/réponses complètes',
   'settings.security.storage.redacted': 'Requêtes/réponses expurgées',

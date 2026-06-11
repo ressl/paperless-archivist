@@ -486,6 +486,8 @@ const deMessages: Record<MessageKey, string> = {
   'settings.security': 'Sicherheit',
   'settings.security.audit_retention': 'Audit-Retention in Tagen',
   'settings.security.ai_artifact_retention': 'AI-Artifact-Retention in Tagen',
+  'settings.security.runs_retention': 'Pipeline-Run-Retention in Tagen',
+  'settings.security.runs_retention.hint': 'Abgeschlossene Pipeline-Runs, die älter sind, werden samt Jobs und AI-Artefakten entfernt; Review-Historie und Audit-Events bleiben erhalten.',
   'settings.security.ai_artifact_storage': 'AI-Artifact-Speicherung',
   'settings.security.storage.full': 'Volle Requests/Responses',
   'settings.security.storage.redacted': 'Redigierte Requests/Responses',

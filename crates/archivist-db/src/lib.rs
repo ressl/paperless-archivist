@@ -172,7 +172,11 @@ pub struct JobRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewItemRecord {
     pub id: Uuid,
-    pub run_id: Uuid,
+    /// None once the originating run has been pruned by the runs retention
+    /// (review_items.run_id is ON DELETE SET NULL since migration 0041).
+    /// Always present while the run is alive — retention only deletes
+    /// terminal runs.
+    pub run_id: Option<Uuid>,
     pub job_id: Option<Uuid>,
     pub paperless_document_id: i32,
     pub stage: Stage,
@@ -216,6 +220,10 @@ pub struct RetentionResult {
     pub audit_events_deleted: i64,
     pub ai_artifacts_deleted: i64,
     pub ocr_page_cache_deleted: i64,
+    /// Terminal pipeline_runs pruned past `runs_retention_days`; their jobs
+    /// and ai_artifacts go with them via ON DELETE CASCADE.
+    #[serde(default)]
+    pub pipeline_runs_deleted: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2169,20 +2177,14 @@ pub struct InventoryUpsert {
 ///
 /// No-op guard + last_seen_at semantics: see upsert_paperless_tag (#302). The
 /// guard compares every column the UPDATE would write — including the
-/// computed `ocr_status`/`tagging_status` ratchets and the `complete`
-/// overwrite — so it fires exactly when the row would actually change (e.g.
-/// re-ratcheting a status another writer downgraded), and skips the physical
-/// write otherwise.
+/// computed `ocr_status` ratchet and the `complete` overwrite — so it fires
+/// exactly when the row would actually change (e.g. re-ratcheting a status
+/// another writer downgraded), and skips the physical write otherwise.
 pub async fn upsert_inventory_item(
     tx: &mut Transaction<'_, Postgres>,
     item: &InventoryUpsert,
 ) -> Result<()> {
     let ocr_status = if item.has_ocr_completion_tag {
-        "succeeded"
-    } else {
-        "unknown"
-    };
-    let tagging_status = if item.has_tagging_completion_tag {
         "succeeded"
     } else {
         "unknown"
@@ -2194,9 +2196,9 @@ pub async fn upsert_inventory_item(
           paperless_document_id, title, original_file_name, current_tags, current_tag_ids,
           correspondent_id, document_type_id, document_date, paperless_modified_at,
           has_ocr_completion_tag, has_tagging_completion_tag, has_full_completion_tag,
-          ocr_status, tagging_status, complete, last_seen_at, updated_at
+          ocr_status, complete, last_seen_at, updated_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now(), now())
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
         on conflict (paperless_document_id)
         do update set title = excluded.title,
                       original_file_name = excluded.original_file_name,
@@ -2210,7 +2212,6 @@ pub async fn upsert_inventory_item(
                       has_tagging_completion_tag = excluded.has_tagging_completion_tag,
                       has_full_completion_tag = excluded.has_full_completion_tag,
                       ocr_status = case when excluded.has_ocr_completion_tag then 'succeeded' else document_inventory.ocr_status end,
-                      tagging_status = case when excluded.has_tagging_completion_tag then 'succeeded' else document_inventory.tagging_status end,
                       complete = excluded.has_full_completion_tag,
                       last_seen_at = now(),
                       updated_at = now()
@@ -2226,7 +2227,6 @@ pub async fn upsert_inventory_item(
                document_inventory.has_tagging_completion_tag,
                document_inventory.has_full_completion_tag,
                document_inventory.ocr_status,
-               document_inventory.tagging_status,
                document_inventory.complete)
               is distinct from
               (excluded.title,
@@ -2241,7 +2241,6 @@ pub async fn upsert_inventory_item(
                excluded.has_tagging_completion_tag,
                excluded.has_full_completion_tag,
                case when excluded.has_ocr_completion_tag then 'succeeded' else document_inventory.ocr_status end,
-               case when excluded.has_tagging_completion_tag then 'succeeded' else document_inventory.tagging_status end,
                excluded.has_full_completion_tag)
         "#,
     )
@@ -2258,7 +2257,6 @@ pub async fn upsert_inventory_item(
     .bind(item.has_tagging_completion_tag)
     .bind(item.has_full_completion_tag)
     .bind(ocr_status)
-    .bind(tagging_status)
     .bind(complete)
     .execute(&mut **tx)
     .await?;
@@ -2552,20 +2550,18 @@ pub async fn named_entity_id_for_name(
 }
 
 pub async fn get_backlog_counts(pool: &DbPool) -> Result<BacklogCounts> {
+    // The `failed` KPI covers the two live stage-status columns. The six
+    // fossil per-field columns the OR-chain used to include were dropped in
+    // migration 0039 (constant 'unknown' since the v1.4.0 consolidation);
+    // metadata_status is their consolidated successor.
     let row = sqlx::query(
         r#"
         select
           count(*)::bigint as total_documents,
           count(*) filter (where complete)::bigint as complete,
           count(*) filter (where ocr_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_ocr,
-          count(*) filter (where tagging_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_tagging,
-          count(*) filter (where title_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_title,
-          count(*) filter (where correspondent_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_correspondent,
-          count(*) filter (where document_type_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_document_type,
-          count(*) filter (where document_date_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_document_date,
-          count(*) filter (where fields_status not in ('succeeded', 'skipped', 'not_needed'))::bigint as missing_fields,
           count(*) filter (where needs_review or current_run_status = 'waiting_review')::bigint as waiting_review,
-          count(*) filter (where ocr_status = 'failed' or tagging_status = 'failed' or title_status = 'failed' or correspondent_status = 'failed' or document_type_status = 'failed' or document_date_status = 'failed' or fields_status = 'failed')::bigint as failed,
+          count(*) filter (where ocr_status = 'failed' or metadata_status = 'failed')::bigint as failed,
           count(*) filter (where current_run_status in ('queued', 'running', 'applying'))::bigint as running,
           count(*) filter (where last_run_id is null)::bigint as never_processed
         from document_inventory
@@ -2578,12 +2574,6 @@ pub async fn get_backlog_counts(pool: &DbPool) -> Result<BacklogCounts> {
         total_documents: row.try_get("total_documents")?,
         complete: row.try_get("complete")?,
         missing_ocr: row.try_get("missing_ocr")?,
-        missing_tagging: row.try_get("missing_tagging")?,
-        missing_title: row.try_get("missing_title")?,
-        missing_correspondent: row.try_get("missing_correspondent")?,
-        missing_document_type: row.try_get("missing_document_type")?,
-        missing_document_date: row.try_get("missing_document_date")?,
-        missing_fields: row.try_get("missing_fields")?,
         waiting_review: row.try_get("waiting_review")?,
         failed: row.try_get("failed")?,
         running: row.try_get("running")?,
@@ -2595,11 +2585,10 @@ pub async fn record_dashboard_snapshot(pool: &DbPool, counts: &BacklogCounts) ->
     sqlx::query(
         r#"
         insert into dashboard_snapshots (
-          total_documents, complete, missing_ocr, missing_tagging, missing_title,
-          missing_correspondent, missing_document_type, missing_document_date, missing_fields, waiting_review,
+          total_documents, complete, missing_ocr, waiting_review,
           failed, running, never_processed
         )
-        select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+        select $1, $2, $3, $4, $5, $6, $7
         where not exists (
           select 1 from dashboard_snapshots
            where captured_at >= now() - interval '5 minutes'
@@ -2609,12 +2598,6 @@ pub async fn record_dashboard_snapshot(pool: &DbPool, counts: &BacklogCounts) ->
     .bind(counts.total_documents)
     .bind(counts.complete)
     .bind(counts.missing_ocr)
-    .bind(counts.missing_tagging)
-    .bind(counts.missing_title)
-    .bind(counts.missing_correspondent)
-    .bind(counts.missing_document_type)
-    .bind(counts.missing_document_date)
-    .bind(counts.missing_fields)
     .bind(counts.waiting_review)
     .bind(counts.failed)
     .bind(counts.running)
@@ -3125,13 +3108,16 @@ pub async fn provider_usage(
     let rows = sqlx::query(
         r#"
         with artifacts as (
-          select provider, model, stage, job_id, duration_ms, response
+          select provider, model, stage, job_id, duration_ms, input_tokens, output_tokens
             from ai_artifacts
            where created_at >= $1
         ),
         -- Aggregate artifacts WITHOUT joining feedback, so request/token/
         -- latency stats are not multiplied by the number of feedback events
         -- per job (the fan-out bug). #260.
+        --
+        -- Token counters are the typed columns filled at insert time and
+        -- backfilled by migration 0040 — no jsonb parsing on the read path.
         usage as (
           select provider,
                  model,
@@ -3139,49 +3125,9 @@ pub async fn provider_usage(
                  count(*)::bigint as request_count,
                  coalesce(avg(duration_ms), 0)::double precision as avg_duration_ms,
                  coalesce(percentile_cont(0.95) within group (order by duration_ms), 0)::bigint as p95_duration_ms,
-                 coalesce(sum(
-                   case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
-                   case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
-                   -- Ollama reports tokens top-level, not under `usage`. Guard every
-                   -- cast: releases up to v1.11.2 redacted numeric usage values to the
-                   -- string "[REDACTED]", and prompt_eval_count may be an object.
-                   case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
-                        then (response ->> 'prompt_eval_count')::bigint else 0 end +
-                   page_usage.input_tokens
-                 ), 0)::bigint as input_tokens,
-                 coalesce(sum(
-                   case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
-                   case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
-                   case when response ->> 'eval_count' ~ '^[0-9]+$'
-                        then (response ->> 'eval_count')::bigint else 0 end +
-                   page_usage.output_tokens
-                 ), 0)::bigint as output_tokens
+                 coalesce(sum(input_tokens), 0)::bigint as input_tokens,
+                 coalesce(sum(output_tokens), 0)::bigint as output_tokens
             from artifacts
-            -- Pre-v1.12 OCR artifacts keep the per-page provider responses
-            -- under `pages` without the flattened top-level `usage` block, so
-            -- the top-level reads above count them as 0 tokens. Sum the nested
-            -- per-page counters instead; artifacts that do carry a top-level
-            -- `usage` (everything written since #259) are skipped so they are
-            -- not double counted. #300
-            cross join lateral (
-              select
-                coalesce(sum(
-                  case when page.value #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,prompt_tokens}')::bigint else 0 end +
-                  case when page.value #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,input_tokens}')::bigint else 0 end +
-                  case when page.value ->> 'prompt_eval_count' ~ '^[0-9]+$' then (page.value ->> 'prompt_eval_count')::bigint else 0 end
-                ), 0)::bigint as input_tokens,
-                coalesce(sum(
-                  case when page.value #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,completion_tokens}')::bigint else 0 end +
-                  case when page.value #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,output_tokens}')::bigint else 0 end +
-                  case when page.value ->> 'eval_count' ~ '^[0-9]+$' then (page.value ->> 'eval_count')::bigint else 0 end
-                ), 0)::bigint as output_tokens
-              from jsonb_array_elements(
-                case when jsonb_typeof(artifacts.response -> 'pages') = 'array'
-                          and artifacts.response -> 'usage' is null
-                     then artifacts.response -> 'pages'
-                     else '[]'::jsonb end
-              ) as page(value)
-            ) page_usage
            group by provider, model, stage
         ),
         -- Feedback aggregated separately, keyed by the distinct artifact
@@ -3276,49 +3222,12 @@ pub async fn provider_bucket_entries(
           ai.provider,
           ai.model,
           ai.stage,
-          coalesce(sum(
-            case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
-            case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
-            -- Ollama reports tokens at the top level (prompt_eval_count /
-            -- eval_count), not under `usage`. Guard the cast: prompt_eval_count
-            -- may be redacted to a JSON object, so only sum plain integers.
-            case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
-                 then (response ->> 'prompt_eval_count')::bigint else 0 end +
-            page_usage.input_tokens
-          ), 0)::bigint as input_tokens,
-          coalesce(sum(
-            case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
-            case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
-            case when response ->> 'eval_count' ~ '^[0-9]+$'
-                 then (response ->> 'eval_count')::bigint else 0 end +
-            page_usage.output_tokens
-          ), 0)::bigint as output_tokens,
+          -- Typed counters (insert-time + 0040 backfill); no jsonb parsing.
+          coalesce(sum(ai.input_tokens), 0)::bigint as input_tokens,
+          coalesce(sum(ai.output_tokens), 0)::bigint as output_tokens,
           avg(duration_ms)::double precision as avg_duration_ms,
           count(*)::bigint as request_count
         from ai_artifacts ai
-        -- Pre-v1.12 OCR artifacts only carry per-page token counters under
-        -- `pages`; sum those when no flattened top-level `usage` exists (which
-        -- everything written since #259 has — those rows must not be double
-        -- counted). #300
-        cross join lateral (
-          select
-            coalesce(sum(
-              case when page.value #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,prompt_tokens}')::bigint else 0 end +
-              case when page.value #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,input_tokens}')::bigint else 0 end +
-              case when page.value ->> 'prompt_eval_count' ~ '^[0-9]+$' then (page.value ->> 'prompt_eval_count')::bigint else 0 end
-            ), 0)::bigint as input_tokens,
-            coalesce(sum(
-              case when page.value #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,completion_tokens}')::bigint else 0 end +
-              case when page.value #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,output_tokens}')::bigint else 0 end +
-              case when page.value ->> 'eval_count' ~ '^[0-9]+$' then (page.value ->> 'eval_count')::bigint else 0 end
-            ), 0)::bigint as output_tokens
-          from jsonb_array_elements(
-            case when jsonb_typeof(ai.response -> 'pages') = 'array'
-                      and ai.response -> 'usage' is null
-                 then ai.response -> 'pages'
-                 else '[]'::jsonb end
-          ) as page(value)
-        ) page_usage
         where ai.created_at >= $1
           and ai.created_at < $2
         group by 1, 2, 3, 4
@@ -3373,10 +3282,9 @@ pub struct StatisticsUsageRow {
 }
 
 /// AI-usage cells over a custom `[from, to)` range, bucketed by `trunc`
-/// (a validated date_trunc unit: hour/day/week/month). Token extraction mirrors
-/// `provider_bucket_entries` — OpenAI `usage.*` plus Ollama top-level
-/// `prompt_eval_count`/`eval_count`, with the redaction guard, plus the
-/// per-page `pages[]` fallback for pre-v1.12 OCR artifacts (#300).
+/// (a validated date_trunc unit: hour/day/week/month). Token counters are the
+/// typed `input_tokens`/`output_tokens` columns written at insert time and
+/// backfilled for historical rows by migration 0040.
 pub async fn statistics_usage_rows(
     pool: &DbPool,
     from: DateTime<Utc>,
@@ -3391,45 +3299,10 @@ pub async fn statistics_usage_rows(
           ai.model,
           ai.stage,
           count(*)::bigint as request_count,
-          coalesce(sum(
-            case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
-            case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
-            case when response ->> 'prompt_eval_count' ~ '^[0-9]+$'
-                 then (response ->> 'prompt_eval_count')::bigint else 0 end +
-            page_usage.input_tokens
-          ), 0)::bigint as input_tokens,
-          coalesce(sum(
-            case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
-            case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
-            case when response ->> 'eval_count' ~ '^[0-9]+$'
-                 then (response ->> 'eval_count')::bigint else 0 end +
-            page_usage.output_tokens
-          ), 0)::bigint as output_tokens,
+          coalesce(sum(ai.input_tokens), 0)::bigint as input_tokens,
+          coalesce(sum(ai.output_tokens), 0)::bigint as output_tokens,
           avg(duration_ms)::double precision as avg_duration_ms
         from ai_artifacts ai
-        -- Pre-v1.12 OCR artifacts only carry per-page token counters under
-        -- `pages`; sum those when no flattened top-level `usage` exists (which
-        -- everything written since #259 has — those rows must not be double
-        -- counted). #300
-        cross join lateral (
-          select
-            coalesce(sum(
-              case when page.value #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,prompt_tokens}')::bigint else 0 end +
-              case when page.value #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,input_tokens}')::bigint else 0 end +
-              case when page.value ->> 'prompt_eval_count' ~ '^[0-9]+$' then (page.value ->> 'prompt_eval_count')::bigint else 0 end
-            ), 0)::bigint as input_tokens,
-            coalesce(sum(
-              case when page.value #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,completion_tokens}')::bigint else 0 end +
-              case when page.value #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (page.value #>> '{usage,output_tokens}')::bigint else 0 end +
-              case when page.value ->> 'eval_count' ~ '^[0-9]+$' then (page.value ->> 'eval_count')::bigint else 0 end
-            ), 0)::bigint as output_tokens
-          from jsonb_array_elements(
-            case when jsonb_typeof(ai.response -> 'pages') = 'array'
-                      and ai.response -> 'usage' is null
-                 then ai.response -> 'pages'
-                 else '[]'::jsonb end
-          ) as page(value)
-        ) page_usage
         where ai.created_at >= $1
           and ai.created_at < $2
         group by 1, 2, 3, 4
@@ -3734,67 +3607,36 @@ fn compute_dashboard_comparison(
 
 /// Per-stage rollup for the dashboard Stage-Matrix.
 ///
-/// v1.4.0 replaced the six per-field stages (title/document_type/correspondent/document_date/
-/// tags/fields) with the consolidated `metadata` stage. To keep the matrix readable on both
-/// fresh v1.4 installs and instances still draining v1.3 in-flight runs, we:
-///
-/// * Always emit `ocr` and `metadata` rows. `metadata_status` is read from the column added
-///   in migration 0019. A fresh install with no documents yet still gets both rows with zero
-///   counts — the dashboard never disappears.
-/// * Emit a legacy per-field row only when at least one document has a non-`unknown` value in
-///   that field column. Once the metadata-stage migration backfills the inventory (and new runs
-///   stop writing the legacy columns), those rows collapse to zero and the `HAVING` clause
-///   suppresses them. This lets v1.3 in-flight runs finish visibly without leaving permanent
-///   ghost rows on the dashboard.
+/// Emits exactly the `ocr` and `metadata` rows (the consolidated v1.4.0 stage
+/// set; `metadata_status` is the column added in migration 0019). The legacy
+/// per-field UNION arms (title/document_type/correspondent/document_date/
+/// tags/fields) were removed with their columns in migration 0039; they had
+/// reported the constant 'unknown' since v1.4.0 and were suppressed from the
+/// matrix by the old `touched > 0` clause anyway.
 async fn stage_status(pool: &DbPool) -> Result<Vec<DashboardStageStatus>> {
     let rows = sqlx::query(
         r#"
         with stage_rows as (
-          select 'ocr' as stage, ocr_status as status, current_run_status, true as always_show
+          select 'ocr' as stage, ocr_status as status, current_run_status
             from document_inventory
-          union all select 'metadata', metadata_status, current_run_status, true
-            from document_inventory
-          union all select 'title', title_status, current_run_status, false
-            from document_inventory
-          union all select 'document_type', document_type_status, current_run_status, false
-            from document_inventory
-          union all select 'correspondent', correspondent_status, current_run_status, false
-            from document_inventory
-          union all select 'document_date', document_date_status, current_run_status, false
-            from document_inventory
-          union all select 'tags', tagging_status, current_run_status, false
-            from document_inventory
-          union all select 'fields', fields_status, current_run_status, false
+          union all select 'metadata', metadata_status, current_run_status
             from document_inventory
         ),
         counted as (
           select
             stage,
-            bool_or(always_show) as always_show,
             count(*)::bigint as total,
             count(*) filter (where status in ('succeeded', 'skipped', 'not_needed'))::bigint as complete,
             count(*) filter (where status = 'failed')::bigint as failed,
             count(*) filter (where status = 'waiting_review' or current_run_status = 'waiting_review')::bigint as waiting_review,
-            count(*) filter (where current_run_status in ('queued', 'running', 'applying') and status not in ('succeeded', 'skipped', 'not_needed', 'failed'))::bigint as running,
-            count(*) filter (where status <> 'unknown')::bigint as touched
+            count(*) filter (where current_run_status in ('queued', 'running', 'applying') and status not in ('succeeded', 'skipped', 'not_needed', 'failed'))::bigint as running
           from stage_rows
           group by stage
         )
         select stage, complete, failed, waiting_review, running,
                greatest(total - complete - failed - waiting_review - running, 0)::bigint as pending
           from counted
-         where always_show
-            or touched > 0
-         order by case stage
-           when 'ocr' then 1
-           when 'metadata' then 2
-           when 'title' then 3
-           when 'document_type' then 4
-           when 'correspondent' then 5
-           when 'document_date' then 6
-           when 'tags' then 7
-           else 8
-         end
+         order by case stage when 'ocr' then 1 else 2 end
         "#,
     )
     .fetch_all(pool)
@@ -4064,24 +3906,14 @@ async fn cost_series_tokens(
         )
         select
           b.bucket,
+          -- Typed counters (insert-time + 0040 backfill); no jsonb parsing.
           coalesce((
-            select sum(
-              case when response #>> '{usage,prompt_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,prompt_tokens}')::bigint else 0 end +
-              case when response #>> '{usage,input_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,input_tokens}')::bigint else 0 end +
-              -- Ollama reports tokens top-level, not under `usage`. Without
-              -- this the dashboard cost series showed 0 tokens on Ollama-only
-              -- installs while the Statistics page showed real numbers. #261.
-              case when response ->> 'prompt_eval_count' ~ '^[0-9]+$' then (response ->> 'prompt_eval_count')::bigint else 0 end
-            )::bigint
+            select sum(input_tokens)::bigint
               from ai_artifacts
              where created_at >= b.bucket and created_at < b.bucket + $3::interval
           ), 0)::bigint as input_tokens,
           coalesce((
-            select sum(
-              case when response #>> '{usage,completion_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,completion_tokens}')::bigint else 0 end +
-              case when response #>> '{usage,output_tokens}' ~ '^[0-9]+$' then (response #>> '{usage,output_tokens}')::bigint else 0 end +
-              case when response ->> 'eval_count' ~ '^[0-9]+$' then (response ->> 'eval_count')::bigint else 0 end
-            )::bigint
+            select sum(output_tokens)::bigint
               from ai_artifacts
              where created_at >= b.bucket and created_at < b.bucket + $3::interval
           ), 0)::bigint as output_tokens,
@@ -4453,8 +4285,7 @@ pub async fn list_inventory(
 ) -> Result<Vec<DocumentInventoryItem>> {
     let mut builder = QueryBuilder::<Postgres>::new(
         "select paperless_document_id, title, original_file_name, current_tags, ocr_status, \
-         metadata_status, tagging_status, title_status, correspondent_status, \
-         document_type_status, document_date_status, fields_status, current_run_status, \
+         metadata_status, current_run_status, \
          last_run_id, last_error, next_required_stage, needs_review, complete, \
          document_date, detected_language, detected_language_confidence, \
          detected_language_source, last_seen_at \
@@ -4477,12 +4308,6 @@ pub async fn list_inventory(
                 current_tags: row.try_get("current_tags")?,
                 ocr_status: row.try_get("ocr_status")?,
                 metadata_status: row.try_get("metadata_status")?,
-                tagging_status: row.try_get("tagging_status")?,
-                title_status: row.try_get("title_status")?,
-                correspondent_status: row.try_get("correspondent_status")?,
-                document_type_status: row.try_get("document_type_status")?,
-                document_date_status: row.try_get("document_date_status")?,
-                fields_status: row.try_get("fields_status")?,
                 current_run_status: row.try_get("current_run_status")?,
                 last_run_id: row.try_get("last_run_id")?,
                 last_error: row.try_get("last_error")?,
@@ -5096,12 +4921,6 @@ pub async fn queue_missing_pipeline(
             select paperless_document_id,
                    ocr_status,
                    metadata_status,
-                   tagging_status,
-                   title_status,
-                   correspondent_status,
-                   document_type_status,
-                   document_date_status,
-                   fields_status,
                    has_ocr_completion_tag,
                    has_tagging_completion_tag,
                    has_full_completion_tag
@@ -5139,12 +4958,6 @@ pub async fn queue_missing_pipeline(
                 InventoryStageState {
                     ocr_status: row.try_get("ocr_status")?,
                     metadata_status: row.try_get("metadata_status")?,
-                    tagging_status: row.try_get("tagging_status")?,
-                    title_status: row.try_get("title_status")?,
-                    correspondent_status: row.try_get("correspondent_status")?,
-                    document_type_status: row.try_get("document_type_status")?,
-                    document_date_status: row.try_get("document_date_status")?,
-                    fields_status: row.try_get("fields_status")?,
                     has_ocr_completion_tag: row.try_get("has_ocr_completion_tag")?,
                     has_tagging_completion_tag: row.try_get("has_tagging_completion_tag")?,
                     has_full_completion_tag: row.try_get("has_full_completion_tag")?,
@@ -5184,12 +4997,6 @@ pub async fn queue_missing_pipeline(
 struct InventoryStageState {
     ocr_status: String,
     metadata_status: String,
-    tagging_status: String,
-    title_status: String,
-    correspondent_status: String,
-    document_type_status: String,
-    document_date_status: String,
-    fields_status: String,
     has_ocr_completion_tag: bool,
     has_tagging_completion_tag: bool,
     has_full_completion_tag: bool,
@@ -5208,20 +5015,15 @@ fn missing_pipeline_stages_for_inventory(
         .copied()
         .filter(|stage| match stage {
             Stage::Ocr => !state.has_ocr_completion_tag && stage_needs_work(&state.ocr_status),
-            // The consolidated stage subsumes the six per-field stages. A document needs the
-            // metadata stage if its dedicated metadata_status column needs work OR any of the
-            // six legacy per-field columns still report work. Honoring the legacy columns
-            // lets v1.3 inventory snapshots (created before metadata_status existed) still
-            // flow through the v1.4 selector without a backfill migration.
+            // The consolidated stage's own status column decides. The six
+            // legacy per-field columns this arm used to OR in (v1.3 snapshot
+            // support) were dropped in migration 0039 — they had been the
+            // constant 'unknown' on every row since the v1.4.0 consolidation,
+            // which made this arm enqueue Metadata for EVERY document without
+            // the legacy tagging-completion tag, even ones whose
+            // metadata_status was already 'succeeded'.
             Stage::Metadata => {
-                !state.has_tagging_completion_tag
-                    && (stage_needs_work(&state.metadata_status)
-                        || stage_needs_work(&state.tagging_status)
-                        || stage_needs_work(&state.title_status)
-                        || stage_needs_work(&state.correspondent_status)
-                        || stage_needs_work(&state.document_type_status)
-                        || stage_needs_work(&state.document_date_status)
-                        || stage_needs_work(&state.fields_status))
+                !state.has_tagging_completion_tag && stage_needs_work(&state.metadata_status)
             }
             Stage::Apply => false,
         })
@@ -6051,7 +5853,10 @@ pub async fn review_decision(
     .await?
     .ok_or_else(|| anyhow!("review item is not pending or does not exist"))?;
 
-    let run_id: Uuid = row.try_get("run_id")?;
+    // None only when the originating run was pruned by retention (terminal
+    // runs only) — impossible for a still-pending review in practice, but
+    // decoded defensively since migration 0041 made the column nullable.
+    let run_id: Option<Uuid> = row.try_get("run_id")?;
     let job_id: Option<Uuid> = row.try_get("job_id")?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
     let stage_text: String = row.try_get("stage")?;
@@ -6060,53 +5865,47 @@ pub async fn review_decision(
     let stored_edited_patch: Option<Value> = row.try_get("edited_patch")?;
 
     if status == "rejected" {
-        sqlx::query(
-            r#"
-            update jobs
-               set status = 'cancelled',
-                   lease_owner = null,
-                   lease_until = null,
-                   updated_at = now()
-             where run_id = $1
-               and status in ('queued', 'running', 'waiting_review')
-            "#,
-        )
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
-        set_inventory_stage_status_tx(
-            &mut tx,
-            document_id,
-            stage,
-            "rejected",
-            None,
-            false,
-            Some(run_id),
-        )
-        .await?;
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'rejected',
-                   finished_at = now(),
-                   updated_at = now()
-             where id = $1
-            "#,
-        )
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'rejected',
-                   updated_at = now()
-             where paperless_document_id = $1
-            "#,
-        )
-        .bind(document_id)
-        .execute(&mut *tx)
-        .await?;
+        set_inventory_stage_status_tx(&mut tx, document_id, stage, "rejected", None, false, run_id)
+            .await?;
+        if let Some(run_id) = run_id {
+            sqlx::query(
+                r#"
+                update jobs
+                   set status = 'cancelled',
+                       lease_owner = null,
+                       lease_until = null,
+                       updated_at = now()
+                 where run_id = $1
+                   and status in ('queued', 'running', 'waiting_review')
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'rejected',
+                       finished_at = now(),
+                       updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'rejected',
+                       updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     append_audit_tx(
@@ -6115,7 +5914,7 @@ pub async fn review_decision(
             event_type: format!("review.{status}"),
             actor_type: "user".to_owned(),
             actor_id: Some(actor_id.to_string()),
-            run_id: Some(run_id),
+            run_id,
             job_id,
             paperless_document_id: Some(document_id),
             before: Some(suggested_patch),
@@ -6217,7 +6016,10 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
 
     let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
-    let run_id: Uuid = row.try_get("run_id")?;
+    // None only when the originating run was pruned by retention (terminal
+    // runs only) — decoded defensively since migration 0041 made the column
+    // nullable; the run-progress block below is skipped without a run.
+    let run_id: Option<Uuid> = row.try_get("run_id")?;
     set_inventory_stage_status_tx(
         &mut tx,
         document_id,
@@ -6225,58 +6027,60 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
         "succeeded",
         None,
         false,
-        Some(run_id),
+        run_id,
     )
     .await?;
 
-    if no_remaining_jobs_tx(&mut tx, run_id).await? {
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'succeeded',
-                   finished_at = now(),
-                   updated_at = now()
-             where id = $1
-            "#,
-        )
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'succeeded',
-                   complete = true,
-                   updated_at = now()
-             where paperless_document_id = $1
-            "#,
-        )
-        .bind(document_id)
-        .execute(&mut *tx)
-        .await?;
-    } else {
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'queued',
-                   updated_at = now()
-             where id = $1
-            "#,
-        )
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'queued',
-                   updated_at = now()
-             where paperless_document_id = $1
-            "#,
-        )
-        .bind(document_id)
-        .execute(&mut *tx)
-        .await?;
+    if let Some(run_id) = run_id {
+        if no_remaining_jobs_tx(&mut tx, run_id).await? {
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'succeeded',
+                       finished_at = now(),
+                       updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'succeeded',
+                       complete = true,
+                       updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'queued',
+                       updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'queued',
+                       updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     append_audit_tx(
@@ -6285,7 +6089,7 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
             event_type: "review.applied".to_owned(),
             actor_type: "user".to_owned(),
             actor_id: Some(actor_id.to_string()),
-            run_id: Some(run_id),
+            run_id,
             job_id,
             paperless_document_id: Some(document_id),
             before: None,
@@ -6404,7 +6208,7 @@ pub async fn claim_pending_review_for_autopilot_drain(
             event_type: "review.approved".to_owned(),
             actor_type: "worker".to_owned(),
             actor_id: None,
-            run_id: Some(record.run_id),
+            run_id: record.run_id,
             job_id: record.job_id,
             paperless_document_id: Some(record.paperless_document_id),
             before: Some(record.suggested_patch.clone()),
@@ -6462,7 +6266,10 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
 
     let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
-    let run_id: Uuid = row.try_get("run_id")?;
+    // None only when the originating run was pruned by retention (terminal
+    // runs only) — decoded defensively since migration 0041 made the column
+    // nullable; the run-progress block below is skipped without a run.
+    let run_id: Option<Uuid> = row.try_get("run_id")?;
     set_inventory_stage_status_tx(
         &mut tx,
         document_id,
@@ -6470,58 +6277,60 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
         "succeeded",
         None,
         false,
-        Some(run_id),
+        run_id,
     )
     .await?;
 
-    if no_remaining_jobs_tx(&mut tx, run_id).await? {
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'succeeded',
-                   finished_at = now(),
-                   updated_at = now()
-             where id = $1
-            "#,
-        )
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'succeeded',
-                   complete = true,
-                   updated_at = now()
-             where paperless_document_id = $1
-            "#,
-        )
-        .bind(document_id)
-        .execute(&mut *tx)
-        .await?;
-    } else {
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'queued',
-                   updated_at = now()
-             where id = $1
-            "#,
-        )
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'queued',
-                   updated_at = now()
-             where paperless_document_id = $1
-            "#,
-        )
-        .bind(document_id)
-        .execute(&mut *tx)
-        .await?;
+    if let Some(run_id) = run_id {
+        if no_remaining_jobs_tx(&mut tx, run_id).await? {
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'succeeded',
+                       finished_at = now(),
+                       updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'succeeded',
+                       complete = true,
+                       updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'queued',
+                       updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'queued',
+                       updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     append_audit_tx(
@@ -6530,7 +6339,7 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
             event_type: "review.applied".to_owned(),
             actor_type: "worker".to_owned(),
             actor_id: None,
-            run_id: Some(run_id),
+            run_id,
             job_id,
             paperless_document_id: Some(document_id),
             before: None,
@@ -6814,16 +6623,76 @@ pub async fn list_inventory_duplicates(pool: &DbPool) -> Result<Vec<DuplicateGro
     Ok(groups)
 }
 
+/// Extract the typed token counters persisted on `ai_artifacts.input_tokens`
+/// / `output_tokens` (migration 0040) from a raw provider response.
+///
+/// Mirrors the SQL extraction the usage queries performed before 0040 (and
+/// that the 0040 backfill still uses): OpenAI/Anthropic-style
+/// `usage.prompt_tokens`/`input_tokens` + `usage.completion_tokens`/
+/// `output_tokens`, Ollama top-level `prompt_eval_count`/`eval_count`, and
+/// the per-page `pages[]` fallback for OCR responses without a flattened
+/// top-level `usage` block. Only plain non-negative integers count — redacted
+/// strings and summary objects contribute 0, like the SQL regexp guard.
+///
+/// Runs on the response BEFORE storage-mode preparation, so the counters stay
+/// correct even when `metadata_only` storage strips the Ollama top-level
+/// counters from the persisted jsonb.
+fn ai_response_token_usage(response: Option<&Value>) -> (i64, i64) {
+    fn counter(value: &Value, path: &[&str]) -> i64 {
+        let mut current = value;
+        for key in path {
+            match current.get(key) {
+                Some(next) => current = next,
+                None => return 0,
+            }
+        }
+        current.as_i64().filter(|count| *count >= 0).unwrap_or(0)
+    }
+    fn tokens(value: &Value) -> (i64, i64) {
+        (
+            counter(value, &["usage", "prompt_tokens"])
+                + counter(value, &["usage", "input_tokens"])
+                + counter(value, &["prompt_eval_count"]),
+            counter(value, &["usage", "completion_tokens"])
+                + counter(value, &["usage", "output_tokens"])
+                + counter(value, &["eval_count"]),
+        )
+    }
+
+    let Some(response) = response else {
+        return (0, 0);
+    };
+    let (mut input, mut output) = tokens(response);
+    // Pages fallback exactly when no top-level `usage` KEY exists (a JSON
+    // null `usage` suppresses it, matching the SQL `-> 'usage' is null`
+    // semantics of the 0040 backfill), so flattened post-#259 OCR responses
+    // are never double counted.
+    if response.get("usage").is_none()
+        && let Some(pages) = response.get("pages").and_then(Value::as_array)
+    {
+        for page in pages {
+            let (page_input, page_output) = tokens(page);
+            input += page_input;
+            output += page_output;
+        }
+    }
+    (input, output)
+}
+
 pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Result<Uuid> {
+    // Token counters are read off the raw response before the storage-mode
+    // redaction/summarization so they reflect what the provider reported.
+    let (input_tokens, output_tokens) = ai_response_token_usage(input.response.as_ref());
     let request = prepare_ai_artifact_value(input.request, input.storage_mode);
     let response = prepare_ai_artifact_value(input.response, input.storage_mode);
 
     let id = sqlx::query(
         r#"
         insert into ai_artifacts (
-          run_id, job_id, stage, provider, model, prompt_id, input_hash, request, response, normalized_output, duration_ms
+          run_id, job_id, stage, provider, model, prompt_id, input_hash, request, response, normalized_output, duration_ms,
+          input_tokens, output_tokens
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         returning id
         "#,
     )
@@ -6838,6 +6707,8 @@ pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Re
     .bind(response)
     .bind(input.normalized_output)
     .bind(input.duration_ms)
+    .bind(input_tokens)
+    .bind(output_tokens)
     .fetch_one(pool)
     .await?
     .try_get("id")?;
@@ -7667,6 +7538,7 @@ pub async fn apply_security_retention(
     let now = Utc::now();
     let artifact_cutoff = now - ChronoDuration::days(security.ai_artifact_retention_days);
     let audit_cutoff = now - ChronoDuration::days(security.audit_retention_days);
+    let runs_cutoff = now - ChronoDuration::days(security.runs_retention_days);
 
     // ocr_page_cache holds the full OCR text of every processed page and must
     // not outlive the artifact retention. Deleted in bounded batches outside
@@ -7775,6 +7647,37 @@ pub async fn apply_security_retention(
         }
     }
 
+    // pipeline_runs were the last unbounded store (#310): ~400 runs/day with
+    // no pruning at all. Delete TERMINAL runs only — active statuses (queued/
+    // running/waiting_review/applying) are never touched, so in-flight work
+    // and open reviews keep their run. Jobs and ai_artifacts cascade with the
+    // run (artifacts on a pruned run are months past their own retention by
+    // default); review_items and audit_events keep their rows with run_id
+    // nulled, and document_inventory.last_run_id nulls out — all four FK
+    // rules flipped/added in migration 0041 BEFORE this code first ran.
+    let mut pipeline_runs_deleted: i64 = 0;
+    loop {
+        let deleted = sqlx::query(
+            r#"
+            delete from pipeline_runs
+             where ctid in (
+               select ctid from pipeline_runs
+                where status in ('succeeded', 'rejected', 'failed', 'cancelled')
+                  and created_at < $1
+                limit 5000
+             )
+            "#,
+        )
+        .bind(runs_cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected() as i64;
+        pipeline_runs_deleted += deleted;
+        if deleted < 5000 {
+            break;
+        }
+    }
+
     let mut tx = pool.begin().await?;
     append_audit_tx(
         &mut tx,
@@ -7790,10 +7693,12 @@ pub async fn apply_security_retention(
             metadata: Some(json!({
                 "audit_retention_days": security.audit_retention_days,
                 "ai_artifact_retention_days": security.ai_artifact_retention_days,
+                "runs_retention_days": security.runs_retention_days,
                 "audit_events_deleted": audit_events_deleted,
                 "ai_artifacts_deleted": ai_artifacts_deleted,
                 "ocr_page_cache_deleted": ocr_page_cache_deleted,
-                "dashboard_snapshots_deleted": dashboard_snapshots_deleted
+                "dashboard_snapshots_deleted": dashboard_snapshots_deleted,
+                "pipeline_runs_deleted": pipeline_runs_deleted
             })),
             outcome: "success".to_owned(),
             error_message: None,
@@ -7808,6 +7713,7 @@ pub async fn apply_security_retention(
         audit_events_deleted,
         ai_artifacts_deleted,
         ocr_page_cache_deleted,
+        pipeline_runs_deleted,
     })
 }
 
@@ -9159,12 +9065,6 @@ mod tests {
             total_documents: total,
             complete,
             missing_ocr: 0,
-            missing_tagging: 0,
-            missing_title: 0,
-            missing_correspondent: 0,
-            missing_document_type: 0,
-            missing_document_date: 0,
-            missing_fields: 0,
             waiting_review: 0,
             failed: 0,
             running: 0,
@@ -9245,12 +9145,6 @@ mod tests {
             total_documents: 250,
             complete: 200,
             missing_ocr: 0,
-            missing_tagging: 0,
-            missing_title: 0,
-            missing_correspondent: 0,
-            missing_document_type: 0,
-            missing_document_date: 0,
-            missing_fields: 0,
             waiting_review: 3,
             failed: 4,
             running: 2,
@@ -9523,6 +9417,57 @@ mod tests {
     }
 
     #[test]
+    fn ai_response_token_usage_handles_all_wire_shapes() {
+        // OpenAI/Anthropic usage block.
+        assert_eq!(
+            ai_response_token_usage(Some(
+                &json!({ "usage": { "prompt_tokens": 100, "completion_tokens": 40 } })
+            )),
+            (100, 40)
+        );
+        // Anthropic-style input_tokens/output_tokens.
+        assert_eq!(
+            ai_response_token_usage(Some(
+                &json!({ "usage": { "input_tokens": 5, "output_tokens": 2 } })
+            )),
+            (5, 2)
+        );
+        // Ollama top-level counters.
+        assert_eq!(
+            ai_response_token_usage(Some(&json!({ "prompt_eval_count": 7, "eval_count": 3 }))),
+            (7, 3)
+        );
+        // OCR pages[] fallback fires only without a top-level usage block...
+        assert_eq!(
+            ai_response_token_usage(Some(&json!({
+                "pages": [
+                    { "usage": { "prompt_tokens": 1000, "completion_tokens": 50 } },
+                    { "prompt_eval_count": 200, "eval_count": 30 },
+                ]
+            }))),
+            (1200, 80)
+        );
+        // ...so a post-#259 flattened response is never double counted.
+        assert_eq!(
+            ai_response_token_usage(Some(&json!({
+                "pages": [ { "usage": { "prompt_tokens": 10, "completion_tokens": 5 } } ],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 5 },
+            }))),
+            (10, 5)
+        );
+        // Redacted strings / objects / negatives contribute 0, like the SQL
+        // regexp guard in the 0040 backfill.
+        assert_eq!(
+            ai_response_token_usage(Some(&json!({
+                "usage": { "prompt_tokens": "[REDACTED]", "completion_tokens": { "redacted": true } },
+                "prompt_eval_count": -3
+            }))),
+            (0, 0)
+        );
+        assert_eq!(ai_response_token_usage(None), (0, 0));
+    }
+
+    #[test]
     fn live_llm_status_prefers_running_jobs() {
         let now = Utc::now();
         let job = DashboardLiveJob {
@@ -9617,12 +9562,6 @@ mod tests {
             InventoryStageState {
                 ocr_status: "unknown".to_owned(),
                 metadata_status: "unknown".to_owned(),
-                tagging_status: "unknown".to_owned(),
-                title_status: "unknown".to_owned(),
-                correspondent_status: "unknown".to_owned(),
-                document_type_status: "unknown".to_owned(),
-                document_date_status: "unknown".to_owned(),
-                fields_status: "unknown".to_owned(),
                 has_ocr_completion_tag: true,
                 // Documents with the tagging-completion tag are considered "metadata done"
                 // because the legacy tag was applied after the per-field stages all ran.
@@ -9639,12 +9578,6 @@ mod tests {
             InventoryStageState {
                 ocr_status: "unknown".to_owned(),
                 metadata_status: "unknown".to_owned(),
-                tagging_status: "unknown".to_owned(),
-                title_status: "unknown".to_owned(),
-                correspondent_status: "unknown".to_owned(),
-                document_type_status: "unknown".to_owned(),
-                document_date_status: "unknown".to_owned(),
-                fields_status: "unknown".to_owned(),
                 has_ocr_completion_tag: false,
                 has_tagging_completion_tag: false,
                 has_full_completion_tag: true,
@@ -9655,26 +9588,33 @@ mod tests {
     }
 
     #[test]
-    fn missing_pipeline_stages_legacy_per_field_columns_still_trigger_metadata() {
-        // A v1.3 inventory row (metadata_status='unknown' default, per-field columns recorded)
-        // with any per-field column needing work should still queue Metadata.
+    fn missing_pipeline_stages_skip_documents_with_succeeded_metadata() {
+        // Regression guard for the 0039 cleanup: before the fossil per-field
+        // columns were dropped, the Metadata arm OR-ed six always-'unknown'
+        // columns and therefore re-enqueued documents whose metadata_status
+        // was already 'succeeded'. Only the consolidated column decides now.
         let stages = missing_pipeline_stages_for_inventory(
             &Stage::all_business_stages(),
             InventoryStageState {
                 ocr_status: "succeeded".to_owned(),
                 metadata_status: "succeeded".to_owned(),
-                tagging_status: "succeeded".to_owned(),
-                title_status: "unknown".to_owned(),
-                correspondent_status: "succeeded".to_owned(),
-                document_type_status: "succeeded".to_owned(),
-                document_date_status: "succeeded".to_owned(),
-                fields_status: "succeeded".to_owned(),
                 has_ocr_completion_tag: true,
                 has_tagging_completion_tag: false,
                 has_full_completion_tag: false,
             },
         );
+        assert!(stages.is_empty());
 
-        assert_eq!(stages, vec![Stage::Metadata]);
+        let needs_metadata = missing_pipeline_stages_for_inventory(
+            &Stage::all_business_stages(),
+            InventoryStageState {
+                ocr_status: "succeeded".to_owned(),
+                metadata_status: "failed".to_owned(),
+                has_ocr_completion_tag: true,
+                has_tagging_completion_tag: false,
+                has_full_completion_tag: false,
+            },
+        );
+        assert_eq!(needs_metadata, vec![Stage::Metadata]);
     }
 }

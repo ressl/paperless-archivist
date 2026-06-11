@@ -39,13 +39,11 @@ async fn seed_inventory(pool: &DbPool, count: i32, ocr_status: &str) {
         sqlx::query(
             r#"
             insert into document_inventory (
-              paperless_document_id, current_tags, ocr_status, tagging_status, title_status,
-              correspondent_status, document_type_status, document_date_status, fields_status,
+              paperless_document_id, current_tags, ocr_status,
               has_ocr_completion_tag, has_tagging_completion_tag, has_full_completion_tag,
               current_run_status
             )
-            values ($1, '{}', $2, 'unknown', 'unknown', 'unknown', 'unknown', 'unknown', 'unknown',
-                    false, false, false, null)
+            values ($1, '{}', $2, false, false, false, null)
             "#,
         )
         .bind(id)

@@ -14,6 +14,7 @@ export function SecuritySection({
   const ids = {
     auditRetention: useId(),
     artifactRetention: useId(),
+    runsRetention: useId(),
     artifactStorage: useId(),
     defaultTtl: useId(),
     maxTtl: useId()
@@ -36,6 +37,19 @@ export function SecuritySection({
           max={365}
           value={value.ai_artifact_retention_days}
           onCommit={(ai_artifact_retention_days) => onChange({ ai_artifact_retention_days })}
+        />
+      </FormField>
+      <FormField
+        label={t('settings.security.runs_retention')}
+        help={t('settings.security.runs_retention.hint')}
+        htmlFor={ids.runsRetention}
+      >
+        <NumberField
+          id={ids.runsRetention}
+          min={30}
+          max={3650}
+          value={value.runs_retention_days}
+          onCommit={(runs_retention_days) => onChange({ runs_retention_days })}
         />
       </FormField>
       <FormField

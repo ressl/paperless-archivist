@@ -3396,8 +3396,11 @@ async fn apply_autopilot_drain_patch(
         .clone()
         .unwrap_or_else(|| review.suggested_patch.clone());
     let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
-    let final_run_stage = if let Some(job_id) = review.job_id {
-        is_last_active_job(pool, review.run_id, job_id).await?
+    // run_id is None only for review items whose run was pruned by retention;
+    // those never reach the drain (retention deletes terminal runs only, and
+    // a pending review keeps its run in 'waiting_review').
+    let final_run_stage = if let (Some(run_id), Some(job_id)) = (review.run_id, review.job_id) {
+        is_last_active_job(pool, run_id, job_id).await?
     } else {
         false
     };
@@ -3443,7 +3446,7 @@ async fn apply_autopilot_drain_patch(
         paperless,
         review.paperless_document_id,
         &patch,
-        Some(review.run_id),
+        review.run_id,
         review.job_id,
         json!({
             "stage": review.stage,
@@ -3460,7 +3463,7 @@ async fn apply_autopilot_drain_patch(
                 event_type: "document.patch_apply_failed".to_owned(),
                 actor_type: "worker".to_owned(),
                 actor_id: None,
-                run_id: Some(review.run_id),
+                run_id: review.run_id,
                 job_id: review.job_id,
                 paperless_document_id: Some(review.paperless_document_id),
                 before: Some(before),
@@ -3488,7 +3491,7 @@ async fn apply_autopilot_drain_patch(
             event_type: "document.patch_applied".to_owned(),
             actor_type: "worker".to_owned(),
             actor_id: None,
-            run_id: Some(review.run_id),
+            run_id: review.run_id,
             job_id: review.job_id,
             paperless_document_id: Some(review.paperless_document_id),
             before: Some(before),

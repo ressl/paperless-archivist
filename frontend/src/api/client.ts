@@ -126,6 +126,7 @@ export type RuntimeSettings = {
   security: {
     audit_retention_days: number;
     ai_artifact_retention_days: number;
+    runs_retention_days: number;
     ai_artifact_storage: 'full' | 'redacted' | 'metadata_only';
     api_token_expiry_required: boolean;
     api_token_default_ttl_days: number;
@@ -230,12 +231,6 @@ export type Counts = {
   total_documents: number;
   complete: number;
   missing_ocr: number;
-  missing_tagging: number;
-  missing_title: number;
-  missing_correspondent: number;
-  missing_document_type: number;
-  missing_document_date: number;
-  missing_fields: number;
   waiting_review: number;
   failed: number;
   running: number;
@@ -491,13 +486,6 @@ export type InventoryItem = {
   ocr_status: string;
   /** Consolidated v1.4+ metadata stage status. */
   metadata_status: string;
-  /** Legacy pre-v1.4 per-field statuses; no longer written by the worker. */
-  tagging_status: string;
-  title_status: string;
-  correspondent_status: string;
-  document_type_status: string;
-  document_date_status: string;
-  fields_status: string;
   current_run_status?: string | null;
   last_error?: string | null;
   needs_review: boolean;

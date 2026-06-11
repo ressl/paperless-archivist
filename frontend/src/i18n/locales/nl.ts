@@ -486,6 +486,8 @@ const nlMessages: Record<MessageKey, string> = {
   'settings.security': 'Beveiliging',
   'settings.security.audit_retention': 'Audit-retentie in dagen',
   'settings.security.ai_artifact_retention': 'AI-artifact-retentie in dagen',
+  'settings.security.runs_retention': 'Pipeline-run-retentie in dagen',
+  'settings.security.runs_retention.hint': 'Afgeronde pipeline-runs die ouder zijn, worden samen met hun jobs en AI-artefacten verwijderd; reviewgeschiedenis en audit-events blijven bewaard.',
   'settings.security.ai_artifact_storage': 'AI-artifact-opslag',
   'settings.security.storage.full': 'Volledige requests/responses',
   'settings.security.storage.redacted': 'Geredigeerde requests/responses',
