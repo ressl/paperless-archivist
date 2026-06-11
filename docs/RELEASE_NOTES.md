@@ -6,6 +6,95 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.12.4 — Prod audit remediation (PostgreSQL 18 + schema cleanup)
+
+Resolves the full 2026-06-10 production audit backlog (#299–#317; sanitized
+report in `docs/reviews/2026-06-10-prod-audit.md`) — a deep pass over auth,
+the worker/queue, OCR, the statistics endpoint, and the database schema on the
+live PostgreSQL 18 cluster. 17 commits across the whole stack plus eight new
+migrations (0037–0044).
+
+**⚠️ Operator actions on upgrade (in order):**
+
+1. **Build & push the image, then bump the deploy digest.** App CI does not
+   publish the image; this release is not live until you build it and update
+   the digest-pinned deploy repo.
+2. **OIDC admin is now self-healing — drop the workaround _after_ deploy.**
+   Until v1.12.4 is running, keep your admin's stable `sub` in
+   `ARCHIVIST_OIDC_ADMIN_USERS` **or** enable ZITADEL → *User Info inside ID
+   Token*. Once v1.12.4 is live, a login that arrives with degraded claims (no
+   `preferred_username` and no verified email) **no longer downgrades an
+   existing admin** — the prior roles are preserved and a WARN is logged — so
+   the workaround is no longer required.
+3. **Set `ARCHIVIST_METRICS_TOKEN`** (and the matching Prometheus scrape
+   header) to lift the `/metrics` 503 (#311). Still an operator/deploy action;
+   not shippable from this repo.
+
+**⚠️ Forward-only migrations — rollback to v1.12.3 is _not_ clean.** This
+project has no down-migrations. Two of the new migrations change shape in a way
+the older binary does not expect:
+
+- `0043` retypes `document_inventory.document_date` from `text` to `date`
+  (`USING document_date::date`) and adds CHECK constraints. v1.12.3 code treats
+  this column as text.
+- `0039` drops the dead `ai_providers` table, the `document_backlog` view, and
+  six fossil status columns the schema no longer uses.
+
+All eight were verified prod-data-safe on the live DB before release (0 orphan
+FK rows, 0 unparseable dates, all status values inside the new CHECK sets). If
+you must roll back, restore the database from a pre-upgrade backup rather than
+downgrading the binary against the v1.12.4 schema.
+
+**Auth (#299, #307):**
+- OIDC degraded-claims hardening: admin match is now against the immutable
+  `sub` (not the mutable username), degraded claims preserve existing roles
+  instead of replacing them, and every role change writes a
+  `user.roles_replaced` audit event. A last-admin guard prevents the role
+  reconciler from disabling the final enabled admin.
+- Cooldown/maintenance endpoints got correct RBAC, settings now persist in
+  normalized form, and a model/provider change releases only the jobs it
+  parked.
+
+**Worker & queue (#304, #308, #303):**
+- Ollama text `num_ctx` is floored at 16384 **at the point of use** (the
+  v1.12.2 startup bump alone missed in-flight call sites); the preset mirror
+  was raised to match.
+- The job-lease window is coupled to the slowest enabled provider's request
+  timeout (`max(300 s, timeout + 60 s)`) so a long legitimate AI call can't
+  lose its lease mid-flight.
+- `document_inventory.current_run_status` stays mirrored on the cooldown and
+  repair paths.
+
+**OCR (#309, #300):**
+- The pixel-cap probe checks **every rendered page** (`pdfinfo -f 1 -l N`), not
+  just page 1, so a heavy later page can't slip past the cap.
+- OCR token usage counts the per-page `pages[]` array and backfills legacy
+  artifacts.
+
+**Statistics (#301, #312):**
+- A bare `to` date now covers its whole day, presets are rolling windows, and
+  buckets are zero-filled; the endpoint does strict parameter validation and is
+  documented in OpenAPI.
+
+**Database schema & performance (#302, #316, #310, #315, #317):**
+- Schema cleanup: typed token columns (`input_tokens`/`output_tokens bigint`),
+  runs-retention FKs (`ON DELETE SET NULL`, added `NOT VALID` then validated),
+  and dropping dead stores, views, and unservable indexes.
+- The four Paperless sync upserts skip no-op rewrites
+  (`WHERE (cols) IS DISTINCT FROM excluded`); `sessions.last_seen_at` is
+  throttled to one write per minute.
+- The provider-cooldown upsert reports `Inserted`/`Extended`/`Unchanged` via
+  `RETURNING` old/new so callers can tell a fresh cooldown from an extension.
+
+**Frontend (#314):**
+- Tuning number fields clamp on commit, the prompt picker uses i18n for its
+  active marker, and a dirty-editor guard stops "Activate selected" from
+  discarding unsaved prompt edits.
+
+**Still open after this release:** #305 (the 20 transient-gateway-404 docs were
+re-queued in prod; the code change to exempt transient infra failures from the
+retry budget is a follow-up) and #311 (metrics token, operator action above).
+
 ## v1.12.3 — Configurable AI request timeout
 
 The per-request HTTP timeout for AI provider calls was hardcoded at 180 s.
