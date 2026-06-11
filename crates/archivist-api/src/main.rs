@@ -5416,16 +5416,23 @@ async fn unblock_jobs_endpoint(
         request.error_substring.as_deref(),
     )
     .await?;
-    let cooldowns_cleared = if request.clear_provider_cooldowns {
-        archivist_db::clear_all_provider_cooldowns(&state.pool).await?
+    let (cooldowns_cleared, retries_released) = if request.clear_provider_cooldowns {
+        let cleared = archivist_db::clear_all_provider_cooldowns(&state.pool).await?;
+        // Lifting the cooldowns must also wake the jobs they parked: their
+        // `run_after` sits at the (now-irrelevant) cooldown end, so without
+        // this the queue would keep waiting it out despite the cooldown being
+        // gone (mirrors clear_provider_cooldowns_endpoint). #306
+        let released = archivist_db::release_scheduled_retries(&state.pool).await?;
+        (cleared, released)
     } else {
-        0
+        (0, 0)
     };
     info!(
         %actor_id,
         predecessors_requeued = summary.predecessors_requeued,
         runs_unblocked = summary.runs_unblocked,
         cooldowns_cleared,
+        retries_released,
         error_substring = ?request.error_substring,
         "operator unblocked queued jobs"
     );
@@ -5443,6 +5450,7 @@ async fn unblock_jobs_endpoint(
                 "predecessors_requeued": summary.predecessors_requeued,
                 "runs_unblocked": summary.runs_unblocked,
                 "cooldowns_cleared": cooldowns_cleared,
+                "retries_released": retries_released,
             })),
             metadata: Some(json!({
                 "error_substring": request.error_substring,
@@ -5459,6 +5467,7 @@ async fn unblock_jobs_endpoint(
         "predecessors_requeued": summary.predecessors_requeued,
         "runs_unblocked": summary.runs_unblocked,
         "cooldowns_cleared": cooldowns_cleared,
+        "retries_released": retries_released,
     })))
 }
 
