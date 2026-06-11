@@ -108,6 +108,11 @@ pub struct OidcUserInput<'a> {
     /// `allow_username_link`: linking grants the OIDC subject the matched
     /// account's roles permanently, so it must be an explicit opt-in.
     pub allow_email_link: bool,
+    /// Degraded ID-token claims (#299): the caller could not derive a
+    /// trustworthy identity (no `preferred_username`, no verified email), so
+    /// a RETURNING user keeps their current roles instead of having them
+    /// replaced by `roles` (which were computed from the raw subject only).
+    pub preserve_existing_roles: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -709,21 +714,80 @@ pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result
     // roles are authoritative-from-IdP: REPLACE with the freshly-computed
     // `input.roles` so removal from ARCHIVIST_OIDC_ADMIN_USERS demotes on the
     // next login (the previous additive merge left stale Admin rows forever).
+    // Exception (#299): with `preserve_existing_roles` the ID token was
+    // degraded, the computed roles are untrustworthy, and a returning user
+    // keeps whatever they already have.
+    let previous_roles = if created {
+        Vec::new()
+    } else {
+        load_user_roles_tx(&mut tx, user_id).await?
+    };
     let mut roles = if linked_existing {
-        let mut existing = load_user_roles_tx(&mut tx, user_id).await?;
+        let mut merged = previous_roles.clone();
         for role in input.roles {
-            if !existing.contains(role) {
-                existing.push(role.clone());
+            if !merged.contains(role) {
+                merged.push(role.clone());
             }
         }
-        existing
+        merged
+    } else if !created && input.preserve_existing_roles {
+        previous_roles.clone()
     } else {
         input.roles.to_vec()
     };
     if roles.is_empty() {
         roles.push(Role::Viewer);
     }
-    replace_user_roles_tx(&mut tx, user_id, &roles).await?;
+    // Last-admin lockout protection (#299): never let an OIDC role refresh
+    // demote the only remaining enabled admin — `ensure_bootstrap_admin` only
+    // runs on an empty users table, so that state would be unrecoverable
+    // in-band.
+    let mut last_admin_protected = false;
+    if previous_roles.contains(&Role::Admin)
+        && !roles.contains(&Role::Admin)
+        && !other_enabled_admin_exists_tx(&mut tx, user_id).await?
+    {
+        tracing::warn!(
+            user_id = %user_id,
+            username = input.username,
+            "refusing to demote the last remaining enabled admin during OIDC role refresh"
+        );
+        roles.push(Role::Admin);
+        last_admin_protected = true;
+    }
+    let roles_changed = sorted_role_names(&previous_roles) != sorted_role_names(&roles);
+    if roles_changed {
+        replace_user_roles_tx(&mut tx, user_id, &roles).await?;
+    }
+
+    if !created && !linked_existing && roles_changed {
+        // #307: a returning OIDC user's roles were rewritten — the prod
+        // admin demotion left zero audit trail, so record before/after.
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "user.roles_replaced".to_owned(),
+                actor_type: "system".to_owned(),
+                actor_id: None,
+                run_id: None,
+                job_id: None,
+                paperless_document_id: None,
+                before: Some(json!({ "user_id": user_id, "roles": previous_roles })),
+                after: Some(json!({ "user_id": user_id, "roles": roles })),
+                metadata: Some(json!({
+                    "username": input.username,
+                    "provider": input.provider,
+                    "external_subject_hash": short_hash(input.subject),
+                    "last_admin_protected": last_admin_protected
+                })),
+                outcome: "success".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
 
     if created || linked_existing {
         append_audit_tx(
@@ -827,6 +891,38 @@ async fn load_user_roles_tx(
                 .map_err(Into::into)
         })
         .collect()
+}
+
+/// Whether any ENABLED user other than `user_id` holds the admin role — the
+/// guard for last-admin demotion (#299). Disabled admins don't count: they
+/// cannot log in to recover the system.
+async fn other_enabled_admin_exists_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<bool> {
+    let row = sqlx::query(
+        r#"
+        select 1
+          from user_roles ur
+          join users u on u.id = ur.user_id
+         where ur.role = $1
+           and ur.user_id <> $2
+           and u.enabled
+         limit 1
+        "#,
+    )
+    .bind(Role::Admin.to_string())
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.is_some())
+}
+
+/// Order-insensitive role-set fingerprint for change detection.
+fn sorted_role_names(roles: &[Role]) -> Vec<String> {
+    let mut names = roles.iter().map(Role::to_string).collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 async fn replace_user_roles_tx(

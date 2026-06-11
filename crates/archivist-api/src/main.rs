@@ -924,6 +924,7 @@ async fn oidc_callback(
     // otherwise an attacker who can set a free-form email at the IdP could
     // escalate to the allowlisted admin or take over a local account.
     let email = oidc_verified_email(&claims);
+    let claims_degraded = oidc_claims_degraded(&claims);
     let username = oidc_username(
         claims
             .preferred_username
@@ -931,7 +932,23 @@ async fn oidc_callback(
             .or(email)
             .unwrap_or(subject),
     );
-    let roles = oidc_roles(&state.config, &username, email)?;
+    let roles = oidc_roles(&state.config, subject, &username, email)?;
+    // Degraded ID token (#299): without preferred_username and a verified
+    // email the recomputed roles are derived from identities the admin
+    // allowlist can never match, so a returning user must keep their existing
+    // roles instead of being silently demoted. A subject match stays
+    // trustworthy (`sub` is present in every signed token), so an explicitly
+    // allowlisted subject still promotes.
+    let preserve_existing_roles = claims_degraded && !roles.contains(&Role::Admin);
+    if claims_degraded {
+        warn!(
+            subject_hash = %hash_token(subject),
+            email_claim_present = claims.email.is_some(),
+            "OIDC ID token carries neither preferred_username nor a verified email; \
+             existing roles are preserved unless the subject is allowlisted \
+             (configure the IdP to include profile/email claims in the ID token)"
+        );
+    }
     let allow_username_link = roles.contains(&Role::Admin);
     let disabled_password_hash = hash_password(&random_token())?;
     let user = upsert_oidc_user(
@@ -945,6 +962,7 @@ async fn oidc_callback(
             roles: &roles,
             allow_username_link,
             allow_email_link: state.config.oidc_allow_email_link,
+            preserve_existing_roles,
         },
     )
     .await?;
@@ -6687,6 +6705,19 @@ fn oidc_verified_email(claims: &OidcIdClaims) -> Option<&str> {
         .filter(|_| claims.email_verified == Some(true))
 }
 
+/// An ID token is "degraded" when it carries neither a usable
+/// `preferred_username` nor a verified email (#299): the derived username
+/// then falls back to the raw subject, and a recomputed role set would be
+/// based on identities the operator never allowlisted. Such tokens must not
+/// drive role demotions for returning users.
+fn oidc_claims_degraded(claims: &OidcIdClaims) -> bool {
+    claims
+        .preferred_username
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+        && oidc_verified_email(claims).is_none()
+}
+
 fn oidc_username(value: &str) -> String {
     let mut username = value
         .trim()
@@ -6715,8 +6746,13 @@ fn oidc_username(value: &str) -> String {
     }
 }
 
-fn oidc_roles(config: &AppConfig, username: &str, email: Option<&str>) -> ApiResult<Vec<Role>> {
-    if oidc_is_admin(config, username, email) {
+fn oidc_roles(
+    config: &AppConfig,
+    subject: &str,
+    username: &str,
+    email: Option<&str>,
+) -> ApiResult<Vec<Role>> {
+    if oidc_is_admin(config, subject, username, email) {
         return Ok(vec![
             Role::Admin,
             Role::Operator,
@@ -6732,8 +6768,8 @@ fn oidc_roles(config: &AppConfig, username: &str, email: Option<&str>) -> ApiRes
 // `preferred_username` claim. The email path is gated on `email_verified`, but
 // username matching trusts the IdP to keep `preferred_username` unique and
 // non-user-settable (true for ZITADEL). For an IdP that lets users choose it,
-// prefer allowlisting by verified email or the immutable `sub`.
-fn oidc_is_admin(config: &AppConfig, username: &str, email: Option<&str>) -> bool {
+// prefer allowlisting by verified email or the immutable `sub` (#299).
+fn oidc_is_admin(config: &AppConfig, subject: &str, username: &str, email: Option<&str>) -> bool {
     let username = username.to_ascii_lowercase();
     let email = email.map(str::to_ascii_lowercase);
     config
@@ -6741,8 +6777,15 @@ fn oidc_is_admin(config: &AppConfig, username: &str, email: Option<&str>) -> boo
         .split([',', ' ', '\n', '\t'])
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
         .any(|admin| {
+            // The immutable subject is matched verbatim (`sub` is
+            // case-sensitive per OIDC Core §2), so the allowlist keeps
+            // working even when the ID token carries no preferred_username
+            // and no verified email (#299).
+            if admin == subject {
+                return true;
+            }
+            let admin = admin.to_ascii_lowercase();
             admin == username
                 || email
                     .as_deref()
@@ -7380,13 +7423,58 @@ mod tests {
         let mut config = test_config();
         config.oidc_admin_users = "oidc-admin, admin@example.com".to_owned();
 
-        let roles = oidc_roles(&config, "oidc-admin", None).expect("roles parse");
+        let roles = oidc_roles(&config, "subject-1", "oidc-admin", None).expect("roles parse");
         assert!(roles.contains(&Role::Admin));
         assert!(roles.contains(&Role::Auditor));
 
-        let email_roles =
-            oidc_roles(&config, "someone", Some("admin@example.com")).expect("roles parse");
+        let email_roles = oidc_roles(&config, "subject-2", "someone", Some("admin@example.com"))
+            .expect("roles parse");
         assert!(email_roles.contains(&Role::Admin));
+    }
+
+    #[test]
+    fn oidc_admin_allowlist_matches_immutable_subject() {
+        let mut config = test_config();
+        config.oidc_admin_users = "327680913418715137".to_owned();
+
+        // Degraded claims: username fell back to the raw subject, no email.
+        // The allowlisted subject must still grant admin (#299).
+        let roles = oidc_roles(&config, "327680913418715137", "327680913418715137", None)
+            .expect("roles parse");
+        assert!(roles.contains(&Role::Admin));
+
+        // Subjects are matched verbatim — a different subject stays default.
+        let other = oidc_roles(&config, "999999999999999999", "999999999999999999", None)
+            .expect("roles parse");
+        assert!(!other.contains(&Role::Admin));
+    }
+
+    #[test]
+    fn oidc_degraded_claims_are_detected() {
+        let mut claims = OidcIdClaims {
+            iss: "https://issuer.example.com".to_owned(),
+            sub: "subject-1".to_owned(),
+            aud: serde_json::Value::String("client".to_owned()),
+            exp: 0,
+            nonce: None,
+            email: Some("admin@example.com".to_owned()),
+            email_verified: None,
+            preferred_username: None,
+            at_hash: None,
+        };
+        // Unverified email + no preferred_username → degraded.
+        assert!(oidc_claims_degraded(&claims));
+
+        claims.email_verified = Some(true);
+        assert!(!oidc_claims_degraded(&claims));
+
+        claims.email_verified = None;
+        claims.preferred_username = Some("rressl".to_owned());
+        assert!(!oidc_claims_degraded(&claims));
+
+        // A whitespace-only preferred_username carries no identity.
+        claims.preferred_username = Some("  ".to_owned());
+        assert!(oidc_claims_degraded(&claims));
     }
 
     #[test]
@@ -7394,7 +7482,7 @@ mod tests {
         let mut config = test_config();
         config.oidc_default_roles = "viewer reviewer viewer".to_owned();
         assert_eq!(
-            oidc_roles(&config, "user", None).expect("roles parse"),
+            oidc_roles(&config, "subject-1", "user", None).expect("roles parse"),
             vec![Role::Viewer, Role::Reviewer]
         );
     }
