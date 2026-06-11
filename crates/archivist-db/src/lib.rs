@@ -5741,6 +5741,104 @@ pub async fn fail_job(
     Ok(true)
 }
 
+/// Release a claimed job lease back to the queue without burning an attempt —
+/// used when the worker discovers the active provider for the job's stage is
+/// in cooldown. `attempts` is decremented to undo the increment performed by
+/// `claim_jobs`, so the per-job retry budget is preserved for the next cycle.
+/// `run_after` is set to the cooldown expiry so the job is not re-claimed
+/// before the provider is plausibly back.
+///
+/// Fenced on lease ownership and the running state (like `complete_job` /
+/// `fail_job`): a worker whose lease was already reclaimed must not requeue
+/// and decrement attempts on a job another replica is now legitimately
+/// running. Returns `false` when the lease was lost (no row matched). #253.
+///
+/// The released job's run is flipped back to `queued` and the change is
+/// mirrored onto `document_inventory.current_run_status` in the same
+/// transaction, like `claim_jobs`/`recover_stale_leases` do. The pre-#303
+/// worker-local variant only updated `jobs`, which parked the run on
+/// `running` with zero running jobs until the startup repair
+/// `reset_stuck_running_pipeline_runs` flipped it — without mirroring. That
+/// pair of gaps is what left ~10% of production inventory rows with a stale
+/// `running` badge. #303.
+pub async fn release_job_lease_for_cooldown(
+    pool: &DbPool,
+    job: &JobRecord,
+    lease_owner: &str,
+    cooldown_until: DateTime<Utc>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let released = sqlx::query(
+        r#"
+        update jobs
+           set status      = 'queued',
+               run_after   = $3,
+               attempts    = greatest(attempts - 1, 0),
+               lease_owner = null,
+               lease_until = null,
+               updated_at  = now()
+         where id = $1
+           and lease_owner = $2
+           and status = 'running'
+        "#,
+    )
+    .bind(job.id)
+    .bind(lease_owner)
+    .bind(cooldown_until)
+    .execute(&mut *tx)
+    .await?;
+
+    // Lease lost: another replica reclaimed the stale lease and owns this job
+    // now. Roll back without touching run/inventory state so we don't fight
+    // the worker that took over.
+    if released.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    sqlx::query(
+        r#"
+        update pipeline_runs
+           set status = 'queued',
+               updated_at = now()
+         where id = $1
+           and status = 'running'
+           and not exists (
+             select 1 from jobs
+              where run_id = $1
+                and status = 'running'
+           )
+        "#,
+    )
+    .bind(job.run_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Mirror whatever the run's status now is, rather than hardcoding
+    // 'queued': if the guard above skipped the run flip, copying the actual
+    // status keeps the mirror invariant (current_run_status follows the run
+    // that last_run_id points at) instead of introducing the opposite drift.
+    sqlx::query(
+        r#"
+        update document_inventory di
+           set current_run_status = pr.status,
+               updated_at = now()
+          from pipeline_runs pr
+         where pr.id = $2
+           and di.paperless_document_id = $1
+           and di.last_run_id = pr.id
+           and di.current_run_status is distinct from pr.status
+        "#,
+    )
+    .bind(job.paperless_document_id)
+    .bind(job.run_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// Insert a review item for `job` and flip job/run/inventory to
 /// `waiting_review`. Like `complete_job`/`fail_job`, the job update is fenced
 /// on `lease_owner`: a worker whose lease was reclaimed gets `Ok(None)` and
@@ -8346,9 +8444,10 @@ pub async fn reset_stuck_running_pipeline_runs(pool: &DbPool) -> Result<StuckRun
              select 1 from jobs j
               where j.run_id = pr.id and j.status in ('queued', 'waiting_review')
            )
+        returning pr.id
         "#,
     )
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
     let to_succeeded = sqlx::query(
         r#"
@@ -8360,11 +8459,41 @@ pub async fn reset_stuck_running_pipeline_runs(pool: &DbPool) -> Result<StuckRun
               where j.run_id = pr.id
                 and j.status in ('queued', 'running', 'waiting_review', 'failed')
            )
+        returning pr.id
         "#,
     )
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
-    let runs_reset = (to_queued.rows_affected() + to_succeeded.rows_affected()) as i64;
+    let flipped_run_ids = to_queued
+        .iter()
+        .chain(to_succeeded.iter())
+        .map(|row| row.try_get::<Uuid, _>("id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    // Mirror the new run status onto document_inventory.current_run_status.
+    // Pre-#303 this helper skipped the mirror, so every cooldown-released
+    // run it repaired left its inventory row showing a stale 'running' badge
+    // (~10% of production rows) that polluted the inventory run-status
+    // filter, the dashboard stage running counts and the running KPI. Only
+    // rows whose last_run_id points at a flipped run are touched — if a newer
+    // run owns the row, that run's own write sites govern the mirror. #303.
+    if !flipped_run_ids.is_empty() {
+        sqlx::query(
+            r#"
+            update document_inventory di
+               set current_run_status = pr.status,
+                   updated_at = now()
+              from pipeline_runs pr
+             where pr.id = any($1)
+               and di.last_run_id = pr.id
+               and di.current_run_status is distinct from pr.status
+            "#,
+        )
+        .bind(&flipped_run_ids)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let runs_reset = (to_queued.len() + to_succeeded.len()) as i64;
 
     if runs_reset > 0 {
         append_audit_tx(
@@ -8378,8 +8507,8 @@ pub async fn reset_stuck_running_pipeline_runs(pool: &DbPool) -> Result<StuckRun
                 paperless_document_id: None,
                 before: None,
                 after: Some(json!({
-                    "to_queued": to_queued.rows_affected(),
-                    "to_succeeded": to_succeeded.rows_affected(),
+                    "to_queued": to_queued.len(),
+                    "to_succeeded": to_succeeded.len(),
                 })),
                 metadata: Some(json!({
                     "trigger": "startup_one_shot",

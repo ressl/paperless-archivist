@@ -28,10 +28,11 @@ use archivist_db::{
     list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
     named_entity_id_for_name, paperless_sync_cursor, queue_missing_pipeline,
     rebalance_backfilled_metadata_priorities, record_dashboard_snapshot, record_document_language,
-    requeue_vision_crashed_jobs, reset_stale_applying_reviews, reset_stuck_running_pipeline_runs,
-    resolve_secret, revert_review_to_pending_after_failed_drain, selector_document_budget,
-    tag_id_pairs_for_names, tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
-    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+    release_job_lease_for_cooldown, requeue_vision_crashed_jobs, reset_stale_applying_reviews,
+    reset_stuck_running_pipeline_runs, resolve_secret, revert_review_to_pending_after_failed_drain,
+    selector_document_budget, tag_id_pairs_for_names, tag_ids_for_names,
+    update_paperless_sync_cursor, upsert_inventory_item, upsert_paperless_custom_field,
+    upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{
     normalize_ocr_pages, render_document_pages, strip_code_fences, validate_ocr_text,
@@ -1132,37 +1133,22 @@ async fn active_cooldown_for_stage(
 /// performed by `claim_jobs`, so the per-job retry budget is preserved
 /// for the next cycle. `run_after` is set to the cooldown expiry so the
 /// job is not re-claimed before the provider is plausibly back.
+///
+/// Delegates to [`release_job_lease_for_cooldown`], which also flips the
+/// run back to `queued` and mirrors `document_inventory.current_run_status`
+/// in the same transaction — the worker-local variant only updated `jobs`,
+/// which is how cooldown releases used to strand runs on `running` and
+/// (via the startup repair) drift the inventory mirror. #303.
 async fn release_lease_for_cooldown(
     pool: &DbPool,
     job: &JobRecord,
     lease_owner: &str,
     cooldown_until: DateTime<Utc>,
 ) -> Result<()> {
-    // Fence on lease ownership and the running state (like complete_job /
-    // fail_job): a worker whose lease was already reclaimed must not requeue
-    // and decrement attempts on a job another replica is now legitimately
-    // running. #253.
-    let released = sqlx::query(
-        r#"
-        update jobs
-           set status      = 'queued',
-               run_after   = $3,
-               attempts    = greatest(attempts - 1, 0),
-               lease_owner = null,
-               lease_until = null,
-               updated_at  = now()
-         where id = $1
-           and lease_owner = $2
-           and status = 'running'
-        "#,
-    )
-    .bind(job.id)
-    .bind(lease_owner)
-    .bind(cooldown_until)
-    .execute(pool)
-    .await
-    .context("release lease for provider cooldown")?;
-    if released.rows_affected() == 0 {
+    let released = release_job_lease_for_cooldown(pool, job, lease_owner, cooldown_until)
+        .await
+        .context("release lease for provider cooldown")?;
+    if !released {
         warn!(
             job_id = %job.id,
             "skipped cooldown lease release: lease no longer owned by this worker"
