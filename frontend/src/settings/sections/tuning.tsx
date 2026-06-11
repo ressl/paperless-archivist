@@ -9,7 +9,7 @@ import {
 } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
 import { errorToString } from '../../lib/ui';
-import { isOllamaCloudProvider, optionalNumber } from './helpers';
+import { isOllamaCloudProvider } from './helpers';
 
 // ---------------------------------------------------------------------------
 // Provider tuning presets (v1.6.2). Mirror `ai_provider_defaults` in the
@@ -289,6 +289,7 @@ export function TuningDisclosure({
             min={0}
             max={1}
             step={0.05}
+            integer={false}
             onChange={(value) => onChangeTuning({ metadata_confidence_threshold: value })}
           />
           <TuningNumberField
@@ -298,6 +299,7 @@ export function TuningDisclosure({
             min={0}
             max={1}
             step={0.05}
+            integer={false}
             onChange={(value) => onChangeTuning({ title_confidence_threshold: value })}
           />
           <TuningNumberField
@@ -307,6 +309,7 @@ export function TuningDisclosure({
             min={0}
             max={1}
             step={0.05}
+            integer={false}
             onChange={(value) => onChangeTuning({ correspondent_confidence_threshold: value })}
           />
           <TuningNumberField
@@ -316,6 +319,7 @@ export function TuningDisclosure({
             min={0}
             max={1}
             step={0.05}
+            integer={false}
             onChange={(value) => onChangeTuning({ document_type_confidence_threshold: value })}
           />
           <TuningNumberField
@@ -325,6 +329,7 @@ export function TuningDisclosure({
             min={0}
             max={1}
             step={0.05}
+            integer={false}
             onChange={(value) => onChangeTuning({ document_date_confidence_threshold: value })}
           />
           <TuningNumberField
@@ -334,6 +339,7 @@ export function TuningDisclosure({
             min={0}
             max={1}
             step={0.05}
+            integer={false}
             onChange={(value) => onChangeTuning({ tags_confidence_threshold: value })}
           />
           <TuningNumberField
@@ -343,6 +349,7 @@ export function TuningDisclosure({
             min={0}
             max={1}
             step={0.05}
+            integer={false}
             onChange={(value) => onChangeTuning({ fields_confidence_threshold: value })}
           />
           <TuningNumberField
@@ -397,7 +404,7 @@ function TuningSection({
   );
 }
 
-function TuningNumberField({
+export function TuningNumberField({
   field,
   value,
   defaultValue,
@@ -405,6 +412,7 @@ function TuningNumberField({
   min,
   max,
   step,
+  integer = true,
   onChange
 }: {
   field: TuningField;
@@ -414,12 +422,38 @@ function TuningNumberField({
   min?: number;
   max?: number;
   step?: number;
+  integer?: boolean;
   onChange: (next: number | null) => void;
 }) {
   const { t } = useI18n();
   // value === null / undefined => render empty (operator sees "inherits default").
   // value === 0 => render '0' (explicit zero is preserved).
-  const display = value === null || value === undefined ? '' : String(value);
+  const text = value === null || value === undefined ? '' : String(value);
+  const [raw, setRaw] = useState(text);
+  useEffect(() => {
+    setRaw(text);
+  }, [text]);
+  // Blur-commit like lib/ui's NumberField (#284): hold the raw draft while
+  // typing and only parse on blur, rounded (most fields are unsigned integers
+  // on the backend — Option<u32>/u16) and clamped into [min, max]. The old
+  // per-keystroke commit let negatives/fractions through, and the backend
+  // rejected the whole settings save with an opaque body-level 422 (#314).
+  // Empty or unparsable input commits `null` = "inherit the global default".
+  const commit = () => {
+    const trimmed = raw.trim();
+    const parsed = trimmed === '' ? NaN : Number(trimmed);
+    if (!Number.isFinite(parsed)) {
+      onChange(null);
+      setRaw('');
+      return;
+    }
+    let next = parsed;
+    if (integer) next = Math.round(next);
+    if (min != null) next = Math.max(min, next);
+    if (max != null) next = Math.min(max, next);
+    onChange(next);
+    setRaw(String(next));
+  };
   const labelKey = `settings.tuning.field.${field}` as Parameters<typeof t>[0];
   const renderedDefault =
     defaultLabel ??
@@ -434,9 +468,10 @@ function TuningNumberField({
         min={min}
         max={max}
         step={step}
-        value={display}
+        value={raw}
         placeholder={defaultValue !== null && defaultValue !== undefined ? String(defaultValue) : ''}
-        onChange={(event) => onChange(optionalNumber(event.target.value))}
+        onChange={(event) => setRaw(event.target.value)}
+        onBlur={commit}
       />
       <small className="field-hint">{renderedDefault}</small>
     </label>

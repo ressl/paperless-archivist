@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, GitCompare, History, Info, Play, RotateCcw, Save } from 'lucide-react';
 import { api, Prompt, PromptExperiment, PromptTestResponse, PromptUsage, Stage } from '../api/client';
 import { promptStageHelp, promptStageOrder, type PromptStageHelp } from '../data/promptHelp';
-import { useI18n } from '../i18n/I18nProvider';
+import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
 import { formatMs } from '../lib/format';
 
@@ -89,7 +89,21 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
     }
   }, [activePrompt?.id, selectedPromptId, stagePrompts]);
 
+  // The reset effect below also fires on the new array identities every
+  // background `load()` produces (e.g. after "Activate selected"), not only on
+  // a real selection change. Track which prompt the editor was last synced
+  // from plus the live dirty flag (in refs, so they don't retrigger the
+  // effect) and skip the reset while the same prompt stays selected with
+  // unsaved edits — otherwise activating a version silently discarded the
+  // operator's draft (#314).
+  const promptDirtyRef = useRef(promptDirty);
+  promptDirtyRef.current = promptDirty;
+  const editorSyncedPromptIdRef = useRef<string | null | undefined>(undefined);
+
   useEffect(() => {
+    const selectedId = selectedPrompt?.id ?? null;
+    if (editorSyncedPromptIdRef.current === selectedId && promptDirtyRef.current) return;
+    editorSyncedPromptIdRef.current = selectedId;
     if (selectedPrompt) {
       setEditorName(selectedPrompt.name);
       setEditorContent(selectedPrompt.content);
@@ -172,7 +186,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                     {stagePrompts.length === 0 && <option value="">{t('prompts.new_prompt')}</option>}
                     {stagePrompts.map((prompt) => (
                       <option key={prompt.id} value={prompt.id}>
-                        {promptOptionLabel(prompt)}
+                        {promptOptionLabel(prompt, t)}
                       </option>
                     ))}
                   </select>
@@ -379,7 +393,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
               {stagePrompts
                 .filter((prompt) => prompt.id !== selectedPrompt?.id)
                 .map((prompt) => (
-                  <option key={prompt.id} value={prompt.id}>{promptOptionLabel(prompt)}</option>
+                  <option key={prompt.id} value={prompt.id}>{promptOptionLabel(prompt, t)}</option>
                 ))}
             </select>
           </label>
@@ -454,8 +468,8 @@ function formatRate(part: number, total: number) {
   return `${((part / total) * 100).toFixed(1)}%`;
 }
 
-function promptOptionLabel(prompt: Prompt) {
-  return `${prompt.name} v${prompt.version}${prompt.active ? ' (active)' : ''}`;
+function promptOptionLabel(prompt: Prompt, t: TFunction) {
+  return `${prompt.name} v${prompt.version}${prompt.active ? ` (${t('prompts.active_marker')})` : ''}`;
 }
 
 function promptTextStats(value: string) {
