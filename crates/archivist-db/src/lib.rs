@@ -3288,6 +3288,11 @@ pub async fn provider_bucket_entries(
 // time-series views from these rows in Rust (one DB round-trip each).
 
 /// One (bucket × provider × model × stage) AI-usage cell.
+///
+/// No p95 here on purpose: percentiles cannot be re-aggregated across the
+/// per-cell grain this query returns, so a per-cell p95 was computed but
+/// never surfaced. Dropped rather than exposing a misleading number (#312);
+/// the dashboard's `provider_usage` computes its p95 over the raw rows.
 #[derive(Debug, Clone)]
 pub struct StatisticsUsageRow {
     pub bucket: DateTime<Utc>,
@@ -3298,7 +3303,6 @@ pub struct StatisticsUsageRow {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub avg_duration_ms: Option<f64>,
-    pub p95_duration_ms: Option<f64>,
 }
 
 /// AI-usage cells over a custom `[from, to)` range, bucketed by `trunc`
@@ -3334,8 +3338,7 @@ pub async fn statistics_usage_rows(
                  then (response ->> 'eval_count')::bigint else 0 end +
             page_usage.output_tokens
           ), 0)::bigint as output_tokens,
-          avg(duration_ms)::double precision as avg_duration_ms,
-          percentile_cont(0.95) within group (order by duration_ms)::double precision as p95_duration_ms
+          avg(duration_ms)::double precision as avg_duration_ms
         from ai_artifacts ai
         -- Pre-v1.12 OCR artifacts only carry per-page token counters under
         -- `pages`; sum those when no flattened top-level `usage` exists (which
@@ -3384,7 +3387,6 @@ pub async fn statistics_usage_rows(
                 input_tokens: row.try_get("input_tokens")?,
                 output_tokens: row.try_get("output_tokens")?,
                 avg_duration_ms: row.try_get("avg_duration_ms")?,
-                p95_duration_ms: row.try_get("p95_duration_ms")?,
             })
         })
         .collect()

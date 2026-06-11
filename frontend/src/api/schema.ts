@@ -1060,6 +1060,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/statistics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Usage, cost and pipeline-throughput analytics over a custom time range for the Statistics page. Defaults apply only when a parameter is absent or blank; a present-but-unparseable value is rejected with 400. */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Inclusive range start: an RFC3339 timestamp or a bare YYYY-MM-DD date (the day's first instant, UTC). Defaults to `to` minus 30 days. */
+                    from?: string;
+                    /** @description Exclusive range end: an RFC3339 timestamp or a bare YYYY-MM-DD date. A bare date means the END of that day (the next UTC midnight), so `from` and `to` naming the same day cover exactly that day. Defaults to now. */
+                    to?: string;
+                    /** @description Time-series bucket granularity. */
+                    bucket?: "hour" | "day" | "week" | "month";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Statistics summary, zero-filled time series and breakdowns */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["StatisticsResponse"];
+                    };
+                };
+                /** @description Unparseable from/to, from not before to, or unknown bucket */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workflow/mode": {
         parameters: {
             query?: never;
@@ -2759,6 +2809,75 @@ export interface components {
         DashboardResponse: {
             counts: components["schemas"]["BacklogCounts"];
             stats: components["schemas"]["DashboardStats"];
+        };
+        StatisticsSummary: {
+            /** Format: int64 */
+            request_count: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: double */
+            avg_duration_ms?: number | null;
+            /** Format: double */
+            estimated_cost_usd?: number | null;
+            /** Format: int64 */
+            jobs_succeeded: number;
+            /** Format: int64 */
+            jobs_failed: number;
+            /** Format: int64 */
+            jobs_cancelled: number;
+        };
+        StatisticsTimePoint: {
+            /** Format: date-time */
+            bucket: string;
+            /** Format: int64 */
+            request_count: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: double */
+            avg_duration_ms?: number | null;
+        };
+        StatisticsThroughputPoint: {
+            /** Format: date-time */
+            bucket: string;
+            /** Format: int64 */
+            succeeded: number;
+            /** Format: int64 */
+            failed: number;
+            /** Format: int64 */
+            cancelled: number;
+        };
+        StatisticsBreakdownRow: {
+            provider?: string;
+            model?: string;
+            stage?: string;
+            /** Format: int64 */
+            request_count: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: double */
+            avg_duration_ms?: number | null;
+            /** Format: double */
+            estimated_cost_usd?: number | null;
+        };
+        StatisticsResponse: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /** @enum {string} */
+            bucket: "hour" | "day" | "week" | "month";
+            summary: components["schemas"]["StatisticsSummary"];
+            time_series: components["schemas"]["StatisticsTimePoint"][];
+            throughput_series: components["schemas"]["StatisticsThroughputPoint"][];
+            by_provider: components["schemas"]["StatisticsBreakdownRow"][];
+            by_model: components["schemas"]["StatisticsBreakdownRow"][];
+            by_stage: components["schemas"]["StatisticsBreakdownRow"][];
         };
         DocumentInventoryItem: {
             debug_context?: components["schemas"]["WorkflowDebugContext"] | null;

@@ -53,7 +53,7 @@ use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use cookie::{Cookie, SameSite};
 use jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER as JWT_CRYPTO_PROVIDER;
 use jsonwebtoken::jwk::JwkSet;
@@ -3129,21 +3129,111 @@ fn parse_stat_datetime(raw: &str, bound: StatBound) -> Option<DateTime<Utc>> {
 /// Resolve the statistics range from the raw query parameters. Defaults:
 /// `to` = `now`, `from` = `to` - 30 days — so the default view always ends at
 /// the current instant and includes today's data.
+///
+/// Defaults apply only when a bound is absent (or blank); a value that is
+/// present but unparseable is rejected with 400 instead of being silently
+/// swapped for the default, which hid typos behind a wrong-looking range. #312
 fn resolve_stat_range(
     from: Option<&str>,
     to: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
-    let to = to
-        .and_then(|raw| parse_stat_datetime(raw, StatBound::End))
-        .unwrap_or(now);
-    let from = from
-        .and_then(|raw| parse_stat_datetime(raw, StatBound::Start))
-        .unwrap_or(to - Duration::days(30));
+    let to = match to.map(str::trim).filter(|raw| !raw.is_empty()) {
+        None => now,
+        Some(raw) => parse_stat_datetime(raw, StatBound::End).ok_or_else(|| {
+            ApiError::bad_request("'to' must be an RFC3339 timestamp or a YYYY-MM-DD date")
+        })?,
+    };
+    let from = match from.map(str::trim).filter(|raw| !raw.is_empty()) {
+        None => to - Duration::days(30),
+        Some(raw) => parse_stat_datetime(raw, StatBound::Start).ok_or_else(|| {
+            ApiError::bad_request("'from' must be an RFC3339 timestamp or a YYYY-MM-DD date")
+        })?,
+    };
     if from >= to {
         return Err(ApiError::bad_request("'from' must be before 'to'"));
     }
     Ok((from, to))
+}
+
+/// Hard ceiling for the zero-filled statistics axis (#312). Covers 90 days of
+/// hour buckets (2160) with headroom and ~6.8 years of day buckets; past the
+/// cap (e.g. hour buckets over a multi-year span) the series simply stay
+/// sparse.
+const MAX_STATISTICS_BUCKETS: usize = 2500;
+
+/// Floor `ts` to the statistics bucket unit, mirroring Postgres
+/// `date_trunc(unit, ts)` under a UTC session: weeks start on the ISO Monday,
+/// months on the 1st.
+fn statistics_bucket_floor(ts: DateTime<Utc>, bucket: &str) -> DateTime<Utc> {
+    let date = ts.date_naive();
+    let (date, hour) = match bucket {
+        "hour" => (date, ts.hour()),
+        "week" => (
+            date - Duration::days(i64::from(date.weekday().num_days_from_monday())),
+            0,
+        ),
+        "month" => (date.with_day(1).unwrap_or(date), 0),
+        // "day" (the only other validated unit)
+        _ => (date, 0),
+    };
+    date.and_hms_opt(hour, 0, 0)
+        .map(|naive| Utc.from_utc_datetime(&naive))
+        .unwrap_or(ts)
+}
+
+/// The start of the bucket after `cursor`: hour/day/week step by a fixed
+/// span, month advances to the 1st of the next month (mirroring
+/// `dashboard_bucket_labels`).
+fn statistics_bucket_next(cursor: DateTime<Utc>, bucket: &str) -> Option<DateTime<Utc>> {
+    match bucket {
+        "hour" => Some(cursor + Duration::hours(1)),
+        "week" => Some(cursor + Duration::days(7)),
+        "month" => {
+            let (year, month) = if cursor.month() == 12 {
+                (cursor.year() + 1, 1)
+            } else {
+                (cursor.year(), cursor.month() + 1)
+            };
+            Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single()
+        }
+        _ => Some(cursor + Duration::days(1)),
+    }
+}
+
+/// Every bucket start covering `[from, to)`, used to zero-fill the statistics
+/// time series so quiet periods chart as 0 instead of being skipped (the SQL
+/// GROUP BY only yields non-empty buckets). #312
+///
+/// The axis never extends before the first bucket that actually holds data:
+/// the "all time" preset sends a far-past sentinel `from`, and mirroring the
+/// dashboard — whose "all" range starts at the earliest record — keeps that
+/// meaning "the recorded span", not decades of empty buckets. Without any
+/// data the requested range itself is enumerated, so the default view still
+/// renders a flat zero axis. Spans past `MAX_STATISTICS_BUCKETS` return an
+/// empty list and the series simply stay sparse.
+fn statistics_bucket_starts(
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    bucket: &str,
+    earliest_data: Option<DateTime<Utc>>,
+) -> Vec<DateTime<Utc>> {
+    let mut cursor = statistics_bucket_floor(from, bucket);
+    if let Some(earliest) = earliest_data {
+        cursor = cursor.max(earliest);
+    }
+    let mut starts = Vec::new();
+    while cursor < to {
+        if starts.len() >= MAX_STATISTICS_BUCKETS {
+            return Vec::new();
+        }
+        starts.push(cursor);
+        match statistics_bucket_next(cursor, bucket) {
+            Some(next) if next > cursor => cursor = next,
+            _ => break,
+        }
+    }
+    starts
 }
 
 #[derive(Default, Clone)]
@@ -3267,6 +3357,15 @@ async fn statistics(
                 tot_cancel += row.job_count;
             }
         }
+    }
+
+    // Zero-fill the shared bucket axis so both charts plot every bucket of
+    // the range and quiet periods show as 0 instead of being compressed
+    // away. #312
+    let earliest_data = series.keys().chain(throughput_series.keys()).min().copied();
+    for bucket_start in statistics_bucket_starts(from, to, &bucket, earliest_data) {
+        series.entry(bucket_start).or_default();
+        throughput_series.entry(bucket_start).or_default();
     }
 
     let total_cost: Option<f64> = {
@@ -7150,6 +7249,112 @@ mod tests {
 
         // Inverted bounds are still rejected.
         assert!(resolve_stat_range(Some("2026-06-11"), Some("2026-06-10"), now).is_err());
+    }
+
+    #[test]
+    fn statistics_unparseable_bounds_are_rejected() {
+        // #312: defaults only apply to ABSENT bounds; garbage is a 400, not a
+        // silent fallback to the default range.
+        let now = utc(2026, 6, 11, 15, 45, 0);
+        assert!(resolve_stat_range(Some("not-a-date"), None, now).is_err());
+        assert!(resolve_stat_range(None, Some("2026-13-77"), now).is_err());
+
+        // Blank values count as absent, not as garbage.
+        let (from, to) = resolve_stat_range(Some(" "), Some(""), now).expect("blank = defaults");
+        assert_eq!(to, now);
+        assert_eq!(from, now - Duration::days(30));
+    }
+
+    #[test]
+    fn statistics_bucket_floor_mirrors_date_trunc() {
+        let ts = utc(2026, 6, 11, 15, 45, 7); // a Thursday
+        assert_eq!(
+            statistics_bucket_floor(ts, "hour"),
+            utc(2026, 6, 11, 15, 0, 0)
+        );
+        assert_eq!(
+            statistics_bucket_floor(ts, "day"),
+            utc(2026, 6, 11, 0, 0, 0)
+        );
+        // date_trunc('week') floors to the ISO Monday.
+        assert_eq!(
+            statistics_bucket_floor(ts, "week"),
+            utc(2026, 6, 8, 0, 0, 0)
+        );
+        assert_eq!(
+            statistics_bucket_floor(ts, "month"),
+            utc(2026, 6, 1, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn statistics_bucket_next_steps_each_granularity() {
+        let monday = utc(2026, 6, 8, 0, 0, 0);
+        assert_eq!(
+            statistics_bucket_next(monday, "hour"),
+            Some(utc(2026, 6, 8, 1, 0, 0))
+        );
+        assert_eq!(
+            statistics_bucket_next(monday, "day"),
+            Some(utc(2026, 6, 9, 0, 0, 0))
+        );
+        assert_eq!(
+            statistics_bucket_next(monday, "week"),
+            Some(utc(2026, 6, 15, 0, 0, 0))
+        );
+        assert_eq!(
+            statistics_bucket_next(utc(2026, 6, 1, 0, 0, 0), "month"),
+            Some(utc(2026, 7, 1, 0, 0, 0))
+        );
+        // Month rollover across the year boundary.
+        assert_eq!(
+            statistics_bucket_next(utc(2026, 12, 1, 0, 0, 0), "month"),
+            Some(utc(2027, 1, 1, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn statistics_zero_fill_enumerates_the_requested_range() {
+        // #312: every bucket of [from, to) appears, including empty interior /
+        // trailing ones, mirroring dashboard_bucket_labels. With no data at
+        // all the requested range itself is enumerated (flat zero axis).
+        let from = utc(2026, 6, 9, 12, 0, 0);
+        let to = utc(2026, 6, 11, 15, 45, 0);
+        assert_eq!(
+            statistics_bucket_starts(from, to, "day", None),
+            vec![
+                utc(2026, 6, 9, 0, 0, 0),
+                utc(2026, 6, 10, 0, 0, 0),
+                utc(2026, 6, 11, 0, 0, 0),
+            ]
+        );
+        // The axis never starts before the first bucket holding data.
+        assert_eq!(
+            statistics_bucket_starts(from, to, "day", Some(utc(2026, 6, 10, 0, 0, 0))),
+            vec![utc(2026, 6, 10, 0, 0, 0), utc(2026, 6, 11, 0, 0, 0)]
+        );
+    }
+
+    #[test]
+    fn statistics_zero_fill_clamps_all_time_to_earliest_data() {
+        // "all time" (far-past from): the axis starts at the earliest bucket
+        // that actually has data, mirroring the dashboard's "all" range...
+        let from = utc(2000, 1, 1, 0, 0, 0);
+        let to = utc(2026, 6, 11, 15, 0, 0);
+        let earliest = Some(utc(2026, 6, 9, 0, 0, 0));
+        assert_eq!(
+            statistics_bucket_starts(from, to, "day", earliest),
+            vec![
+                utc(2026, 6, 9, 0, 0, 0),
+                utc(2026, 6, 10, 0, 0, 0),
+                utc(2026, 6, 11, 0, 0, 0),
+            ]
+        );
+        // ...stays sparse without any data (the sentinel span blows the cap)...
+        assert!(statistics_bucket_starts(from, to, "day", None).is_empty());
+        // ...and stays sparse when even the data span exceeds the cap.
+        let ancient = Some(utc(2000, 2, 7, 0, 0, 0));
+        assert!(statistics_bucket_starts(from, to, "hour", ancient).is_empty());
     }
 
     #[test]
