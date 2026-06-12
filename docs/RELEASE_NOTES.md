@@ -6,6 +6,31 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.13.1 — Ship the reworked prompts to running systems (migration)
+
+v1.13.0 changed the `DEFAULT_*_SYSTEM_PROMPT` **constants**, but those are only a
+fallback that is never reached: the active prompts are DB rows seeded once by
+migration `0008_default_prompt_pack.sql`, and `get_active_prompt` always returns
+that row. So the v1.13.0 prompt rework did not actually reach any deployment —
+existing or new. This release fixes that.
+
+- **Migration `0045_upgrade_default_prompts.sql`** upgrades the seeded `default`
+  metadata and ocr prompts to the v1.13.0 text on deploy, as a new prompt
+  version (the old version is kept, inactive, as history). After upgrading, the
+  dashboard prompt workbench shows the new version active and the worker serves
+  it on the next job — no manual paste.
+- **Customizations are protected.** The upgrade is guarded by the previous
+  content's md5: only a prompt whose content still hashes to the untouched 0008
+  seed is replaced. Any operator edit changes the hash, so a customized prompt
+  is left exactly as-is. A running A/B experiment (`experiment_group` set) is
+  also left intact.
+
+If you already pasted the new text by hand, your active prompt no longer matches
+the seed hash, so the migration is a no-op for you — you keep your version.
+
+**Forward-only, data-only; safe to roll the binary back** (prompts are data, and
+any build serves whichever version is active). No schema change.
+
 ## v1.13.0 — Re-run-all-failed button, reworked extraction prompts, empty-field hardening
 
 Three changes, two of them validated by an empirical A/B test on the live model.
