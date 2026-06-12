@@ -22,9 +22,9 @@ use archivist_db::{
     append_audit, apply_security_retention, connect, consume_oidc_login_state, count_reviews,
     create_document_chat_session, create_oidc_login_state, create_run_with_jobs_with_priority,
     create_runs_for_documents, create_session, create_user_with_roles, dashboard_bucket_labels,
-    dashboard_range_start, document_chat_session_visible, find_api_token, find_session,
-    find_user_for_login, get_backlog_counts, get_dashboard_live_status, get_dashboard_stats,
-    get_runtime_settings, has_any_user, hash_token, increment_metric_counter,
+    dashboard_range_start, document_chat_session_visible, failed_document_ids, find_api_token,
+    find_session, find_user_for_login, get_backlog_counts, get_dashboard_live_status,
+    get_dashboard_stats, get_runtime_settings, has_any_user, hash_token, increment_metric_counter,
     insert_document_chat_message, insert_document_chat_sources, latest_apply_audit_for_run,
     latest_metadata_artifact_for_run, latest_metadata_run_for_document, list_audit_events,
     list_document_chat_messages, list_document_chat_sessions, list_inventory,
@@ -389,6 +389,7 @@ fn router(state: AppState) -> Router {
         .route("/batches/ocr", post(queue_ocr_batch))
         .route("/batches/full", post(queue_full_batch))
         .route("/batches/rerun", post(rerun_batch))
+        .route("/batches/rerun-failed", post(rerun_failed_batch))
         .route("/reviews", get(reviews))
         .route("/reviews/batch", post(batch_review))
         .route("/reviews/auto-fix-preview", post(auto_fix_preview))
@@ -5032,6 +5033,50 @@ async fn rerun_batch(
     Span::current().record("queued", queued);
     info!(queued, "queued bulk re-run batch");
     Ok(Json(json!({ "queued": queued })))
+}
+
+/// Re-run every document the dashboard counts as failed (a failed `ocr` or
+/// `metadata` stage, no active run) in one click, so an operator does not have
+/// to filter the inventory and hand-select after an upstream incident.
+/// Idempotent: documents already being reprocessed are skipped by the
+/// per-document active-run guard, so a double click cannot duplicate runs.
+async fn rerun_failed_batch(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::WriteBatches)?;
+    if let Some(user_id) = auth.0.user_id {
+        Span::current().record("user_id", tracing::field::display(user_id));
+    }
+
+    let document_ids = failed_document_ids(&state.pool).await?;
+    if document_ids.is_empty() {
+        return Ok(Json(json!({ "queued": 0, "candidates": 0 })));
+    }
+
+    let settings = get_runtime_settings(&state.pool).await?;
+    // Re-run both stages: OCR is page-cached so a still-good result is cheap to
+    // revalidate and a failed OCR is redone. Priority 0 jumps ahead of
+    // age-derived auto-selected runs, mirroring the hand-picked rerun.
+    let queued = create_runs_for_documents(
+        &state.pool,
+        &document_ids,
+        &[Stage::Ocr, Stage::Metadata],
+        settings.workflow.mode,
+        "rerun-failed",
+        &auth.0.actor_type,
+        Some(0),
+    )
+    .await?;
+    Span::current().record("queued", queued);
+    info!(
+        queued,
+        candidates = document_ids.len(),
+        "queued re-run of all failed documents"
+    );
+    Ok(Json(
+        json!({ "queued": queued, "candidates": document_ids.len() }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

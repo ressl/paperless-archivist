@@ -186,6 +186,7 @@ const nlMessages: Record<MessageKey, string> = {
   'dashboard.action.sync': 'Synchroniseren',
   'dashboard.action.queue_ocr': 'OCR in wachtrij',
   'dashboard.action.queue_full': 'Full in wachtrij',
+  'dashboard.action.rerun_failed': 'Mislukte opnieuw',
   'dashboard.auto.title': 'Automatische verwerking',
   'dashboard.auto.processing_mode': 'Verwerkingsmodus',
   'dashboard.auto.updating': 'Bijwerken...',

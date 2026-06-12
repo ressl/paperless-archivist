@@ -184,6 +184,7 @@ export const enMessages = {
   'dashboard.action.sync': 'Sync',
   'dashboard.action.queue_ocr': 'Queue OCR',
   'dashboard.action.queue_full': 'Queue Full',
+  'dashboard.action.rerun_failed': 'Re-run all failed',
   'dashboard.auto.title': 'Auto Processing',
   'dashboard.auto.processing_mode': 'Processing mode',
   'dashboard.auto.updating': 'Updating...',

@@ -186,6 +186,7 @@ const deMessages: Record<MessageKey, string> = {
   'dashboard.action.sync': 'Synchronisieren',
   'dashboard.action.queue_ocr': 'OCR queueen',
   'dashboard.action.queue_full': 'Full queueen',
+  'dashboard.action.rerun_failed': 'Fehlgeschlagene neu starten',
   'dashboard.auto.title': 'Automatische Verarbeitung',
   'dashboard.auto.processing_mode': 'Verarbeitungsmodus',
   'dashboard.auto.updating': 'Aktualisiere...',

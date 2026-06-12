@@ -894,6 +894,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ document_ids, stages })
     }),
+  rerunFailed: () =>
+    request<{ queued: number; candidates: number }>('/api/batches/rerun-failed', {
+      method: 'POST'
+    }),
   triggerDocument: (paperless_document_id: number, stages: Stage[], mode: ProcessingMode) =>
     request<{ run_id: string }>(`/api/documents/${paperless_document_id}/trigger`, {
       method: 'POST',

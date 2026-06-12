@@ -186,6 +186,7 @@ const plMessages: Record<MessageKey, string> = {
   'dashboard.action.sync': 'Synchronizuj',
   'dashboard.action.queue_ocr': 'Dodaj OCR do kolejki',
   'dashboard.action.queue_full': 'Dodaj Full do kolejki',
+  'dashboard.action.rerun_failed': 'Ponów nieudane',
   'dashboard.auto.title': 'Automatyczne przetwarzanie',
   'dashboard.auto.processing_mode': 'Tryb przetwarzania',
   'dashboard.auto.updating': 'Aktualizowanie...',

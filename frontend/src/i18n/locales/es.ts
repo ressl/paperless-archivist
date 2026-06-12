@@ -186,6 +186,7 @@ const esMessages: Record<MessageKey, string> = {
   'dashboard.action.sync': 'Sincronizar',
   'dashboard.action.queue_ocr': 'Encolar OCR',
   'dashboard.action.queue_full': 'Encolar Full',
+  'dashboard.action.rerun_failed': 'Reejecutar fallidos',
   'dashboard.auto.title': 'Procesamiento automático',
   'dashboard.auto.processing_mode': 'Modo de procesamiento',
   'dashboard.auto.updating': 'Actualizando...',

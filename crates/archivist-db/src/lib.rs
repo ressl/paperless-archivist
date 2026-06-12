@@ -4732,6 +4732,30 @@ pub async fn create_runs_for_documents(
     Ok(queued)
 }
 
+/// Document ids the dashboard surfaces as "failed" — a stage (`ocr` or
+/// `metadata`) is in `failed` state — and that are NOT currently being
+/// reprocessed (no active run). Backs the "re-run all failed" maintenance
+/// action so an operator does not have to select them by hand. The active-run
+/// exclusion avoids shadowing an in-flight auto-selected run; `create_runs_for_documents`'
+/// own per-document guard is a second line of defence.
+pub async fn failed_document_ids(pool: &DbPool) -> Result<Vec<i32>> {
+    let rows = sqlx::query(
+        r#"
+        select paperless_document_id
+          from document_inventory
+         where (ocr_status = 'failed' or metadata_status = 'failed')
+           and coalesce(current_run_status, '') not in ('queued', 'running', 'applying', 'waiting_review')
+         order by paperless_document_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 /// Per-document run/job creation against an existing transaction. Callers own the begin/commit so
 /// batch backfills can amortise one transaction across many documents instead of paying a full
 /// begin+commit per doc. The active-run guard and idempotent inventory upsert are unchanged.

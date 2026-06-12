@@ -186,6 +186,7 @@ const frMessages: Record<MessageKey, string> = {
   'dashboard.action.sync': 'Synchroniser',
   'dashboard.action.queue_ocr': 'Mettre OCR en file',
   'dashboard.action.queue_full': 'Mettre Full en file',
+  'dashboard.action.rerun_failed': 'Relancer les échoués',
   'dashboard.auto.title': 'Traitement automatique',
   'dashboard.auto.processing_mode': 'Mode de traitement',
   'dashboard.auto.updating': 'Mise à jour...',

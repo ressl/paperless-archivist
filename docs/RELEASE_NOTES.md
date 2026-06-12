@@ -6,6 +6,56 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.13.0 — Re-run-all-failed button, reworked extraction prompts, empty-field hardening
+
+Three changes, two of them validated by an empirical A/B test on the live model.
+
+**Re-run all failed (dashboard).** A new **"Re-run all failed"** button in the
+dashboard maintenance drawer (queue section) re-queues every document the
+dashboard counts as failed — a failed `ocr` or `metadata` stage with no active
+run — in one click, instead of filtering the inventory and hand-selecting.
+Backed by `POST /api/batches/rerun-failed` (+ `failed_document_ids`), priority 0,
+idempotent (the per-document active-run guard means a double click can't
+duplicate runs).
+
+**Reworked metadata & OCR default prompts.** `DEFAULT_METADATA_SYSTEM_PROMPT`
+and `DEFAULT_OCR_SYSTEM_PROMPT` were redesigned (multi-agent review grounded in
+the actual schema/parser code, then an A/B test of old vs new on
+`qwen3-paperless:8b` over 12 synthetic Swiss/German docs). The new prompts fixed
+real defects the old ones had:
+- money currency (`Fr. 1'250.–` → `CHF1250.00`, not `EUR1250.00`),
+- date fabrication (month-only/yearless dates now `null` instead of an invented
+  day),
+- over-confidence (per-field calibration restored; an illegible IBAN drops to
+  0.60), and better cross-language type mapping and tag recall.
+A first revision over-tagged and emitted placeholder fields; the shipped prompt
+tightens the tag rule and the `fields[]` null contract to remove that.
+
+**⚠️ Operator action — the prompt change is opt-in on a live system.** The
+DB-active prompt rows shadow these code constants (`get_active_prompt`), so a
+running deployment keeps its current prompts until you paste the new text in
+**Settings → Prompts** and activate it. The code constants only change new
+deployments and the "reset to default" path.
+
+**Empty-field hardening (applies immediately).** `coerce_custom_field_value`
+now drops empty, whitespace-only, literal-`"null"`, and JSON-null custom-field
+values before the Paperless PATCH. Text fields previously fell through coercion
+unchanged, so a model emitting `""` or `"null"` could write a garbage custom
+field — that can no longer happen, independent of which prompt is active.
+
+**Known limitations (verify, don't assume).**
+- Prompt injection: in the A/B test, both old and new prompts followed an
+  in-document `SYSTEM:` line that named an allowlisted correspondent
+  (within-enum steering). No prompt fully prevents this — keep `correspondent`
+  and `document_type` review-gated on documents from untrusted sources.
+- Deferred companion edits (a follow-up, mostly relevant to fallback providers
+  that ignore the response schema): aligning the user-prompt builder's
+  "omit this key" wording with the new null contract, the example-4 few-shot,
+  extending `neutralize_fence_delimiters` to more block prefixes, and
+  `think:false` on Ollama calls. The Ollama path is validated without them.
+
+No schema migration; rollback to v1.12.8 is safe.
+
 ## v1.12.8 — Fetch OIDC userinfo (the real #299 admin fix)
 
 Diagnosed on the live v1.12.7 deployment: the ZITADEL **ID token is minimal** —

@@ -4963,12 +4963,12 @@ mod tests {
         let fields = vec![
             FieldValueSuggestion {
                 name: "B".to_owned(),
-                value: Value::Null,
+                value: Value::String("val-b".to_owned()),
                 confidence: None,
             },
             FieldValueSuggestion {
                 name: "A".to_owned(),
-                value: Value::Null,
+                value: Value::String("val-a".to_owned()),
                 confidence: None,
             },
         ];

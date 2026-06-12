@@ -146,7 +146,8 @@ export function MaintenanceDrawer({
   queueBusy,
   onQueueSync,
   onQueueOcr,
-  onQueueFull
+  onQueueFull,
+  onRerunFailed
 }: {
   open: boolean;
   onClose: () => void;
@@ -166,6 +167,7 @@ export function MaintenanceDrawer({
   onQueueSync: () => void;
   onQueueOcr: () => void;
   onQueueFull: () => void;
+  onRerunFailed: () => void;
 }) {
   const { t } = useI18n();
   const drawerRef = useRef<HTMLElement>(null);
@@ -211,6 +213,7 @@ export function MaintenanceDrawer({
             <ActionButton icon={<RefreshCw />} label={t('dashboard.action.sync')} busy={queueBusy} onClick={onQueueSync} />
             <ActionButton icon={<FileText />} label={t('dashboard.action.queue_ocr')} busy={queueBusy} onClick={onQueueOcr} />
             <ActionButton icon={<Play />} label={t('dashboard.action.queue_full')} busy={queueBusy} onClick={onQueueFull} />
+            <ActionButton icon={<RotateCcw />} label={t('dashboard.action.rerun_failed')} busy={queueBusy} onClick={onRerunFailed} />
           </div>
         </section>
       </aside>

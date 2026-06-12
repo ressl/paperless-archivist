@@ -2764,6 +2764,21 @@ pub fn coerce_custom_field_value(
     data_type: Option<&str>,
     value: &serde_json::Value,
 ) -> Option<serde_json::Value> {
+    // A model that emits an empty, whitespace-only, or literal "null" value (or a
+    // JSON null) for a custom field must never write that field — text fields fall
+    // through the coercion below unchanged, so without this guard Paperless would
+    // store an empty string or the literal "null". Drop it here, before any type
+    // coercion, so the rule is uniform across every field type and prompt variant.
+    match value {
+        serde_json::Value::Null => return None,
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                return None;
+            }
+        }
+        _ => {}
+    }
     match data_type.map(|kind| kind.to_ascii_lowercase()).as_deref() {
         Some("integer") => coerce_integer_value(value),
         Some("boolean") => coerce_boolean_value(value),
@@ -4191,6 +4206,39 @@ mod tests {
         let redacted = redact_secret(secret);
         assert!(redacted.starts_with("🔐🔐🔐🔐..."));
         assert!(redacted.ends_with("🗝🗝🗝🗝"));
+    }
+
+    #[test]
+    fn coerce_custom_field_drops_empty_whitespace_and_null_for_every_type() {
+        use serde_json::json;
+        // Text fields fall through coercion unchanged, so an empty / whitespace /
+        // literal-"null" value must be dropped here or it pollutes Paperless. The
+        // guard is type-independent.
+        for data_type in [
+            None,
+            Some("text"),
+            Some("url"),
+            Some("monetary"),
+            Some("date"),
+        ] {
+            assert_eq!(coerce_custom_field_value(data_type, &json!("")), None);
+            assert_eq!(coerce_custom_field_value(data_type, &json!("   ")), None);
+            assert_eq!(coerce_custom_field_value(data_type, &json!("null")), None);
+            assert_eq!(coerce_custom_field_value(data_type, &json!("NULL")), None);
+            assert_eq!(
+                coerce_custom_field_value(data_type, &serde_json::Value::Null),
+                None
+            );
+        }
+        // A real value that merely contains "null" as a substring is kept.
+        assert_eq!(
+            coerce_custom_field_value(Some("text"), &json!("Null Industries AG")),
+            Some(json!("Null Industries AG"))
+        );
+        assert_eq!(
+            coerce_custom_field_value(Some("text"), &json!("4091")),
+            Some(json!("4091"))
+        );
     }
 
     #[test]

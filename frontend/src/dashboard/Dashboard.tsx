@@ -328,6 +328,7 @@ export function Dashboard({
           onQueueSync={() => void run(setBusy, setError, api.syncPaperless, t).then(load)}
           onQueueOcr={() => void run(setBusy, setError, api.queueOcr, t).then(load)}
           onQueueFull={() => void run(setBusy, setError, api.queueFull, t).then(load)}
+          onRerunFailed={() => void run(setBusy, setError, api.rerunFailed, t).then(load)}
         />
       )}
 

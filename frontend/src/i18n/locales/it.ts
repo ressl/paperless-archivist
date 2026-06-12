@@ -186,6 +186,7 @@ const itMessages: Record<MessageKey, string> = {
   'dashboard.action.sync': 'Sincronizza',
   'dashboard.action.queue_ocr': 'Metti OCR in coda',
   'dashboard.action.queue_full': 'Metti Full in coda',
+  'dashboard.action.rerun_failed': 'Riesegui i falliti',
   'dashboard.auto.title': 'Elaborazione automatica',
   'dashboard.auto.processing_mode': 'Modalità di elaborazione',
   'dashboard.auto.updating': 'Aggiornamento...',
