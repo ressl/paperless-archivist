@@ -6,6 +6,35 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.14.1 — Fix the broken dashboard layout (JS/CSS breakpoint drift)
+
+The dashboard layout broke ("zerschossen") in the 1101–1300px width band: the
+live panel floated over the stacked charts. Root cause (found by a multi-agent
+audit of the real CSS): a JS-vs-CSS breakpoint disagreement. `Dashboard.tsx`'s
+`compactLayout = useMediaQuery('(max-width: 1100px)')` drives the tab bar and
+the `.is-hidden` panel gating at **1100px** and renders a coordinator class
+`.dashboard-ops-grid.is-compact` — but `app.css` styled `.is-compact` **nowhere**
+and instead collapsed the grid via `@media (max-width: 1300px)`. So between 1101
+and 1300px the grid was already one column while JS still thought it was wide,
+and the `position: sticky` live panel pinned inside the oversized single-column
+cell and floated over the content.
+
+Fix (pure CSS, no JSX change — `.is-compact` was already emitted):
+- `.is-compact` is now the single source of truth: it collapses the grid and
+  resets the live panel to `position: static` at the exact 1100px JS boundary.
+- The mismatched `@media (max-width: 1300px)` block and the now-redundant
+  `.live-processing-panel { position: static }` resets in the 1100px and 900px
+  blocks are removed, so JS and CSS can no longer drift on this boundary.
+- `quality-strip` and `live-summary` switched to self-wrapping
+  `repeat(auto-fit, minmax(...))` so they can't overflow between breakpoints.
+
+Verified: build, typecheck, and the accessibility tests pass; the orphan 1300px
+media query is gone and the `.is-compact` rules are present in the built CSS.
+
+This is the first slice of a larger, audited frontend redesign (visual tokens,
+dashboard hierarchy, navigation/IA, responsive) being rolled out in reviewed
+stages. No schema migration.
+
 ## v1.14.0 — Auto-create new correspondents
 
 The metadata stage is closed-vocabulary: it could only assign a correspondent

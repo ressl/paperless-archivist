@@ -1818,9 +1818,7 @@ th {
 }
 
 @media (max-width: 1100px) {
-  .live-processing-panel {
-    position: static;
-  }
+  /* .live-processing-panel position reset now lives on .dashboard-ops-grid.is-compact */
   .operations-strip {
     grid-template-columns: 1fr;
   }
@@ -1897,7 +1895,9 @@ th {
 
 .quality-strip {
   display: grid;
-  grid-template-columns: repeat(5, minmax(130px, 1fr));
+  /* self-wrapping so it never overflows/squishes between breakpoints (was a
+     rigid repeat(5, ...)) */
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 10px;
   margin: 12px 0;
 }
@@ -1931,10 +1931,21 @@ th {
   min-width: 0;
 }
 
-@media (max-width: 1300px) {
-  .dashboard-ops-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/* JS (Dashboard.tsx `compactLayout` @1100px) is the single source of truth for
+   the dashboard reflow: it emits `.is-compact` and gates the tab bar + the
+   `.is-hidden` panels at the same 1100px. Collapse the grid AND drop the sticky
+   live panel via that SAME class — never a parallel @media. The removed
+   `@media (max-width: 1300px)` collapsed the grid 200px early, so in the
+   1101–1300px band the grid was already one column while JS still thought it was
+   wide: the `position: sticky` live panel then pinned inside the oversized
+   single-column cell and floated over the stacked charts (the reported broken
+   layout). `.dashboard-ops-grid.is-compact` (0-2-0) beats the base rule. */
+.dashboard-ops-grid.is-compact {
+  grid-template-columns: minmax(0, 1fr);
+}
+.dashboard-ops-grid.is-compact .live-processing-panel {
+  position: static;
+  top: auto;
 }
 
 .dashboard-analytics {
@@ -2004,7 +2015,9 @@ th {
 
 .live-summary {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* self-wrapping so it never overflows the narrow live panel on phones
+     (was a rigid repeat(3, 1fr)) */
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
 
 .live-summary div {
@@ -2491,10 +2504,6 @@ th {
 
   .chart-panel.wide {
     grid-column: auto;
-  }
-
-  .live-processing-panel {
-    position: static;
   }
 
   .chat-layout {
