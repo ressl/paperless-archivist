@@ -2935,20 +2935,30 @@ async fn dashboard_live_llm_events(pool: &DbPool) -> Result<Vec<DashboardLiveLlm
 }
 
 async fn dashboard_live_failures(pool: &DbPool) -> Result<Vec<DashboardLiveFailure>> {
+    // Only failures from each document's CURRENT run (`last_run_id`). The `jobs`
+    // table keeps every historical failed row forever, so an unfiltered "last 8
+    // failed jobs" perpetually shows old failures even after the documents were
+    // re-run and succeeded — the live panel then disagrees with the failed KPI
+    // (which reads the live document_inventory status). Binding to `last_run_id`
+    // drops superseded failures: a doc re-run to success points last_run_id at
+    // the new run, so its old failed job no longer matches.
     let rows = sqlx::query(
         r#"
-        select id, run_id, paperless_document_id, stage, status, attempts,
+        select j.id, j.run_id, j.paperless_document_id, j.stage, j.status, j.attempts,
                case
-                 when status = 'queued' and run_after > now() then 'retry_scheduled'
-                 when status = 'queued' then 'retry_ready'
+                 when j.status = 'queued' and j.run_after > now() then 'retry_scheduled'
+                 when j.status = 'queued' then 'retry_ready'
                  else 'failed'
                end as failure_kind,
-               coalesce(error_message, 'Job failed without details') as error_message,
-               case when status = 'queued' then run_after else null end as next_attempt_at,
-               updated_at
-          from jobs
-         where status = 'failed' or (status = 'queued' and error_message is not null)
-         order by updated_at desc
+               coalesce(j.error_message, 'Job failed without details') as error_message,
+               case when j.status = 'queued' then j.run_after else null end as next_attempt_at,
+               j.updated_at
+          from jobs j
+          join document_inventory di
+            on di.paperless_document_id = j.paperless_document_id
+           and di.last_run_id = j.run_id
+         where j.status = 'failed' or (j.status = 'queued' and j.error_message is not null)
+         order by j.updated_at desc
          limit 8
         "#,
     )

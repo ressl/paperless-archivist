@@ -6,6 +6,28 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.13.4 — Dashboard live-failures panel no longer shows stale failures
+
+The dashboard's live processing panel kept showing old failures (and a derived
+"recent failure" status) even when every document had since been re-run to
+success — disagreeing with the failed KPI, which reads live
+`document_inventory` and correctly showed zero.
+
+Cause: `dashboard_live_failures` selected the last 8 rows from `jobs` where
+`status='failed'`, with no time or state bound. The `jobs` table keeps every
+historical failed row forever (3000+ on a long-lived archive), so the panel
+perpetually surfaced superseded failures.
+
+Fix: the query now joins `document_inventory` and only returns failures whose
+job belongs to the document's **current run** (`last_run_id = jobs.run_id`). A
+document re-run to success points `last_run_id` at the new run, so its old
+failed job is dropped; a genuinely current failure (or a live retry on the
+current run) still shows. The panel now matches the failed KPI. Verified on
+production data (the old query returned 8 stale failures, the new query returns
+0) and by a new integration test covering both the show and hide cases.
+
+No schema migration; no config change.
+
 ## v1.13.3 — Drop vulnerable esbuild from the frontend lockfile (CI security gate)
 
 v1.13.2's CI went red on `security:trivy-fs`: a newly-published HIGH advisory
