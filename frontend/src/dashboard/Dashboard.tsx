@@ -290,11 +290,16 @@ export function Dashboard({
         </div>
       </div>
 
-      <AlertsBar items={live?.needs_attention ?? []} onAction={onAlertAction} />
+      <section className="dash-tier">
+        <h3 className="dash-tier-label">{t('dashboard.tier.overview')}</h3>
+        <AlertsBar items={live?.needs_attention ?? []} onAction={onAlertAction} />
 
       {/* Primary KPI hierarchy first (issue #237): hero + headline + demoted stats. */}
-      <KpiRow stats={stats} counts={counts} range={range} />
+        <KpiRow stats={stats} counts={counts} range={range} />
+      </section>
 
+      <section className="dash-tier">
+        <h3 className="dash-tier-label">{t('dashboard.tier.control')}</h3>
       {/*
         Operations controls (autopilot + service status) live in OperationsStrip.
         The processing-mode segmented control keeps its group label there:
@@ -331,7 +336,10 @@ export function Dashboard({
           onRerunFailed={() => void run(setBusy, setError, api.rerunFailed, t).then(load)}
         />
       )}
+      </section>
 
+      <section className="dash-tier">
+        <h3 className="dash-tier-label">{t('dashboard.tier.analytics')}</h3>
       {compactLayout && (
         <div className="dashboard-tabs" role="tablist" aria-label={t('dashboard.title')}>
           <button
@@ -409,6 +417,7 @@ export function Dashboard({
       <CostPanel stats={stats} range={range} />
 
       <ProviderTable usage={stats?.provider_usage ?? []} />
+      </section>
     </section>
   );
 }

@@ -154,8 +154,8 @@ export function App() {
         </div>
         <nav>
           {/* Fixed-order, labelled groups so nav positions never shift by role (#235). */}
-          <div className="nav-group">
-            <span className="nav-group-label">{t('nav.group.operations')}</span>
+          <div className="nav-group" role="group" aria-label={t('nav.group.operations')}>
+            <span className="nav-group-label" aria-hidden="true">{t('nav.group.operations')}</span>
             <NavButton icon={<Activity />} label={t('nav.dashboard')} active={tab === 'dashboard'} onClick={() => selectTab('dashboard')} />
             {canReadDashboard && <NavButton icon={<BarChart3 />} label={t('nav.statistics')} active={tab === 'statistics'} onClick={() => selectTab('statistics')} />}
             <NavButton icon={<Archive />} label={t('nav.inventory')} active={tab === 'inventory'} onClick={() => selectTab('inventory')} />
@@ -163,16 +163,16 @@ export function App() {
             {canUseChat && <NavButton icon={<MessageSquare />} label={t('nav.chat')} active={tab === 'chat'} onClick={() => selectTab('chat')} />}
           </div>
           {(canReadSettings || canManageUsers) && (
-            <div className="nav-group">
-              <span className="nav-group-label">{t('nav.group.configuration')}</span>
+            <div className="nav-group" role="group" aria-label={t('nav.group.configuration')}>
+              <span className="nav-group-label" aria-hidden="true">{t('nav.group.configuration')}</span>
               {canReadSettings && <NavButton icon={<Settings />} label={t('nav.settings')} active={tab === 'settings'} onClick={() => selectTab('settings')} />}
               {canReadSettings && <NavButton icon={<ClipboardList />} label={t('nav.prompts')} active={tab === 'prompts'} onClick={() => selectTab('prompts')} />}
               {canManageUsers && <NavButton icon={<UserPlus />} label={t('nav.users')} active={tab === 'users'} onClick={() => selectTab('users')} />}
             </div>
           )}
           {(canReadAudit || debugConsoleEnabled) && (
-            <div className="nav-group">
-              <span className="nav-group-label">{t('nav.group.system')}</span>
+            <div className="nav-group" role="group" aria-label={t('nav.group.system')}>
+              <span className="nav-group-label" aria-hidden="true">{t('nav.group.system')}</span>
               {canReadAudit && <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => selectTab('audit')} />}
               {debugConsoleEnabled && canReadAudit && <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => selectTab('debug')} />}
             </div>

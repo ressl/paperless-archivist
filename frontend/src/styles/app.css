@@ -597,12 +597,6 @@ th {
   margin: 0;
 }
 
-.metric-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--tile-compact), 1fr));
-  gap: var(--space-3);
-}
-
 .metric {
   display: grid;
   gap: var(--space-2);
@@ -660,6 +654,29 @@ th {
 
 .dashboard-page {
   gap: var(--space-4);
+}
+
+/* Dashboard hierarchy tiers (v1.16.0): group the flat band stack into three
+   scannable zones — Overview / Control / Analytics. Explicit single column for
+   the same reason as .page: a `.chart-panel.wide` child (1 / -1) must not be
+   able to spawn an implicit 2nd column. */
+.dash-tier {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+.dash-tier + .dash-tier {
+  margin-top: var(--space-3);
+}
+
+.dash-tier-label {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .dashboard-heading {
@@ -899,10 +916,6 @@ th {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
-}
-
-.dashboard-metrics {
-  grid-template-columns: repeat(6, minmax(130px, 1fr));
 }
 
 .dashboard-heading-main {
@@ -1996,16 +2009,6 @@ th {
   grid-column: auto;
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.dashboard-grid.compact {
-  align-items: stretch;
-}
-
 .chart-panel {
   min-width: 0;
   padding: var(--space-4);
@@ -2016,7 +2019,7 @@ th {
 
 .chart-panel.wide {
   /* Full width across whatever grid it sits in. `span 2` assumed a 2-column
-     parent (the now-dead .dashboard-grid); as a direct child of the
+     parent (the removed .dashboard-grid); as a direct child of the
      single-column .dashboard-page it was forcing an implicit 2nd column and
      breaking the whole dashboard. `1 / -1` spans all tracks in any grid. */
   grid-column: 1 / -1;
@@ -2509,7 +2512,6 @@ th {
   .dashboard-heading-actions,
 	  .operations-strip,
 	  .dashboard-ops-grid,
-	  .dashboard-metrics,
 	  .maintenance-grid,
 	  .first-run-steps,
 	  .quality-strip {
@@ -2538,10 +2540,6 @@ th {
 
   .mode-button-group {
     flex-basis: auto;
-  }
-
-  .dashboard-grid {
-    grid-template-columns: 1fr;
   }
 
   .chart-panel.wide {

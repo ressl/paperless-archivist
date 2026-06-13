@@ -6,6 +6,33 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.16.0 — Dashboard hierarchy tiers, nav a11y, dead-CSS cleanup
+
+The redesign's deeper polish, now that the layout is solid. Verified by rendering
+the actual built app in headless Chrome at desktop / compact / mobile widths
+(computed styles + axe), not by eyeballing screenshots.
+
+- **Dashboard hierarchy tiers:** the flat band stack is grouped into three
+  scannable zones — **Overview** (alerts + KPIs), **Control** (autopilot +
+  service status + maintenance), **Analytics** (charts, stage matrix, activity,
+  quality, cost, providers) — each introduced by a quiet uppercase eyebrow
+  label. The tiers are nameless grouping `<section>`s with `<h3>` headings (so
+  they add screen-reader structure without creating nested landmarks — the live
+  `<aside>` panel stays a top-level complementary landmark, axe-clean). The
+  compact-mode tablist/tabpanels are untouched and still work at ≤1100px.
+- **Navigation a11y:** the three sidebar groups are now proper
+  `role="group"` + `aria-label` groups; the visible group label is
+  `aria-hidden` to avoid double announcement.
+- **Dead-CSS cleanup:** removed the unused `.metric-grid`, `.dashboard-metrics`
+  and — notably — `.dashboard-grid` rules (the two-column wrapper whose leftover
+  `grid-column: span 2` caused the v1.15.2 bug), plus their orphaned `@media`
+  references (25 lines).
+
+New i18n keys `dashboard.tier.{overview,control,analytics}` added across all 7
+locales (parity-checked). Single-column layout, the bento KPI grid (5/3/2
+columns) and the compact tabs all verified intact at 1600 / 1000 / 480 px.
+Typecheck, all 44 a11y/unit tests, and the i18n parity check pass. No migration.
+
 ## v1.15.2 — Fix the broken two-column dashboard (the real layout bug)
 
 This is the actual fix for the "overlapping / disordered" dashboard. The earlier
