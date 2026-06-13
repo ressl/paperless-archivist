@@ -1217,14 +1217,17 @@ th {
 }
 
 .kpi-grid {
+  /* Flat bento: every KPI is an equal-height tile in a fixed responsive grid.
+     The backlog "hero" is double-wide (prominent) but ONE row tall — the old
+     2-row span stretched a tiny value ("2") into a huge empty box. */
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(0, 3fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--space-3);
   align-items: stretch;
 }
 
 .kpi-grid > .metric.hero {
-  grid-row: span 2;
+  grid-column: span 2;
   padding: 18px;
 }
 
@@ -1241,10 +1244,8 @@ th {
 
 .kpi-secondary,
 .kpi-tertiary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--tile-compact), 1fr));
-  gap: 10px;
-  min-width: 0;
+  /* wrappers dissolve so their four tiles each join the single .kpi-grid bento */
+  display: contents;
 }
 
 .kpi-tertiary .metric strong {
@@ -1264,16 +1265,16 @@ th {
   background: var(--surface-2);
 }
 
-/* When the hero column collapses next to the cards, allow the secondary
-   and tertiary cards to share a single auto-fit grid each. At intermediate
-   widths the rigid 4-column layout was overflowing the container; auto-fit
-   lets the cards wrap naturally to the next row. */
+/* Fewer columns as width drops; the hero stays double-wide until it fills the row. */
 @media (max-width: 1200px) {
   .kpi-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
-  .kpi-grid > .metric.hero {
-    grid-row: auto;
+}
+
+@media (max-width: 700px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1899,16 +1900,6 @@ th {
 @media (max-width: 900px) {
   .cost-panel-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-  .kpi-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .kpi-grid > .metric.hero {
-    grid-row: auto;
-  }
-  .kpi-secondary,
-  .kpi-tertiary {
-    grid-template-columns: repeat(auto-fit, minmax(var(--tile-compact), 1fr));
   }
 }
 

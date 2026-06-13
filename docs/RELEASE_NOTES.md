@@ -6,6 +6,26 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.15.1 — Fix the oversized empty KPI "hero" tile (flat bento grid)
+
+Follow-up to the redesign after a screenshot showed the dashboard still looked
+unbalanced: the **"Offener Backlog" hero KPI was a huge, mostly-empty box**. Root
+cause: the KPI grid was a two-column layout (`minmax(220px,1fr) minmax(0,3fr)`)
+with the hero set to `grid-row: span 2` and `align-items: stretch`, so a tiny
+value (e.g. `2`) was stretched to the full height of the four-tile stack beside
+it — a tall empty rectangle that distorted the whole KPI band.
+
+Fix (CSS-only): the KPI area is now a **flat bento grid** — every metric is an
+equal-height tile in a fixed responsive grid (`repeat(5 → 3 → 2, 1fr)` across
+desktop/tablet/phone). The backlog tile stays prominent as a **double-wide tile**
+(`grid-column: span 2`) but is only one row tall, so it can never become an empty
+tower. The `.kpi-secondary` / `.kpi-tertiary` wrappers dissolve (`display:
+contents`) so their tiles join the single grid; the quiet tertiary-strip styling
+and tone borders are preserved.
+
+Builds under vite 8; typecheck and all 44 accessibility/unit tests pass. No
+schema migration.
+
 ## v1.15.0 — Frontend redesign, slice 1: consistency, calm hierarchy, responsive
 
 The first implemented slice of the audited redesign (the multi-agent design pass
