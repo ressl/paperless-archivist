@@ -8260,15 +8260,16 @@ pub struct TextNumCtxBumpSummary {
     pub bumped: bool,
 }
 
-/// One-shot, idempotent helper that raises `ai.ollama_text_num_ctx` to a 16384
-/// floor. The text default was 8192 with no floor (the vision path got one in
-/// v1.5.1, the text path never did), so a large metadata prompt — the OCR text
-/// plus the candidate correspondent/type/tag lists — could overflow the 8192
-/// window and fail every metadata job permanently with
-/// `exceed_context_size_error`. 16384 gives headroom for a bounded prompt;
-/// operators who already raised it past the floor are left alone.
+/// One-shot, idempotent helper that raises `ai.ollama_text_num_ctx` to a 32768
+/// floor. A large metadata prompt — the bounded OCR text plus the candidate
+/// correspondent/type/tag allowlists, few-shots, and the JSON shape — can
+/// exceed 16384 tokens on a long document and fail the metadata job with
+/// `exceed_context_size_error` (observed in production at 18962 tokens). 32768
+/// matches the vision floor and gives the bounded prompt comfortable headroom;
+/// operators who already raised it past the floor are left alone. Raising the
+/// floor re-bumps a deployment previously pinned at 16384 on the next startup.
 pub async fn bump_text_num_ctx_if_too_small(pool: &DbPool) -> Result<TextNumCtxBumpSummary> {
-    const FLOOR: i64 = 16384;
+    const FLOOR: i64 = 32768;
 
     let mut tx = pool.begin().await?;
     let row = sqlx::query(
@@ -8322,7 +8323,7 @@ pub async fn bump_text_num_ctx_if_too_small(pool: &DbPool) -> Result<TextNumCtxB
             after: Some(json!({ "ollama_text_num_ctx": FLOOR })),
             metadata: Some(json!({
                 "trigger": "startup_one_shot",
-                "reason": "text_context_overflow_at_8192",
+                "reason": "text_context_overflow_above_16384",
             })),
             outcome: "success".to_owned(),
             error_message: None,

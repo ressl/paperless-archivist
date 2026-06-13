@@ -154,17 +154,18 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         Err(error) => warn!(error = %error, "startup vision num_ctx bump failed"),
     }
 
-    // One-shot: raise the text num_ctx to a 16384 floor. The text path never
-    // had a floor (unlike vision), so the 8192 default let a large metadata
-    // prompt (OCR + candidate lists) overflow the context and fail every
-    // metadata job permanently. Operators who already raised it are untouched.
+    // One-shot: raise the text num_ctx to a 32768 floor (matching vision). A
+    // large metadata prompt (bounded OCR + candidate allowlists + few-shots +
+    // JSON shape) can exceed 16384 tokens on a long document and fail the
+    // metadata job with exceed_context_size_error (seen at 18962). Operators
+    // who already raised it past the floor are untouched.
     match bump_text_num_ctx_if_too_small(&pool).await {
         Ok(summary) if summary.bumped => info!(
             previous = ?summary.previous,
             current = summary.current,
-            "bumped ai.ollama_text_num_ctx to 16384 to give the text model context headroom"
+            "bumped ai.ollama_text_num_ctx to 32768 to give the text model context headroom"
         ),
-        Ok(_) => info!("ai.ollama_text_num_ctx already at or above 16384; no bump"),
+        Ok(_) => info!("ai.ollama_text_num_ctx already at or above 32768; no bump"),
         Err(error) => warn!(error = %error, "startup text num_ctx bump failed"),
     }
 
@@ -4219,14 +4220,15 @@ fn ollama_num_ctx_for_provider(provider: &StageProvider, configured: Option<i64>
 }
 
 /// Minimum Ollama text `num_ctx`: metadata prompts embed up to 16k chars of
-/// document content plus the candidate correspondent/type/tag lists, which
-/// overflow a 4096-token window and fail with `exceed_context_size_error`
-/// (the v1.12.2 incident). The startup bump only raises the GLOBAL
-/// `ai.ollama_text_num_ctx`; a per-provider tuning override (the shipped
-/// Ollama preset pinned 4096) wins over the global in resolution and would
-/// smuggle a too-small value through, so floor it at the point of use exactly
-/// like the vision path. #304
-const OLLAMA_TEXT_NUM_CTX_FLOOR: i64 = 16384;
+/// document content plus the candidate correspondent/type/tag allowlists,
+/// few-shots, and the JSON shape, which on a long document exceed even a
+/// 16384-token window and fail with `exceed_context_size_error` (observed in
+/// production at 18962 tokens; the original v1.12.2 incident was at 4096). The
+/// startup bump only raises the GLOBAL `ai.ollama_text_num_ctx`; a per-provider
+/// tuning override wins over the global in resolution and would smuggle a
+/// too-small value through, so floor it at the point of use. 32768 matches the
+/// effective vision num_ctx. #304
+const OLLAMA_TEXT_NUM_CTX_FLOOR: i64 = 32768;
 
 /// Resolve the Ollama text `num_ctx`, never returning a value below the
 /// prompt-safe floor.

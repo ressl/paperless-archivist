@@ -28,9 +28,9 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     consensus_secondary_text_model: null,
     consensus_date_tolerance_days: null,
     // Mirrors the backend preset: the worker floors the effective Ollama
-    // text num_ctx at 16384 anyway (#304), so a smaller pin would only
-    // misrepresent what actually runs.
-    text_num_ctx: 16384,
+    // text num_ctx at 32768 anyway (#304 — a long metadata prompt exceeds
+    // 16384 tokens), so a smaller pin would only misrepresent what runs.
+    text_num_ctx: 32768,
     vision_num_ctx: 4096,
     ocr_page_limit: 2,
     hourly_document_limit: 200,

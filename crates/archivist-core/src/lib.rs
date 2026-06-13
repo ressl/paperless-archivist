@@ -1834,11 +1834,12 @@ impl AiProviderSettings {
         // Preset for the "Ollama local 4060 Ti class" deployment. Conservative
         // concurrency, no consensus, tight OCR/page and throughput caps —
         // these are the values that keep a 16 GB-VRAM host from thrashing.
-        // text_num_ctx must be >= 16384: the metadata prompts embed up to 16k
-        // chars of content plus the allowed lists, and the worker floors the
-        // effective value there anyway — shipping a smaller pin would only
+        // text_num_ctx must be >= 32768: the metadata prompts embed up to 16k
+        // chars of content plus the allowed lists, few-shots, and JSON shape,
+        // which on a long document exceed 16384 tokens; the worker floors the
+        // effective value at 32768 anyway, so a smaller pin would only
         // misrepresent what actually runs (#304). vision_num_ctx is likewise
-        // floored to 16384 at the point of use (#293).
+        // raised to 32768 by the startup bump (#293).
         Self {
             name: "ollama".to_owned(),
             kind: AiProviderKind::Ollama,
@@ -1853,7 +1854,7 @@ impl AiProviderSettings {
                 worker_concurrency: Some(2),
                 consensus_secondary_text_model: None,
                 consensus_date_tolerance_days: None,
-                text_num_ctx: Some(16384),
+                text_num_ctx: Some(32768),
                 vision_num_ctx: Some(4096),
                 reasoning_effort: None,
                 ocr_page_limit: Some(2),
@@ -4981,7 +4982,7 @@ mod tests {
         let tuning = settings.effective_tuning();
         assert_eq!(tuning.worker_concurrency, 2);
         assert_eq!(tuning.ocr_page_limit, 2);
-        assert_eq!(tuning.text_num_ctx, Some(16384));
+        assert_eq!(tuning.text_num_ctx, Some(32768));
         assert_eq!(tuning.vision_num_ctx, Some(4096));
         assert_eq!(tuning.hourly_document_limit, Some(200));
         assert_eq!(tuning.daily_document_limit, Some(2000));
@@ -5162,10 +5163,10 @@ mod tests {
         let provider = AiProviderSettings::ollama_default();
         assert_eq!(provider.tuning.worker_concurrency, Some(2));
         assert!(provider.tuning.consensus_secondary_text_model.is_none());
-        // >= the worker's 16384 point-of-use floor — a smaller pin would be
+        // >= the worker's 32768 point-of-use floor — a smaller pin would be
         // silently overridden there and leave a fresh install "born broken"
         // the moment the floor regressed (#304).
-        assert_eq!(provider.tuning.text_num_ctx, Some(16384));
+        assert_eq!(provider.tuning.text_num_ctx, Some(32768));
         assert_eq!(provider.tuning.vision_num_ctx, Some(4096));
         assert_eq!(provider.tuning.ocr_page_limit, Some(2));
         assert_eq!(provider.tuning.hourly_document_limit, Some(200));

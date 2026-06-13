@@ -6,6 +6,36 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.13.2 — Raise text num_ctx to 32768 (long-document metadata overflow)
+
+A long document's metadata prompt — the bounded OCR text plus the candidate
+correspondent/type/tag allowlists, few-shots, and the JSON shape — can exceed
+the text model's `num_ctx`. Observed in production: an 18962-token prompt
+against `num_ctx=16384` returned a `400 exceed_context_size_error`, which failed
+the metadata stage, which failed the whole run, so **nothing was applied and the
+document looked "processed but not updated."** (It is not an OCR-write bug — the
+OCR stage does PATCH `content`, and correctly skips the write when the new OCR
+text is identical to what Paperless already has, e.g. a page-cache hit.)
+
+The vision path was raised to a 32768 num_ctx floor previously; the text path
+was left at 16384. This release brings text to parity:
+
+- The startup bump floor, the point-of-use floor (`OLLAMA_TEXT_NUM_CTX_FLOOR`),
+  and the Ollama preset default for `ollama_text_num_ctx` are all raised from
+  16384 to **32768**. The startup bump re-bumps a deployment previously pinned
+  at 16384 to 32768 on the next start, so the fix applies automatically on
+  deploy. An operator value already above the floor is left untouched.
+
+**Immediate unblock without redeploying:** set `ai.ollama_text_num_ctx` to
+`32768` in **Settings → Tuning** (resource caps) and re-run the affected
+document.
+
+VRAM: an 8B text model at 32768 context is well within the GPU already running
+the vision model at 32768. Genuinely huge documents could still exceed 32768 —
+the document text remains bounded at 16k chars, so the residual risk is large
+allowlists; a token-aware bound is a possible future enhancement. No schema
+migration; rollback is safe.
+
 ## v1.13.1 — Ship the reworked prompts to running systems (migration)
 
 v1.13.0 changed the `DEFAULT_*_SYSTEM_PROMPT` **constants**, but those are only a

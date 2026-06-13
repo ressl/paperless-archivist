@@ -1,7 +1,7 @@
 //! DB-required integration test: `bump_text_num_ctx_if_too_small` raises a
-//! too-small text num_ctx (the old 8192 default that overflowed metadata
-//! prompts) to the 16384 floor, is idempotent, and leaves operator overrides
-//! above the floor untouched.
+//! too-small text num_ctx (the old 8192/16384 values that overflowed long
+//! metadata prompts) to the 32768 floor, is idempotent, and leaves operator
+//! overrides above the floor untouched.
 //!
 //! Run locally with `DATABASE_URL=postgres://... cargo test -p archivist-db -- --ignored`.
 
@@ -49,26 +49,37 @@ async fn bump_text_num_ctx_raises_low_values_and_leaves_high_ones() {
         return;
     };
 
-    // The old 8192 default is below the floor → bumped to 16384 and persisted.
+    // The old 8192 default is below the floor → bumped to 32768 and persisted.
     set_runtime_text_num_ctx(&pool, 8192).await;
     let summary = bump_text_num_ctx_if_too_small(&pool)
         .await
         .expect("bump from 8192");
     assert!(summary.bumped, "8192 is below the floor and must be bumped");
     assert_eq!(summary.previous, Some(8192));
-    assert_eq!(summary.current, 16384);
+    assert_eq!(summary.current, 32768);
     assert_eq!(
         read_text_num_ctx(&pool).await,
-        16384,
+        32768,
         "persisted to the floor"
     );
+
+    // A deployment previously pinned at the old 16384 floor is re-bumped to 32768.
+    set_runtime_text_num_ctx(&pool, 16384).await;
+    let rebump = bump_text_num_ctx_if_too_small(&pool)
+        .await
+        .expect("re-bump from old 16384 floor");
+    assert!(
+        rebump.bumped,
+        "16384 is below the new floor and must be re-bumped"
+    );
+    assert_eq!(rebump.current, 32768);
 
     // Idempotent: a second pass is a no-op now that it sits at the floor.
     let again = bump_text_num_ctx_if_too_small(&pool)
         .await
         .expect("idempotent pass");
     assert!(!again.bumped, "already at the floor; no bump");
-    assert_eq!(again.current, 16384);
+    assert_eq!(again.current, 32768);
 
     // An operator override above the floor is left untouched.
     set_runtime_text_num_ctx(&pool, 65536).await;
