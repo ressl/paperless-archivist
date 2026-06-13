@@ -516,7 +516,12 @@ th {
 }
 
 .page {
+  /* Single-column page stack. The EXPLICIT track is load-bearing: a descendant
+     that declares `grid-column: span 2` (e.g. .chart-panel.wide on the dashboard
+     and statistics pages) would otherwise make this grid spawn an implicit 2nd
+     column, collapsing the whole page into a broken two-column layout (v1.15.2). */
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
 }
 
@@ -2010,7 +2015,11 @@ th {
 }
 
 .chart-panel.wide {
-  grid-column: span 2;
+  /* Full width across whatever grid it sits in. `span 2` assumed a 2-column
+     parent (the now-dead .dashboard-grid); as a direct child of the
+     single-column .dashboard-page it was forcing an implicit 2nd column and
+     breaking the whole dashboard. `1 / -1` spans all tracks in any grid. */
+  grid-column: 1 / -1;
 }
 
 .chart-panel h3 {

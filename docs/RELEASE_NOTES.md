@@ -6,6 +6,35 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.15.2 — Fix the broken two-column dashboard (the real layout bug)
+
+This is the actual fix for the "overlapping / disordered" dashboard. The earlier
+slices (v1.14.1, v1.15.0, v1.15.1) each fixed a genuine sub-issue but the page
+still rendered as a **broken two-column layout** because of a deeper bug that
+only shows up at runtime.
+
+**Diagnosis (reproduced in headless Chrome, not guessed):** `.page` is meant to
+be a single-column vertical stack, but `CostPanel` and `ProviderTable` render
+`.chart-panel.wide`, whose rule was `grid-column: span 2`. That rule was written
+for the long-removed two-column `.dashboard-grid` wrapper (now dead CSS). As a
+**direct child of the single-column `.page`**, `span 2` forces the CSS grid to
+spawn an *implicit* second column — and once the page has two columns, every
+auto-placed section (heading, KPIs, ops-strip, charts) pairs up into two columns
+instead of stacking. Computed `grid-template-columns` on the live `.page` was
+`781px 794px` (two tracks) instead of one.
+
+**Fix (CSS-only):**
+- `.page` now declares an explicit single track (`grid-template-columns:
+  minmax(0, 1fr)`), so the page can never silently grow a second column.
+- `.chart-panel.wide` now uses `grid-column: 1 / -1` (span all tracks = full
+  width in any grid) instead of `span 2` (which assumed exactly two columns).
+
+This also fixes the same latent bug on the **Statistics** page, whose wide usage
+chart is likewise a direct `.page` child. Verified by rendering the actual built
+app headless: the live `.page` now computes to a single `1592px` track and all
+sections stack full-width. Build + typecheck + all 44 a11y/unit tests pass. No
+schema migration.
+
 ## v1.15.1 — Fix the oversized empty KPI "hero" tile (flat bento grid)
 
 Follow-up to the redesign after a screenshot showed the dashboard still looked
