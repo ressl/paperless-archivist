@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Paperless Archivist API
-  version: 1.13.2
+  version: 1.13.3
 servers:
   - url: /
 security:

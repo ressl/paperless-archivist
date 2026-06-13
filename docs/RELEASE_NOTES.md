@@ -6,6 +6,24 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.13.3 — Drop vulnerable esbuild from the frontend lockfile (CI security gate)
+
+v1.13.2's CI went red on `security:trivy-fs`: a newly-published HIGH advisory
+(`GHSA-gv7w-rqvm-qjhr`, esbuild RCE via the Deno module, fixed in 0.28.1) flagged
+the transitive `esbuild@0.27.7` in `frontend/pnpm-lock.yaml`. Not introduced by
+v1.13.2 — Trivy's vulnerability DB updated. (Same code as v1.13.2; this only
+fixes the dependency.)
+
+- A `pnpm.overrides` entry pins `esbuild` to `>=0.28.1`, and the frontend
+  lockfile was regenerated. vite 8 no longer needs esbuild (rolldown-based), so
+  the fresh resolve removed it and its `@esbuild/*` platform packages entirely —
+  the lockfile shrank and carries no vulnerable esbuild. The override remains as
+  a safety net should a future dependency reintroduce it.
+- Verified: production build, typecheck, and the 44 accessibility tests all pass
+  without esbuild.
+
+No code change from v1.13.2; no schema migration.
+
 ## v1.13.2 — Raise text num_ctx to 32768 (long-document metadata overflow)
 
 A long document's metadata prompt — the bounded OCR text plus the candidate
