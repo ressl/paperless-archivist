@@ -6,6 +6,35 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.15.0 — Frontend redesign, slice 1: consistency, calm hierarchy, responsive
+
+The first implemented slice of the audited redesign (the multi-agent design pass
+that found the v1.14.1 layout bug). CSS-only, gate-verified — visual consistency,
+a calmer dashboard, and responsive/nav polish:
+
+- **Token consistency:** the de-facto tone hexes inside `.metric.{tone}` and
+  `.range-tabs` are lifted into named `:root` tokens (pixel-identical refactor),
+  and all 27 raw `border-radius: 6px` + 12 `999px` corners now use
+  `var(--radius-md)` / `var(--radius-pill)` — one corner language.
+- **Calmer dashboard hierarchy:** the tertiary KPI row drops to a quiet stat
+  strip (neutral surface) while keeping the tone **border** on the failed/running
+  tiles, so the danger affordance survives but stops shouting.
+- **Responsive:** a new 1024px tablet rail narrows the 280px sidebar (220px) so
+  the workspace stops being starved in the tablet band before the full mobile
+  stack at 860px.
+- **Navigation affordance:** the active page now shows a left accent rail, not
+  just a faint background.
+- **Overlay elevation:** the login panel uses the shared `--shadow-lg` token.
+
+Builds under vite 8; typecheck and the accessibility tests pass.
+
+**Deliberately deferred to a verified next stage** (they are accessibility-
+sensitive and need a real browser + screen-reader pass, which can't be done from
+CI alone): the dashboard ATTENTION/OPERATE/ANALYZE tier restructure, the
+`PageHeader` subtitle/actions extension, the mobile-nav `display:contents`
+flatten, and the navigation IA reorg (Statistics into its own group). The full
+plan is recorded; these ship once verified in the browser. No schema migration.
+
 ## v1.14.1 — Fix the broken dashboard layout (JS/CSS breakpoint drift)
 
 The dashboard layout broke ("zerschossen") in the 1101–1300px width band: the

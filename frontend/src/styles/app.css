@@ -23,6 +23,17 @@
   --warning: #a9782b;
   --warning-soft: #f1e5d0;
 
+  /* Tone surfaces — named from the de-facto hexes the .metric.{tone} and
+     .range-tabs rules used inline; lifting them here is a pixel-identical
+     refactor (same values), it just removes the raw hexes. */
+  --success-border: #b7d8cf;
+  --success-bg: #f3fbf7;
+  --warning-border: #e0c999;
+  --danger-border: #e0a09b;
+  --info-border: #b7d3e6;
+  --teal-border: #b7d8cf;
+  --teal-fg: #0f5f5b;
+
   /* Spacing scale — replaces ad-hoc 4/8/10/12/14/16/24px paddings & gaps */
   --space-1: 4px;
   --space-2: 8px;
@@ -140,7 +151,7 @@ button {
   gap: var(--space-2);
   min-height: 36px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--ink);
   cursor: pointer;
@@ -167,7 +178,7 @@ textarea {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 8px 10px;
   background: #fff;
   color: var(--ink);
@@ -228,7 +239,7 @@ th {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: 28px;
-  box-shadow: 0 20px 60px rgb(23 35 49 / 12%);
+  box-shadow: var(--shadow-lg);
 }
 
 .login-panel img {
@@ -257,7 +268,7 @@ th {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--teal);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--teal);
   color: white;
   font-weight: 700;
@@ -274,6 +285,14 @@ th {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 280px 1fr;
+}
+
+/* Tablet rail: the 280px sidebar starves content in the ~861–1024px band.
+   Narrow it so the workspace breathes before the full mobile stack (@860). */
+@media (max-width: 1024px) {
+  .app-shell {
+    grid-template-columns: 220px 1fr;
+  }
 }
 
 .sidebar {
@@ -299,7 +318,7 @@ th {
   width: 44px;
   height: 44px;
   object-fit: contain;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: #fff;
 }
 
@@ -348,6 +367,16 @@ th {
 .sidebar nav button:hover,
 .ghost-button:hover {
   background: rgb(255 255 255 / 9%);
+}
+
+/* Current-section affordance: a left accent rail so the active page reads at a
+   glance, not only by a faint background. box-sizing:border-box (global) means
+   the 2px border eats content width rather than shifting the row. */
+.sidebar nav button {
+  border-left: 2px solid transparent;
+}
+.sidebar nav button.active {
+  border-left-color: var(--teal);
 }
 
 .sidebar-version {
@@ -448,7 +477,7 @@ th {
 
 .first-run-wizard header span {
   padding: 5px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--info-soft);
   color: var(--info);
   font-weight: 800;
@@ -510,7 +539,7 @@ th {
   gap: var(--space-3);
   padding: var(--space-3);
   margin-bottom: 18px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--line);
   background: var(--surface);
 }
@@ -604,23 +633,23 @@ th {
 }
 
 .metric.success {
-  border-color: #b7d8cf;
-  background: #f3fbf7;
+  border-color: var(--success-border);
+  background: var(--success-bg);
 }
 
 .metric.warning {
-  border-color: #e0c999;
+  border-color: var(--warning-border);
   background: var(--brass-soft);
 }
 
 .metric.danger {
-  border-color: #e0a09b;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
 .metric.info,
 .metric.review {
-  border-color: #b7d3e6;
+  border-color: var(--info-border);
   background: var(--info-soft);
 }
 
@@ -673,9 +702,9 @@ th {
 }
 
 .range-tabs button.active {
-  border-color: #b7d8cf;
+  border-color: var(--teal-border);
   background: var(--teal-soft);
-  color: #0f5f5b;
+  color: var(--teal-fg);
 }
 
 .operations-strip {
@@ -860,7 +889,7 @@ th {
 .recovery-counts span {
   padding: 5px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--paper);
   color: var(--muted);
   font-size: 12px;
@@ -897,7 +926,7 @@ th {
   min-width: 38px;
   height: 38px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--paper);
   color: var(--ink);
   font-size: 18px;
@@ -1121,7 +1150,7 @@ th {
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--paper);
 }
 
@@ -1171,7 +1200,7 @@ th {
 
 .alert-count {
   padding: 3px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: #fff;
   color: var(--ink);
   font-size: 12px;
@@ -1222,6 +1251,19 @@ th {
   font-size: 22px;
 }
 
+/* Calm hierarchy: tertiary KPIs are a quiet stat strip, not hero-weight tiles.
+   Drop the full tone tint to a neutral surface BUT keep the tone border (from
+   .metric.danger/.info/.review) so the failed/running affordance survives. */
+.kpi-tertiary .metric {
+  padding: var(--space-2);
+  background: var(--surface-2);
+}
+.kpi-tertiary .metric.danger,
+.kpi-tertiary .metric.info,
+.kpi-tertiary .metric.review {
+  background: var(--surface-2);
+}
+
 /* When the hero column collapses next to the cards, allow the secondary
    and tertiary cards to share a single auto-fit grid each. At intermediate
    widths the rigid 4-column layout was overflowing the container; auto-fit
@@ -1242,7 +1284,7 @@ th {
   margin-top: 10px;
   padding: 10px 12px;
   border: 1px solid #e0c999;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--brass-soft);
 }
 
@@ -1305,7 +1347,7 @@ th {
 .quota-track {
   position: relative;
   height: 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--paper);
   overflow: hidden;
 }
@@ -1380,7 +1422,7 @@ th {
 .bottleneck-badge {
   display: inline-block;
   padding: 3px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--brass);
   color: #fff;
   font-size: 11px;
@@ -1515,7 +1557,7 @@ th {
   display: grid;
   gap: 10px;
   padding: var(--space-3);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 
 .drawer-section {
@@ -1523,7 +1565,7 @@ th {
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: #fff;
 }
 
@@ -1602,7 +1644,7 @@ th {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--info-soft);
   color: var(--info);
   font-size: 11px;
@@ -1613,7 +1655,7 @@ th {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--brass-soft);
   color: var(--brass);
   font-size: 11px;
@@ -1631,7 +1673,7 @@ th {
   gap: 6px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   min-width: 0;
 }
@@ -1692,7 +1734,7 @@ th {
   gap: 6px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface);
 }
 
@@ -1806,7 +1848,7 @@ th {
 
 .cost-breakdown-track {
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--paper);
   overflow: hidden;
 }
@@ -2025,7 +2067,7 @@ th {
   gap: var(--space-1);
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: #fff;
 }
 
@@ -2051,7 +2093,7 @@ th {
   min-width: 0;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: #fff;
 }
 
@@ -2147,7 +2189,7 @@ th {
   gap: var(--space-1);
   min-height: 24px;
   padding: 3px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: #edf1f3;
   color: var(--ink-2);
   font-size: 12px;
@@ -2205,7 +2247,7 @@ th {
   max-height: 280px;
   overflow: auto;
   padding: var(--space-3);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface-2);
   color: var(--ink);
 }
@@ -2222,7 +2264,7 @@ th {
   align-items: start;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: #f8fbfb;
 }
 
@@ -2252,7 +2294,7 @@ th {
   align-items: center;
   gap: var(--space-1);
   padding: 4px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--brass-soft);
   color: var(--brass);
   font-size: 12px;
@@ -2261,7 +2303,7 @@ th {
 
 .debug-context {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface-2);
   padding: 8px 10px;
   font-size: 12px;
@@ -2596,7 +2638,7 @@ th {
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface-2);
   color: var(--ink-2);
   font-size: 13px;
@@ -2676,7 +2718,7 @@ th {
   grid-column: 1 / -1;
   margin-top: 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--base);
 }
 
@@ -2700,7 +2742,7 @@ th {
 
 .provider-tuning-section {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface);
 }
 
@@ -2832,7 +2874,7 @@ th {
   width: min(300px, calc(100vw - 40px));
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: 0 14px 36px rgb(23 35 49 / 16%);
   color: var(--ink);
@@ -2961,7 +3003,7 @@ th {
   align-items: center;
   min-height: 24px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--brass-soft);
   color: #7b5d20;
   font-size: 12px;
@@ -3006,7 +3048,7 @@ th {
   gap: 2px;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface-2);
 }
 
@@ -3141,7 +3183,7 @@ th {
   margin: 0;
   padding: var(--space-3);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface-2);
   color: var(--ink-2);
   font-size: 12px;
@@ -3163,7 +3205,7 @@ th {
   width: min(360px, calc(100vw - 40px));
   padding: var(--space-3);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: 0 14px 36px rgb(23 35 49 / 16%);
   color: var(--ink);
@@ -3268,7 +3310,7 @@ legend {
   margin: 0 0 16px;
   padding: var(--space-3);
   border: 1px solid var(--brass);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--brass-soft);
   color: var(--ink);
   display: flex;
@@ -3346,7 +3388,7 @@ legend {
   gap: var(--space-2);
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 4px 10px;
   flex: 1 1 320px;
   max-width: 480px;
@@ -3385,7 +3427,7 @@ legend {
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 5px 12px;
   font-size: 13px;
   cursor: pointer;
@@ -3412,7 +3454,7 @@ legend {
 }
 .advanced-filter-panel fieldset {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
   color: var(--text);
 }
