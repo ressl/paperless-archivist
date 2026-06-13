@@ -1290,6 +1290,14 @@ pub fn parse_metadata_suggestion(text: &str) -> Result<MetadataSuggestion> {
     {
         out.correspondent = serde_json::from_value(field).ok();
     }
+    if let Some(field) = object.remove("new_correspondent")
+        && !field.is_null()
+    {
+        out.new_correspondent = serde_json::from_value::<String>(field)
+            .ok()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+    }
     if let Some(field) = object.remove("document_date")
         && !field.is_null()
     {
@@ -1938,12 +1946,20 @@ pub fn prompt_for_metadata(
     if enabled_fields.correspondent {
         requested_keys.push("correspondent");
         shape_lines.push(
-            "  \"correspondent\": {\"name\":\"<exactly one entry from <allowed_correspondents>; omit this key entirely if no entry fits>\",\"confidence\":0.0,\"evidence\":\"<short literal snippet>\"}"
+            "  \"correspondent\": {\"name\":\"<exactly one entry from <allowed_correspondents>, or null if none fits>\",\"confidence\":0.0,\"evidence\":\"<short literal snippet>\"}"
+                .to_owned(),
+        );
+        // Escape hatch: when no allowed correspondent fits but the document
+        // clearly names its sender/issuer, the model puts that exact name here
+        // (and sets correspondent null). The apply path may create it.
+        requested_keys.push("new_correspondent");
+        shape_lines.push(
+            "  \"new_correspondent\": \"<only when no <allowed_correspondents> entry fits: the exact sender/issuer name the document prints; otherwise null. Never duplicate an allowed entry here.>\""
                 .to_owned(),
         );
         allowlist_blocks.push(allowlist_block(
             "allowed_correspondents",
-            "Allowed correspondent values — copy ONE entry verbatim, or omit the correspondent key entirely if no entry fits.",
+            "Allowed correspondent values — copy ONE entry verbatim into correspondent.name. If none fits, set correspondent.name null and, only if the document clearly names the sender/issuer, put that exact name in new_correspondent.",
             allowed_correspondents,
         ));
     }
@@ -2097,6 +2113,17 @@ pub fn schema_for_metadata(
             closed_vocab_object_schema("name", allowed_correspondents),
         );
         required.push("correspondent".to_owned());
+        // Free-text escape hatch for a correspondent the document clearly names
+        // but that is not in the closed-vocabulary allowlist. The model fills
+        // this (and leaves `correspondent` null) so the apply path can create it
+        // when `metadata.allow_new_correspondents` is on. Always schema-present
+        // but apply-gated, like `new_tags`. Required+nullable for OpenAI strict
+        // mode, matching the rest of this schema.
+        properties.insert(
+            "new_correspondent".to_owned(),
+            json!({ "type": ["string", "null"] }),
+        );
+        required.push("new_correspondent".to_owned());
     }
     if enabled_fields.tags {
         properties.insert("tags".to_owned(), tags_schema(allowed_tags, max_tags));
@@ -3108,6 +3135,55 @@ mod tests {
             request
                 .user_prompt
                 .contains("return [] for array-valued keys or omit the key entirely"),
+        );
+    }
+
+    #[test]
+    fn schema_for_metadata_exposes_new_correspondent_escape_hatch() {
+        let schema = schema_for_metadata(
+            &["ACME GmbH".to_owned()],
+            &["Rechnung".to_owned()],
+            &["Finanzen".to_owned()],
+            &["Invoice Number".to_owned()],
+            &MetadataFieldFlags::ALL,
+            5,
+            10,
+        )
+        .expect("schema");
+        // correspondent stays closed-vocab (enum); a free-text new_correspondent
+        // escape hatch lets the model name an out-of-allowlist sender.
+        assert_eq!(
+            schema["properties"]["new_correspondent"]["type"],
+            json!(["string", "null"])
+        );
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "new_correspondent"),
+            "new_correspondent must be required+nullable for strict mode"
+        );
+    }
+
+    #[test]
+    fn parse_metadata_extracts_new_correspondent() {
+        let response = r#"{
+            "correspondent": null,
+            "new_correspondent": "  Brack AG  ",
+            "document_type": {"name": "Rechnung", "confidence": 0.98}
+        }"#;
+        let parsed = parse_metadata_suggestion(response).expect("parse ok");
+        assert!(parsed.correspondent.is_none(), "no closed-vocab match");
+        assert_eq!(
+            parsed.new_correspondent.as_deref(),
+            Some("Brack AG"),
+            "trimmed proposal is kept"
+        );
+        let blank = parse_metadata_suggestion(r#"{"new_correspondent": "   "}"#).expect("parse ok");
+        assert!(
+            blank.new_correspondent.is_none(),
+            "whitespace-only proposal is dropped"
         );
     }
 

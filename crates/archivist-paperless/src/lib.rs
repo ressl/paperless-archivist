@@ -355,6 +355,56 @@ impl PaperlessClient {
             .context("decode created Paperless tag")
     }
 
+    /// Create-or-reuse a correspondent by name, mirroring [`Self::ensure_tag`].
+    /// Used by the metadata stage to materialise an AI-proposed correspondent
+    /// the document clearly names but that isn't in the closed-vocabulary
+    /// allowlist yet (gated by `metadata.allow_new_correspondents`). The
+    /// Unicode case-insensitive reuse stops "Brack AG" / "brack ag" from
+    /// creating a near-duplicate, and the post-failure refetch handles a
+    /// concurrent create (#271).
+    pub async fn ensure_correspondent(&self, name: &str) -> Result<PaperlessNamedEntity> {
+        let wanted = name.to_lowercase();
+        let existing = self.list_correspondents().await?;
+        if let Some(entity) = existing
+            .into_iter()
+            .find(|entity| entity.name.to_lowercase() == wanted)
+        {
+            return Ok(entity);
+        }
+        let url = self.url("api/correspondents/")?;
+        let response = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .map_err(PaperlessError::from)?;
+        let status = response.status();
+        if !status.is_success() {
+            if status.is_client_error() {
+                for backoff_ms in [0_u64, 250, 750] {
+                    if backoff_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    }
+                    if let Some(entity) = self
+                        .list_correspondents()
+                        .await?
+                        .into_iter()
+                        .find(|entity| entity.name.to_lowercase() == wanted)
+                    {
+                        return Ok(entity);
+                    }
+                }
+            }
+            let body = response.text().await.unwrap_or_default();
+            return Err(PaperlessError::from_status(status.as_u16(), body).into());
+        }
+        response
+            .json()
+            .await
+            .context("decode created Paperless correspondent")
+    }
+
     pub async fn add_and_remove_tags(
         &self,
         id: i32,

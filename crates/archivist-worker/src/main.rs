@@ -2467,6 +2467,44 @@ async fn process_metadata(
         }
     }
 
+    // --- new correspondent (auto-create, gated) ---
+    // When the model found no closed-vocabulary match (it set `correspondent`
+    // null) but proposed a sender/issuer the document clearly names, create it
+    // in Paperless and assign it — mirroring how new_tags materialises unknown
+    // tags. `ensure_correspondent` reuses an existing case-insensitive match so
+    // this cannot duplicate. Gated by `metadata.allow_new_correspondents` and
+    // the same overwrite-existing guard as the closed-vocab path.
+    if enabled.correspondent
+        && settings.metadata.allow_new_correspondents
+        && suggestion.correspondent.is_none()
+        && composite_patch.correspondent.is_none()
+        && (document.correspondent.is_none() || settings.metadata.overwrite_existing_correspondent)
+        && let Some(new_name) = suggestion
+            .new_correspondent
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    {
+        match paperless.ensure_correspondent(new_name).await {
+            Ok(entity) => {
+                composite_patch.correspondent = Some(Some(entity.id));
+                applied_fields.push("correspondent");
+                info!(
+                    correspondent = %new_name,
+                    correspondent_id = entity.id,
+                    "created and assigned a new correspondent from the model proposal"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    correspondent = %new_name,
+                    "failed to create proposed new correspondent; leaving it unset"
+                );
+            }
+        }
+    }
+
     // --- document_date ---
     if enabled.document_date
         && let Some(date) = suggestion.document_date.clone()

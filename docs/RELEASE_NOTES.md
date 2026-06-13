@@ -6,6 +6,36 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## v1.14.0 — Auto-create new correspondents
+
+The metadata stage is closed-vocabulary: it could only assign a correspondent
+that already existed in Paperless, so the first document from a new sender (e.g.
+"Brack AG") got no correspondent at all — the model had no valid option and
+returned a low-confidence garbage value. A `metadata.allow_new_correspondents`
+setting (with a UI toggle) already existed but was **never wired into the
+backend** — toggling it did nothing.
+
+This release wires it, mirroring the existing `new_tags` feature:
+
+- The metadata schema/prompt gain a free-text `new_correspondent` escape hatch.
+  When no allowlist entry fits but the document clearly names its sender/issuer,
+  the model sets `correspondent` null and puts the exact name in
+  `new_correspondent` (instead of forcing a wrong closed-vocab pick).
+- On apply, when `allow_new_correspondents` is **on**, a new
+  `paperless.ensure_correspondent()` creates-or-reuses the correspondent in
+  Paperless and assigns it. Reuse is Unicode case-insensitive, so it can't
+  duplicate ("Brack AG" / "brack ag" collapse), and a concurrent create is
+  handled with a refetch (mirrors `ensure_tag`).
+- Gated and guarded: off by default; honors the existing
+  `overwrite_existing_correspondent` rule; only fires when the closed-vocab pick
+  was null. With the setting off, behavior is unchanged.
+
+**Operator action:** enable **Settings → Metadata → "Allow new correspondents"**,
+then re-run an affected document — the named correspondent is created and
+assigned. (The setting was inert before this release.)
+
+No schema migration.
+
 ## v1.13.4 — Dashboard live-failures panel no longer shows stale failures
 
 The dashboard's live processing panel kept showing old failures (and a derived

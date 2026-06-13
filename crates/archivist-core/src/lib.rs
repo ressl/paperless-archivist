@@ -3463,6 +3463,12 @@ pub struct MetadataSuggestion {
     pub document_type: Option<ChoiceSuggestion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correspondent: Option<ChoiceSuggestion>,
+    /// A correspondent the document clearly names but that is NOT in the
+    /// closed-vocabulary allowlist. Free text (not enum-constrained). The apply
+    /// path creates-or-reuses it in Paperless when `metadata.allow_new_correspondents`
+    /// is on; otherwise it is ignored. Mirrors `TagSuggestion::new_tags`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_correspondent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document_date: Option<DocumentDateSuggestion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
