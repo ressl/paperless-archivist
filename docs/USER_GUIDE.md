@@ -105,9 +105,11 @@ Archivist ships with default provider records:
 - `openai`
 - `anthropic`
 - `openai-compatible`
+- `mineru`
 
 Commercial providers usually only need an API key. Local Ollama usually needs
-installed models.
+installed models. `mineru` targets a self-hosted vision-only OCR server and
+ships disabled until it is configured; see MinerU (Vision-Only OCR) below.
 
 ### Local Ollama
 
@@ -150,6 +152,77 @@ The provider test also shows a running state and a result box. For local Ollama,
 common hints include whether the service is reachable and whether the selected
 model is installed. For commercial providers, the hints focus on API key,
 provider Base URL, model access, and rate limits.
+
+### Reasoning Models And Output Tuning
+
+OpenAI and OpenAI-compatible providers (for example a self-hosted SGLang
+server) expose two extra tuning fields per provider:
+
+- `Max output tokens`: sent to the server as `max_tokens`. Reasoning tokens
+  count toward this cap on most servers, so give reasoning/thinking models a
+  generous budget (for example 8192). Leave it empty to keep the server
+  default.
+- `Structured output`: `auto` keeps the strict JSON-schema response format
+  used today; `json_object` switches to schema-free JSON mode for servers
+  whose grammar backend rejects strict schemas; `off` sends no response
+  format and relies on prompt instructions only. In `auto` mode, a 400
+  response that looks like a rejected schema is retried once automatically
+  without the schema.
+
+Reasoning models such as MiniMax-M2 or DeepSeek-R1 served through an
+OpenAI-compatible endpoint may return inline `<think>...</think>` reasoning
+blocks. Archivist removes them before using the response. If a response
+contains only reasoning text and no final answer, the job fails with a
+message pointing at the server's reasoning-parser configuration instead of
+silently producing empty output.
+
+Known limitation: `Max output tokens` applies to worker stage calls (OCR,
+metadata, tagging, consensus) but not to the Document Chat API path.
+
+### MinerU (Vision-Only OCR)
+
+The `mineru` provider kind connects to a MinerU API server (a small FastAPI
+service in front of a vision-language OCR model):
+
+- `Base URL` is the MinerU server address without a `/v1` suffix.
+- The vision model is fixed to `mineru`; there is no model dropdown or
+  `Refresh`/sync button for this kind.
+- The text-model picker is hidden. Selecting `mineru` for a text stage
+  (metadata, tagging, document type, chat, ...) fails with a clear
+  configuration error instead of a model call.
+- `Test` sends a `GET /docs` request instead of a chat call.
+- Token usage and estimated cost are not tracked for this provider; MinerU
+  does not return usage data.
+- The OCR prompt setting has no effect for this kind, since MinerU ignores
+  prompt, temperature, and context-size parameters.
+
+### Example: SGLang (MiniMax) + MinerU
+
+A common local setup uses an OpenAI-compatible SGLang server for every text
+stage and MinerU only for OCR. Configure both provider cards in `Settings`,
+then set `Default provider` to the SGLang entry in the `AI Defaults` section.
+The resulting provider settings look like this (`base_url`/host values are
+placeholders):
+
+```jsonc
+// settings.ai.providers (excerpt)
+{ "name": "sglang-minimax", "kind": "openai_compatible",
+  "base_url": "http://<omega>:<port>/v1",
+  "default_text_model": "nvidia/MiniMax-M2.7-NVFP4",
+  "tuning": { "max_output_tokens": 8192 } },
+{ "name": "mineru", "kind": "mineru",
+  "base_url": "http://<mineru-host>:<port>",
+  "default_vision_model": "mineru" }
+// settings.ai.default_provider = "sglang-minimax"
+// settings.ai.stage_models = [{ "stage": "ocr", "provider": "mineru", "model": "mineru" }]
+```
+
+Because MinerU rejects text requests, the OCR stage needs the `stage_models`
+override shown above so only OCR routes to MinerU while every other stage
+keeps using the default SGLang provider. There is no Settings UI control for
+`stage_models` yet; an admin sets it by calling `PUT /api/settings` (for
+example with a scoped API token) with the desired `ai.stage_models` array
+alongside the rest of the settings JSON returned by `GET /api/settings`.
 
 ## Sync Inventory
 

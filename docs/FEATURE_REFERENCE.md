@@ -17,6 +17,47 @@ Operators use inventory for:
 - inspecting debug context for why a document is selected or skipped
 - comparing Archivist state with Paperless state
 
+## Model Providers
+
+Archivist routes vision/OCR and text calls through configured model
+providers. Default provider records cover `ollama`, `ollama-cloud`,
+`openai`, `anthropic`, `openai-compatible`, and a disabled `mineru` preset
+for vision-only OCR.
+
+The `mineru` provider kind targets a MinerU API server:
+
+- vision/OCR only; selecting it for a text stage returns a clear
+  configuration error instead of a model call
+- `base_url` points at the MinerU server without a `/v1` suffix
+- health check is `GET /docs` rather than a chat call
+- the model is fixed to `mineru`; there is no model list to sync
+- no token usage or cost statistics are recorded, since MinerU returns
+  none
+- the OCR prompt setting has no effect, since MinerU ignores prompt,
+  temperature, and context-size parameters
+
+OpenAI and OpenAI-compatible providers (including OpenAI-compatible
+servers such as SGLang) add two tuning fields:
+
+- `max_output_tokens`: sent as `max_tokens`. Reasoning tokens count
+  toward this cap on most servers, so reasoning/thinking models need a
+  generous budget. An empty value keeps the server default.
+- `structured_output`: `auto` (strict `json_schema`, unchanged default
+  behavior), `json_object` (schema-free JSON mode for servers whose
+  grammar backend rejects strict schemas), or `off` (no
+  `response_format`, prompt-only). In `auto` mode, a 400 response that
+  looks like a rejected schema triggers one automatic retry without
+  `response_format`.
+
+Reasoning models served through an OpenAI-compatible endpoint (for
+example MiniMax-M2 or DeepSeek-R1) may emit inline `<think>...</think>`
+blocks; Archivist strips them before parsing the response. A response
+that contains only reasoning content and no final answer fails with a
+parser-configuration hint instead of returning empty text. Known
+limitation: the document-chat API path does not apply
+`max_output_tokens`; worker stage calls (OCR, metadata, tagging,
+consensus) do.
+
 ## OCR Pipeline
 
 The OCR stage downloads the Paperless original through the backend/worker,
