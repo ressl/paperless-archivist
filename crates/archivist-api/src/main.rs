@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
-    AiResponse, AnthropicClient, ChatRequest, OllamaClient, OllamaLoadedModel, OllamaModel,
-    OpenAiCompatibleClient, TextProvider,
+    AiResponse, AnthropicClient, ChatRequest, MineruClient, OllamaClient, OllamaLoadedModel,
+    OllamaModel, OpenAiCompatibleClient, TextProvider,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
@@ -2318,6 +2318,10 @@ async fn discover_provider_models(
             let ids = list_with_timeout(client.list_models()).await?;
             Ok(ids.into_iter().map(OllamaInstalledModel::from_id).collect())
         }
+        AiProviderKind::Mineru => {
+            // MinerU serves one implicit model; there is no /models endpoint.
+            Ok(vec![OllamaInstalledModel::from_id("mineru".to_owned())])
+        }
     }
 }
 
@@ -2546,6 +2550,7 @@ fn non_ollama_runtime_hints(provider: &ApiProvider) -> AiRuntimeHintsResponse {
         AiProviderKind::Anthropic => "anthropic",
         AiProviderKind::OpenaiCompatible => "openai_compatible",
         AiProviderKind::Ollama => "ollama",
+        AiProviderKind::Mineru => "mineru",
     };
     AiRuntimeHintsResponse {
         provider: provider.name.clone(),
@@ -2653,6 +2658,7 @@ fn provider_base_url(kind: &AiProviderKind, configured: &str) -> String {
         AiProviderKind::Openai => "https://api.openai.com/v1".to_owned(),
         AiProviderKind::Anthropic => "https://api.anthropic.com/v1".to_owned(),
         AiProviderKind::OpenaiCompatible => "http://localhost:8000/v1".to_owned(),
+        AiProviderKind::Mineru => "http://localhost:8001".to_owned(),
     }
 }
 
@@ -2718,6 +2724,14 @@ async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Va
                 json!({ "provider": response.provider, "model": response.model, "text": response.text }),
             )
         }
+        AiProviderKind::Mineru => {
+            let client = MineruClient::new(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(state, provider).await?,
+            )?;
+            client.test_connection().await
+        }
     }
 }
 
@@ -2750,6 +2764,11 @@ async fn chat_with_default_provider(
             let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
             client.chat(request).await
         }
+        AiProviderKind::Mineru => Err(anyhow!(
+            "AI provider '{}' uses kind \"mineru\" which is vision-only (OCR); \
+             select a text-capable provider for this stage",
+            provider.name
+        )),
     }
 }
 

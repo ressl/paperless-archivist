@@ -6,8 +6,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
     AiProviderError, AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT,
-    ImageInput, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext, TextProvider,
-    VisionProvider, VisionRequest, parse_metadata_suggestion, prompt_for_metadata,
+    ImageInput, MineruClient, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext,
+    TextProvider, VisionProvider, VisionRequest, parse_metadata_suggestion, prompt_for_metadata,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
@@ -4194,6 +4194,7 @@ fn provider_base_url(kind: &AiProviderKind, configured: &str) -> String {
         AiProviderKind::Openai => "https://api.openai.com/v1".to_owned(),
         AiProviderKind::Anthropic => "https://api.anthropic.com/v1".to_owned(),
         AiProviderKind::OpenaiCompatible => "http://localhost:8000/v1".to_owned(),
+        AiProviderKind::Mineru => "http://localhost:8001".to_owned(),
     }
 }
 
@@ -4349,6 +4350,11 @@ async fn chat_with_provider(
             )?;
             client.chat(request).await
         }
+        AiProviderKind::Mineru => Err(anyhow!(
+            "AI provider '{}' uses kind \"mineru\" which is vision-only (OCR); \
+             select a text-capable provider for this stage",
+            provider.name
+        )),
     }
 }
 
@@ -4364,6 +4370,7 @@ enum VisionClient {
     Ollama(OllamaClient),
     OpenAiCompatible(OpenAiCompatibleClient),
     Anthropic(AnthropicClient),
+    Mineru(MineruClient),
 }
 
 impl VisionClient {
@@ -4372,6 +4379,7 @@ impl VisionClient {
             VisionClient::Ollama(client) => client.vision(request).await,
             VisionClient::OpenAiCompatible(client) => client.vision(request).await,
             VisionClient::Anthropic(client) => client.vision(request).await,
+            VisionClient::Mineru(client) => client.vision(request).await,
         }
     }
 }
@@ -4410,6 +4418,12 @@ async fn build_vision_client(
                 timeout,
             )?))
         }
+        AiProviderKind::Mineru => Ok(VisionClient::Mineru(MineruClient::new_with_timeout(
+            &provider.name,
+            &provider.base_url,
+            provider_secret(pool, config, provider).await?,
+            timeout,
+        )?)),
     }
 }
 
@@ -4480,6 +4494,18 @@ mod tests {
         assert_eq!(
             classify_processing_failure(&server),
             ProcessingFailureClass::Transient
+        );
+    }
+
+    #[test]
+    fn provider_base_url_defaults_for_mineru() {
+        assert_eq!(
+            provider_base_url(&AiProviderKind::Mineru, ""),
+            "http://localhost:8001"
+        );
+        assert_eq!(
+            provider_base_url(&AiProviderKind::Mineru, "http://omega:8001/"),
+            "http://omega:8001"
         );
     }
 

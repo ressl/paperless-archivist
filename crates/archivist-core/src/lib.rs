@@ -1859,6 +1859,7 @@ impl AiProviderSettings {
             Self::openai_default(),
             Self::anthropic_default(),
             Self::openai_compatible_default(),
+            Self::mineru_default(),
         ]
     }
 
@@ -2000,6 +2001,25 @@ impl AiProviderSettings {
         }
     }
 
+    pub fn mineru_default() -> Self {
+        // MinerU API server (FastAPI in front of vLLM). Vision-only: the
+        // pipeline may select it exclusively for the OCR stage. Disabled by
+        // default like the openai-compatible preset — operators point
+        // base_url at their deployment and enable it.
+        Self {
+            name: "mineru".to_owned(),
+            kind: AiProviderKind::Mineru,
+            base_url: "http://localhost:8001".to_owned(),
+            default_text_model: None,
+            default_vision_model: Some("mineru".to_owned()),
+            cost_per_1m_input_tokens_usd: Some(0.0),
+            cost_per_1m_output_tokens_usd: Some(0.0),
+            secret_id: None,
+            enabled: false,
+            tuning: ProviderTuning::default(),
+        }
+    }
+
     pub fn append_missing_defaults(providers: &mut Vec<Self>) {
         for default_provider in Self::default_providers() {
             if !providers
@@ -2019,6 +2039,7 @@ pub enum AiProviderKind {
     Openai,
     Anthropic,
     OpenaiCompatible,
+    Mineru,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5279,6 +5300,23 @@ mod tests {
     fn openai_compatible_default_constructor_ships_blank_tuning() {
         let provider = AiProviderSettings::openai_compatible_default();
         assert_eq!(provider.tuning, ProviderTuning::default());
+    }
+
+    #[test]
+    fn mineru_kind_serializes_snake_case_and_ships_disabled_preset() {
+        assert_eq!(
+            serde_json::to_string(&AiProviderKind::Mineru).unwrap(),
+            "\"mineru\""
+        );
+        let presets = AiProviderSettings::default_providers();
+        let mineru = presets
+            .iter()
+            .find(|provider| provider.name == "mineru")
+            .expect("mineru preset present");
+        assert_eq!(mineru.kind, AiProviderKind::Mineru);
+        assert!(!mineru.enabled);
+        assert_eq!(mineru.default_vision_model.as_deref(), Some("mineru"));
+        assert_eq!(mineru.default_text_model, None);
     }
 
     #[test]
