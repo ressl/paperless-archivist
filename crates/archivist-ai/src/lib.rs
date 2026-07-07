@@ -999,6 +999,133 @@ impl VisionProvider for OpenAiCompatibleClient {
     }
 }
 
+/// Client for the MinerU API server (FastAPI in front of a vLLM-served
+/// MinerU VLM). Protocol: POST one rendered page image to `/file_parse`
+/// as multipart, receive parsed-document JSON; the OCR text is the
+/// returned Markdown. Vision-only — MinerU exposes no chat endpoint, and
+/// prompt/temperature/num_ctx have no meaning for its internal
+/// layout+recognition pipeline.
+#[derive(Clone)]
+pub struct MineruClient {
+    base_url: String,
+    client: reqwest::Client,
+    provider_name: String,
+}
+
+impl MineruClient {
+    pub fn new(provider_name: &str, base_url: &str, api_key: Option<SecretString>) -> Result<Self> {
+        Self::new_with_timeout(provider_name, base_url, api_key, Duration::from_secs(180))
+    }
+
+    pub fn new_with_timeout(
+        provider_name: &str,
+        base_url: &str,
+        api_key: Option<SecretString>,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let mut headers = HeaderMap::new();
+        if let Some(api_key) = api_key {
+            let value = format!("Bearer {}", api_key.expose_secret());
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&value)?);
+        }
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            client,
+            provider_name: provider_name.to_owned(),
+        })
+    }
+
+    /// Health probe for the provider test button. The FastAPI server serves
+    /// its interactive docs at `/docs`; any 2xx proves the service is up
+    /// without spending GPU time on a real parse.
+    pub async fn test_connection(&self) -> Result<Value> {
+        let response = self
+            .client
+            .get(format!("{}/docs", self.base_url))
+            .send()
+            .await
+            .context("call MinerU /docs")?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("MinerU health check returned {status}"));
+        }
+        Ok(json!({ "provider": self.provider_name, "status": "ok" }))
+    }
+}
+
+/// Extracts the Markdown payload from a MinerU `/file_parse` response.
+/// Known shapes (fixture-pinned; re-verify when bumping the deployed
+/// MinerU version): `{"md_content": "..."}` for single-file responses and
+/// `{"results": {"<input-name>": {"md_content": "..."}}}` for the batch
+/// envelope of mineru's web_api. Returns None on anything else so the
+/// caller can error with a body snippet.
+fn extract_mineru_markdown(raw: &Value) -> Option<String> {
+    if let Some(md) = raw.get("md_content").and_then(Value::as_str) {
+        return Some(md.to_owned());
+    }
+    raw.get("results")
+        .and_then(Value::as_object)
+        .and_then(|results| results.values().next())
+        .and_then(|entry| entry.get("md_content"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+#[async_trait]
+impl VisionProvider for MineruClient {
+    async fn vision(&self, request: VisionRequest) -> Result<AiResponse> {
+        let started = Instant::now();
+        let Some(image) = request.images.first() else {
+            return Err(anyhow!("MinerU vision call requires one page image"));
+        };
+        let file_name = match image.mime_type.as_str() {
+            "image/jpeg" => "page.jpg",
+            _ => "page.png",
+        };
+        let part = reqwest::multipart::Part::bytes(image.bytes.clone())
+            .file_name(file_name)
+            .mime_str(&image.mime_type)
+            .context("build MinerU multipart part")?;
+        let form = reqwest::multipart::Form::new()
+            .part("files", part)
+            .text("return_md", "true");
+        let response = self
+            .client
+            .post(format!("{}/file_parse", self.base_url))
+            .multipart(form)
+            .send()
+            .await
+            .context("call MinerU file_parse")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let snippet: String = body.chars().take(600).collect();
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                status.as_u16(),
+                snippet,
+            ))
+            .context("MinerU file_parse call"));
+        }
+        let raw: Value = response.json().await.context("decode MinerU response")?;
+        let Some(text) = extract_mineru_markdown(&raw) else {
+            let snippet: String = raw.to_string().chars().take(600).collect();
+            return Err(anyhow!("MinerU response had no md_content field: {snippet}"));
+        };
+        Ok(AiResponse {
+            provider: self.provider_name.clone(),
+            model: request.model,
+            text,
+            raw_response: raw,
+            duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
+        })
+    }
+}
+
 /// Removes `<think>...</think>` reasoning blocks that thinking models
 /// (MiniMax-M2, DeepSeek-R1, QwQ) emit inline when the serving layer does
 /// not split them into `reasoning_content`. An unterminated `<think>`
@@ -2435,6 +2562,21 @@ mod tests {
         });
         assert_eq!(extract_model_ids(&raw), vec!["glm-5.1", "deepseek-v4-pro"]);
         assert!(extract_model_ids(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn mineru_markdown_extraction_handles_known_response_shapes() {
+        // Single-file shape.
+        let raw = json!({ "md_content": "# Rechnung\n\nBetrag: 42,00 EUR" });
+        assert_eq!(
+            extract_mineru_markdown(&raw).as_deref(),
+            Some("# Rechnung\n\nBetrag: 42,00 EUR")
+        );
+        // Batch shape keyed by input file name (mineru web_api).
+        let raw = json!({ "results": { "page.png": { "md_content": "Seite eins" } } });
+        assert_eq!(extract_mineru_markdown(&raw).as_deref(), Some("Seite eins"));
+        // Unknown shape -> None (caller raises a descriptive error).
+        assert_eq!(extract_mineru_markdown(&json!({ "status": "ok" })), None);
     }
 
     #[test]
