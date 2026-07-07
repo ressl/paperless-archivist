@@ -887,15 +887,7 @@ impl TextProvider for OpenAiCompatibleClient {
             .json()
             .await
             .context("decode OpenAI-compatible response")?;
-        let text = raw
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("message"))
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let text = extract_openai_message_text(&raw)?;
         Ok(AiResponse {
             provider: self.provider_name.clone(),
             model: request.model,
@@ -962,15 +954,7 @@ impl VisionProvider for OpenAiCompatibleClient {
             .json()
             .await
             .context("decode OpenAI-compatible vision response")?;
-        let text = raw
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("message"))
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let text = extract_openai_message_text(&raw)?;
         Ok(AiResponse {
             provider: self.provider_name.clone(),
             model,
@@ -979,6 +963,62 @@ impl VisionProvider for OpenAiCompatibleClient {
             duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
         })
     }
+}
+
+/// Removes `<think>...</think>` reasoning blocks that thinking models
+/// (MiniMax-M2, DeepSeek-R1, QwQ) emit inline when the serving layer does
+/// not split them into `reasoning_content`. An unterminated `<think>`
+/// drops everything from the tag to the end — the model never surfaced a
+/// final answer after it.
+fn strip_think_blocks(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        output.push_str(&rest[..start]);
+        match rest[start..].find("</think>") {
+            Some(end_rel) => rest = &rest[start + end_rel + "</think>".len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Extracts the assistant text from an OpenAI-style chat/vision response,
+/// tolerating reasoning models: inline `<think>` blocks are stripped and a
+/// response whose visible content is empty while reasoning text exists is
+/// rejected with a configuration hint instead of silently returning "".
+/// Plain empty content (blank OCR page) stays valid.
+fn extract_openai_message_text(raw: &Value) -> Result<String> {
+    let message = raw
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"));
+    let content = message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stripped = strip_think_blocks(content);
+    let trimmed = stripped.trim();
+    if trimmed.is_empty() {
+        let had_think = content.contains("<think>");
+        let reasoning_only = message
+            .and_then(|message| message.get("reasoning_content"))
+            .and_then(Value::as_str)
+            .is_some_and(|reasoning| !reasoning.trim().is_empty());
+        if had_think || reasoning_only {
+            return Err(anyhow!(
+                "model returned only reasoning content and no final answer — \
+                 check the server's reasoning-parser configuration"
+            ));
+        }
+        return Ok(String::new());
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Extracts model IDs from an OpenAI-/Anthropic-style models listing
@@ -3518,5 +3558,58 @@ mod tests {
                 .get("response_format")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn strip_think_blocks_removes_single_and_multiple_blocks() {
+        assert_eq!(
+            strip_think_blocks("<think>plan</think>{\"title\":\"A\"}"),
+            "{\"title\":\"A\"}"
+        );
+        assert_eq!(
+            strip_think_blocks("a<think>x</think>b<think>y</think>c"),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn strip_think_blocks_drops_unterminated_tail() {
+        assert_eq!(strip_think_blocks("answer<think>never closed"), "answer");
+    }
+
+    #[test]
+    fn extract_openai_message_text_strips_think_and_trims() {
+        let raw = json!({ "choices": [{ "message": {
+            "content": "<think>reasoning...</think>\n  final answer  " } }] });
+        assert_eq!(extract_openai_message_text(&raw).unwrap(), "final answer");
+    }
+
+    #[test]
+    fn extract_openai_message_text_errors_on_reasoning_only_response() {
+        // SGLang --reasoning-parser puts thinking into reasoning_content; if the
+        // model never produced a final answer the content is empty. That must be
+        // a loud error, not silent empty text.
+        let raw = json!({ "choices": [{ "message": {
+            "content": "", "reasoning_content": "thinking forever" } }] });
+        let error = extract_openai_message_text(&raw).unwrap_err().to_string();
+        assert!(error.contains("reasoning"), "got: {error}");
+
+        let raw = json!({ "choices": [{ "message": { "content": "<think>only thoughts</think>" } }] });
+        assert!(extract_openai_message_text(&raw).is_err());
+    }
+
+    #[test]
+    fn extract_openai_message_text_keeps_legitimate_empty_content() {
+        // A blank OCR page can legitimately come back empty — that is not an
+        // error (document-level min_chars validation handles it downstream).
+        let raw = json!({ "choices": [{ "message": { "content": "" } }] });
+        assert_eq!(extract_openai_message_text(&raw).unwrap(), "");
+    }
+
+    #[test]
+    fn extract_openai_message_text_ignores_reasoning_alongside_answer() {
+        let raw = json!({ "choices": [{ "message": {
+            "content": "answer", "reasoning_content": "thoughts" } }] });
+        assert_eq!(extract_openai_message_text(&raw).unwrap(), "answer");
     }
 }
