@@ -13,8 +13,9 @@ use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, DocumentPatch, LanguageDetection, MetadataFieldFlags,
     MetadataSuggestion, OldTagStrategy, ProcessingMode, ReasoningEffort, RuntimeSettings, Stage,
-    detect_document_language, validate_choice_suggestion, validate_document_date_suggestion,
-    validate_field_suggestion, validate_tag_suggestion, validate_title_suggestion,
+    StructuredOutputMode, detect_document_language, validate_choice_suggestion,
+    validate_document_date_suggestion, validate_field_suggestion, validate_tag_suggestion,
+    validate_title_suggestion,
 };
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit,
@@ -1670,7 +1671,7 @@ async fn process_ocr(
                     .effective_tuning_for_stage(Stage::Ocr)
                     .vision_num_ctx,
             ),
-            max_output_tokens: None,
+            max_output_tokens: provider.max_output_tokens,
             prompt: page_prompt,
             images: vec![ImageInput {
                 mime_type: page.mime_type.clone(),
@@ -2215,9 +2216,10 @@ async fn process_metadata(
     // become impossible to emit, so the closed-vocabulary
     // (document_type, correspondent, tags, custom-field names) gets
     // hard guarantees on top of the soft prompt constraints.
-    // OpenAI-compatible and Anthropic clients ignore this field today;
-    // their wire-level enforcement (response_format json_schema /
-    // tool-use) is tracked as future work.
+    // The OpenAI-compatible client forwards it as `response_format`
+    // (json_schema/json_object per the provider's `structured_output`
+    // tuning, with a one-shot schema-400 fallback), and the Anthropic
+    // client as forced tool-use.
     let allowed_field_names: Vec<String> = allowed_fields
         .iter()
         .map(|(name, _)| name.clone())
@@ -4116,6 +4118,8 @@ struct StageProvider {
     model: String,
     secret_id: Option<Uuid>,
     reasoning_effort: ReasoningEffort,
+    max_output_tokens: Option<u32>,
+    structured_output: StructuredOutputMode,
     request_timeout_seconds: u32,
 }
 
@@ -4154,6 +4158,11 @@ fn provider_for_stage(
         .model_for_stage_provider(&provider, stage, vision);
     let base_url = provider_base_url(&provider.kind, &provider.base_url);
     let reasoning_effort = provider.tuning.reasoning_effort.unwrap_or_default();
+    let max_output_tokens = provider
+        .tuning
+        .max_output_tokens
+        .filter(|tokens| *tokens > 0);
+    let structured_output = provider.tuning.structured_output.unwrap_or_default();
     // Per-request AI timeout: a 0/unset value inherits the built-in default.
     let request_timeout_seconds = provider
         .tuning
@@ -4167,6 +4176,8 @@ fn provider_for_stage(
         model,
         secret_id: provider.secret_id,
         reasoning_effort,
+        max_output_tokens,
+        structured_output,
         request_timeout_seconds,
     })
 }
@@ -4243,6 +4254,8 @@ async fn chat_for_stage(
     request.num_ctx =
         ollama_text_num_ctx_for_provider(&provider, settings.effective_tuning().text_num_ctx);
     request.reasoning_effort = Some(provider.reasoning_effort);
+    request.max_output_tokens = provider.max_output_tokens;
+    request.structured_output = Some(provider.structured_output);
     chat_with_provider(pool, config, &provider, request).await
 }
 
@@ -4476,6 +4489,8 @@ mod tests {
             model: "m".to_owned(),
             secret_id: None,
             reasoning_effort: ReasoningEffort::default(),
+            max_output_tokens: None,
+            structured_output: StructuredOutputMode::default(),
             request_timeout_seconds: archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS,
         }
     }
@@ -5169,5 +5184,26 @@ mod tests {
             webhook_secret: None,
             metrics_token: None,
         }
+    }
+
+    #[test]
+    fn provider_for_stage_carries_max_output_tokens_and_structured_output() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.ensure_default_providers();
+        settings.ai.default_provider = "openai-compatible".to_owned();
+        let provider = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "openai-compatible")
+            .expect("preset exists");
+        provider.enabled = true;
+        provider.tuning.max_output_tokens = Some(8192);
+        provider.tuning.structured_output = Some(StructuredOutputMode::JsonObject);
+
+        let resolved =
+            provider_for_stage(&settings, Stage::Metadata, false).expect("provider resolves");
+        assert_eq!(resolved.max_output_tokens, Some(8192));
+        assert_eq!(resolved.structured_output, StructuredOutputMode::JsonObject);
     }
 }
