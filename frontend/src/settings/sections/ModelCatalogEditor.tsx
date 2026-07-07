@@ -3,7 +3,7 @@ import { AiProviderKind, ModelCatalogEntry, ModelUsageTier } from '../../api/cli
 import { useI18n } from '../../i18n/I18nProvider';
 import { usageTierLabel } from './helpers';
 
-const CATALOG_PROVIDER_KINDS: AiProviderKind[] = ['ollama', 'openai', 'anthropic', 'openai_compatible'];
+const CATALOG_PROVIDER_KINDS: AiProviderKind[] = ['ollama', 'openai', 'anthropic', 'openai_compatible', 'mineru'];
 const CATALOG_USAGE_TIERS: ModelUsageTier[] = ['low', 'medium', 'high', 'extra_high'];
 
 export function ModelCatalogEditor({

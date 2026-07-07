@@ -28,7 +28,7 @@ components:
       enum: [manual_review, auto_select_review, full_auto]
     AiProviderKind:
       type: string
-      enum: [ollama, openai, anthropic, openai_compatible]
+      enum: [ollama, openai, anthropic, openai_compatible, mineru]
     AiProviderSettings:
       type: object
       required: [name, kind, base_url, enabled]

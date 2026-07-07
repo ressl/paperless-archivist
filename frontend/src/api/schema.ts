@@ -2374,7 +2374,7 @@ export interface components {
         /** @enum {string} */
         ProcessingMode: "manual_review" | "auto_select_review" | "full_auto";
         /** @enum {string} */
-        AiProviderKind: "ollama" | "openai" | "anthropic" | "openai_compatible";
+        AiProviderKind: "ollama" | "openai" | "anthropic" | "openai_compatible" | "mineru";
         AiProviderSettings: {
             name: string;
             kind: components["schemas"]["AiProviderKind"];

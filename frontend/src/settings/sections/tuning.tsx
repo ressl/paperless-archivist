@@ -20,7 +20,7 @@ import { isOllamaCloudProvider } from './helpers';
 // clears any operator-supplied overrides for that sub-block.
 // ---------------------------------------------------------------------------
 
-type TuningPresetKind = 'ollama' | 'ollama_cloud' | 'openai' | 'anthropic' | 'openai_compatible';
+type TuningPresetKind = 'ollama' | 'ollama_cloud' | 'openai' | 'anthropic' | 'openai_compatible' | 'mineru';
 
 export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
   ollama: {
@@ -32,6 +32,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     // 16384 tokens), so a smaller pin would only misrepresent what runs.
     text_num_ctx: 32768,
     vision_num_ctx: 4096,
+    max_output_tokens: null,
+    structured_output: null,
     ocr_page_limit: 2,
     hourly_document_limit: 200,
     daily_document_limit: 2000,
@@ -52,6 +54,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     consensus_date_tolerance_days: null,
     text_num_ctx: null,
     vision_num_ctx: null,
+    max_output_tokens: null,
+    structured_output: null,
     ocr_page_limit: null,
     hourly_document_limit: null,
     daily_document_limit: null,
@@ -72,6 +76,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     consensus_date_tolerance_days: null,
     text_num_ctx: null,
     vision_num_ctx: null,
+    max_output_tokens: null,
+    structured_output: null,
     ocr_page_limit: 8,
     hourly_document_limit: null,
     daily_document_limit: null,
@@ -92,6 +98,8 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     consensus_date_tolerance_days: null,
     text_num_ctx: null,
     vision_num_ctx: null,
+    max_output_tokens: null,
+    structured_output: null,
     ocr_page_limit: null,
     hourly_document_limit: null,
     daily_document_limit: null,
@@ -112,6 +120,30 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     consensus_date_tolerance_days: null,
     text_num_ctx: null,
     vision_num_ctx: null,
+    max_output_tokens: null,
+    structured_output: null,
+    ocr_page_limit: null,
+    hourly_document_limit: null,
+    daily_document_limit: null,
+    metadata_confidence_threshold: null,
+    title_confidence_threshold: null,
+    correspondent_confidence_threshold: null,
+    document_type_confidence_threshold: null,
+    document_date_confidence_threshold: null,
+    tags_confidence_threshold: null,
+    fields_confidence_threshold: null,
+    max_tags: null,
+    allowed_list_max: null,
+    request_timeout_seconds: null
+  },
+  mineru: {
+    worker_concurrency: null,
+    consensus_secondary_text_model: null,
+    consensus_date_tolerance_days: null,
+    text_num_ctx: null,
+    vision_num_ctx: null,
+    max_output_tokens: null,
+    structured_output: null,
     ocr_page_limit: null,
     hourly_document_limit: null,
     daily_document_limit: null,

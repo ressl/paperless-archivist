@@ -11,6 +11,8 @@ export type AiLoadedModel = components['schemas']['AiLoadedModel'];
 // workflow / ocr / metadata / tagging applies. See docs/PROVIDER_TUNING_PLAN.md.
 export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high';
 
+export type StructuredOutputMode = 'auto' | 'json_object' | 'off';
+
 export type ModelUsageTier = 'low' | 'medium' | 'high' | 'extra_high';
 
 // Editable model-picker catalog entry (v1.6.3). Mirrors
@@ -34,6 +36,8 @@ export type ProviderTuning = {
   text_num_ctx?: number | null;
   vision_num_ctx?: number | null;
   reasoning_effort?: ReasoningEffort | null;
+  max_output_tokens?: number | null;
+  structured_output?: StructuredOutputMode | null;
   ocr_page_limit?: number | null;
   hourly_document_limit?: number | null;
   daily_document_limit?: number | null;
@@ -53,7 +57,7 @@ export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
 export type Stage = 'ocr' | 'metadata';
 export type PipelineStage = Stage | 'apply';
 export type ProcessingMode = 'manual_review' | 'auto_select_review' | 'full_auto';
-export type AiProviderKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible';
+export type AiProviderKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible' | 'mineru';
 
 export type AiProvider = {
   name: string;
