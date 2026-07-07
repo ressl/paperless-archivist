@@ -1928,6 +1928,8 @@ async fn build_prompt_test_chat_request(
             num_ctx: None,
             response_schema: None,
             reasoning_effort: None,
+            max_output_tokens: None,
+            structured_output: None,
         }),
         // Stage::Metadata uses the consolidated prompt builder added alongside the worker
         // handler. The builder is registered in archivist-ai in a follow-up commit; until
@@ -2686,6 +2688,8 @@ async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Va
                     num_ctx: None,
                     response_schema: None,
                     reasoning_effort: None,
+                    max_output_tokens: None,
+                    structured_output: None,
                 })
                 .await?;
             Ok(
@@ -2706,6 +2710,8 @@ async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Va
                     num_ctx: None,
                     response_schema: None,
                     reasoning_effort: None,
+                    max_output_tokens: None,
+                    structured_output: None,
                 })
                 .await?;
             Ok(
@@ -4683,6 +4689,8 @@ async fn post_chat_message(
             num_ctx: None,
             response_schema: None,
             reasoning_effort: None,
+            max_output_tokens: None,
+            structured_output: None,
         },
     )
     .await?;
@@ -8609,6 +8617,8 @@ mod tests {
                 num_ctx: None,
                 response_schema: None,
                 reasoning_effort: None,
+                max_output_tokens: None,
+                structured_output: None,
             })
             .await
             .expect("chat succeeds");

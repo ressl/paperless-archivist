@@ -1670,6 +1670,7 @@ async fn process_ocr(
                     .effective_tuning_for_stage(Stage::Ocr)
                     .vision_num_ctx,
             ),
+            max_output_tokens: None,
             prompt: page_prompt,
             images: vec![ImageInput {
                 mime_type: page.mime_type.clone(),

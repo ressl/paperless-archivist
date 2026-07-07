@@ -37,6 +37,8 @@ fn chat_request() -> ChatRequest {
         num_ctx: None,
         response_schema: None,
         reasoning_effort: None,
+        max_output_tokens: None,
+        structured_output: None,
     }
 }
 
