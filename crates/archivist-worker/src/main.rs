@@ -2994,6 +2994,8 @@ async fn run_consensus_check(
     request.model = secondary_model.clone();
     request.num_ctx = ollama_text_num_ctx_for_provider(&provider, tuning.text_num_ctx);
     request.reasoning_effort = Some(provider.reasoning_effort);
+    request.max_output_tokens = provider.max_output_tokens;
+    request.structured_output = Some(provider.structured_output);
 
     let response = match chat_with_provider(pool, config, &provider, request).await {
         Ok(r) => r,
