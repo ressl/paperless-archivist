@@ -5377,7 +5377,10 @@ mod tests {
         provider.tuning.structured_output = Some(StructuredOutputMode::JsonObject);
         let effective = settings.effective_tuning();
         assert_eq!(effective.max_output_tokens, Some(8192));
-        assert_eq!(effective.structured_output, StructuredOutputMode::JsonObject);
+        assert_eq!(
+            effective.structured_output,
+            StructuredOutputMode::JsonObject
+        );
     }
 
     #[test]

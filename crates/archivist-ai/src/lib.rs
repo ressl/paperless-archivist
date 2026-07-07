@@ -882,7 +882,10 @@ impl TextProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible chat")?;
         let status = response.status();
         let raw: Value = if status.is_success() {
-            response.json().await.context("decode OpenAI-compatible response")?
+            response
+                .json()
+                .await
+                .context("decode OpenAI-compatible response")?
         } else {
             let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
             if !should_retry_without_schema(status.as_u16(), &body, retryable) {
@@ -1105,16 +1108,17 @@ impl VisionProvider for MineruClient {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             let snippet: String = body.chars().take(600).collect();
-            return Err(anyhow::Error::new(AiProviderError::from_http(
-                status.as_u16(),
-                snippet,
-            ))
-            .context("MinerU file_parse call"));
+            return Err(
+                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), snippet))
+                    .context("MinerU file_parse call"),
+            );
         }
         let raw: Value = response.json().await.context("decode MinerU response")?;
         let Some(text) = extract_mineru_markdown(&raw) else {
             let snippet: String = raw.to_string().chars().take(600).collect();
-            return Err(anyhow!("MinerU response had no md_content field: {snippet}"));
+            return Err(anyhow!(
+                "MinerU response had no md_content field: {snippet}"
+            ));
         };
         Ok(AiResponse {
             provider: self.provider_name.clone(),
@@ -3784,7 +3788,8 @@ mod tests {
         let error = extract_openai_message_text(&raw).unwrap_err().to_string();
         assert!(error.contains("reasoning"), "got: {error}");
 
-        let raw = json!({ "choices": [{ "message": { "content": "<think>only thoughts</think>" } }] });
+        let raw =
+            json!({ "choices": [{ "message": { "content": "<think>only thoughts</think>" } }] });
         assert!(extract_openai_message_text(&raw).is_err());
     }
 
@@ -3805,7 +3810,8 @@ mod tests {
 
     #[test]
     fn should_retry_without_schema_matrix() {
-        let body = "Bad Request: response_format json_schema is not supported by the xgrammar backend";
+        let body =
+            "Bad Request: response_format json_schema is not supported by the xgrammar backend";
         assert!(should_retry_without_schema(400, body, true));
         assert!(!should_retry_without_schema(400, body, false)); // no schema was sent
         assert!(!should_retry_without_schema(500, body, true)); // only 400s
@@ -3814,6 +3820,10 @@ mod tests {
             "model not found", // unrelated 400
             true
         ));
-        assert!(should_retry_without_schema(400, "invalid GRAMMAR compilation", true));
+        assert!(should_retry_without_schema(
+            400,
+            "invalid GRAMMAR compilation",
+            true
+        ));
     }
 }
