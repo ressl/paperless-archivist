@@ -897,6 +897,10 @@ impl RuntimeSettings {
             reasoning_effort: tuning
                 .and_then(|tuning| tuning.reasoning_effort)
                 .unwrap_or_default(),
+            max_output_tokens: tuning.and_then(|tuning| tuning.max_output_tokens),
+            structured_output: tuning
+                .and_then(|tuning| tuning.structured_output)
+                .unwrap_or_default(),
             ocr_page_limit: tuning
                 .and_then(|tuning| tuning.ocr_page_limit)
                 .unwrap_or(self.ocr.page_limit),
@@ -1732,6 +1736,22 @@ impl ReasoningEffort {
     }
 }
 
+/// Wire-level structured-output mode for OpenAI / OpenAI-compatible
+/// providers. `Auto` keeps the strict `json_schema` response_format
+/// (OpenAI Structured Outputs). `JsonObject` downgrades to
+/// `{"type":"json_object"}` for servers whose grammar backend rejects
+/// strict schemas (seen on SGLang/vLLM with some reasoning models).
+/// `Off` sends no response_format and relies on prompt steering plus the
+/// defensive `normalize_model_json` parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredOutputMode {
+    #[default]
+    Auto,
+    JsonObject,
+    Off,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderTuning {
     // --- Performance ---
@@ -1756,6 +1776,16 @@ pub struct ProviderTuning {
     /// Reasoning / thinking effort for capable models. None = inherit (Off).
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Output-token cap sent as `max_tokens` to OpenAI / OpenAI-compatible
+    /// providers. None = omit the field (server default applies). Reasoning
+    /// tokens count toward the cap on most servers, so budget generously
+    /// for thinking models (e.g. 8192). Other kinds ignore it.
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    /// Structured-output wire mode for schema-carrying requests on OpenAI /
+    /// OpenAI-compatible providers. None = inherit (Auto).
+    #[serde(default)]
+    pub structured_output: Option<StructuredOutputMode>,
 
     // --- Resource caps ---
     /// OCR pages to extract per document. None = inherit `ocr.page_limit`.
@@ -1804,6 +1834,8 @@ pub struct EffectiveTuning {
     pub text_num_ctx: Option<i64>,
     pub vision_num_ctx: Option<i64>,
     pub reasoning_effort: ReasoningEffort,
+    pub max_output_tokens: Option<u32>,
+    pub structured_output: StructuredOutputMode,
     pub ocr_page_limit: u16,
     pub hourly_document_limit: Option<i64>,
     pub daily_document_limit: Option<i64>,
@@ -1857,6 +1889,8 @@ impl AiProviderSettings {
                 text_num_ctx: Some(32768),
                 vision_num_ctx: Some(4096),
                 reasoning_effort: None,
+                max_output_tokens: None,
+                structured_output: None,
                 ocr_page_limit: Some(2),
                 hourly_document_limit: Some(200),
                 daily_document_limit: Some(2000),
@@ -1917,6 +1951,8 @@ impl AiProviderSettings {
                 text_num_ctx: None,
                 vision_num_ctx: None,
                 reasoning_effort: None,
+                max_output_tokens: None,
+                structured_output: None,
                 ocr_page_limit: Some(8),
                 hourly_document_limit: None,
                 daily_document_limit: None,
@@ -5273,5 +5309,48 @@ mod tests {
         assert_eq!(value["options"]["token"], "[REDACTED]");
         assert_eq!(value["options"]["num_ctx"], 4096);
         assert_eq!(value["secret"], "[REDACTED]");
+    }
+
+    #[test]
+    fn tuning_resolves_max_output_tokens_and_structured_output() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.ensure_default_providers();
+        settings.ai.default_provider = "openai-compatible".to_owned();
+        let provider = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "openai-compatible")
+            .expect("preset exists");
+        provider.enabled = true;
+
+        // Unset falls through to the defaults: no cap, Auto mode.
+        let effective = settings.effective_tuning();
+        assert_eq!(effective.max_output_tokens, None);
+        assert_eq!(effective.structured_output, StructuredOutputMode::Auto);
+
+        let provider = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "openai-compatible")
+            .expect("preset exists");
+        provider.tuning.max_output_tokens = Some(8192);
+        provider.tuning.structured_output = Some(StructuredOutputMode::JsonObject);
+        let effective = settings.effective_tuning();
+        assert_eq!(effective.max_output_tokens, Some(8192));
+        assert_eq!(effective.structured_output, StructuredOutputMode::JsonObject);
+    }
+
+    #[test]
+    fn structured_output_mode_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&StructuredOutputMode::JsonObject).unwrap(),
+            "\"json_object\""
+        );
+        assert_eq!(
+            serde_json::from_str::<StructuredOutputMode>("\"off\"").unwrap(),
+            StructuredOutputMode::Off
+        );
     }
 }
