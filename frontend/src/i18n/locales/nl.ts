@@ -437,6 +437,14 @@ const nlMessages: Record<MessageKey, string> = {
   'settings.tuning.reasoning.low': "Laag",
   'settings.tuning.reasoning.medium': "Gemiddeld",
   'settings.tuning.reasoning.high': "Hoog",
+  'settings.tuning.field.max_output_tokens': 'Max. output-tokens (max_tokens)',
+  'settings.tuning.default.max_output_tokens':
+    'Serverstandaard. Redeneertokens tellen mee voor de limiet — reserveer ruim budget voor denkmodellen (bijv. 8192).',
+  'settings.tuning.field.structured_output': 'Structured output',
+  'settings.tuning.default.structured_output': 'Auto (strikt JSON-schema)',
+  'settings.tuning.structured_output.auto': 'auto (json_schema strict)',
+  'settings.tuning.structured_output.json_object': 'json_object (schemaloze JSON-modus)',
+  'settings.tuning.structured_output.off': 'off (alleen prompt)',
   'settings.tuning.field.ocr_page_limit': 'OCR-paginalimiet',
   'settings.tuning.field.hourly_document_limit': 'Uurlijkse documentlimiet',
   'settings.tuning.field.daily_document_limit': 'Dagelijkse documentlimiet',
@@ -546,6 +554,8 @@ const nlMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Actief',
   'settings.provider.add': 'Provider toevoegen',
+  'settings.provider.mineru_base_url_hint':
+    'URL van de MinerU API-server (FastAPI), zonder /v1. De OCR-promptinstelling heeft geen effect voor dit providertype.',
   'settings.paperless.test_running.title': 'Paperless-test loopt',
   'settings.paperless.test_running.description': 'Archivist controleert de opgeslagen Paperless REST-verbinding.',
   'settings.paperless.test_running.hint': 'De test gebruikt de opgeslagen Base URL en API-token.',

@@ -437,6 +437,14 @@ const frMessages: Record<MessageKey, string> = {
   'settings.tuning.reasoning.low': "Faible",
   'settings.tuning.reasoning.medium': "Moyen",
   'settings.tuning.reasoning.high': "Élevé",
+  'settings.tuning.field.max_output_tokens': 'Tokens de sortie max (max_tokens)',
+  'settings.tuning.default.max_output_tokens':
+    'Valeur par défaut du serveur. Les tokens de raisonnement comptent dans le plafond — prévoyez une marge généreuse pour les modèles de réflexion (par ex. 8192).',
+  'settings.tuning.field.structured_output': 'Structured output',
+  'settings.tuning.default.structured_output': 'Auto (schéma JSON strict)',
+  'settings.tuning.structured_output.auto': 'auto (json_schema strict)',
+  'settings.tuning.structured_output.json_object': 'json_object (mode JSON sans schéma)',
+  'settings.tuning.structured_output.off': 'off (prompt seul)',
   'settings.tuning.field.ocr_page_limit': 'Limite de pages OCR',
   'settings.tuning.field.hourly_document_limit': 'Limite horaire de documents',
   'settings.tuning.field.daily_document_limit': 'Limite quotidienne de documents',
@@ -546,6 +554,8 @@ const frMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Activé',
   'settings.provider.add': 'Ajouter un provider',
+  'settings.provider.mineru_base_url_hint':
+    "URL du serveur API MinerU (FastAPI), sans /v1. Le réglage de prompt OCR n’a aucun effet pour ce type de provider.",
   'settings.paperless.test_running.title': 'Test Paperless en cours',
   'settings.paperless.test_running.description': 'Archivist vérifie la connexion Paperless REST enregistrée.',
   'settings.paperless.test_running.hint': 'Le test utilise la Base URL et le token API enregistrés.',

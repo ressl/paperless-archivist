@@ -4,7 +4,6 @@ import {
   api,
   AiRuntimeHints,
   ProviderTuning,
-  ReasoningEffort,
   RuntimeSettings
 } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
@@ -168,7 +167,9 @@ export const PERFORMANCE_FIELDS = [
   'consensus_date_tolerance_days',
   'text_num_ctx',
   'vision_num_ctx',
-  'reasoning_effort'
+  'reasoning_effort',
+  'max_output_tokens',
+  'structured_output'
 ] as const satisfies readonly (keyof ProviderTuning)[];
 
 export const CAPS_FIELDS = [
@@ -278,6 +279,26 @@ export function TuningDisclosure({
             hint={provider.kind === 'anthropic' ? t('settings.tuning.hint.reasoning_anthropic') : undefined}
             onChange={(value) => onChangeTuning({ reasoning_effort: value })}
           />
+          {(provider.kind === 'openai' || provider.kind === 'openai_compatible') && (
+            <>
+              <TuningNumberField
+                field="max_output_tokens"
+                value={tuning.max_output_tokens}
+                defaultValue={null}
+                defaultLabel={t('settings.tuning.default.max_output_tokens')}
+                min={1}
+                step={256}
+                onChange={(value) => onChangeTuning({ max_output_tokens: value })}
+              />
+              <TuningSelectField
+                field="structured_output"
+                value={tuning.structured_output}
+                options={STRUCTURED_OUTPUT_OPTIONS}
+                defaultLabel={t('settings.tuning.default.structured_output')}
+                onChange={(value) => onChangeTuning({ structured_output: value })}
+              />
+            </>
+          )}
         </TuningSection>
         <TuningSection titleKey="settings.tuning.section.caps" onReset={() => onResetBlock(CAPS_FIELDS)}>
           <TuningNumberField
@@ -540,7 +561,11 @@ function TuningTextField({
   );
 }
 
-function TuningSelectField({
+// Generic over the field's own string-literal union (`ReasoningEffort` for
+// `reasoning_effort`, `StructuredOutputMode` for `structured_output`, ...) so
+// each caller's `onChange` gets its real value type back instead of a cast to
+// a single hardcoded union.
+function TuningSelectField<T extends string>({
   field,
   value,
   options,
@@ -549,11 +574,11 @@ function TuningSelectField({
   onChange
 }: {
   field: TuningField;
-  value: string | null | undefined;
-  options: readonly { value: string; labelKey: Parameters<ReturnType<typeof useI18n>['t']>[0] }[];
+  value: T | null | undefined;
+  options: readonly { value: T; labelKey: Parameters<ReturnType<typeof useI18n>['t']>[0] }[];
   defaultLabel: string;
   hint?: string;
-  onChange: (next: ReasoningEffort | null) => void;
+  onChange: (next: T | null) => void;
 }) {
   const { t } = useI18n();
   const labelKey = `settings.tuning.field.${field}` as Parameters<typeof t>[0];
@@ -564,7 +589,7 @@ function TuningSelectField({
         value={value ?? ''}
         onChange={(event) => {
           const next = event.target.value;
-          onChange(next === '' ? null : (next as ReasoningEffort));
+          onChange(next === '' ? null : (next as T));
         }}
       >
         <option value="">{defaultLabel}</option>
@@ -584,6 +609,12 @@ const REASONING_EFFORT_OPTIONS = [
   { value: 'low', labelKey: 'settings.tuning.reasoning.low' },
   { value: 'medium', labelKey: 'settings.tuning.reasoning.medium' },
   { value: 'high', labelKey: 'settings.tuning.reasoning.high' }
+] as const;
+
+const STRUCTURED_OUTPUT_OPTIONS = [
+  { value: 'auto', labelKey: 'settings.tuning.structured_output.auto' },
+  { value: 'json_object', labelKey: 'settings.tuning.structured_output.json_object' },
+  { value: 'off', labelKey: 'settings.tuning.structured_output.off' }
 ] as const;
 
 function OllamaServerHints({ providerName }: { providerName: string }) {

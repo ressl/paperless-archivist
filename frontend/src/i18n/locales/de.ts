@@ -437,6 +437,14 @@ const deMessages: Record<MessageKey, string> = {
   'settings.tuning.reasoning.low': "Niedrig",
   'settings.tuning.reasoning.medium': "Mittel",
   'settings.tuning.reasoning.high': "Hoch",
+  'settings.tuning.field.max_output_tokens': 'Max. Ausgabe-Tokens (max_tokens)',
+  'settings.tuning.default.max_output_tokens':
+    'Server-Standard. Reasoning-Tokens zählen mit — für Denk-Modelle großzügig wählen (z. B. 8192).',
+  'settings.tuning.field.structured_output': 'Structured Output',
+  'settings.tuning.default.structured_output': 'Auto (striktes JSON-Schema)',
+  'settings.tuning.structured_output.auto': 'auto (json_schema strict)',
+  'settings.tuning.structured_output.json_object': 'json_object (JSON-Modus ohne Schema)',
+  'settings.tuning.structured_output.off': 'off (nur Prompt)',
   'settings.tuning.field.ocr_page_limit': 'OCR-Seitenlimit',
   'settings.tuning.field.hourly_document_limit': 'Stundenlimit Dokumente',
   'settings.tuning.field.daily_document_limit': 'Tageslimit Dokumente',
@@ -546,6 +554,8 @@ const deMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API-Key',
   'settings.provider.enabled': 'Aktiv',
   'settings.provider.add': 'Provider hinzufügen',
+  'settings.provider.mineru_base_url_hint':
+    'URL des MinerU-API-Servers (FastAPI), ohne /v1. Das OCR-Prompt-Setting hat für diesen Provider-Typ keine Wirkung.',
   'settings.paperless.test_running.title': 'Paperless-Test läuft',
   'settings.paperless.test_running.description': 'Archivist prüft gerade die gespeicherte Paperless REST-Verbindung.',
   'settings.paperless.test_running.hint': 'Der Test nutzt die gespeicherte Base URL und den gespeicherten API-Token.',

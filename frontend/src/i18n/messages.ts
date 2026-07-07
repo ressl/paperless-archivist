@@ -435,6 +435,14 @@ export const enMessages = {
   'settings.tuning.reasoning.low': "Low",
   'settings.tuning.reasoning.medium': "Medium",
   'settings.tuning.reasoning.high': "High",
+  'settings.tuning.field.max_output_tokens': 'Max output tokens (max_tokens)',
+  'settings.tuning.default.max_output_tokens':
+    'Server default. Reasoning tokens count toward the cap — budget generously for thinking models (e.g. 8192).',
+  'settings.tuning.field.structured_output': 'Structured output',
+  'settings.tuning.default.structured_output': 'Auto (strict JSON schema)',
+  'settings.tuning.structured_output.auto': 'auto (json_schema strict)',
+  'settings.tuning.structured_output.json_object': 'json_object (schema-free JSON mode)',
+  'settings.tuning.structured_output.off': 'off (prompt only)',
   'settings.tuning.field.ocr_page_limit': 'OCR page limit',
   'settings.tuning.field.hourly_document_limit': 'Hourly document limit',
   'settings.tuning.field.daily_document_limit': 'Daily document limit',
@@ -544,6 +552,8 @@ export const enMessages = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Enabled',
   'settings.provider.add': 'Add Provider',
+  'settings.provider.mineru_base_url_hint':
+    'URL of the MinerU API server (FastAPI), without /v1. The OCR prompt setting has no effect for this kind.',
   'settings.paperless.test_running.title': 'Paperless test running',
   'settings.paperless.test_running.description': 'Archivist is checking the saved Paperless REST connection.',
   'settings.paperless.test_running.hint': 'The test uses the saved Base URL and saved API token.',

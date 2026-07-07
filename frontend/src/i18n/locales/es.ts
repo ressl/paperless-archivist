@@ -437,6 +437,14 @@ const esMessages: Record<MessageKey, string> = {
   'settings.tuning.reasoning.low': "Bajo",
   'settings.tuning.reasoning.medium': "Medio",
   'settings.tuning.reasoning.high': "Alto",
+  'settings.tuning.field.max_output_tokens': 'Máx. tokens de salida (max_tokens)',
+  'settings.tuning.default.max_output_tokens':
+    'Por defecto del servidor. Los tokens de razonamiento cuentan para el límite — reserva un margen generoso para modelos de pensamiento (p. ej. 8192).',
+  'settings.tuning.field.structured_output': 'Structured output',
+  'settings.tuning.default.structured_output': 'Auto (esquema JSON estricto)',
+  'settings.tuning.structured_output.auto': 'auto (json_schema strict)',
+  'settings.tuning.structured_output.json_object': 'json_object (modo JSON sin esquema)',
+  'settings.tuning.structured_output.off': 'off (solo prompt)',
   'settings.tuning.field.ocr_page_limit': 'Límite de páginas OCR',
   'settings.tuning.field.hourly_document_limit': 'Límite horario de documentos',
   'settings.tuning.field.daily_document_limit': 'Límite diario de documentos',
@@ -546,6 +554,8 @@ const esMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Activo',
   'settings.provider.add': 'Añadir provider',
+  'settings.provider.mineru_base_url_hint':
+    'URL del servidor de la API de MinerU (FastAPI), sin /v1. El ajuste de prompt de OCR no tiene efecto para este tipo de provider.',
   'settings.paperless.test_running.title': 'Prueba de Paperless en curso',
   'settings.paperless.test_running.description': 'Archivist está verificando la conexión REST guardada de Paperless.',
   'settings.paperless.test_running.hint': 'La prueba usa la Base URL y el token de API guardados.',

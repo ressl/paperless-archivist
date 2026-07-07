@@ -264,6 +264,14 @@ function baseModelOptions(provider: ProviderDescriptor, capability: ModelCapabil
 }
 
 export function recommendedModel(provider: ProviderDescriptor, capability: ModelCapability) {
+  // Mineru is a fixed, vision-only OCR backend: it has no text capability and
+  // no model catalog to pick from — the vision "model" is really just the
+  // provider kind itself. Special-case it ahead of the catalog lookup so the
+  // ProviderCard's disabled vision input and the kind-switch handler both get
+  // a stable, non-empty value without inventing catalog entries.
+  if (provider.kind === 'mineru') {
+    return capability === 'vision' ? 'mineru' : '';
+  }
   const options = baseModelOptions(provider, capability);
   return options.find((option) => option.recommendation)?.value ?? options[0]?.value ?? '';
 }

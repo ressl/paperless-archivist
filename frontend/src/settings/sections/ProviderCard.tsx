@@ -66,9 +66,14 @@ export function ProviderCard({
           <option value="openai">openai</option>
           <option value="anthropic">anthropic</option>
           <option value="openai_compatible">openai compatible</option>
+          <option value="mineru">mineru (OCR)</option>
         </select>
       </FormField>
-      <FormField label={t('settings.provider.base_url')} htmlFor={ids.baseUrl}>
+      <FormField
+        label={t('settings.provider.base_url')}
+        htmlFor={ids.baseUrl}
+        help={provider.kind === 'mineru' ? t('settings.provider.mineru_base_url_hint') : undefined}
+      >
         <input
           id={ids.baseUrl}
           value={provider.base_url}
@@ -95,29 +100,35 @@ export function ProviderCard({
           onChange={(event) => onChangeProvider({ cost_per_1m_output_tokens_usd: optionalNumber(event.target.value) })}
         />
       </FormField>
-      <div className="settings-field">
-        {t('settings.provider.text_model')}
-        <ProviderModelSelect
-          capability="text"
-          provider={provider}
-          value={provider.default_text_model ?? ''}
-          catalog={catalog}
-          ollamaState={ollamaState}
-          onChange={(value) => onChangeProvider({ default_text_model: value })}
-          onRefresh={onRefreshModels}
-        />
-      </div>
+      {provider.kind !== 'mineru' && (
+        <div className="settings-field">
+          {t('settings.provider.text_model')}
+          <ProviderModelSelect
+            capability="text"
+            provider={provider}
+            value={provider.default_text_model ?? ''}
+            catalog={catalog}
+            ollamaState={ollamaState}
+            onChange={(value) => onChangeProvider({ default_text_model: value })}
+            onRefresh={onRefreshModels}
+          />
+        </div>
+      )}
       <div className="settings-field">
         {t('settings.provider.vision_model')}
-        <ProviderModelSelect
-          capability="vision"
-          provider={provider}
-          value={provider.default_vision_model ?? ''}
-          catalog={catalog}
-          ollamaState={ollamaState}
-          onChange={(value) => onChangeProvider({ default_vision_model: value })}
-          onRefresh={onRefreshModels}
-        />
+        {provider.kind === 'mineru' ? (
+          <input value="mineru" disabled aria-label={t('settings.provider.vision_model')} />
+        ) : (
+          <ProviderModelSelect
+            capability="vision"
+            provider={provider}
+            value={provider.default_vision_model ?? ''}
+            catalog={catalog}
+            ollamaState={ollamaState}
+            onChange={(value) => onChangeProvider({ default_vision_model: value })}
+            onRefresh={onRefreshModels}
+          />
+        )}
       </div>
       <FormField label={t('settings.provider.api_key')} htmlFor={ids.apiKey}>
         <input
