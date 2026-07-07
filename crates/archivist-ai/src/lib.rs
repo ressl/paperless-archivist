@@ -867,26 +867,60 @@ impl OpenAiCompatibleClient {
 impl TextProvider for OpenAiCompatibleClient {
     async fn chat(&self, request: ChatRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let payload = build_openai_chat_payload(&request);
+        let mut payload = build_openai_chat_payload(&request);
+        // Self-healing is only armed in Auto mode: JsonObject/Off are already
+        // the operator's explicit compatibility choice.
+        let retryable = payload.get("response_format").is_some()
+            && request.structured_output.unwrap_or_default() == StructuredOutputMode::Auto;
+        let url = format!("{}/chat/completions", self.base_url);
         let response = self
             .client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(&url)
             .json(&payload)
             .send()
             .await
             .context("call OpenAI-compatible chat")?;
         let status = response.status();
-        if !status.is_success() {
+        let raw: Value = if status.is_success() {
+            response.json().await.context("decode OpenAI-compatible response")?
+        } else {
             let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("OpenAI-compatible chat call"),
+            if !should_retry_without_schema(status.as_u16(), &body, retryable) {
+                return Err(
+                    anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
+                        .context("OpenAI-compatible chat call"),
+                );
+            }
+            tracing::warn!(
+                provider = %self.provider_name,
+                "server rejected response_format (400); retrying once without structured output"
             );
-        }
-        let raw: Value = response
-            .json()
-            .await
-            .context("decode OpenAI-compatible response")?;
+            payload
+                .as_object_mut()
+                .expect("payload is an object literal")
+                .remove("response_format");
+            let retry = self
+                .client
+                .post(&url)
+                .json(&payload)
+                .send()
+                .await
+                .context("call OpenAI-compatible chat (schema retry)")?;
+            let retry_status = retry.status();
+            if !retry_status.is_success() {
+                let (retry_status, retry_body) =
+                    check_quota_then_take_body(&self.provider_name, retry).await?;
+                return Err(anyhow::Error::new(AiProviderError::from_http(
+                    retry_status.as_u16(),
+                    retry_body,
+                ))
+                .context("OpenAI-compatible chat call (schema retry)"));
+            }
+            retry
+                .json()
+                .await
+                .context("decode OpenAI-compatible response (schema retry)")?
+        };
         let text = extract_openai_message_text(&raw)?;
         Ok(AiResponse {
             provider: self.provider_name.clone(),
@@ -1019,6 +1053,20 @@ fn extract_openai_message_text(raw: &Value) -> Result<String> {
         return Ok(String::new());
     }
     Ok(trimmed.to_owned())
+}
+
+/// True when a 400 looks like the server rejecting our `response_format`
+/// (strict json_schema unsupported by the grammar backend — observed on
+/// SGLang/vLLM with some reasoning models). One retry without the field
+/// keeps the pipeline alive; `normalize_model_json` still guards shape.
+fn should_retry_without_schema(status: u16, body: &str, retryable_request: bool) -> bool {
+    if status != 400 || !retryable_request {
+        return false;
+    }
+    let lowered = body.to_ascii_lowercase();
+    ["response_format", "json_schema", "grammar", "schema"]
+        .iter()
+        .any(|needle| lowered.contains(needle))
 }
 
 /// Extracts model IDs from an OpenAI-/Anthropic-style models listing
@@ -3611,5 +3659,19 @@ mod tests {
         let raw = json!({ "choices": [{ "message": {
             "content": "answer", "reasoning_content": "thoughts" } }] });
         assert_eq!(extract_openai_message_text(&raw).unwrap(), "answer");
+    }
+
+    #[test]
+    fn should_retry_without_schema_matrix() {
+        let body = "Bad Request: response_format json_schema is not supported by the xgrammar backend";
+        assert!(should_retry_without_schema(400, body, true));
+        assert!(!should_retry_without_schema(400, body, false)); // no schema was sent
+        assert!(!should_retry_without_schema(500, body, true)); // only 400s
+        assert!(!should_retry_without_schema(
+            400,
+            "model not found", // unrelated 400
+            true
+        ));
+        assert!(should_retry_without_schema(400, "invalid GRAMMAR compilation", true));
     }
 }
