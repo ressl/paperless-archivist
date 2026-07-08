@@ -236,11 +236,12 @@ const modelOptionsByProvider: Record<AiProviderKind, Record<ModelCapability, Mod
     text: openAiCompatibleTextModels,
     vision: openAiCompatibleVisionModels
   },
-  // Mineru is vision-only OCR (no chat/text capability) and has no curated
-  // model list yet — the picker UI lands in a later task. Empty arrays keep
-  // this Record total (required by AiProviderKind) without inventing catalog
-  // data; modelOptions()'s "current custom" fallback still renders the
-  // backend-provided default_vision_model ("mineru") safely.
+  // Mineru is vision-only OCR (no chat/text capability) with a fixed vision
+  // model ("mineru") rendered as a disabled input, not a picker — there is
+  // no catalog of selectable models, so no picker options are needed. Empty
+  // arrays keep this Record total (required by AiProviderKind) without
+  // inventing catalog data; modelOptions()'s "current custom" fallback still
+  // renders the backend-provided default_vision_model ("mineru") safely.
   mineru: {
     text: [],
     vision: []

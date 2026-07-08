@@ -177,7 +177,8 @@ message pointing at the server's reasoning-parser configuration instead of
 silently producing empty output.
 
 Known limitation: `Max output tokens` applies to worker stage calls (OCR,
-metadata, tagging, consensus) but not to the Document Chat API path.
+metadata, tagging, consensus) but not to the Document Chat API path or other
+API-side helper calls (prompt tester, provider connection test).
 
 ### MinerU (Vision-Only OCR)
 

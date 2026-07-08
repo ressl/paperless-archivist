@@ -54,7 +54,8 @@ example MiniMax-M2 or DeepSeek-R1) may emit inline `<think>...</think>`
 blocks; Archivist strips them before parsing the response. A response
 that contains only reasoning content and no final answer fails with a
 parser-configuration hint instead of returning empty text. Known
-limitation: the document-chat API path does not apply
+limitation: the document-chat path and other API-side helper calls
+(prompt tester, provider connection test) do not apply
 `max_output_tokens`; worker stage calls (OCR, metadata, tagging,
 consensus) do.
 
