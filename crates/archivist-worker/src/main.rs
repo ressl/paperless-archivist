@@ -5246,14 +5246,16 @@ mod tests {
             .find(|provider| provider.name == "mineru")
             .expect("mineru preset exists");
         provider.enabled = true;
-        settings.ai.stage_models.push(archivist_core::StageModelOverride {
-            stage: Stage::Ocr,
-            provider: "mineru".to_owned(),
-            model: "mineru".to_owned(),
-        });
+        settings
+            .ai
+            .stage_models
+            .push(archivist_core::StageModelOverride {
+                stage: Stage::Ocr,
+                provider: "mineru".to_owned(),
+                model: "mineru".to_owned(),
+            });
 
-        let resolved =
-            provider_for_stage(&settings, Stage::Ocr, true).expect("provider resolves");
+        let resolved = provider_for_stage(&settings, Stage::Ocr, true).expect("provider resolves");
         assert_eq!(resolved.kind, AiProviderKind::Mineru);
         assert_eq!(resolved.model, "mineru");
         assert_eq!(resolved.base_url, "http://localhost:8001");
