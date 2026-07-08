@@ -5234,4 +5234,28 @@ mod tests {
         assert_eq!(resolved.max_output_tokens, Some(8192));
         assert_eq!(resolved.structured_output, StructuredOutputMode::JsonObject);
     }
+
+    #[test]
+    fn provider_for_stage_uses_mineru_override_for_ocr() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.ensure_default_providers();
+        let provider = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "mineru")
+            .expect("mineru preset exists");
+        provider.enabled = true;
+        settings.ai.stage_models.push(archivist_core::StageModelOverride {
+            stage: Stage::Ocr,
+            provider: "mineru".to_owned(),
+            model: "mineru".to_owned(),
+        });
+
+        let resolved =
+            provider_for_stage(&settings, Stage::Ocr, true).expect("provider resolves");
+        assert_eq!(resolved.kind, AiProviderKind::Mineru);
+        assert_eq!(resolved.model, "mineru");
+        assert_eq!(resolved.base_url, "http://localhost:8001");
+    }
 }

@@ -1006,8 +1006,8 @@ impl VisionProvider for OpenAiCompatibleClient {
 /// MinerU VLM). Protocol: POST one rendered page image to `/file_parse`
 /// as multipart, receive parsed-document JSON; the OCR text is the
 /// returned Markdown. Vision-only — MinerU exposes no chat endpoint, and
-/// prompt/temperature/num_ctx have no meaning for its internal
-/// layout+recognition pipeline.
+/// prompt/temperature/num_ctx/max_output_tokens have no meaning for its
+/// internal layout+recognition pipeline.
 #[derive(Clone)]
 pub struct MineruClient {
     base_url: String,
@@ -1035,6 +1035,9 @@ impl MineruClient {
             .default_headers(headers)
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
+            // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an
+            // accepted residual risk for this operator-configured provider host
+            // (the pinning resolver was reverted, see #183).
             .build()?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
