@@ -10,6 +10,17 @@
 
 _No changes yet._
 
+## v1.17.1 — Accurate blocked-job dashboard counts
+
+This patch release corrects the dashboard's queued-job attention count.
+
+- **Blocked-job classification (#377):** normal sequential processing no longer
+  counts a queued job as blocked merely because an earlier stage is queued or
+  running. A queued job is reported as blocked only when an earlier stage has
+  failed or is waiting for review; failed predecessors take deterministic
+  precedence when both conditions exist. A PostgreSQL regression covers all
+  four predecessor states.
+
 ## v1.17.0 — Monitoring, MiniMax M3, and reliability hardening
 
 This release adds production-grade authenticated monitoring, the supported
