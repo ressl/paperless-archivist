@@ -159,6 +159,38 @@ describe('<DocumentChat> request ownership', () => {
     expect(screen.queryByText('A stale')).not.toBeInTheDocument();
   });
 
+  it('rejects old generations when navigation returns from A to B to A', async () => {
+    const firstA = deferred<{ items: DocumentChatMessage[] }>();
+    const secondA = deferred<{ items: DocumentChatMessage[] }>();
+    const sessionB = deferred<{ items: DocumentChatMessage[] }>();
+    let sessionACalls = 0;
+    chatMessagesMock.mockImplementation((sessionId: string) => {
+      if (sessionId === 'session-a') {
+        sessionACalls += 1;
+        return sessionACalls === 1 ? firstA.promise : secondA.promise;
+      }
+      return sessionB.promise;
+    });
+
+    await renderChat();
+    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-a'));
+    fireEvent.click(screen.getByTitle('Session B'));
+    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-b'));
+    fireEvent.click(screen.getByTitle('Session A'));
+    await waitFor(() =>
+      expect(chatMessagesMock.mock.calls.filter(([id]) => id === 'session-a')).toHaveLength(2)
+    );
+
+    await act(async () => secondA.resolve(messagesResponse('session-a', 'A newest')));
+    expect(await screen.findByText('A newest')).toBeInTheDocument();
+    await act(async () => sessionB.resolve(messagesResponse('session-b', 'B stale')));
+    await act(async () => firstA.resolve(messagesResponse('session-a', 'A oldest')));
+
+    expect(screen.getByText('A newest')).toBeInTheDocument();
+    expect(screen.queryByText('B stale')).not.toBeInTheDocument();
+    expect(screen.queryByText('A oldest')).not.toBeInTheDocument();
+  });
+
   it('keeps B visible when the post-send A refresh resolves late', async () => {
     const refreshA = deferred<{ items: DocumentChatMessage[] }>();
     const sessionB = deferred<{ items: DocumentChatMessage[] }>();
