@@ -69,6 +69,30 @@ chat, and modified-timestamp indexes.
 Model inference is usually the bottleneck. For local Ollama, size GPU/VRAM for
 the selected text and vision models before increasing worker concurrency.
 
+### SGLang/MiniMax M3 measured profile
+
+The built-in `sglang-minimax-m3` provider uses a measured conservative profile:
+
+- worker concurrency `1` (still clamped by the global
+  `ARCHIVIST_WORKER_CONCURRENCY` hard upper cap)
+- request timeout `180` seconds
+- maximum output `4096` tokens
+- structured output `auto` (strict JSON Schema where the consumer supplies it)
+- reasoning unset/disabled by default
+
+This reserves one of the reviewed runtime's two request slots for interactive
+Prompt Tester, Provider Test, or Document Chat traffic. With structured output
+`auto`, one high-level call may make a schema request and one bounded
+compatibility retry. The Worker lease is therefore at least 420 seconds
+(`2 × 180 + 60`), covering both per-request timeouts plus its safety margin.
+Do not raise Worker concurrency merely because a short parallel smoke
+succeeds: offering four Worker requests to the two-slot runtime reduced Worker
+throughput by about 13% versus two while increasing p50 latency from 1.01 to
+2.82 seconds. See the public-safe
+[capacity report](performance/2026-07-17-sglang-minimax-m3-capacity.md) for
+method, p50/p95, throughput, timeout/error rates, the mixed application-path
+E2E gate, retry bounds, and the revalidation command.
+
 ## Operational Targets
 
 Use these as practical targets, not strict promises:

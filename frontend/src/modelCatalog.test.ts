@@ -60,7 +60,14 @@ describe('SGLang MiniMax M3 model defaults', () => {
       default_text_model: MINIMAX_M3_MODEL,
       default_vision_model: null,
       secret_id: null,
-      enabled: false
+      enabled: false,
+      tuning: {
+        worker_concurrency: 1,
+        reasoning_effort: null,
+        max_output_tokens: 4096,
+        structured_output: 'auto',
+        request_timeout_seconds: 180
+      }
     });
     expect(catalogEntries).toHaveLength(1);
     expect(catalogEntries[0].recommended).toBe(false);

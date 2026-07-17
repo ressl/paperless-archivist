@@ -102,6 +102,15 @@ public:sglang:minimax-m3:contract-mock:
   script:
     - node --test scripts/verify/sglang_minimax_m3_contract.test.mjs
 
+# Offline capacity harness contract. This uses a local mock only; real load
+# remains an explicit operator command and never runs in ordinary pipelines.
+public:sglang:minimax-m3:capacity-mock:
+  stage: test
+  image: "$NODE_IMAGE"
+  extends: .default_retry
+  script:
+    - node --test scripts/verify/sglang_minimax_m3_capacity.test.mjs
+
 # Prove that the restrictive base and the opt-in custom-AI component both
 # render with a pinned public kubectl, and that only the opt-in render adds a
 # second NetworkPolicy. Detailed selector/port assertions run in pnpm test.

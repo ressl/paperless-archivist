@@ -39,6 +39,16 @@ function blankProviderTuning(): AiProvider['tuning'] {
   };
 }
 
+// Measured against the exact runtime pins in the MiniMax M3 capacity report.
+// A single worker request leaves one runtime slot for interactive consumers.
+export const SGLANG_MINIMAX_M3_TUNING: AiProvider['tuning'] = {
+  ...blankProviderTuning(),
+  worker_concurrency: 1,
+  max_output_tokens: 4096,
+  structured_output: 'auto',
+  request_timeout_seconds: 180
+};
+
 const localOllamaProvider: ProviderDescriptor = {
   name: 'ollama',
   kind: 'ollama',
@@ -93,7 +103,7 @@ const sglangMinimaxM3Provider: AiProvider = {
   cost_per_1m_output_tokens_usd: null,
   secret_id: null,
   enabled: false,
-  tuning: blankProviderTuning()
+  tuning: SGLANG_MINIMAX_M3_TUNING
 };
 
 const builtInProviderNames = new Set([

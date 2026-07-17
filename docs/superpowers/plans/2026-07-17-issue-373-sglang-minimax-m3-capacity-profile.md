@@ -11,20 +11,20 @@
 - Add: `scripts/verify/sglang_minimax_m3_capacity.mjs`
 - Modify: `frontend/package.json`
 
-- [ ] Add failing offline tests for exact model/runtime pins, synthetic Worker Metadata and Document Chat payloads, bounded concurrency/count/timeout/body size, and secret-safe reporting.
-- [ ] Reuse the live-contract configuration rules: explicit opt-in, environment/file-based credentials, normalized `/v1`, and exit codes `0` pass, `1` contract/capacity failure, `2` configuration failure.
-- [ ] Implement sequential, parallel, and mixed Worker Metadata plus Document Chat scenarios with throughput, p50/p95, timeout rate, and error rate.
-- [ ] Keep the ordinary `pnpm test` gate offline; make the real load run an explicit operator command only.
+- [x] Add failing offline tests for exact model/runtime pins, synthetic Worker Metadata and Document Chat payloads, bounded concurrency/count/timeout/body size, and secret-safe reporting.
+- [x] Reuse the live-contract configuration rules: explicit opt-in, environment/file-based credentials, normalized `/v1`, and exit codes `0` pass, `1` contract/capacity failure, `2` configuration failure.
+- [x] Implement sequential, parallel, and mixed Worker Metadata plus Document Chat scenarios with throughput, p50/p95, timeout rate, and error rate.
+- [x] Keep the ordinary `pnpm test` gate offline; make the real load run an explicit operator command only.
 
 ### Task 2: Measure and choose the preset
 
 **Files:**
 - Add: `docs/performance/2026-07-17-sglang-minimax-m3-capacity.md`
 
-- [ ] Run the bounded harness against the reviewed pinned deployment without changing it.
-- [ ] Record only aggregate, public-safe results and the exact public model/runtime pins.
-- [ ] Choose and justify worker concurrency, request timeout, output limit, and structured-output mode from the measurements while reserving interactive burst capacity.
-- [ ] State the measurement limits and a repeatable operator revalidation procedure.
+- [x] Run the bounded harness against the reviewed pinned deployment without changing it.
+- [x] Record only aggregate, public-safe results and the exact public model/runtime pins.
+- [x] Choose and justify worker concurrency, request timeout, output limit, and structured-output mode from the measurements while reserving interactive burst capacity.
+- [x] State the measurement limits and a repeatable operator revalidation procedure.
 
 ### Task 3: Apply identical Core/frontend defaults
 
@@ -34,10 +34,10 @@
 - Modify: `frontend/src/settings/sections/tuning.tsx`
 - Modify/add: focused Rust and frontend tests
 
-- [ ] Add failing parity tests for the exact M3 tuning profile.
-- [ ] Put the measured values in `AiProviderSettings::sglang_minimax_m3_default()` and the built-in frontend provider.
-- [ ] Give Reset-to-defaults an M3-specific tuning kind instead of the generic OpenAI-compatible preset.
-- [ ] Preserve disabled-by-default, text-only, exact-model, and no-reasoning behavior.
+- [x] Add failing parity tests for the exact M3 tuning profile.
+- [x] Put the measured values in `AiProviderSettings::sglang_minimax_m3_default()` and the built-in frontend provider.
+- [x] Give Reset-to-defaults an M3-specific tuning kind instead of the generic OpenAI-compatible preset.
+- [x] Preserve disabled-by-default, text-only, exact-model, and no-reasoning behavior.
 
 ### Task 4: Prove operational safety
 
@@ -46,13 +46,13 @@
 - Modify: `docs/PROVIDER_TUNING_PLAN.md`
 - Modify: focused worker tests if the existing seams do not cover the measured preset
 
-- [ ] Prove the provider value cannot exceed the global worker env cap and that a transition retains its existing audit signal.
-- [ ] Prove the job lease is longer than the measured preset timeout plus the safety margin.
-- [ ] Document bounded retry ceilings and the existing retry/error/latency/queue-age metrics used to diagnose provider pressure.
-- [ ] Document interactive burst behavior and whether the measurement requires additional application backpressure.
+- [x] Prove the provider value cannot exceed the global worker env cap and that a transition retains its existing audit signal.
+- [x] Prove the job lease is longer than the measured preset timeout plus the safety margin.
+- [x] Document bounded retry ceilings and the existing retry/error/latency/queue-age metrics used to diagnose provider pressure.
+- [x] Document interactive burst behavior and whether the measurement requires additional application backpressure.
 
 ### Task 5: Verify and deliver
 
-- [ ] Run offline harness tests, the bounded live load, frontend tests/lint/typecheck, focused Rust tests, formatting, documentation links, and secret scan.
-- [ ] Obtain an independent Critical/Important review and resolve every finding.
+- [x] Run offline harness tests, the bounded live load, frontend tests/lint/typecheck, focused Rust tests, formatting, documentation links, and secret scan.
+- [x] Obtain an independent Critical/Important review and resolve every finding.
 - [ ] Commit/push, verify branch and MR pipelines, document aggregate evidence, and close #373 only when green.

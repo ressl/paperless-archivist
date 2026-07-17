@@ -529,14 +529,17 @@ async fn run_startup_vision_crash_requeue(pool: &DbPool) -> Result<()> {
 /// grant less than this.
 const BASE_JOB_LEASE_SECONDS: i64 = 300;
 
-/// Margin added on top of the slowest configured AI request timeout when the
-/// lease is derived from it: heartbeats run BETWEEN AI calls, so one lease
-/// window must also cover the non-AI work around a maximal-length call
+/// Margin added on top of the slowest configured AI high-level call budget
+/// when the lease is derived from it: heartbeats run BETWEEN AI calls, so one
+/// lease window must also cover the non-AI work around a maximal-length call
 /// (Paperless round-trips, page rendering, DB writes).
 const JOB_LEASE_TIMEOUT_MARGIN_SECONDS: i64 = 60;
 
 /// Lease window for `claim_jobs` / `bump_job_lease`, coupled to the AI
-/// request timeout: `max(300, slowest enabled provider timeout + margin)`.
+/// request timeout: `max(300, slowest enabled provider call budget + margin)`.
+/// OpenAI-compatible `structured_output=auto` may make two sequential HTTP
+/// requests (strict schema, then the bounded 400 compatibility fallback), so
+/// its high-level call budget is twice the per-request timeout.
 ///
 /// `request_timeout_seconds` is operator-configurable (prod runs 600s for
 /// slow local models) while the lease used to be a hard-coded 300s — a
@@ -547,22 +550,34 @@ const JOB_LEASE_TIMEOUT_MARGIN_SECONDS: i64 = 60;
 /// claimed before stage→provider resolution, so size the window for the
 /// slowest enabled provider rather than per-stage. #308
 fn job_lease_seconds(settings: &RuntimeSettings) -> i64 {
-    let slowest_timeout = settings
+    let slowest_call_budget = settings
         .ai
         .providers
         .iter()
         .filter(|provider| provider.enabled)
         .map(|provider| {
             // Mirror `provider_for_stage`: 0/unset inherits the built-in default.
-            provider
-                .tuning
-                .request_timeout_seconds
-                .filter(|secs| *secs > 0)
-                .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+            let request_timeout = i64::from(
+                provider
+                    .tuning
+                    .request_timeout_seconds
+                    .filter(|secs| *secs > 0)
+                    .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS),
+            );
+            let schema_retry_possible = matches!(
+                provider.kind,
+                AiProviderKind::Openai | AiProviderKind::OpenaiCompatible
+            ) && provider.tuning.structured_output.unwrap_or_default()
+                == StructuredOutputMode::Auto;
+            if schema_retry_possible {
+                request_timeout.saturating_mul(2)
+            } else {
+                request_timeout
+            }
         })
         .max()
-        .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS);
-    BASE_JOB_LEASE_SECONDS.max(i64::from(slowest_timeout) + JOB_LEASE_TIMEOUT_MARGIN_SECONDS)
+        .unwrap_or(i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS));
+    BASE_JOB_LEASE_SECONDS.max(slowest_call_budget + JOB_LEASE_TIMEOUT_MARGIN_SECONDS)
 }
 
 async fn process_available_jobs(
@@ -4716,11 +4731,16 @@ mod tests {
     }
 
     #[test]
-    fn job_lease_outlives_the_slowest_enabled_provider_timeout() {
-        // Default presets leave request_timeout_seconds unset → the 180s
-        // built-in default; the 300s baseline wins.
+    fn job_lease_outlives_the_slowest_enabled_provider_call_budget() {
+        // Default presets leave request_timeout_seconds unset → 180s. The
+        // enabled OpenAI preset can make the one-shot Auto schema fallback,
+        // so its high-level call budget is 2*180 plus the margin.
         let mut settings = RuntimeSettings::default();
-        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+                + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
 
         // The prod shape from the audit: a 600s timeout used to outlive the
         // hard-coded 300s lease mid-call. The lease must now cover the call
@@ -4746,16 +4766,74 @@ mod tests {
             600 + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
         );
 
-        // 0 means "inherit the default", not a zero-second timeout; and a
-        // timeout short enough to fit the baseline keeps today's 300s.
+        // 0 means "inherit the default", not a zero-second timeout. The
+        // enabled OpenAI provider still owns the larger 2*180 call budget.
         settings.ai.providers[0].tuning.request_timeout_seconds = Some(0);
-        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+                + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
         settings.ai.providers[0].tuning.request_timeout_seconds = Some(120);
-        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+                + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
 
         // No providers at all: fall back to the built-in default → baseline.
         settings.ai.providers.clear();
         assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+    }
+
+    #[test]
+    fn minimax_m3_capacity_preset_reserves_interactive_slot_and_has_lease_margin() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.default_provider = archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME.to_owned();
+        for provider in &mut settings.ai.providers {
+            provider.enabled = false;
+        }
+        let provider = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME)
+            .expect("built-in MiniMax M3 provider");
+        provider.enabled = true;
+
+        let effective = settings.effective_tuning();
+        assert_eq!(effective.worker_concurrency, 1);
+        assert_eq!(resolve_target_concurrency(8, &settings), 1);
+        assert_eq!(effective.request_timeout_seconds, 180);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * i64::from(effective.request_timeout_seconds) + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
+
+        let provider = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME)
+            .expect("built-in MiniMax M3 provider");
+        provider.tuning.structured_output = Some(StructuredOutputMode::Off);
+        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+    }
+
+    #[test]
+    fn openai_auto_schema_retry_also_doubles_the_lease_request_budget() {
+        let mut settings = RuntimeSettings::default();
+        for provider in &mut settings.ai.providers {
+            provider.enabled = provider.kind == AiProviderKind::Openai;
+            if provider.enabled {
+                provider.tuning.request_timeout_seconds = Some(180);
+                provider.tuning.structured_output = Some(StructuredOutputMode::Auto);
+            }
+        }
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * 180 + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
     }
 
     #[test]

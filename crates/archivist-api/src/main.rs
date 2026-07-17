@@ -9922,6 +9922,119 @@ mod tests {
         document_handle.abort();
     }
 
+    #[derive(Default)]
+    struct MixedM3Capture {
+        active: std::sync::atomic::AtomicUsize,
+        max_active: std::sync::atomic::AtomicUsize,
+        bodies: Mutex<Vec<Value>>,
+    }
+
+    async fn mixed_m3_handler(
+        State(capture): State<Arc<MixedM3Capture>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        use std::sync::atomic::Ordering;
+
+        let active = capture.active.fetch_add(1, Ordering::AcqRel) + 1;
+        capture.max_active.fetch_max(active, Ordering::AcqRel);
+        capture.bodies.lock().unwrap().push(body.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        capture.active.fetch_sub(1, Ordering::AcqRel);
+        let content = if body.get("response_format").is_some() {
+            r#"{"title":{"title":"Synthetic capacity document","confidence":1.0}}"#
+        } else {
+            "ARCHIVIST_CAPACITY_CHAT_OK"
+        };
+        Json(json!({ "choices": [{ "message": { "content": content } }] }))
+    }
+
+    #[tokio::test]
+    async fn worker_metadata_and_document_chat_m3_paths_share_endpoint_concurrently() {
+        use std::sync::atomic::Ordering;
+
+        let capture = Arc::new(MixedM3Capture::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/chat/completions", post(mixed_m3_handler))
+            .with_state(capture.clone());
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.enabled_stages = vec![Stage::Metadata];
+        settings.ai.default_provider = archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME.to_owned();
+        settings.ai.default_text_model = archivist_core::MINIMAX_M3_MODEL.to_owned();
+        for provider in &mut settings.ai.providers {
+            provider.enabled = false;
+        }
+        let m3 = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME)
+            .expect("built-in MiniMax M3 provider");
+        m3.enabled = true;
+        m3.base_url = format!("http://{address}");
+
+        let state = api_text_test_state();
+        let provider = provider_for_default_text(&settings).expect("M3 API provider");
+        let mut metadata_request = build_metadata_prompt_test_chat_request(
+            &settings,
+            &provider.tuning,
+            "SYNTHETIC-ONLY capacity document dated 2026-01-02.",
+            MetadataPromptTestCatalog {
+                correspondents: Vec::new(),
+                document_types: Vec::new(),
+                tags: Vec::new(),
+                fields: Vec::new(),
+            },
+        )
+        .expect("Worker-equivalent Metadata request");
+        metadata_request.model = provider.model.clone();
+        apply_api_provider_tuning(&provider, &mut metadata_request);
+        let document_request = build_document_chat_request(
+            &provider,
+            "Answer only from the SYNTHETIC-ONLY document.".to_owned(),
+            "Reply with exactly ARCHIVIST_CAPACITY_CHAT_OK.".to_owned(),
+        );
+
+        let (metadata_result, document_result) = tokio::join!(
+            chat_with_api_provider(&state, &provider, metadata_request),
+            chat_with_api_provider(&state, &provider, document_request)
+        );
+        assert!(metadata_result.is_ok());
+        assert_eq!(
+            document_result.expect("Document Chat call").text,
+            "ARCHIVIST_CAPACITY_CHAT_OK"
+        );
+        assert_eq!(capture.max_active.load(Ordering::Acquire), 2);
+
+        let bodies = capture.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert!(
+            bodies
+                .iter()
+                .all(|body| body["model"] == archivist_core::MINIMAX_M3_MODEL)
+        );
+        assert!(bodies.iter().all(|body| body["max_tokens"] == 4096));
+        assert!(
+            bodies
+                .iter()
+                .all(|body| { body["chat_template_kwargs"]["thinking_mode"] == "disabled" })
+        );
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|body| body.get("response_format").is_some())
+                .count(),
+            1
+        );
+
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn api_text_chat_honors_selected_provider_request_timeout() {
         use axum::Json as AxumJson;

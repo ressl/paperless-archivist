@@ -2156,7 +2156,16 @@ impl AiProviderSettings {
             cost_per_1m_output_tokens_usd: None,
             secret_id: None,
             enabled: false,
-            tuning: ProviderTuning::default(),
+            // Capacity profile validated against the pinned SGLang runtime:
+            // one worker request leaves the second runtime slot available
+            // for Prompt Tester, Provider Test, and Document Chat bursts.
+            tuning: ProviderTuning {
+                worker_concurrency: Some(1),
+                max_output_tokens: Some(4096),
+                structured_output: Some(StructuredOutputMode::Auto),
+                request_timeout_seconds: Some(DEFAULT_AI_REQUEST_TIMEOUT_SECS),
+                ..ProviderTuning::default()
+            },
         }
     }
 
@@ -5699,7 +5708,17 @@ mod tests {
         assert_eq!(provider.default_vision_model, None);
         assert_eq!(provider.secret_id, None);
         assert!(!provider.enabled);
-        assert_eq!(provider.tuning, ProviderTuning::default());
+        assert_eq!(provider.tuning.worker_concurrency, Some(1));
+        assert_eq!(provider.tuning.reasoning_effort, None);
+        assert_eq!(provider.tuning.max_output_tokens, Some(4096));
+        assert_eq!(
+            provider.tuning.structured_output,
+            Some(StructuredOutputMode::Auto)
+        );
+        assert_eq!(
+            provider.tuning.request_timeout_seconds,
+            Some(DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+        );
 
         let mut settings = RuntimeSettings::default();
         settings

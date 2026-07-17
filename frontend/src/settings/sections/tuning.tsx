@@ -8,6 +8,10 @@ import {
 } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
 import { errorToString } from '../../lib/ui';
+import {
+  isSglangMinimaxM3Provider,
+  SGLANG_MINIMAX_M3_TUNING
+} from '../../modelCatalog';
 import { isOllamaCloudProvider } from './helpers';
 
 // ---------------------------------------------------------------------------
@@ -19,7 +23,14 @@ import { isOllamaCloudProvider } from './helpers';
 // clears any operator-supplied overrides for that sub-block.
 // ---------------------------------------------------------------------------
 
-type TuningPresetKind = 'ollama' | 'ollama_cloud' | 'openai' | 'anthropic' | 'openai_compatible' | 'mineru';
+type TuningPresetKind =
+  | 'ollama'
+  | 'ollama_cloud'
+  | 'openai'
+  | 'anthropic'
+  | 'openai_compatible'
+  | 'sglang_minimax_m3'
+  | 'mineru';
 
 export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
   ollama: {
@@ -140,6 +151,7 @@ export const TUNING_PRESETS: Record<TuningPresetKind, ProviderTuning> = {
     allowed_list_max: null,
     request_timeout_seconds: null
   },
+  sglang_minimax_m3: SGLANG_MINIMAX_M3_TUNING,
   mineru: {
     worker_concurrency: null,
     consensus_secondary_text_model: null,
@@ -200,6 +212,7 @@ export const THRESHOLD_FIELDS = [
 export function tuningPresetKindFor(
   provider: Pick<RuntimeSettings['ai']['providers'][number], 'kind' | 'name' | 'base_url'>
 ): TuningPresetKind {
+  if (isSglangMinimaxM3Provider(provider)) return 'sglang_minimax_m3';
   if (provider.kind === 'ollama' && isOllamaCloudProvider(provider)) return 'ollama_cloud';
   return provider.kind;
 }
