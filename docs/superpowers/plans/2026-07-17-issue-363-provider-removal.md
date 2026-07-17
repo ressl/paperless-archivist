@@ -30,4 +30,4 @@
 
 - [x] Prove a removed custom provider stays absent after Save response and reload.
 - [x] Prove successor API-key/model state never receives the removed provider's indexed state.
-- [ ] Run focused and full frontend verification, independent review, commit/push, both pipelines, and close #363 only when green.
+- [x] Run focused and full frontend verification, independent review, commit/push, both pipelines, and close #363 only when green.
