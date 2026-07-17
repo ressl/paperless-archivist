@@ -8351,6 +8351,43 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn sglang_minimax_m3_is_confirmed_through_openai_compatible_models_endpoint() {
+        use axum::Json as AxumJson;
+
+        const MODEL: &str = "ressl/MiniMax-M3-uncensored-NVFP4";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/v1/models",
+            get(|| async { AxumJson(json!({ "data": [{ "id": MODEL }] })) }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        let provider = ApiProvider {
+            name: "sglang-minimax-m3".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: format!("http://{address}/v1"),
+            model: MODEL.to_owned(),
+            secret_id: None,
+            tuning: RuntimeSettings::default().effective_tuning(),
+        };
+
+        let models = discover_provider_models(&provider, None)
+            .await
+            .expect("SGLang model discovery succeeds");
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![MODEL]
+        );
+        server.abort();
+    }
+
     #[test]
     fn validates_password_strength() {
         assert!(validate_password_strength("short").is_err());

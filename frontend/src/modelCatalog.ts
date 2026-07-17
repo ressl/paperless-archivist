@@ -10,6 +10,35 @@ type ModelOption = {
 
 type ProviderDescriptor = Pick<AiProvider, 'name' | 'kind' | 'base_url'>;
 
+export const MINIMAX_M3_MODEL = 'ressl/MiniMax-M3-uncensored-NVFP4';
+export const SGLANG_MINIMAX_M3_PROVIDER_NAME = 'sglang-minimax-m3';
+
+function blankProviderTuning(): AiProvider['tuning'] {
+  return {
+    worker_concurrency: null,
+    consensus_secondary_text_model: null,
+    consensus_date_tolerance_days: null,
+    text_num_ctx: null,
+    vision_num_ctx: null,
+    reasoning_effort: null,
+    max_output_tokens: null,
+    structured_output: null,
+    ocr_page_limit: null,
+    hourly_document_limit: null,
+    daily_document_limit: null,
+    metadata_confidence_threshold: null,
+    title_confidence_threshold: null,
+    correspondent_confidence_threshold: null,
+    document_type_confidence_threshold: null,
+    document_date_confidence_threshold: null,
+    tags_confidence_threshold: null,
+    fields_confidence_threshold: null,
+    max_tags: null,
+    allowed_list_max: null,
+    request_timeout_seconds: null
+  };
+}
+
 const localOllamaProvider: ProviderDescriptor = {
   name: 'ollama',
   kind: 'ollama',
@@ -54,12 +83,26 @@ const ollamaCloudProvider: AiProvider = {
   }
 };
 
+const sglangMinimaxM3Provider: AiProvider = {
+  name: SGLANG_MINIMAX_M3_PROVIDER_NAME,
+  kind: 'openai_compatible',
+  base_url: '',
+  default_text_model: MINIMAX_M3_MODEL,
+  default_vision_model: null,
+  cost_per_1m_input_tokens_usd: null,
+  cost_per_1m_output_tokens_usd: null,
+  secret_id: null,
+  enabled: false,
+  tuning: blankProviderTuning()
+};
+
 const builtInProviderNames = new Set([
   'ollama',
   'ollama-cloud',
   'openai',
   'anthropic',
   'openai-compatible',
+  SGLANG_MINIMAX_M3_PROVIDER_NAME,
   'mineru'
 ]);
 
@@ -69,6 +112,13 @@ function normalizedProviderName(name: string) {
 
 export function isBuiltInProviderName(name: string) {
   return builtInProviderNames.has(normalizedProviderName(name));
+}
+
+export function isSglangMinimaxM3Provider(provider: ProviderDescriptor) {
+  return (
+    provider.kind === 'openai_compatible' &&
+    normalizedProviderName(provider.name) === SGLANG_MINIMAX_M3_PROVIDER_NAME
+  );
 }
 
 const localOllamaTextModels: ModelOption[] = [
@@ -240,6 +290,7 @@ const anthropicModels: ModelOption[] = [
 
 const openAiCompatibleTextModels: ModelOption[] = [
   { value: 'qwen3:8b', label: 'qwen3:8b', recommendation: true },
+  { value: MINIMAX_M3_MODEL, label: MINIMAX_M3_MODEL },
   { value: 'qwen3:14b', label: 'qwen3:14b' },
   { value: 'qwen3:30b', label: 'qwen3:30b' },
   { value: 'qwen3:32b', label: 'qwen3:32b' },
@@ -354,11 +405,41 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
   ) {
     knownProviders.push(ollamaCloudProvider);
   }
+  if (
+    !knownProviders.some(
+      (provider) =>
+        normalizedProviderName(provider.name) === SGLANG_MINIMAX_M3_PROVIDER_NAME
+    )
+  ) {
+    knownProviders.push(sglangMinimaxM3Provider);
+  }
   const providers = knownProviders.map((provider) => ({
     ...provider,
-    default_text_model: provider.default_text_model || recommendedModel(provider, 'text'),
-    default_vision_model: provider.default_vision_model || recommendedModel(provider, 'vision')
+    default_text_model: isSglangMinimaxM3Provider(provider)
+      ? provider.default_text_model
+      : provider.default_text_model || recommendedModel(provider, 'text'),
+    default_vision_model:
+      provider.default_vision_model ||
+      (isSglangMinimaxM3Provider(provider) ? null : recommendedModel(provider, 'vision'))
   }));
+  const modelCatalog = [...(settings.ai.model_catalog ?? [])];
+  if (
+    !modelCatalog.some(
+      (entry) =>
+        entry.provider_kind === 'openai_compatible' &&
+        entry.capability === 'text' &&
+        entry.model_id === MINIMAX_M3_MODEL
+    )
+  ) {
+    modelCatalog.push({
+      provider_kind: 'openai_compatible',
+      capability: 'text',
+      model_id: MINIMAX_M3_MODEL,
+      recommended: false,
+      modality: 'text',
+      best_for: 'MiniMax M3 served by SGLang'
+    });
+  }
   const defaultProviderName = normalizedProviderName(settings.ai.default_provider);
   const selectedProvider =
     providers.find((provider) => normalizedProviderName(provider.name) === defaultProviderName) ??
@@ -404,7 +485,8 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
       ...settings.ai,
       default_text_model: settings.ai.default_text_model || recommendedModel(selectedProvider, 'text'),
       default_vision_model: settings.ai.default_vision_model || recommendedModel(selectedProvider, 'vision'),
-      providers
+      providers,
+      model_catalog: modelCatalog
     }
   };
 }

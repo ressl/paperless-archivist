@@ -791,6 +791,7 @@ pub struct UiSettings {
 impl RuntimeSettings {
     pub fn normalized(mut self) -> Self {
         self.ai.ensure_default_providers();
+        self.ai.ensure_minimax_m3_catalog_entry();
         self.security = self.security.normalized();
         self.notifications = self.notifications.normalized();
         self.workflow.rules.include_tags =
@@ -1347,6 +1348,11 @@ pub struct ModelCatalogEntry {
     pub best_for: Option<String>,
 }
 
+/// Exact public model identity for the supported MiniMax M3 deployment.
+pub const MINIMAX_M3_MODEL: &str = "ressl/MiniMax-M3-uncensored-NVFP4";
+/// Stable built-in provider name for the disabled SGLang preset.
+pub const SGLANG_MINIMAX_M3_PROVIDER_NAME: &str = "sglang-minimax-m3";
+
 /// Seed catalog. Ollama Cloud entries come from the 2026-05-25 model matrix
 /// (`docs/LLM_PROVIDER_SETTINGS_PLAN.md`); the remote providers carry their
 /// recommended picks. Local Ollama is intentionally absent — it lists
@@ -1601,6 +1607,16 @@ fn default_model_catalog() -> Vec<ModelCatalogEntry> {
         entry(
             OpenaiCompatible,
             Text,
+            MINIMAX_M3_MODEL,
+            false,
+            None,
+            None,
+            Some("text"),
+            Some("MiniMax M3 served by SGLang"),
+        ),
+        entry(
+            OpenaiCompatible,
+            Text,
             "gpt-oss:120b",
             false,
             None,
@@ -1712,6 +1728,29 @@ impl AiSettings {
 
     pub fn ensure_default_providers(&mut self) {
         AiProviderSettings::append_missing_defaults(&mut self.providers);
+    }
+
+    /// Appends the MiniMax M3 picker entry to settings persisted before the
+    /// model was part of the seed catalog. Existing operator-authored catalog
+    /// metadata wins unchanged.
+    pub fn ensure_minimax_m3_catalog_entry(&mut self) {
+        let already_present = self.model_catalog.iter().any(|entry| {
+            entry.provider_kind == AiProviderKind::OpenaiCompatible
+                && entry.capability == ModelCapability::Text
+                && entry.model_id == MINIMAX_M3_MODEL
+        });
+        if already_present {
+            return;
+        }
+        let entry = default_model_catalog()
+            .into_iter()
+            .find(|entry| {
+                entry.provider_kind == AiProviderKind::OpenaiCompatible
+                    && entry.capability == ModelCapability::Text
+                    && entry.model_id == MINIMAX_M3_MODEL
+            })
+            .expect("MiniMax M3 is part of the default catalog");
+        self.model_catalog.push(entry);
     }
 
     pub fn default_model_for_provider(
@@ -1963,6 +2002,7 @@ impl AiProviderSettings {
             Self::openai_default(),
             Self::anthropic_default(),
             Self::openai_compatible_default(),
+            Self::sglang_minimax_m3_default(),
             Self::mineru_default(),
         ]
     }
@@ -2105,6 +2145,21 @@ impl AiProviderSettings {
         }
     }
 
+    pub fn sglang_minimax_m3_default() -> Self {
+        Self {
+            name: SGLANG_MINIMAX_M3_PROVIDER_NAME.to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: String::new(),
+            default_text_model: Some(MINIMAX_M3_MODEL.to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled: false,
+            tuning: ProviderTuning::default(),
+        }
+    }
+
     pub fn mineru_default() -> Self {
         // MinerU API server (FastAPI in front of vLLM). Vision-only: the
         // pipeline may select it exclusively for the OCR stage. Disabled by
@@ -2126,11 +2181,12 @@ impl AiProviderSettings {
 
     pub fn append_missing_defaults(providers: &mut Vec<Self>) {
         for default_provider in Self::default_providers() {
-            let default_name = default_provider.name.to_lowercase();
-            if !providers
-                .iter()
-                .any(|provider| provider.name.to_lowercase() == default_name)
-            {
+            if !providers.iter().any(|provider| {
+                provider
+                    .name
+                    .trim()
+                    .eq_ignore_ascii_case(&default_provider.name)
+            }) {
                 providers.push(default_provider);
             }
         }
@@ -5618,6 +5674,157 @@ mod tests {
     fn openai_compatible_default_constructor_ships_blank_tuning() {
         let provider = AiProviderSettings::openai_compatible_default();
         assert_eq!(provider.tuning, ProviderTuning::default());
+    }
+
+    #[test]
+    fn sglang_minimax_m3_preset_is_disabled_text_only_and_openai_compatible() {
+        let presets = AiProviderSettings::default_providers();
+        let matching = presets
+            .iter()
+            .filter(|provider| provider.name == "sglang-minimax-m3")
+            .collect::<Vec<_>>();
+
+        assert_eq!(matching.len(), 1);
+        let provider = matching[0];
+        assert_eq!(provider.kind, AiProviderKind::OpenaiCompatible);
+        assert_eq!(
+            serde_json::to_string(&provider.kind).unwrap(),
+            "\"openai_compatible\""
+        );
+        assert_eq!(provider.base_url, "");
+        assert_eq!(
+            provider.default_text_model.as_deref(),
+            Some("ressl/MiniMax-M3-uncensored-NVFP4")
+        );
+        assert_eq!(provider.default_vision_model, None);
+        assert_eq!(provider.secret_id, None);
+        assert!(!provider.enabled);
+        assert_eq!(provider.tuning, ProviderTuning::default());
+
+        let mut settings = RuntimeSettings::default();
+        settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "sglang-minimax-m3")
+            .expect("SGLang preset exists")
+            .enabled = true;
+        assert_eq!(
+            settings.ai.normalize_and_validate_providers(),
+            Err(ProviderConfigurationError::MissingBaseUrl {
+                name: "sglang-minimax-m3".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn minimax_m3_upgrade_normalization_is_idempotent_and_preserves_operator_provider() {
+        let mut settings = RuntimeSettings::default();
+        settings
+            .ai
+            .providers
+            .retain(|provider| provider.name != "sglang-minimax-m3");
+
+        let upgraded_once = settings.normalized();
+        let upgraded_twice = upgraded_once.clone().normalized();
+        for upgraded in [&upgraded_once, &upgraded_twice] {
+            assert_eq!(
+                upgraded
+                    .ai
+                    .providers
+                    .iter()
+                    .filter(|provider| provider.name == "sglang-minimax-m3")
+                    .count(),
+                1
+            );
+        }
+
+        let mut customized = AiProviderSettings::openai_compatible_default();
+        customized.name = " SGLANG-MINIMAX-M3 ".to_owned();
+        customized.base_url = "https://operator.example.test/v1".to_owned();
+        customized.default_text_model = Some("operator/custom-model".to_owned());
+        customized.secret_id = Some(Uuid::new_v4());
+        customized.enabled = true;
+        customized.tuning.max_output_tokens = Some(4242);
+        let expected = serde_json::to_value(&customized).unwrap();
+
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![customized];
+        let normalized = settings.normalized();
+        assert_eq!(normalized.ai.providers.len(), 7);
+        let preserved = normalized
+            .ai
+            .providers
+            .iter()
+            .find(|provider| {
+                provider
+                    .name
+                    .trim()
+                    .eq_ignore_ascii_case("sglang-minimax-m3")
+            })
+            .expect("customized provider remains present");
+        assert_eq!(serde_json::to_value(preserved).unwrap(), expected);
+    }
+
+    #[test]
+    fn minimax_m3_catalog_upgrade_is_idempotent_and_preserves_custom_entry() {
+        const MODEL: &str = "ressl/MiniMax-M3-uncensored-NVFP4";
+        let mut settings = RuntimeSettings::default();
+        settings
+            .ai
+            .model_catalog
+            .retain(|entry| entry.model_id != MODEL);
+
+        let upgraded = settings.normalized().normalized();
+        let m3_entries = upgraded
+            .ai
+            .model_catalog
+            .iter()
+            .filter(|entry| entry.model_id == MODEL)
+            .collect::<Vec<_>>();
+        assert_eq!(m3_entries.len(), 1);
+        assert_eq!(
+            m3_entries[0].provider_kind,
+            AiProviderKind::OpenaiCompatible
+        );
+        assert_eq!(m3_entries[0].capability, ModelCapability::Text);
+        assert!(!m3_entries[0].recommended);
+        assert!(!upgraded.ai.model_catalog.iter().any(|entry| {
+            entry.model_id == MODEL && entry.capability == ModelCapability::Vision
+        }));
+        assert_eq!(
+            upgraded
+                .ai
+                .model_catalog
+                .iter()
+                .filter(|entry| {
+                    entry.provider_kind == AiProviderKind::OpenaiCompatible
+                        && entry.capability == ModelCapability::Text
+                        && entry.recommended
+                })
+                .map(|entry| entry.model_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["qwen3:8b"]
+        );
+
+        let mut customized = m3_entries[0].clone();
+        customized.label = Some("Operator label".to_owned());
+        customized.context = Some("custom context".to_owned());
+        let expected = customized.clone();
+        let mut settings = RuntimeSettings::default();
+        settings
+            .ai
+            .model_catalog
+            .retain(|entry| entry.model_id != MODEL);
+        settings.ai.model_catalog.push(customized);
+        let normalized = settings.normalized();
+        let preserved = normalized
+            .ai
+            .model_catalog
+            .iter()
+            .filter(|entry| entry.model_id == MODEL)
+            .collect::<Vec<_>>();
+        assert_eq!(preserved, vec![&expected]);
     }
 
     #[test]

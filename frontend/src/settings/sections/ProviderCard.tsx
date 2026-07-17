@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import { Trash2 } from 'lucide-react';
 import { AiProviderKind, ModelCatalogEntry, ProviderTuning, RuntimeSettings } from '../../api/client';
-import { recommendedModel } from '../../modelCatalog';
+import { isSglangMinimaxM3Provider, recommendedModel } from '../../modelCatalog';
 import { useI18n } from '../../i18n/I18nProvider';
 import { Button, FormField } from '../../lib/ui';
 import { ProviderModelSelect } from './ProviderModelSelect';
@@ -72,6 +72,7 @@ export function ProviderCard({
         <select
           id={ids.kind}
           value={provider.kind}
+          disabled={builtIn}
           onChange={(event) => {
             const kind = event.target.value as AiProviderKind;
             const nextProvider = { ...provider, kind };
@@ -141,8 +142,12 @@ export function ProviderCard({
       )}
       <div className="settings-field">
         {t('settings.provider.vision_model')}
-        {provider.kind === 'mineru' ? (
-          <input value="mineru" disabled aria-label={t('settings.provider.vision_model')} />
+        {provider.kind === 'mineru' || isSglangMinimaxM3Provider(provider) ? (
+          <input
+            value={provider.kind === 'mineru' ? 'mineru' : (provider.default_vision_model ?? '')}
+            disabled
+            aria-label={t('settings.provider.vision_model')}
+          />
         ) : (
           <ProviderModelSelect
             capability="vision"

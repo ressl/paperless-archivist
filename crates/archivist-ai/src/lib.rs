@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+pub use archivist_core::MINIMAX_M3_MODEL;
 use archivist_core::{
     LanguageDetection, MetadataFieldFlags, MetadataSuggestion, ReasoningEffort,
     StructuredOutputMode, normalize_model_json,
@@ -729,10 +730,6 @@ pub fn build_ollama_chat_payload(request: &ChatRequest) -> Value {
     }
     payload
 }
-
-/// Exact public model identity whose chat template accepts MiniMax M3's
-/// `thinking_mode` extension.
-pub const MINIMAX_M3_MODEL: &str = "ressl/MiniMax-M3-uncensored-NVFP4";
 
 /// Builds the JSON payload posted to OpenAI / OpenAI-compatible
 /// `/chat/completions`. When `response_schema` is set on the request,

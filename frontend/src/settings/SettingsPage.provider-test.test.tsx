@@ -348,6 +348,35 @@ describe('<SettingsPage> provider draft test', () => {
     confirm.mockRestore();
   });
 
+  it('renders the disabled SGLang MiniMax M3 preset and blocks enabling it without a URL', async () => {
+    const { SettingsPage } = await import('./SettingsPage');
+    render(
+      <I18nProvider>
+        <SettingsPage setError={() => undefined} />
+      </I18nProvider>
+    );
+
+    const preset = await screen.findByRole('group', { name: 'sglang-minimax-m3' });
+    expect(within(preset).getByRole('textbox', { name: 'Name' })).toBeDisabled();
+    expect(within(preset).getByRole('combobox', { name: 'Kind' })).toBeDisabled();
+    expect(within(preset).getByRole('combobox', { name: 'Kind' })).toHaveValue(
+      'openai_compatible'
+    );
+    expect(within(preset).getByRole('textbox', { name: 'Base URL' })).toHaveValue('');
+    expect(within(preset).getByRole('combobox', { name: 'sglang-minimax-m3 text model' })).toHaveValue(
+      'ressl/MiniMax-M3-uncensored-NVFP4'
+    );
+    expect(within(preset).getByLabelText('Vision model')).toBeDisabled();
+    expect(within(preset).getByLabelText('Vision model')).toHaveValue('');
+    expect(within(preset).getByRole('checkbox', { name: 'Enabled' })).not.toBeChecked();
+    expect(within(preset).queryByRole('button', { name: 'Remove Provider' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(preset).getByRole('checkbox', { name: 'Enabled' }));
+
+    expect(within(preset).getByText(/requires a Base URL/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
   it('blocks removal when a stage still references the custom provider', async () => {
     const fixture = settingsFixture();
     fixture.ai.default_provider = 'ollama-cloud';
