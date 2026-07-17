@@ -3,8 +3,12 @@ import { AlertTriangle, Check, GitCompare, History, Info, Play, RotateCcw, Save 
 import { api, Prompt, PromptExperiment, PromptTestResponse, PromptUsage, Stage } from '../api/client';
 import { promptStageHelp, promptStageOrder, type PromptStageHelp } from '../data/promptHelp';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
-import { Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { Button, PageHeader, Status, localizedErrorMessage, run, useFocusTrap } from '../lib/ui';
 import { formatMs } from '../lib/format';
+
+type PendingPromptSelection =
+  | { kind: 'stage'; stage: Stage }
+  | { kind: 'prompt'; promptId: string | null };
 
 export function Prompts({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatDateTime } = useI18n();
@@ -24,6 +28,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const [saving, setSaving] = useState(false);
   const [activating, setActivating] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [pendingSelection, setPendingSelection] = useState<PendingPromptSelection | null>(null);
   const usageByPromptId = useMemo(() => {
     const byId = new Map<string, PromptUsage>();
     usage.forEach((entry) => byId.set(entry.prompt_id, entry));
@@ -51,9 +56,11 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const comparePrompt = comparePromptId ? stagePrompts.find((prompt) => prompt.id === comparePromptId) ?? null : null;
   const selectedUsage = selectedPrompt ? usageByPromptId.get(selectedPrompt.id) : undefined;
   const promptDirty =
-    selectedPrompt == null ||
-    editorName.trim() !== selectedPrompt.name ||
-    editorContent.trimEnd() !== selectedPrompt.content.trimEnd();
+    !activate ||
+    (selectedPrompt
+      ? editorName.trim() !== selectedPrompt.name ||
+        editorContent.trimEnd() !== selectedPrompt.content.trimEnd()
+      : editorName.trim() !== 'default' || editorContent.trimEnd() !== '');
   const stageHelp = promptStageHelp[selectedStage];
   const promptStats = promptTextStats(editorContent);
   const diffStats = comparePrompt && selectedPrompt ? promptDiffStats(comparePrompt.content, editorContent) : null;
@@ -121,6 +128,35 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
     setTestResult(null);
   }, [activePrompt, selectedPrompt?.id, stagePrompts]);
 
+  const applySelection = (selection: PendingPromptSelection) => {
+    if (selection.kind === 'stage') {
+      setSelectedStage(selection.stage);
+      setSelectedPromptId(null);
+      setComparePromptId(null);
+      return;
+    }
+    setSelectedPromptId(selection.promptId);
+  };
+
+  const requestSelection = (selection: PendingPromptSelection) => {
+    const unchanged =
+      selection.kind === 'stage'
+        ? selection.stage === selectedStage
+        : selection.promptId === (selectedPrompt?.id ?? null);
+    if (unchanged) return;
+    if (promptDirty) {
+      setPendingSelection(selection);
+      return;
+    }
+    applySelection(selection);
+  };
+
+  const discardDraftAndSwitch = () => {
+    const selection = pendingSelection;
+    setPendingSelection(null);
+    if (selection) applySelection(selection);
+  };
+
   return (
     <section className="page">
       <div className="prompt-heading">
@@ -143,11 +179,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                 type="button"
                 key={entry}
                 className={selectedStage === entry ? 'active' : ''}
-                onClick={() => {
-                  setSelectedStage(entry);
-                  setSelectedPromptId(null);
-                  setComparePromptId(null);
-                }}
+                onClick={() => requestSelection({ kind: 'stage', stage: entry })}
               >
                 <span>
                   <strong>{help.label}</strong>
@@ -181,7 +213,9 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   {t('prompts.version')}
                   <select
                     value={selectedPrompt?.id ?? ''}
-                    onChange={(event) => setSelectedPromptId(event.target.value || null)}
+                    onChange={(event) =>
+                      requestSelection({ kind: 'prompt', promptId: event.target.value || null })
+                    }
                   >
                     {stagePrompts.length === 0 && <option value="">{t('prompts.new_prompt')}</option>}
                     {stagePrompts.map((prompt) => (
@@ -237,6 +271,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   onClick={() => {
                     setEditorName(selectedPrompt?.name ?? 'default');
                     setEditorContent(selectedPrompt?.content ?? '');
+                    setActivate(true);
                   }}
                 >
                   {t('prompts.reset')}
@@ -304,7 +339,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   key={prompt.id}
                   type="button"
                   className={prompt.id === selectedPrompt?.id ? 'active' : ''}
-                  onClick={() => setSelectedPromptId(prompt.id)}
+                  onClick={() => requestSelection({ kind: 'prompt', promptId: prompt.id })}
                 >
                   <span>{prompt.name} v{prompt.version}</span>
                   <small>{prompt.active ? t('prompts.active_marker') : formatDateTime(prompt.created_at)}</small>
@@ -459,7 +494,60 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
           </table>
         )}
       </section>
+      {pendingSelection && (
+        <PromptDraftDialog
+          onCancel={() => setPendingSelection(null)}
+          onDiscard={discardDraftAndSwitch}
+        />
+      )}
     </section>
+  );
+}
+
+function PromptDraftDialog({ onCancel, onDiscard }: { onCancel: () => void; onDiscard: () => void }) {
+  const { t } = useI18n();
+  const dialogRef = useRef<HTMLElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+  useFocusTrap(true, dialogRef);
+
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCancel();
+    };
+    window.addEventListener('keydown', cancelOnEscape);
+    return () => window.removeEventListener('keydown', cancelOnEscape);
+  }, [onCancel]);
+
+  return (
+    <div className="prompt-draft-dialog-root">
+      <div className="prompt-draft-dialog-backdrop" aria-hidden="true" onClick={onCancel} />
+      <section
+        className="prompt-draft-dialog"
+        ref={dialogRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+      >
+        <header>
+          <AlertTriangle size={20} aria-hidden="true" />
+          <h3 id={titleId}>{t('prompts.draft_dialog.title')}</h3>
+        </header>
+        <p id={descriptionId}>{t('prompts.draft_dialog.description')}</p>
+        <div className="prompt-draft-dialog-actions">
+          <button ref={cancelRef} className="secondary-button" type="button" onClick={onCancel}>
+            {t('prompts.draft_dialog.cancel')}
+          </button>
+          <button className="primary-button danger-button" type="button" onClick={onDiscard}>
+            {t('prompts.draft_dialog.discard')}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 

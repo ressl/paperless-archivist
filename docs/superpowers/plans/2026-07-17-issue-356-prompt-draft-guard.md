@@ -7,11 +7,11 @@
 **Files:**
 - Create: `frontend/src/prompts/Prompts.draft-guard.test.tsx`
 
-- [ ] Prove clean stage navigation remains immediate.
-- [ ] Prove dirty stage navigation supports cancel and explicit discard.
-- [ ] Prove dirty version navigation supports cancel and explicit discard.
-- [ ] Prove the dialog exposes accessible semantics, Escape cancellation, and focus restoration.
-- [ ] Keep the existing activate-with-draft regression green.
+- [x] Prove clean stage navigation remains immediate.
+- [x] Prove dirty stage navigation supports cancel and explicit discard.
+- [x] Prove dirty version navigation supports cancel and explicit discard.
+- [x] Prove the dialog exposes accessible semantics, Escape cancellation, and focus restoration.
+- [x] Keep the existing activate-with-draft regression green.
 
 ### Task 2: Add one guarded selection path
 
@@ -19,9 +19,9 @@
 - Modify: `frontend/src/prompts/Prompts.tsx`
 - Modify: `frontend/src/styles/app.css`
 
-- [ ] Route stage buttons, version select, and version-history buttons through one pending-selection guard.
-- [ ] Preserve draft and controlled selection on cancel; apply the pending target once on discard.
-- [ ] Add a modal alert dialog with a labelled description, safe initial focus, trapped Tab navigation, Escape cancellation, and focus restoration.
+- [x] Route stage buttons, version select, and version-history buttons through one pending-selection guard.
+- [x] Preserve draft and controlled selection on cancel; apply the pending target once on discard.
+- [x] Add a modal alert dialog with a labelled description, safe initial focus, trapped Tab navigation, Escape cancellation, and focus restoration.
 
 ### Task 3: Localize and verify
 
@@ -29,6 +29,6 @@
 - Modify: `frontend/src/i18n/messages.ts`
 - Modify: `frontend/src/i18n/locales/{de,es,fr,it,nl,pl}.ts`
 
-- [ ] Add complete locale strings for title, explanation, cancel, and discard actions.
-- [ ] Run focused tests, full frontend tests, i18n parity, accessibility static checks, typecheck, build, and diff checks.
+- [x] Add complete locale strings for title, explanation, cancel, and discard actions.
+- [x] Run focused tests, full frontend tests, i18n parity, accessibility static checks, typecheck, build, and diff checks.
 - [ ] Obtain independent review, commit, push, and close #356 only after the MR pipeline is green.
