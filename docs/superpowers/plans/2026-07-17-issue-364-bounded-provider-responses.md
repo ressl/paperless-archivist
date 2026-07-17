@@ -36,4 +36,4 @@
 
 - [x] Run focused and complete archivist-ai tests, workspace tests, formatting, and Clippy with warnings denied.
 - [x] Obtain an independent Critical/Important review and resolve every finding with regression coverage.
-- [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #364 only when green.
+- [x] Commit/push, verify both GitLab pipelines, document evidence, and close #364 only when green.
