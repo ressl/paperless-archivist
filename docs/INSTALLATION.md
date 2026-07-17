@@ -85,6 +85,21 @@ docker compose \
 Replace example hostnames in your private runtime configuration, not in public
 documentation.
 
+This overlay is the public HTTPS profile: it forces
+`ARCHIVIST_COOKIE_SECURE=true`, redirects port 80 to HTTPS, and returns
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`. The value of
+`ARCHIVIST_COOKIE_SECURE` in `.env` remains `false` for the separate base-only
+localhost profile and is intentionally overridden when the proxy file is used.
+Do not publish the base profile directly.
+
+After upgrading an existing proxy deployment, restart the API and sign out and
+back in (or revoke existing browser sessions) so cookies issued before the
+upgrade are replaced with `Secure` cookies. Only use the HSTS profile when the
+hostname and all of its subdomains will remain HTTPS-capable: a browser can
+retain the policy for one year, so removing the overlay does not immediately
+undo HSTS. A rollback to direct local HTTP may also require clearing the secure
+site cookies before logging in at `http://127.0.0.1:8080`.
+
 ## Generic Kubernetes
 
 Start with:

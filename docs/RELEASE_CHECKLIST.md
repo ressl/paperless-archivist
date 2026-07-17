@@ -23,8 +23,10 @@ Keep the three version identities in lockstep with the release tag `vX.Y.Z`:
 - [ ] `npm --prefix frontend run typecheck`
 - [ ] `npm --prefix frontend run build`
 - [ ] `node scripts/verify/docs_link_check.mjs`
+- [ ] `pnpm --dir frontend contract:compose:rendered`
 - [ ] `docker compose --env-file deploy/compose/.env.example -f deploy/compose/docker-compose.yml config`
 - [ ] `docker compose --env-file deploy/compose/.env.example -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.external-postgres.yml config`
+- [ ] Caddy configuration validates with the pinned `caddy:2.11.4` image.
 - [ ] `kubectl kustomize deploy/kubernetes/base`
 
 ## Security And Public Safety

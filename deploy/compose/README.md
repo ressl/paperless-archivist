@@ -41,6 +41,24 @@ docker compose \
 ```
 
 Set `ARCHIVIST_PUBLIC_HOST` and `ACME_EMAIL` before exposing the reverse proxy.
+The overlay always sets `ARCHIVIST_COOKIE_SECURE=true` for the API, regardless
+of the localhost-oriented value in `.env`, so new session and CSRF cookies are
+HTTPS-only. Caddy redirects HTTP to HTTPS and emits HSTS with a one-year
+`max-age` and `includeSubDomains`.
+
+Use the base file without the proxy overlay for direct local HTTP. That profile
+keeps `ARCHIVIST_COOKIE_SECURE=false` so browsers can use cookies at
+`http://127.0.0.1:8080`; do not expose it as a public deployment.
+
+Verify both rendered profiles after changing Compose files:
+
+```bash
+pnpm --dir frontend contract:compose:rendered
+```
+
+Because HSTS includes subdomains, enable the public profile only on a hostname
+whose full subdomain tree is available over HTTPS. Browsers can retain the HSTS
+policy for up to one year after a rollback.
 
 ## Hardening Notes
 
@@ -52,6 +70,8 @@ Set `ARCHIVIST_PUBLIC_HOST` and `ACME_EMAIL` before exposing the reverse proxy.
   run before jobs are claimed.
 - Services communicate on the private `archivist-internal` network.
 - Resource reservations and limits are configurable through `.env`.
+- The Caddy profile owns the external HSTS header and replaces the API's
+  equivalent value so clients receive one unambiguous policy.
 
 ## Secrets
 

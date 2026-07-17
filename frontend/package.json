@@ -6,9 +6,11 @@
   "packageManager": "pnpm@10.34.1",
   "scripts": {
     "generate:client": "openapi-typescript ../openapi/openapi.yaml -o src/api/schema.ts",
-    "lint": "pnpm contract:routes && pnpm contract:settings && pnpm generate:client && git diff --exit-code -- src/api/schema.ts",
+    "lint": "pnpm contract:routes && pnpm contract:settings && pnpm contract:compose && pnpm generate:client && git diff --exit-code -- src/api/schema.ts",
     "contract:routes": "node ../scripts/verify/router_openapi_contract.mjs",
     "contract:settings": "node ../scripts/verify/runtime_settings_openapi_contract.mjs",
+    "contract:compose": "node ../scripts/verify/compose_proxy_contract.mjs --static",
+    "contract:compose:rendered": "node ../scripts/verify/compose_proxy_contract.mjs",
     "accessibility:check": "node ../scripts/verify/accessibility_static_check.mjs",
     "i18n:check": "node ../scripts/verify/i18n_translation_parity.mjs",
     "test": "pnpm test:a11y",

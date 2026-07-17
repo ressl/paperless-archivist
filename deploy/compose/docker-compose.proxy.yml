@@ -1,4 +1,10 @@
 services:
+  api:
+    environment:
+      # This overlay is exclusively for Caddy-managed HTTPS. Keep the base
+      # profile's false default for direct localhost HTTP development.
+      ARCHIVIST_COOKIE_SECURE: "true"
+
   proxy:
     image: caddy:2.11.4
     profiles: ["reverse-proxy"]

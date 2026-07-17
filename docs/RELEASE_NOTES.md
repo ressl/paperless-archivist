@@ -6,6 +6,19 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## Unreleased
+
+- **Secure Caddy profile (#355):** the reverse-proxy Compose overlay now forces
+  `ARCHIVIST_COOKIE_SECURE=true`; session and CSRF cookies issued through the
+  public HTTPS profile therefore carry `Secure`. Direct base-only localhost
+  HTTP remains available with the explicit `false` default. Caddy redirects
+  HTTP to HTTPS, emits one authoritative one-year HSTS policy with
+  `includeSubDomains`, and suppresses the duplicate upstream HSTS value.
+- **Upgrade note:** restart the API and replace pre-upgrade browser sessions so
+  their existing cookies are reissued with `Secure`. HSTS can remain cached for
+  one year, including after rollback; do not enable this profile unless the
+  selected hostname and its subdomains will remain HTTPS-capable.
+
 ## v1.16.0 — Dashboard hierarchy tiers, nav a11y, dead-CSS cleanup
 
 The redesign's deeper polish, now that the layout is solid. Verified by rendering

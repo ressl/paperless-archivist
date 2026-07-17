@@ -7474,6 +7474,19 @@ fn verify_dummy_password(password: &str) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn tls_mode_marks_session_and_csrf_cookies_secure() {
+        let session = build_cookie(SESSION_COOKIE, "session", true, true, 12).to_string();
+        let csrf = build_cookie(CSRF_COOKIE, "csrf", false, true, 12).to_string();
+        let local_session = build_cookie(SESSION_COOKIE, "session", true, false, 12).to_string();
+
+        assert!(session.contains("; Secure"));
+        assert!(session.contains("; HttpOnly"));
+        assert!(csrf.contains("; Secure"));
+        assert!(!csrf.contains("; HttpOnly"));
+        assert!(!local_session.contains("; Secure"));
+    }
+
     fn auth_context_for_session_listing(
         cookie_auth: bool,
         user_id: Uuid,

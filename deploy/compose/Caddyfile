@@ -4,7 +4,11 @@
 
 {$ARCHIVIST_PUBLIC_HOST} {
 	encode zstd gzip
-	reverse_proxy api:8080
+	reverse_proxy api:8080 {
+		# The API also emits HSTS in secure-cookie mode. Keep one externally
+		# authoritative value instead of forwarding duplicate policies.
+		header_down -Strict-Transport-Security
+	}
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
