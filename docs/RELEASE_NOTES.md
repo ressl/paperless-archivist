@@ -14,7 +14,8 @@
   boundaries, and fences exposed after parsing are covered by regressions;
   `style`/`script`/`head`/`svg`/`noscript` content is discarded. Layout-only
   output now fails with a dedicated permanent error instead of the generic
-  minimum-length error. Enabling MinerU remains opt-in.
+  minimum-length error. Token and nesting limits reject pathological markup
+  before DOM construction. Enabling MinerU remains opt-in.
 - **OCR hash upgrade note:** normalized content hashes change for
   markup-bearing OCR pages. Duplicate detection does not bridge old-to-new
   hashes across this one deployment boundary; no backfill is performed.

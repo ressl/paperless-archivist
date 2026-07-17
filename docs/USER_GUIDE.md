@@ -206,7 +206,9 @@ layout normalizer. MinerU Markdown can contain HTML tables; Archivist parses
 that layout into stable text while preserving empty columns and rejecting
 unsafe control characters. A scan that contains layout but no document text is
 reported as `OCR produced no text after layout markup normalization`, so it can
-be distinguished from a generic minimum-length failure. MinerU remains opt-in.
+be distinguished from a generic minimum-length failure. Pathologically deep or
+large markup is rejected as `OCR layout markup exceeded normalization limits`.
+MinerU remains opt-in.
 
 ### SGLang With MiniMax M3 (Text Only)
 

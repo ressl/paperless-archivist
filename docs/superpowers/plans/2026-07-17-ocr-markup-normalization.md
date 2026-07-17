@@ -179,7 +179,7 @@ git commit -m "test(ocr): define layout markup normalization contract"
 
 ---
 
-### Task 2: Implement DOM-backed detection and deterministic rendering
+### Task 2: Implement tokenizer-backed detection and deterministic rendering
 
 **Files:**
 - Modify: `Cargo.toml:20-55`
@@ -225,41 +225,62 @@ use crate::strip_code_fences;
 pub(crate) struct NormalizedPages {
     pub text: String,
     pub had_layout_markup: bool,
+    pub normalization_limits_exceeded: bool,
 }
 
 struct NormalizedPage {
     text: String,
     had_layout_markup: bool,
+    normalization_limits_exceeded: bool,
 }
 
 pub(crate) fn normalize_pages(page_texts: &[String]) -> NormalizedPages {
     let pages = page_texts.iter().map(|page| normalize_page(page)).collect::<Vec<_>>();
     let had_layout_markup = pages.iter().any(|page| page.had_layout_markup);
+    let normalization_limits_exceeded = pages
+        .iter()
+        .any(|page| page.normalization_limits_exceeded);
     let text = pages
         .into_iter()
         .map(|page| page.text.trim().to_owned())
         .filter(|page| !page.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
-    NormalizedPages { text, had_layout_markup }
+    NormalizedPages {
+        text,
+        had_layout_markup,
+        normalization_limits_exceeded,
+    }
 }
 
 fn normalize_page(page: &str) -> NormalizedPage {
     let detection_input = strip_code_fences(page);
-    let dom = parse_html(&detection_input);
-    if !looks_like_layout_markup(&detection_input, &dom) {
+    let inspection = inspect_markup(&detection_input);
+    if !looks_like_layout_markup(&detection_input, &inspection) {
         return NormalizedPage {
             text: detection_input,
             had_layout_markup: false,
+            normalization_limits_exceeded: false,
+        };
+    }
+    if inspection.limits_exceeded {
+        // The checked worker API turns this into a permanent error. The
+        // convenience API retains the source instead of losing text.
+        return NormalizedPage {
+            text: detection_input,
+            had_layout_markup: true,
+            normalization_limits_exceeded: true,
         };
     }
 
+    let dom = parse_html(&detection_input);
     let mut rendered = String::with_capacity(detection_input.len());
     render_node(&dom.document, &mut rendered);
     let normalized = normalize_rendered_text(&sanitize_controls(&rendered));
     NormalizedPage {
         text: strip_code_fences(&normalized),
         had_layout_markup: true,
+        normalization_limits_exceeded: false,
     }
 }
 
@@ -293,32 +314,32 @@ fn contains_start_tag(source_lower: &str, name: &str) -> bool {
 }
 ```
 
-- [ ] **Step 3: Implement conservative DOM-backed detection**
+- [ ] **Step 3: Implement conservative tokenizer-backed detection**
 
-Use a `LayoutEvidence` traversal. Element names come from parsed DOM nodes and
-are therefore case-normalized; source checks only confirm explicit closing
-structure.
+Use one `html5ever::tokenizer::Tokenizer` pass before DOM construction. The
+original draft used a raw `source.contains("</tag")` search; review proved that
+it accepted tag-name prefixes and closers inside attributes/comments, counted a
+single closer multiple times, and rescanned the source per DOM node. That draft
+is superseded and must not be implemented.
 
 ```rust
-#[derive(Default)]
-struct LayoutEvidence {
+struct MarkupInspection {
     marker_attribute: bool,
     table: bool,
     recognized_elements: usize,
     explicitly_closed_elements: usize,
+    limits_exceeded: bool,
 }
 
-fn looks_like_layout_markup(source: &str, dom: &RcDom) -> bool {
+fn inspect_markup(source: &str) -> MarkupInspection {
+    // Tokenize once. Count recognized start tags and only matched end-tag
+    // events. Track attributes, tables, total tokens, and an explicit stack
+    // of open non-void elements. Reject above 100,000 tokens or depth 256.
+    // See crates/archivist-ocr/src/markup.rs for the complete TokenSink.
+}
+
+fn looks_like_layout_markup(source: &str, inspection: &MarkupInspection) -> bool {
     let source_lower = source.to_ascii_lowercase();
-    let mut evidence = LayoutEvidence::default();
-    collect_layout_evidence(&dom.document, &source_lower, &mut evidence);
-
-    // Inspect the parsed RcDom recursively. For each Element node, read
-    // `name.local` and `attrs`; html5ever has already normalized case and tag
-    // boundaries. Count known layout elements, marker attributes, tables, and
-    // elements whose explicit closing token exists in `source_lower`.
-    // `collect_layout_evidence` recurses over `node.children.borrow()`.
-
     let starts_with_layout = source_lower.trim_start().strip_prefix('<').is_some_and(|rest| {
         let name = rest
             .split(|ch: char| ch.is_ascii_whitespace() || ch == '>' || ch == '/')
@@ -327,33 +348,10 @@ fn looks_like_layout_markup(source: &str, dom: &RcDom) -> bool {
         is_layout_element(name)
     });
 
-    evidence.marker_attribute
-        || evidence.table
-        || (starts_with_layout && evidence.explicitly_closed_elements >= 1)
-        || (evidence.recognized_elements >= 2 && evidence.explicitly_closed_elements >= 2)
-}
-
-fn collect_layout_evidence(node: &Handle, source_lower: &str, evidence: &mut LayoutEvidence) {
-    if let NodeData::Element { name, attrs, .. } = &node.data {
-        let element_name = name.local.as_ref();
-        if attrs.borrow().iter().any(|attribute| {
-            matches!(attribute.name.local.as_ref(), "data-bbox" | "data-label")
-        }) {
-            evidence.marker_attribute = true;
-        }
-        if element_name == "table" {
-            evidence.table = true;
-        }
-        if is_layout_element(element_name) {
-            evidence.recognized_elements += 1;
-            if source_lower.contains(&format!("</{element_name}")) {
-                evidence.explicitly_closed_elements += 1;
-            }
-        }
-    }
-    for child in node.children.borrow().iter() {
-        collect_layout_evidence(child, source_lower, evidence);
-    }
+    inspection.marker_attribute
+        || inspection.table
+        || (starts_with_layout && inspection.explicitly_closed_elements >= 1)
+        || (inspection.recognized_elements >= 2 && inspection.explicitly_closed_elements >= 2)
 }
 
 fn is_layout_element(name: &str) -> bool {
@@ -425,7 +423,11 @@ fn render_table(table: &Handle, output: &mut String) {
             .map(render_table_cell)
             .collect::<Vec<_>>();
         if !cells.is_empty() {
-            output.push_str(&cells.join(" | "));
+            if cells.iter().all(String::is_empty) {
+                output.push_str(&vec!["|"; cells.len()].join(" "));
+            } else {
+                output.push_str(&cells.join(" | "));
+            }
             push_line_break(output);
         }
     }
@@ -560,6 +562,11 @@ pub fn normalize_and_validate_ocr_pages(
     min_chars: usize,
 ) -> Result<String> {
     let normalized = markup::normalize_pages(page_texts);
+    if normalized.normalization_limits_exceeded {
+        return Err(anyhow!(
+            "OCR layout markup exceeded normalization limits"
+        ));
+    }
     if normalized.had_layout_markup && normalized.text.trim().is_empty() {
         return Err(anyhow!(
             "OCR produced no text after layout markup normalization"

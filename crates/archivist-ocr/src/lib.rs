@@ -264,6 +264,9 @@ pub fn normalize_ocr_pages(page_texts: &[String]) -> String {
 
 pub fn normalize_and_validate_ocr_pages(page_texts: &[String], min_chars: usize) -> Result<String> {
     let normalized = markup::normalize_pages(page_texts);
+    if normalized.normalization_limits_exceeded {
+        return Err(anyhow!("OCR layout markup exceeded normalization limits"));
+    }
     if normalized.had_layout_markup && normalized.text.trim().is_empty() {
         return Err(anyhow!(
             "OCR produced no text after layout markup normalization"
@@ -377,6 +380,19 @@ mod tests {
     }
 
     #[test]
+    fn normalize_ocr_pages_requires_real_balanced_closing_evidence() {
+        for page in [
+            "<p>literal</paragraph>",
+            r#"<p data-note="</p>">literal"#,
+            "Prefix <p>one</p><!-- </div> --><div>literal",
+            "Prefix <p>one<p>two</p>",
+            "</p></div><p>one<div>two",
+        ] {
+            assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
+        }
+    }
+
+    #[test]
     fn normalize_ocr_pages_recognizes_uppercase_and_marker_free_layout() {
         let pages = vec![
             "<DIV><H1>Rechnung</H1><UL><LI>Position eins</LI><LI>Position zwei</LI></UL></DIV>"
@@ -448,6 +464,15 @@ mod tests {
     }
 
     #[test]
+    fn normalize_ocr_pages_preserves_fully_empty_table_rows() {
+        let pages = vec![
+            "<table><tr><td></td></tr><tr><td></td><td></td></tr><tr><td>kept</td></tr></table>"
+                .to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "|\n| |\nkept");
+    }
+
+    #[test]
     fn normalize_ocr_pages_separates_blocks_and_implicit_list_items() {
         let pages = vec![
             "<div><h1>Heading</h1><ul><li>One<li>Two</ul><blockquote>Quote</blockquote><p>Tail</p></div>"
@@ -491,6 +516,37 @@ mod tests {
         let error = normalize_and_validate_ocr_pages(&["short".to_owned()], 10)
             .expect_err("short plain text must still fail");
         assert_eq!(error.to_string(), "OCR result is below minimum length");
+    }
+
+    #[test]
+    fn normalize_and_validate_rejects_pathological_layout_nesting() {
+        let deeply_nested = format!(
+            "<div data-bbox=\"0 0 1 1\">{}text{}",
+            "<span>".repeat(300),
+            "</span>".repeat(300)
+        );
+        assert_eq!(
+            normalize_ocr_pages(std::slice::from_ref(&deeply_nested)),
+            deeply_nested,
+            "the legacy convenience API must not silently drop rejected text"
+        );
+        let error = normalize_and_validate_ocr_pages(&[deeply_nested], 1)
+            .expect_err("pathological nesting must be rejected before DOM traversal");
+        assert_eq!(
+            error.to_string(),
+            "OCR layout markup exceeded normalization limits"
+        );
+    }
+
+    #[test]
+    fn normalize_and_validate_rejects_repeated_unclosed_table_cells() {
+        let malformed_table = format!("<table><tr>{}</table>", "<td>cell".repeat(300));
+        let error = normalize_and_validate_ocr_pages(&[malformed_table], 1)
+            .expect_err("pathological unclosed cells must be rejected before DOM traversal");
+        assert_eq!(
+            error.to_string(),
+            "OCR layout markup exceeded normalization limits"
+        );
     }
 
     #[tokio::test]

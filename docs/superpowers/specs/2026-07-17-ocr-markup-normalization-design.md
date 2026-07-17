@@ -50,19 +50,20 @@ make archival output dependent on display width and library presentation rules.
 
 ## Markup Detection
 
-Every page is parsed as an HTML fragment for structural inspection, but parsing
-alone does not authorize rewriting. Plain text remains byte-for-byte unchanged
-apart from the existing code-fence behavior unless the parsed fragment contains
-credible OCR layout markup.
+Every page first passes through the HTML5 tokenizer for structural inspection,
+but tokenization alone does not authorize rewriting. Plain text remains
+byte-for-byte unchanged apart from the existing code-fence behavior unless the
+token stream contains credible OCR layout markup. Only accepted, bounded layout
+input is then materialized as a DOM.
 
 A page is treated as layout markup when at least one condition holds:
 
-1. a parsed element has `data-bbox` or `data-label`;
-2. a table element is present;
-3. the trimmed page begins with a recognized layout element and contains its
-   explicit closing tag;
-4. at least two recognized layout elements with structural closing tags are
-   present.
+1. a start-tag token has `data-bbox` or `data-label`;
+2. a table start-tag token is present;
+3. the trimmed page begins with a recognized layout element and the tokenizer
+   observes its matched explicit closing tag;
+4. at least two recognized layout elements with matched structural closing
+   tags are present.
 
 Recognized layout elements are `p`, `div`, `section`, `article`, `header`,
 `footer`, `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `ul`, `ol`,
@@ -70,9 +71,20 @@ Recognized layout elements are `p`, `div`, `section`, `article`, `header`,
 
 This keeps `A < B`, `<brutto>`, and prose mentioning a lone literal `<p>` on the
 plain-text path while recognizing uppercase and marker-free layout documents.
-The detector consumes the code-fence-unwrapped view so a whole-page fenced HTML
-fragment can still be recognized. Fence stripping is repeated after rendering,
-because entity decoding or tag removal can reveal a new standalone fence.
+End tags embedded in attributes or comments, prefix names such as
+`</paragraph>`, unmatched leading end tags, and one closing token shared by
+multiple start tags do not count as structural evidence. This keeps detection
+linear in the source size. The detector consumes the code-fence-unwrapped view
+so a whole-page fenced HTML fragment can still be recognized. Fence stripping
+is repeated after rendering, because entity decoding or tag removal can reveal
+a new standalone fence.
+
+Before DOM construction, the tokenizer rejects layout input above 100,000
+tokens or 256 open elements. This bounds memory and recursive rendering depth
+for malformed provider responses. The checked worker API returns the permanent,
+operator-distinguishable error `OCR layout markup exceeded normalization
+limits`; the legacy convenience normalizer preserves the original input on that
+path instead of silently losing text.
 
 ## Public Interface and Data Flow
 
@@ -83,6 +95,7 @@ an internal summary:
 pub(crate) struct NormalizedPages {
     pub text: String,
     pub had_layout_markup: bool,
+    pub normalization_limits_exceeded: bool,
 }
 
 pub(crate) fn normalize_pages(page_texts: &[String]) -> NormalizedPages;
@@ -132,8 +145,10 @@ collapsed. Empty lines are removed and remaining lines are joined with `\n`.
 Each `tr` is rendered independently. Direct `td` and `th` descendants become
 cells; each cell is rendered recursively and normalized to a single line. Cells
 are joined with ` | ` without dropping empty leading, middle, or trailing cells.
-Rows are joined with `\n`. Nested tables are rendered as content of their owning
-cell without being counted again as rows of the outer table.
+Rows are joined with `\n`. A fully empty row emits one `|` marker per empty cell
+so the row and its column count remain visible. Nested tables are rendered as
+content of their owning cell without being counted again as rows of the outer
+table.
 
 ### Unsafe or Non-document Subtrees
 
@@ -165,15 +180,20 @@ Regression tests cover every consolidated issue:
 
 - raw `<` comparisons inside marked-up text;
 - literal `<p>` and `<brutto>` plain text;
+- tag-name prefixes, end tags in attributes/comments, unmatched end tags, and
+  repeated elements sharing one closer;
 - uppercase and marker-free layout;
 - `>` inside quoted attributes and comments;
 - style/script/head/svg/noscript subtree removal;
 - NUL/control numeric entities, bare ampersands, Latin-1, currency, and
   typographic entities;
 - compact and pretty-printed tables, including empty cells;
+- fully empty table rows;
 - headings, lists, blockquotes, and implicit block boundaries;
 - fences exposed by tag removal or entity decoding;
 - layout-only pages producing the dedicated validation error;
+- excessive nesting and repeated unclosed table cells producing the bounded
+  normalization error;
 - plain-text entities remaining unchanged;
 - normalization idempotence for already normalized output.
 

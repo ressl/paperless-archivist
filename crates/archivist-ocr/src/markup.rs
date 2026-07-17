@@ -1,17 +1,29 @@
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+
 use html5ever::tendril::TendrilSink;
+use html5ever::tokenizer::{
+    BufferQueue, EndTag, StartTag, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
+    TokenizerOpts,
+};
 use html5ever::{QualName, local_name, ns, parse_document, parse_fragment};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::strip_code_fences;
 
+const MAX_LAYOUT_TOKENS: usize = 100_000;
+const MAX_LAYOUT_NESTING_DEPTH: usize = 256;
+
 pub(crate) struct NormalizedPages {
     pub text: String,
     pub had_layout_markup: bool,
+    pub normalization_limits_exceeded: bool,
 }
 
 struct NormalizedPage {
     text: String,
     had_layout_markup: bool,
+    normalization_limits_exceeded: bool,
 }
 
 pub(crate) fn normalize_pages(page_texts: &[String]) -> NormalizedPages {
@@ -20,6 +32,7 @@ pub(crate) fn normalize_pages(page_texts: &[String]) -> NormalizedPages {
         .map(|page| normalize_page(page))
         .collect::<Vec<_>>();
     let had_layout_markup = pages.iter().any(|page| page.had_layout_markup);
+    let normalization_limits_exceeded = pages.iter().any(|page| page.normalization_limits_exceeded);
     let text = pages
         .into_iter()
         .map(|page| page.text.trim().to_owned())
@@ -30,6 +43,7 @@ pub(crate) fn normalize_pages(page_texts: &[String]) -> NormalizedPages {
     NormalizedPages {
         text,
         had_layout_markup,
+        normalization_limits_exceeded,
     }
 }
 
@@ -37,14 +51,25 @@ fn normalize_page(page: &str) -> NormalizedPage {
     // Unwrap whole-page fences for detection, then run fence removal again
     // after rendering because tag/entity decoding can reveal a new bare fence.
     let detection_input = strip_code_fences(page);
-    let dom = parse_html(&detection_input);
-    if !looks_like_layout_markup(&detection_input, &dom) {
+    let inspection = inspect_markup(&detection_input);
+    if !looks_like_layout_markup(&detection_input, &inspection) {
         return NormalizedPage {
             text: detection_input,
             had_layout_markup: false,
+            normalization_limits_exceeded: false,
+        };
+    }
+    if inspection.limits_exceeded {
+        return NormalizedPage {
+            // Preserve the legacy convenience API's lossless fallback. The
+            // worker consumes the checked API and rejects this page below.
+            text: detection_input,
+            had_layout_markup: true,
+            normalization_limits_exceeded: true,
         };
     }
 
+    let dom = parse_html(&detection_input);
     let mut rendered = String::with_capacity(detection_input.len());
     render_node(&dom.document, &mut rendered);
     let normalized = normalize_rendered_text(&sanitize_controls(&rendered));
@@ -52,6 +77,7 @@ fn normalize_page(page: &str) -> NormalizedPage {
     NormalizedPage {
         text: strip_code_fences(&normalized),
         had_layout_markup: true,
+        normalization_limits_exceeded: false,
     }
 }
 
@@ -84,18 +110,117 @@ fn contains_start_tag(source_lower: &str, name: &str) -> bool {
     })
 }
 
-#[derive(Default)]
-struct LayoutEvidence {
+struct MarkupInspection {
     marker_attribute: bool,
     table: bool,
     recognized_elements: usize,
     explicitly_closed_elements: usize,
+    limits_exceeded: bool,
 }
 
-fn looks_like_layout_markup(source: &str, dom: &RcDom) -> bool {
+#[derive(Default)]
+struct MarkupInspectionSink {
+    marker_attribute: Cell<bool>,
+    table: Cell<bool>,
+    recognized_starts: RefCell<HashMap<String, usize>>,
+    recognized_ends: RefCell<HashMap<String, usize>>,
+    open_elements: RefCell<Vec<String>>,
+    token_count: Cell<usize>,
+    limits_exceeded: Cell<bool>,
+}
+
+impl MarkupInspectionSink {
+    fn increment_recognized(counts: &RefCell<HashMap<String, usize>>, name: &str) {
+        if is_layout_element(name) {
+            let mut counts = counts.borrow_mut();
+            *counts.entry(name.to_owned()).or_default() += 1;
+        }
+    }
+
+    fn record_start_tag(&self, tag: &html5ever::tokenizer::Tag) {
+        let name = tag.name.as_ref();
+        Self::increment_recognized(&self.recognized_starts, name);
+        if name == "table" {
+            self.table.set(true);
+        }
+        if tag
+            .attrs
+            .iter()
+            .any(|attribute| matches!(attribute.name.local.as_ref(), "data-bbox" | "data-label"))
+        {
+            self.marker_attribute.set(true);
+        }
+
+        // HTML ignores the self-closing flag on ordinary elements, so only
+        // actual void elements may be omitted from the structural stack.
+        if !is_void_element(name) {
+            let mut open_elements = self.open_elements.borrow_mut();
+            if open_elements.len() >= MAX_LAYOUT_NESTING_DEPTH {
+                self.limits_exceeded.set(true);
+            } else {
+                open_elements.push(name.to_owned());
+            }
+        }
+    }
+
+    fn record_end_tag(&self, name: &str) {
+        let mut open_elements = self.open_elements.borrow_mut();
+        if let Some(index) = open_elements.iter().rposition(|open| open == name) {
+            Self::increment_recognized(&self.recognized_ends, name);
+            open_elements.truncate(index);
+        }
+    }
+
+    fn finish(&self) -> MarkupInspection {
+        let recognized_starts = self.recognized_starts.borrow();
+        let recognized_ends = self.recognized_ends.borrow();
+        let recognized_elements = recognized_starts.values().sum();
+        let explicitly_closed_elements = recognized_starts
+            .iter()
+            .map(|(name, starts)| starts.min(recognized_ends.get(name).unwrap_or(&0)))
+            .sum();
+
+        MarkupInspection {
+            marker_attribute: self.marker_attribute.get(),
+            table: self.table.get(),
+            recognized_elements,
+            explicitly_closed_elements,
+            limits_exceeded: self.limits_exceeded.get(),
+        }
+    }
+}
+
+impl TokenSink for MarkupInspectionSink {
+    type Handle = ();
+
+    fn process_token(&self, token: Token, _line_number: u64) -> TokenSinkResult<Self::Handle> {
+        let token_count = self.token_count.get().saturating_add(1);
+        self.token_count.set(token_count);
+        if token_count > MAX_LAYOUT_TOKENS {
+            self.limits_exceeded.set(true);
+        }
+
+        if let TagToken(tag) = token {
+            match tag.kind {
+                StartTag => self.record_start_tag(&tag),
+                EndTag => self.record_end_tag(tag.name.as_ref()),
+            }
+        }
+        TokenSinkResult::Continue
+    }
+}
+
+fn inspect_markup(source: &str) -> MarkupInspection {
+    let input = BufferQueue::default();
+    input.push_back(source.into());
+    let tokenizer = Tokenizer::new(MarkupInspectionSink::default(), TokenizerOpts::default());
+    let _ = tokenizer.feed(&input);
+    tokenizer.end();
+    tokenizer.sink.finish()
+}
+
+fn looks_like_layout_markup(source: &str, inspection: &MarkupInspection) -> bool {
     let source_lower = source.to_ascii_lowercase();
-    let mut evidence = LayoutEvidence::default();
-    collect_layout_evidence(&dom.document, &source_lower, &mut evidence);
 
     let starts_with_layout = source_lower
         .trim_start()
@@ -108,36 +233,10 @@ fn looks_like_layout_markup(source: &str, dom: &RcDom) -> bool {
             is_layout_element(name)
         });
 
-    evidence.marker_attribute
-        || evidence.table
-        || (starts_with_layout && evidence.explicitly_closed_elements >= 1)
-        || (evidence.recognized_elements >= 2 && evidence.explicitly_closed_elements >= 2)
-}
-
-fn collect_layout_evidence(node: &Handle, source_lower: &str, evidence: &mut LayoutEvidence) {
-    if let NodeData::Element { name, attrs, .. } = &node.data {
-        let element_name = name.local.as_ref();
-        if attrs
-            .borrow()
-            .iter()
-            .any(|attribute| matches!(attribute.name.local.as_ref(), "data-bbox" | "data-label"))
-        {
-            evidence.marker_attribute = true;
-        }
-        if element_name == "table" {
-            evidence.table = true;
-        }
-        if is_layout_element(element_name) {
-            evidence.recognized_elements += 1;
-            if source_lower.contains(&format!("</{element_name}")) {
-                evidence.explicitly_closed_elements += 1;
-            }
-        }
-    }
-
-    for child in node.children.borrow().iter() {
-        collect_layout_evidence(child, source_lower, evidence);
-    }
+    inspection.marker_attribute
+        || inspection.table
+        || (starts_with_layout && inspection.explicitly_closed_elements >= 1)
+        || (inspection.recognized_elements >= 2 && inspection.explicitly_closed_elements >= 2)
 }
 
 fn is_layout_element(name: &str) -> bool {
@@ -165,6 +264,30 @@ fn is_layout_element(name: &str) -> bool {
             | "h4"
             | "h5"
             | "h6"
+    )
+}
+
+fn is_void_element(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "basefont"
+            | "bgsound"
+            | "br"
+            | "col"
+            | "embed"
+            | "frame"
+            | "hr"
+            | "img"
+            | "input"
+            | "keygen"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
     )
 }
 
@@ -247,7 +370,11 @@ fn render_table(table: &Handle, output: &mut String) {
             .map(render_table_cell)
             .collect::<Vec<_>>();
         if !cells.is_empty() {
-            output.push_str(&cells.join(" | "));
+            if cells.iter().all(String::is_empty) {
+                output.push_str(&vec!["|"; cells.len()].join(" "));
+            } else {
+                output.push_str(&cells.join(" | "));
+            }
             push_line_break(output);
         }
     }

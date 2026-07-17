@@ -5427,6 +5427,7 @@ mod tests {
             anyhow!("model response did not contain valid JSON"),
             anyhow!("unknown allowed tag returned by model"),
             anyhow!("OCR produced no text after layout markup normalization"),
+            anyhow!("OCR layout markup exceeded normalization limits"),
         ];
 
         for error in cases {
