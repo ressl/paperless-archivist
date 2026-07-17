@@ -1,15 +1,8 @@
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: paperless-archivist-api
-spec:
-  template:
-    spec:
-      containers:
-        - name: api
-          env:
-            - name: ARCHIVIST_METRICS_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: paperless-archivist-metrics
-                  key: ARCHIVIST_METRICS_TOKEN
+- op: add
+  path: /spec/template/spec/containers/0/env
+  value:
+    - name: ARCHIVIST_METRICS_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: paperless-archivist-metrics
+          key: ARCHIVIST_METRICS_TOKEN

@@ -5,3 +5,8 @@ resources:
   - prometheusrule.yaml
 patches:
   - path: deployment-api-metrics-env-patch.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: paperless-archivist-api

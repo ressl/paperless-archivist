@@ -19,16 +19,29 @@ test('monitoring component uses one dedicated Secret for API and Prometheus', as
   const patch = await loadYaml(
     'deploy/kubernetes/components/monitoring/deployment-api-metrics-env-patch.yaml'
   );
-  const env = patch.spec.template.spec.containers[0].env;
-  assert.deepEqual(env, [{
-    name: 'ARCHIVIST_METRICS_TOKEN',
-    valueFrom: {
-      secretKeyRef: {
-        name: 'paperless-archivist-metrics',
-        key: 'ARCHIVIST_METRICS_TOKEN'
+  assert.deepEqual(patch, [{
+    op: 'add',
+    path: '/spec/template/spec/containers/0/env',
+    value: [{
+      name: 'ARCHIVIST_METRICS_TOKEN',
+      valueFrom: {
+        secretKeyRef: {
+          name: 'paperless-archivist-metrics',
+          key: 'ARCHIVIST_METRICS_TOKEN'
+        }
       }
-    }
+    }]
   }]);
+
+  const component = await loadYaml(
+    'deploy/kubernetes/components/monitoring/kustomization.yaml'
+  );
+  assert.deepEqual(component.patches[0].target, {
+    group: 'apps',
+    version: 'v1',
+    kind: 'Deployment',
+    name: 'paperless-archivist-api'
+  });
 
   const monitor = await loadYaml(
     'deploy/kubernetes/components/monitoring/servicemonitor.yaml'
