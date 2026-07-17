@@ -8,6 +8,7 @@ members = [
   "crates/archivist-db",
   "crates/archivist-ocr",
   "crates/archivist-paperless",
+  "crates/archivist-sqlx",
   "crates/archivist-worker",
 ]
 
@@ -44,7 +45,9 @@ secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "chrono", "uuid", "json", "migrate"] }
+# PostgreSQL-only facade. The upstream multi-driver facade records dormant
+# SQLite/MySQL packages (including yanked transitive crates) in Cargo.lock.
+sqlx = { package = "archivist-sqlx", path = "crates/archivist-sqlx" }
 subtle = "2"
 tempfile = "3"
 thiserror = "2"
