@@ -38,4 +38,4 @@
 
 - [x] Run targeted unit and PostgreSQL tests.
 - [x] Run formatting, Clippy, workspace tests, audit, deny, and the full PostgreSQL gate.
-- [ ] Commit, push, inspect the MR pipeline, document evidence, and close #344 only after the remote gate is green.
+- [x] Commit, push, inspect the MR pipeline, document evidence, and close #344 only after the remote gate is green.
