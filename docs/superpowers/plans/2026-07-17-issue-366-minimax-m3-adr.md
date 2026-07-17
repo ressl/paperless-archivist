@@ -34,4 +34,4 @@
 
 - [x] Check source links, Markdown/diff hygiene, model/template/runtime fingerprints, and repository lint.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #366 only when green.
+- [x] Commit/push, verify both GitLab pipelines, document evidence, and close #366 only when green.
