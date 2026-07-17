@@ -20,5 +20,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+futures.workspace = true
 tokio.workspace = true
-

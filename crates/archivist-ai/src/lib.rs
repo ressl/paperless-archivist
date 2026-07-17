@@ -8,12 +8,22 @@ use archivist_core::{
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+
+/// Maximum number of bytes accepted from any buffered AI-provider response.
+/// This single limit covers OpenAI-compatible model listings, chat/vision JSON,
+/// structured-output retries, and provider error bodies. Content-Length is
+/// checked before reading; streaming/chunked bodies are stopped at the same cap.
+pub const AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Provider diagnostics may be persisted or logged through an anyhow chain, so
+/// they receive a much smaller cap after sensitive JSON fields are redacted.
+const AI_PROVIDER_ERROR_SNIPPET_LIMIT_BYTES: usize = 1024;
 
 /// Typed surface for AI provider failures. The worker uses `is_transient()`
 /// to decide whether to retry — see `archivist-worker::classify_processing_failure`.
@@ -132,29 +142,181 @@ fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64>
         .map(|seconds| seconds.max(0) as u64)
 }
 
+#[derive(Debug)]
+struct BoundedResponseBody {
+    bytes: Vec<u8>,
+    truncated: bool,
+    declared_length: Option<u64>,
+}
+
+#[derive(Debug, Error)]
+#[error("{source}")]
+struct ResponseBodyReadError {
+    #[source]
+    source: AiProviderError,
+    partial: BoundedResponseBody,
+}
+
+async fn take_bounded_response_body(
+    mut response: reqwest::Response,
+) -> std::result::Result<BoundedResponseBody, ResponseBodyReadError> {
+    let declared_length = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared_length.is_some_and(|length| length > AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES as u64) {
+        return Ok(BoundedResponseBody {
+            bytes: Vec::new(),
+            truncated: true,
+            declared_length,
+        });
+    }
+
+    let mut bytes = Vec::with_capacity(
+        declared_length
+            .unwrap_or_default()
+            .min(AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES as u64) as usize,
+    );
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                return Err(ResponseBodyReadError {
+                    source: AiProviderError::from(error),
+                    partial: BoundedResponseBody {
+                        bytes,
+                        truncated: false,
+                        declared_length,
+                    },
+                });
+            }
+        };
+        let remaining = AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES.saturating_sub(bytes.len());
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            return Ok(BoundedResponseBody {
+                bytes,
+                truncated: true,
+                declared_length,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(BoundedResponseBody {
+        bytes,
+        truncated: false,
+        declared_length,
+    })
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
+    if value.len() <= max_bytes {
+        return (value, false);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&value[..end], true)
+}
+
+fn safe_body_diagnostic(body: &BoundedResponseBody) -> String {
+    // Configured provider endpoints are untrusted and may echo a credential as
+    // an arbitrary JSON string, object key, or nested message. Key-name based
+    // redaction is therefore insufficient: diagnostics expose no provider body
+    // content at all, while retaining bounded transport metadata below.
+    let serialized = if body.bytes.is_empty() {
+        "<response body omitted>".to_owned()
+    } else {
+        "<provider response body redacted>".to_owned()
+    };
+    let (snippet, snippet_truncated) =
+        truncate_utf8(&serialized, AI_PROVIDER_ERROR_SNIPPET_LIMIT_BYTES);
+    let mut diagnostic = snippet.to_owned();
+    if snippet_truncated {
+        diagnostic.push_str(" [diagnostic snippet truncated]");
+    }
+    if body.truncated {
+        diagnostic.push_str(&format!(
+            " [response body truncated at {} bytes",
+            AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES
+        ));
+        if let Some(length) = body.declared_length {
+            diagnostic.push_str(&format!("; declared Content-Length={length}"));
+        }
+        diagnostic.push(']');
+    }
+    diagnostic
+}
+
+fn body_limit_error(operation: &str, body: &BoundedResponseBody) -> anyhow::Error {
+    anyhow::Error::new(AiProviderError::InvalidResponse(format!(
+        "{operation} response body exceeded {}-byte limit: {}",
+        AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES,
+        safe_body_diagnostic(body)
+    )))
+}
+
+async fn decode_bounded_json(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<Value> {
+    let body = take_bounded_response_body(response)
+        .await
+        .with_context(|| format!("read {operation} response"))?;
+    if body.truncated {
+        return Err(body_limit_error(operation, &body));
+    }
+    serde_json::from_slice(&body.bytes).with_context(|| format!("decode {operation} response"))
+}
+
+#[derive(Debug)]
+struct ProviderErrorBody {
+    status: reqwest::StatusCode,
+    raw_body: String,
+    safe_body: String,
+    truncated: bool,
+}
+
 /// Inspect a non-success HTTP response: if it looks like a provider quota
 /// signal (429 + "usage limit" / "quota" in the body), surface
 /// `AiProviderError::QuotaExhausted` so the worker can pause the
 /// provider instead of burning per-job retries. Otherwise return
-/// `(status, body)` so the caller can keep producing its previous
-/// `anyhow!`-formatted error and downstream substring classification
-/// continues to work.
+/// status, a bounded raw body for compatibility decisions, and a redacted,
+/// snippet-capped body for diagnostics.
 async fn check_quota_then_take_body(
     provider: &str,
     response: reqwest::Response,
-) -> Result<(reqwest::StatusCode, String)> {
+) -> Result<ProviderErrorBody> {
     let status = response.status();
     let retry_after = parse_retry_after_header(response.headers());
-    let body = response.text().await.unwrap_or_default();
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS && AiProviderError::is_quota_signal(&body) {
+    let (body, read_failed) = match take_bounded_response_body(response).await {
+        Ok(body) => (body, false),
+        Err(ResponseBodyReadError { partial, .. }) => (partial, true),
+    };
+    let raw_body = String::from_utf8_lossy(&body.bytes).into_owned();
+    let mut safe_body = safe_body_diagnostic(&body);
+    if read_failed {
+        safe_body.push_str(" [response body read failed before completion]");
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        && AiProviderError::is_quota_signal(&raw_body)
+    {
         return Err(AiProviderError::QuotaExhausted {
             provider: provider.to_owned(),
-            message: body,
+            message: safe_body,
             retry_after,
         }
         .into());
     }
-    Ok((status, body))
+    Ok(ProviderErrorBody {
+        status,
+        raw_body,
+        safe_body,
+        truncated: body.truncated || read_failed,
+    })
 }
 
 impl From<reqwest::Error> for AiProviderError {
@@ -730,11 +892,12 @@ impl TextProvider for OllamaClient {
             .context("call Ollama chat")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("Ollama chat call"),
-            );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("Ollama chat call"));
         }
         let raw: Value = response
             .json()
@@ -776,11 +939,12 @@ impl VisionProvider for OllamaClient {
             .context("call Ollama vision")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("Ollama vision call"),
-            );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("Ollama vision call"));
         }
         let raw: Value = response
             .json()
@@ -853,13 +1017,14 @@ impl OpenAiCompatibleClient {
             .context("call OpenAI-compatible models listing")?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("models listing returned {status}: {body}"));
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("OpenAI-compatible models listing"));
         }
-        let raw: Value = response
-            .json()
-            .await
-            .context("decode OpenAI-compatible models listing")?;
+        let raw = decode_bounded_json(response, "OpenAI-compatible models listing").await?;
         Ok(extract_model_ids(&raw))
     }
 }
@@ -883,17 +1048,17 @@ impl TextProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible chat")?;
         let status = response.status();
         let raw: Value = if status.is_success() {
-            response
-                .json()
-                .await
-                .context("decode OpenAI-compatible response")?
+            decode_bounded_json(response, "OpenAI-compatible chat").await?
         } else {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            if !should_retry_without_schema(status.as_u16(), &body, retryable) {
-                return Err(
-                    anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                        .context("OpenAI-compatible chat call"),
-                );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            if error.truncated
+                || !should_retry_without_schema(error.status.as_u16(), &error.raw_body, retryable)
+            {
+                return Err(anyhow::Error::new(AiProviderError::from_http(
+                    error.status.as_u16(),
+                    error.safe_body,
+                ))
+                .context("OpenAI-compatible chat call"));
             }
             tracing::warn!(
                 provider = %self.provider_name,
@@ -912,18 +1077,14 @@ impl TextProvider for OpenAiCompatibleClient {
                 .context("call OpenAI-compatible chat (schema retry)")?;
             let retry_status = retry.status();
             if !retry_status.is_success() {
-                let (retry_status, retry_body) =
-                    check_quota_then_take_body(&self.provider_name, retry).await?;
+                let error = check_quota_then_take_body(&self.provider_name, retry).await?;
                 return Err(anyhow::Error::new(AiProviderError::from_http(
-                    retry_status.as_u16(),
-                    retry_body,
+                    error.status.as_u16(),
+                    error.safe_body,
                 ))
                 .context("OpenAI-compatible chat call (schema retry)"));
             }
-            retry
-                .json()
-                .await
-                .context("decode OpenAI-compatible response (schema retry)")?
+            decode_bounded_json(retry, "OpenAI-compatible chat schema retry").await?
         };
         let text = extract_openai_message_text(&raw)?;
         Ok(AiResponse {
@@ -982,16 +1143,14 @@ impl VisionProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible vision")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("OpenAI-compatible vision call"),
-            );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("OpenAI-compatible vision call"));
         }
-        let raw: Value = response
-            .json()
-            .await
-            .context("decode OpenAI-compatible vision response")?;
+        let raw = decode_bounded_json(response, "OpenAI-compatible vision").await?;
         let text = extract_openai_message_text(&raw)?;
         Ok(AiResponse {
             provider: self.provider_name.clone(),
@@ -1316,11 +1475,12 @@ impl AnthropicClient {
             .context("call Anthropic messages API")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("Anthropic messages call"),
-            );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("Anthropic messages call"));
         }
         let raw: Value = response.json().await.context("decode Anthropic response")?;
         let text = if structured {
