@@ -1,7 +1,9 @@
 # GitLab Backlog Cleanup Audit (2026-07-17)
 
-Issue: #365  
-Scope: project milestones and confidential automated deploy feedback  
+Issue: #365
+
+Scope: project milestones and confidential automated deploy feedback
+
 Safety rule: this report contains counts and non-sensitive validation phases only. Confidential issue bodies, deployment paths, credentials, registry details, and private repository contents are deliberately excluded.
 
 ## Before state
