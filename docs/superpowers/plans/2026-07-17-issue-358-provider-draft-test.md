@@ -40,5 +40,5 @@
 
 ### Task 4: Verify and deliver
 
-- [ ] Run backend tests, OpenAPI contracts/regeneration, focused and full frontend tests, lint, i18n/accessibility, typecheck, build, and security checks.
-- [ ] Obtain independent review, commit, push, and close #358 only after the MR pipeline is green.
+- [x] Run backend tests, OpenAPI contracts/regeneration, focused and full frontend tests, lint, i18n/accessibility, typecheck, build, and security checks.
+- [x] Obtain independent review, commit, push, and close #358 only after the MR pipeline is green.
