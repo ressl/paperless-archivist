@@ -1,0 +1,53 @@
+{
+  "paperless": {
+    "base_url": "http://paperless:8000",
+    "timeout_seconds": 0,
+    "archive_profiles": [
+      { "name": "default", "base_url": "http://paperless:8000" }
+    ]
+  },
+  "ai": {
+    "stage_models": [
+      { "stage": "metadata", "provider": "sglang", "model": "MiniMax-M3" }
+    ],
+    "providers": [
+      {
+        "name": "sglang",
+        "kind": "openai_compatible",
+        "base_url": "http://sglang:30000/v1",
+        "enabled": true,
+        "tuning": {
+          "worker_concurrency": 4294967295,
+          "ocr_page_limit": 65535
+        }
+      }
+    ],
+    "model_catalog": [
+      {
+        "provider_kind": "openai_compatible",
+        "capability": "text",
+        "model_id": "MiniMax-M3"
+      }
+    ]
+  },
+  "security": {},
+  "notifications": {},
+  "workflow": { "mode": "review", "rules": {} },
+  "ocr": { "page_limit": 0, "min_chars": 0, "renderer": "pdftoppm" },
+  "tagging": {
+    "max_tags": 0,
+    "allow_new_tags": false,
+    "confidence_threshold": 0.5,
+    "old_tag_strategy": "keep_existing"
+  },
+  "metadata": {
+    "overwrite_existing_correspondent": false,
+    "overwrite_existing_document_type": false,
+    "overwrite_existing_document_date": false,
+    "allow_new_correspondents": false,
+    "allow_new_document_types": false,
+    "confidence_threshold": 0.5
+  },
+  "fields": { "confidence_threshold": 0.5, "max_fields": 0 },
+  "ui": {}
+}

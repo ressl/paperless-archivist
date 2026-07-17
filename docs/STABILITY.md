@@ -64,6 +64,10 @@ For v1.0.x:
 - browser-only session endpoints continue to require CSRF
 
 Generated frontend types must be regenerated after OpenAPI changes.
+`openapi/fixtures/runtime-settings*.json` are the shared Serde/OpenAPI fixtures
+for complete responses and backward-compatible partial inputs. Run `pnpm contract:settings` from
+`frontend/` after changing a settings struct or schema; CI runs the same check
+before verifying the generated client diff.
 
 ## Settings Compatibility
 

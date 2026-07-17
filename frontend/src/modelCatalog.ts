@@ -1,6 +1,6 @@
-import type { AiProvider, AiProviderKind, RuntimeSettings } from './api/client';
+import type { AiProvider, AiProviderKind, ModelCapability, RuntimeSettings } from './api/client';
 
-export type ModelCapability = 'text' | 'vision';
+export type { ModelCapability } from './api/client';
 
 type ModelOption = {
   value: string;
@@ -22,11 +22,36 @@ const ollamaCloudProvider: AiProvider = {
   base_url: 'https://ollama.com',
   default_text_model: 'glm-5.1',
   default_vision_model: 'qwen3-vl:235b-instruct',
+  cost_per_1m_input_tokens_usd: null,
+  cost_per_1m_output_tokens_usd: null,
   secret_id: null,
   // Injected as a UI suggestion only — must stay disabled so merely opening
   // Settings doesn't persist an enabled, unconfigured external provider on the
   // next save. The operator enables it explicitly after adding a key. (#272)
-  enabled: false
+  enabled: false,
+  tuning: {
+    worker_concurrency: null,
+    consensus_secondary_text_model: null,
+    consensus_date_tolerance_days: null,
+    text_num_ctx: null,
+    vision_num_ctx: null,
+    reasoning_effort: 'medium',
+    max_output_tokens: null,
+    structured_output: null,
+    ocr_page_limit: null,
+    hourly_document_limit: null,
+    daily_document_limit: null,
+    metadata_confidence_threshold: null,
+    title_confidence_threshold: null,
+    correspondent_confidence_threshold: null,
+    document_type_confidence_threshold: null,
+    document_date_confidence_threshold: null,
+    tags_confidence_threshold: null,
+    fields_confidence_threshold: null,
+    max_tags: null,
+    allowed_list_max: null,
+    request_timeout_seconds: null
+  }
 };
 
 const localOllamaTextModels: ModelOption[] = [

@@ -4,7 +4,7 @@
 
 **Goal:** Make OpenAPI the complete, reproducible type contract for runtime settings and provider tuning, then consume the generated schemas in the frontend.
 
-**Architecture:** Describe every serialized `RuntimeSettings` branch as a closed OpenAPI 3.1 schema and compose it through `$ref`. A checked-in representative JSON fixture is deserialized and reserialized by `archivist-core`, and the same fixture is validated recursively against OpenAPI. Generated `components` aliases replace handwritten frontend duplicates while the UI-only business-stage subset remains an `Exclude` of the generated pipeline stage.
+**Architecture:** Describe every serialized `RuntimeSettings` branch as a closed OpenAPI 3.1 response schema and every Serde-defaulted write branch as a separate input schema, composed through `$ref`. Checked-in complete-response and partial-input fixtures are consumed by both `archivist-core` and the recursive OpenAPI validator. Generated `components` aliases replace handwritten frontend duplicates while the UI-only business-stage subset remains an `Exclude` of the generated pipeline stage.
 
 **Tech Stack:** Rust/Serde, OpenAPI 3.1, openapi-typescript, TypeScript 6, Node.js.
 
@@ -24,9 +24,9 @@
 - Modify: `frontend/package.json`
 - Add: `crates/archivist-core/tests/runtime_settings_contract.rs`
 
-- [ ] Add a representative complete settings fixture covering nested settings, optional/null values, provider tuning, and the model catalog.
-- [ ] Prove the fixture round-trips through Serde without shape drift.
-- [ ] Add an OpenAPI fixture validator and demonstrate that the current open `RuntimeSettings` contract fails.
+- [x] Add a representative complete settings fixture covering nested settings, optional/null values, provider tuning, and the model catalog.
+- [x] Prove the fixture round-trips through Serde without shape drift.
+- [x] Add an OpenAPI fixture validator and demonstrate that the current open `RuntimeSettings` contract fails.
 
 ### Task 2: Define the complete OpenAPI schema graph
 
@@ -34,17 +34,17 @@
 - Modify: `openapi/openapi.yaml`
 - Modify: `frontend/src/api/schema.ts`
 
-- [ ] Add closed schemas for every `RuntimeSettings` branch, workflow tags/rules, field mappings, AI providers, provider tuning, and model catalog entries.
-- [ ] Document reasoning effort, output-token cap, structured-output mode, request timeout, inheritance/null behavior, examples, and numeric bounds.
-- [ ] Match Serde-required response properties while leaving `skip_serializing_if` properties optional.
-- [ ] Regenerate `schema.ts` and prove a second generation is diff-free.
+- [x] Add closed schemas for every `RuntimeSettings` branch, workflow tags/rules, field mappings, AI providers, provider tuning, and model catalog entries.
+- [x] Document reasoning effort, output-token cap, structured-output mode, request timeout, inheritance/null behavior, examples, and numeric bounds.
+- [x] Match Serde-required response properties while leaving `skip_serializing_if` properties optional.
+- [x] Regenerate `schema.ts` and prove a second generation is diff-free.
 
 ### Task 3: Consume generated frontend types and verify delivery
 
 **Files:**
 - Modify: `frontend/src/api/client.ts`
 
-- [ ] Replace handwritten settings/provider/catalog/enums with aliases of generated component schemas.
-- [ ] Preserve the UI business-stage subset as `Exclude<PipelineStage, 'apply'>`.
-- [ ] Run the Serde fixture test, OpenAPI fixture validator, generator diff, TypeScript typecheck, frontend tests, and production build.
+- [x] Replace handwritten settings/provider/catalog/enums with aliases of generated component schemas.
+- [x] Preserve the UI business-stage subset as `Exclude<PipelineStage, 'apply'>`.
+- [x] Run the Serde fixture test, OpenAPI fixture validator, generator diff, TypeScript typecheck, frontend tests, and production build.
 - [ ] Run repository formatting/diff checks, obtain independent review, commit, push, and close #353 only after the MR pipeline is green.

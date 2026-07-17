@@ -1,10 +1,10 @@
-import type { OllamaInstalledModel, RuntimeSettings } from '../../api/client';
+import type { ModelCapability, OllamaInstalledModel, RuntimeSettings } from '../../api/client';
 
 // Shared structural types for the decomposed Settings sections. Kept in one
 // place so every section file agrees on the same shapes without re-importing
 // the monolith.
 
-export type ModelCapability = 'text' | 'vision';
+export type { ModelCapability } from '../../api/client';
 
 export type ModelProviderDescriptor = Pick<
   RuntimeSettings['ai']['providers'][number],

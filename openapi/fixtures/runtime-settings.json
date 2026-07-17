@@ -1,0 +1,177 @@
+{
+  "paperless": {
+    "base_url": "http://paperless:8000",
+    "public_url": null,
+    "token_secret_id": null,
+    "timeout_seconds": 30,
+    "login_bridge_enabled": true,
+    "delta_sync_enabled": true,
+    "delta_sync_overlap_minutes": 5,
+    "active_archive": "default",
+    "archive_profiles": [
+      {
+        "name": "default",
+        "base_url": "http://paperless:8000",
+        "token_secret_id": null,
+        "enabled": true
+      }
+    ]
+  },
+  "ai": {
+    "default_provider": "sglang",
+    "ollama_base_url": "http://ollama:11434",
+    "default_text_model": "MiniMax-M3",
+    "default_vision_model": "qwen2.5vl:7b",
+    "stage_models": [
+      { "stage": "metadata", "provider": "sglang", "model": "MiniMax-M3" }
+    ],
+    "providers": [
+      {
+        "name": "sglang",
+        "kind": "openai_compatible",
+        "base_url": "http://sglang:30000/v1",
+        "default_text_model": "MiniMax-M3",
+        "default_vision_model": null,
+        "cost_per_1m_input_tokens_usd": null,
+        "cost_per_1m_output_tokens_usd": null,
+        "secret_id": null,
+        "enabled": true,
+        "tuning": {
+          "worker_concurrency": 2,
+          "consensus_secondary_text_model": null,
+          "consensus_date_tolerance_days": 1,
+          "text_num_ctx": 32768,
+          "vision_num_ctx": null,
+          "reasoning_effort": "medium",
+          "max_output_tokens": 8192,
+          "structured_output": "json_object",
+          "ocr_page_limit": null,
+          "hourly_document_limit": 100,
+          "daily_document_limit": null,
+          "metadata_confidence_threshold": 0.7,
+          "title_confidence_threshold": null,
+          "correspondent_confidence_threshold": 0.8,
+          "document_type_confidence_threshold": null,
+          "document_date_confidence_threshold": 0.9,
+          "tags_confidence_threshold": null,
+          "fields_confidence_threshold": null,
+          "max_tags": 8,
+          "allowed_list_max": 40,
+          "request_timeout_seconds": 240
+        }
+      }
+    ],
+    "external_provider_warning_acknowledged": true,
+    "fallback_vision_model": "qwen2.5vl:7b",
+    "requeue_vision_crashes_on_startup": true,
+    "ollama_vision_num_ctx": 16384,
+    "ollama_text_num_ctx": 8192,
+    "consensus_secondary_text_model": "qwen3:8b",
+    "consensus_date_tolerance_days": 1,
+    "model_catalog": [
+      {
+        "provider_kind": "openai_compatible",
+        "capability": "text",
+        "model_id": "MiniMax-M3",
+        "label": "MiniMax M3 via SGLang",
+        "recommended": true,
+        "usage_tier": "high",
+        "context": "204k",
+        "modality": "text",
+        "best_for": "metadata extraction"
+      }
+    ]
+  },
+  "security": {
+    "audit_retention_days": 365,
+    "ai_artifact_retention_days": 30,
+    "runs_retention_days": 365,
+    "ai_artifact_storage": "redacted",
+    "api_token_expiry_required": true,
+    "api_token_default_ttl_days": 90,
+    "api_token_max_ttl_days": 365
+  },
+  "notifications": {
+    "enabled": false,
+    "webhook_url_secret_id": "00000000-0000-0000-0000-000000000001",
+    "review_queue_threshold": 10,
+    "repeated_failure_threshold": 3,
+    "cooldown_minutes": 60
+  },
+  "workflow": {
+    "mode": "manual_review",
+    "paused": false,
+    "dry_run": false,
+    "hourly_document_limit": null,
+    "daily_document_limit": null,
+    "tags": {
+      "trigger_process": "ai-process",
+      "trigger_ocr": "ai-ocr",
+      "trigger_tags": "ai-tags",
+      "trigger_title": "ai-title",
+      "trigger_correspondent": "ai-correspondent",
+      "trigger_document_type": "ai-document-type",
+      "trigger_document_date": "ai-document-date",
+      "trigger_fields": "ai-fields",
+      "completion_processed": "ai-processed",
+      "completion_ocr": "archivist-ocr",
+      "completion_metadata": "archivist-metadata",
+      "completion_tagging": "archivist-tags",
+      "completion_title": "ai-processed-title",
+      "completion_correspondent": "ai-processed-correspondent",
+      "completion_document_type": "ai-processed-document-type",
+      "completion_document_date": "ai-processed-document-date",
+      "completion_fields": "ai-processed-fields",
+      "review_needed": "ai-review-needed",
+      "failed": "ai-failed",
+      "failed_ocr": "ai-failed-ocr",
+      "failed_tagging": "ai-failed-tagging"
+    },
+    "rules": { "include_tags": ["inbox"], "exclude_tags": ["private"] },
+    "enabled_stages": ["ocr", "metadata"],
+    "fallback_to_review_on_validation_failure": true
+  },
+  "ocr": {
+    "page_limit": 3,
+    "min_chars": 10,
+    "renderer": "pdftoppm",
+    "language_hint": "deu+eng"
+  },
+  "tagging": {
+    "max_tags": 5,
+    "allow_new_tags": false,
+    "confidence_threshold": 0.55,
+    "old_tag_strategy": "keep_existing",
+    "tag_output_language": "de"
+  },
+  "metadata": {
+    "overwrite_existing_correspondent": false,
+    "overwrite_existing_document_type": false,
+    "overwrite_existing_document_date": false,
+    "allow_new_correspondents": false,
+    "allow_new_document_types": false,
+    "confidence_threshold": 0.65,
+    "title_confidence_threshold": 0.6,
+    "document_date_confidence_threshold": 0.9,
+    "correspondent_confidence_threshold": 0.8,
+    "document_type_confidence_threshold": 0.75,
+    "tags_confidence_threshold": 0.65,
+    "fields_confidence_threshold": 0.8,
+    "allowed_list_max": 20,
+    "document_date_anchor_required": true,
+    "document_date_anchor_penalty": 0.3
+  },
+  "fields": {
+    "confidence_threshold": 0.55,
+    "max_fields": 20,
+    "mappings": [
+      {
+        "field_name": "invoice_number",
+        "enabled": true,
+        "aliases": ["invoice no"],
+        "instructions": null
+      }
+    ]
+  },
+  "ui": { "debug_console_enabled": true }
+}

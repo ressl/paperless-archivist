@@ -26,12 +26,171 @@ components:
     ProcessingMode:
       type: string
       enum: [manual_review, auto_select_review, full_auto]
+    ProcessingModeInput:
+      type: string
+      description: Settings input accepts the two historical Serde aliases.
+      enum: [manual_review, review, auto_select_review, full_auto, autopilot]
     AiProviderKind:
       type: string
       enum: [ollama, openai, anthropic, openai_compatible, mineru]
+    ReasoningEffort:
+      type: string
+      description: Reasoning or thinking effort requested from a capable model.
+      enum: [off, low, medium, high]
+      example: medium
+    StructuredOutputMode:
+      type: string
+      description: Wire format used for schema-constrained OpenAI-compatible responses.
+      enum: [auto, json_object, off]
+      example: json_object
+    ModelCapability:
+      type: string
+      enum: [text, vision]
+    ModelUsageTier:
+      type: string
+      enum: [low, medium, high, extra_high]
+    AiArtifactStorageMode:
+      type: string
+      enum: [full, redacted, metadata_only]
+    OldTagStrategy:
+      type: string
+      enum: [keep_existing, replace_ai_managed, remove_all_business]
+    ProviderTuning:
+      type: object
+      description: >-
+        Optional per-provider overrides. An omitted or null member inherits its
+        global setting; the API serializes unset members as null.
+      required:
+        - worker_concurrency
+        - consensus_secondary_text_model
+        - consensus_date_tolerance_days
+        - text_num_ctx
+        - vision_num_ctx
+        - reasoning_effort
+        - max_output_tokens
+        - structured_output
+        - ocr_page_limit
+        - hourly_document_limit
+        - daily_document_limit
+        - metadata_confidence_threshold
+        - title_confidence_threshold
+        - correspondent_confidence_threshold
+        - document_type_confidence_threshold
+        - document_date_confidence_threshold
+        - tags_confidence_threshold
+        - fields_confidence_threshold
+        - max_tags
+        - allowed_list_max
+        - request_timeout_seconds
+      additionalProperties: false
+      properties:
+        worker_concurrency:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: Live worker pool size, capped by the deployment environment.
+          example: 2
+        consensus_secondary_text_model:
+          type: [string, "null"]
+          description: Secondary text model used for metadata consensus; null disables it.
+        consensus_date_tolerance_days:
+          type: [integer, "null"]
+          format: int64
+        text_num_ctx:
+          type: [integer, "null"]
+          format: int64
+          description: Ollama text context override; ignored by cloud providers.
+        vision_num_ctx:
+          type: [integer, "null"]
+          format: int64
+          description: Ollama vision context override; ignored by cloud providers.
+        reasoning_effort:
+          type: [string, "null"]
+          enum: [off, low, medium, high, null]
+          description: Reasoning/thinking effort; null inherits off.
+          example: medium
+        max_output_tokens:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: >-
+            Output-token cap sent to OpenAI-compatible providers. Reasoning tokens
+            count toward this budget; null lets the server choose its default.
+          example: 8192
+        structured_output:
+          type: [string, "null"]
+          enum: [auto, json_object, off, null]
+          description: >-
+            auto uses strict JSON schema, json_object uses compatibility mode,
+            and off relies on prompt steering; null inherits auto.
+          example: json_object
+        ocr_page_limit:
+          type: [integer, "null"]
+          format: int32
+          minimum: 0
+          maximum: 65535
+        hourly_document_limit:
+          type: [integer, "null"]
+          format: int64
+        daily_document_limit:
+          type: [integer, "null"]
+          format: int64
+        metadata_confidence_threshold:
+          type: [number, "null"]
+          format: float
+        title_confidence_threshold:
+          type: [number, "null"]
+          format: float
+        correspondent_confidence_threshold:
+          type: [number, "null"]
+          format: float
+        document_type_confidence_threshold:
+          type: [number, "null"]
+          format: float
+        document_date_confidence_threshold:
+          type: [number, "null"]
+          format: float
+        tags_confidence_threshold:
+          type: [number, "null"]
+          format: float
+        fields_confidence_threshold:
+          type: [number, "null"]
+          format: float
+        max_tags:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+        allowed_list_max:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+        request_timeout_seconds:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: >-
+            Per-request provider timeout in seconds. Null or zero on legacy input
+            inherits the built-in 180-second default.
+          example: 240
     AiProviderSettings:
       type: object
-      required: [name, kind, base_url, enabled]
+      required:
+        - name
+        - kind
+        - base_url
+        - default_text_model
+        - default_vision_model
+        - cost_per_1m_input_tokens_usd
+        - cost_per_1m_output_tokens_usd
+        - secret_id
+        - enabled
+        - tuning
+      additionalProperties: false
       properties:
         name: { type: string }
         kind: { $ref: "#/components/schemas/AiProviderKind" }
@@ -42,6 +201,299 @@ components:
         cost_per_1m_output_tokens_usd: { type: [number, "null"], format: double }
         secret_id: { type: [string, "null"], format: uuid }
         enabled: { type: boolean }
+        tuning: { $ref: "#/components/schemas/ProviderTuning" }
+    StageModelOverride:
+      type: object
+      required: [stage, provider, model]
+      additionalProperties: false
+      properties:
+        stage: { $ref: "#/components/schemas/Stage" }
+        provider: { type: string }
+        model: { type: string }
+    ModelCatalogEntry:
+      type: object
+      required: [provider_kind, capability, model_id, recommended]
+      additionalProperties: false
+      properties:
+        provider_kind: { $ref: "#/components/schemas/AiProviderKind" }
+        capability: { $ref: "#/components/schemas/ModelCapability" }
+        model_id: { type: string }
+        label: { type: string }
+        recommended: { type: boolean }
+        usage_tier:
+          type: string
+          enum: [low, medium, high, extra_high]
+        context: { type: string }
+        modality: { type: string }
+        best_for: { type: string }
+    PaperlessArchiveProfile:
+      type: object
+      required: [name, base_url, token_secret_id, enabled]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        base_url: { type: string }
+        token_secret_id: { type: [string, "null"], format: uuid }
+        enabled: { type: boolean }
+    PaperlessSettings:
+      type: object
+      required:
+        - base_url
+        - public_url
+        - token_secret_id
+        - timeout_seconds
+        - login_bridge_enabled
+        - delta_sync_enabled
+        - delta_sync_overlap_minutes
+        - active_archive
+        - archive_profiles
+      additionalProperties: false
+      properties:
+        base_url: { type: string }
+        public_url: { type: [string, "null"] }
+        token_secret_id: { type: [string, "null"], format: uuid }
+        timeout_seconds: { type: integer, format: int64, minimum: 1, maximum: 120 }
+        login_bridge_enabled: { type: boolean }
+        delta_sync_enabled: { type: boolean }
+        delta_sync_overlap_minutes: { type: integer, format: int64, minimum: 0, maximum: 1440 }
+        active_archive: { type: string }
+        archive_profiles:
+          type: array
+          items: { $ref: "#/components/schemas/PaperlessArchiveProfile" }
+    AiSettings:
+      type: object
+      required:
+        - default_provider
+        - ollama_base_url
+        - default_text_model
+        - default_vision_model
+        - stage_models
+        - providers
+        - external_provider_warning_acknowledged
+        - requeue_vision_crashes_on_startup
+        - ollama_vision_num_ctx
+        - ollama_text_num_ctx
+        - consensus_date_tolerance_days
+        - model_catalog
+      additionalProperties: false
+      properties:
+        default_provider: { type: string }
+        ollama_base_url: { type: string }
+        default_text_model: { type: string }
+        default_vision_model: { type: string }
+        stage_models:
+          type: array
+          items: { $ref: "#/components/schemas/StageModelOverride" }
+        providers:
+          type: array
+          items: { $ref: "#/components/schemas/AiProviderSettings" }
+        external_provider_warning_acknowledged: { type: boolean }
+        fallback_vision_model:
+          type: string
+          description: Omitted when no explicit fallback is configured.
+        requeue_vision_crashes_on_startup: { type: boolean }
+        ollama_vision_num_ctx: { type: integer, format: int64 }
+        ollama_text_num_ctx: { type: integer, format: int64 }
+        consensus_secondary_text_model:
+          type: string
+          description: Omitted when the consensus check is disabled.
+        consensus_date_tolerance_days: { type: integer, format: int64 }
+        model_catalog:
+          type: array
+          items: { $ref: "#/components/schemas/ModelCatalogEntry" }
+    SecuritySettings:
+      type: object
+      required:
+        - audit_retention_days
+        - ai_artifact_retention_days
+        - runs_retention_days
+        - ai_artifact_storage
+        - api_token_expiry_required
+        - api_token_default_ttl_days
+        - api_token_max_ttl_days
+      additionalProperties: false
+      properties:
+        audit_retention_days: { type: integer, format: int64, minimum: 30, maximum: 3650 }
+        ai_artifact_retention_days: { type: integer, format: int64, minimum: 1, maximum: 365 }
+        runs_retention_days: { type: integer, format: int64, minimum: 30, maximum: 3650 }
+        ai_artifact_storage: { $ref: "#/components/schemas/AiArtifactStorageMode" }
+        api_token_expiry_required: { type: boolean }
+        api_token_default_ttl_days: { type: integer, format: int64, minimum: 1, maximum: 365 }
+        api_token_max_ttl_days: { type: integer, format: int64, minimum: 1, maximum: 3650 }
+    NotificationSettings:
+      type: object
+      required: [enabled, webhook_url_secret_id, review_queue_threshold, repeated_failure_threshold, cooldown_minutes]
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        webhook_url_secret_id: { type: [string, "null"], format: uuid }
+        review_queue_threshold: { type: integer, format: int64, minimum: 1, maximum: 100000 }
+        repeated_failure_threshold: { type: integer, format: int64, minimum: 1, maximum: 1000 }
+        cooldown_minutes: { type: integer, format: int64, minimum: 1, maximum: 1440 }
+    WorkflowTags:
+      type: object
+      required:
+        - trigger_process
+        - trigger_ocr
+        - trigger_tags
+        - trigger_title
+        - trigger_correspondent
+        - trigger_document_type
+        - trigger_document_date
+        - trigger_fields
+        - completion_processed
+        - completion_ocr
+        - completion_metadata
+        - completion_tagging
+        - completion_title
+        - completion_correspondent
+        - completion_document_type
+        - completion_document_date
+        - completion_fields
+        - review_needed
+        - failed
+        - failed_ocr
+        - failed_tagging
+      additionalProperties: false
+      properties:
+        trigger_process: { type: string }
+        trigger_ocr: { type: string }
+        trigger_tags: { type: string }
+        trigger_title: { type: string }
+        trigger_correspondent: { type: string }
+        trigger_document_type: { type: string }
+        trigger_document_date: { type: string }
+        trigger_fields: { type: string }
+        completion_processed: { type: string }
+        completion_ocr: { type: string }
+        completion_metadata: { type: string }
+        completion_tagging: { type: string }
+        completion_title: { type: string }
+        completion_correspondent: { type: string }
+        completion_document_type: { type: string }
+        completion_document_date: { type: string }
+        completion_fields: { type: string }
+        review_needed: { type: string }
+        failed: { type: string }
+        failed_ocr: { type: string }
+        failed_tagging: { type: string }
+    WorkflowRules:
+      type: object
+      required: [include_tags, exclude_tags]
+      additionalProperties: false
+      properties:
+        include_tags:
+          type: array
+          items: { type: string }
+        exclude_tags:
+          type: array
+          items: { type: string }
+    WorkflowSettings:
+      type: object
+      required:
+        - mode
+        - paused
+        - dry_run
+        - hourly_document_limit
+        - daily_document_limit
+        - tags
+        - rules
+        - enabled_stages
+        - fallback_to_review_on_validation_failure
+      additionalProperties: false
+      properties:
+        mode: { $ref: "#/components/schemas/ProcessingMode" }
+        paused: { type: boolean }
+        dry_run: { type: boolean }
+        hourly_document_limit: { type: [integer, "null"], format: int64, minimum: 1 }
+        daily_document_limit: { type: [integer, "null"], format: int64, minimum: 1 }
+        tags: { $ref: "#/components/schemas/WorkflowTags" }
+        rules: { $ref: "#/components/schemas/WorkflowRules" }
+        enabled_stages:
+          type: array
+          items: { $ref: "#/components/schemas/Stage" }
+        fallback_to_review_on_validation_failure: { type: boolean }
+    OcrSettings:
+      type: object
+      required: [page_limit, min_chars, renderer, language_hint]
+      additionalProperties: false
+      properties:
+        page_limit: { type: integer, format: int32, minimum: 1, maximum: 1000 }
+        min_chars: { type: integer, format: int64, minimum: 1, maximum: 100000 }
+        renderer: { type: string }
+        language_hint: { type: [string, "null"] }
+    TaggingSettings:
+      type: object
+      required: [max_tags, allow_new_tags, confidence_threshold, old_tag_strategy, tag_output_language]
+      additionalProperties: false
+      properties:
+        max_tags: { type: integer, format: int64, minimum: 1, maximum: 50 }
+        allow_new_tags: { type: boolean }
+        confidence_threshold: { type: number, format: float, minimum: 0, maximum: 1 }
+        old_tag_strategy: { $ref: "#/components/schemas/OldTagStrategy" }
+        tag_output_language: { type: string }
+    MetadataSettings:
+      type: object
+      required:
+        - overwrite_existing_correspondent
+        - overwrite_existing_document_type
+        - overwrite_existing_document_date
+        - allow_new_correspondents
+        - allow_new_document_types
+        - confidence_threshold
+        - title_confidence_threshold
+        - document_date_confidence_threshold
+        - correspondent_confidence_threshold
+        - document_type_confidence_threshold
+        - tags_confidence_threshold
+        - fields_confidence_threshold
+        - allowed_list_max
+        - document_date_anchor_required
+        - document_date_anchor_penalty
+      additionalProperties: false
+      properties:
+        overwrite_existing_correspondent: { type: boolean }
+        overwrite_existing_document_type: { type: boolean }
+        overwrite_existing_document_date: { type: boolean }
+        allow_new_correspondents: { type: boolean }
+        allow_new_document_types: { type: boolean }
+        confidence_threshold: { type: number, format: float, minimum: 0, maximum: 1 }
+        title_confidence_threshold: { type: [number, "null"], format: float, minimum: 0, maximum: 1 }
+        document_date_confidence_threshold: { type: [number, "null"], format: float, minimum: 0, maximum: 1 }
+        correspondent_confidence_threshold: { type: [number, "null"], format: float, minimum: 0, maximum: 1 }
+        document_type_confidence_threshold: { type: [number, "null"], format: float, minimum: 0, maximum: 1 }
+        tags_confidence_threshold: { type: [number, "null"], format: float, minimum: 0, maximum: 1 }
+        fields_confidence_threshold: { type: [number, "null"], format: float, minimum: 0, maximum: 1 }
+        allowed_list_max: { type: integer, format: int64, minimum: 0, maximum: 1000 }
+        document_date_anchor_required: { type: boolean }
+        document_date_anchor_penalty: { type: number, format: float, minimum: 0, maximum: 1 }
+    CustomFieldMapping:
+      type: object
+      required: [field_name, enabled, aliases, instructions]
+      additionalProperties: false
+      properties:
+        field_name: { type: string }
+        enabled: { type: boolean }
+        aliases:
+          type: array
+          items: { type: string }
+        instructions: { type: [string, "null"] }
+    FieldSettings:
+      type: object
+      required: [confidence_threshold, max_fields, mappings]
+      additionalProperties: false
+      properties:
+        confidence_threshold: { type: number, format: float, minimum: 0, maximum: 1 }
+        max_fields: { type: integer, format: int64, minimum: 1, maximum: 50 }
+        mappings:
+          type: array
+          items: { $ref: "#/components/schemas/CustomFieldMapping" }
+    UiSettings:
+      type: object
+      required: [debug_console_enabled]
+      additionalProperties: false
+      properties:
+        debug_console_enabled: { type: boolean }
     LoginRequest:
       type: object
       required: [username, password]
@@ -99,12 +551,309 @@ components:
         paperless_login_enabled: { type: boolean }
     RuntimeSettings:
       type: object
-      additionalProperties: true
+      required: [paperless, ai, security, notifications, workflow, ocr, tagging, metadata, fields, ui]
+      additionalProperties: false
+      properties:
+        paperless: { $ref: "#/components/schemas/PaperlessSettings" }
+        ai: { $ref: "#/components/schemas/AiSettings" }
+        security: { $ref: "#/components/schemas/SecuritySettings" }
+        notifications: { $ref: "#/components/schemas/NotificationSettings" }
+        workflow: { $ref: "#/components/schemas/WorkflowSettings" }
+        ocr: { $ref: "#/components/schemas/OcrSettings" }
+        tagging: { $ref: "#/components/schemas/TaggingSettings" }
+        metadata: { $ref: "#/components/schemas/MetadataSettings" }
+        fields: { $ref: "#/components/schemas/FieldSettings" }
+        ui: { $ref: "#/components/schemas/UiSettings" }
+    ProviderTuningInput:
+      type: object
+      description: Partial provider tuning accepted on settings updates; omitted or null fields inherit.
+      additionalProperties: false
+      properties:
+        worker_concurrency: { type: [integer, "null"], format: int64, minimum: 0, maximum: 4294967295 }
+        consensus_secondary_text_model: { type: [string, "null"] }
+        consensus_date_tolerance_days: { type: [integer, "null"], format: int64 }
+        text_num_ctx: { type: [integer, "null"], format: int64 }
+        vision_num_ctx: { type: [integer, "null"], format: int64 }
+        reasoning_effort:
+          type: [string, "null"]
+          enum: [off, low, medium, high, null]
+        max_output_tokens: { type: [integer, "null"], format: int64, minimum: 0, maximum: 4294967295 }
+        structured_output:
+          type: [string, "null"]
+          enum: [auto, json_object, off, null]
+        ocr_page_limit: { type: [integer, "null"], format: int32, minimum: 0, maximum: 65535 }
+        hourly_document_limit: { type: [integer, "null"], format: int64 }
+        daily_document_limit: { type: [integer, "null"], format: int64 }
+        metadata_confidence_threshold: { type: [number, "null"], format: float }
+        title_confidence_threshold: { type: [number, "null"], format: float }
+        correspondent_confidence_threshold: { type: [number, "null"], format: float }
+        document_type_confidence_threshold: { type: [number, "null"], format: float }
+        document_date_confidence_threshold: { type: [number, "null"], format: float }
+        tags_confidence_threshold: { type: [number, "null"], format: float }
+        fields_confidence_threshold: { type: [number, "null"], format: float }
+        max_tags: { type: [integer, "null"], format: int64, minimum: 0, maximum: 4294967295 }
+        allowed_list_max: { type: [integer, "null"], format: int64, minimum: 0, maximum: 4294967295 }
+        request_timeout_seconds: { type: [integer, "null"], format: int64, minimum: 0, maximum: 4294967295 }
+    AiProviderSettingsInput:
+      type: object
+      required: [name, kind, base_url, enabled]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        kind: { $ref: "#/components/schemas/AiProviderKind" }
+        base_url: { type: string }
+        default_text_model: { type: [string, "null"] }
+        default_vision_model: { type: [string, "null"] }
+        cost_per_1m_input_tokens_usd: { type: [number, "null"], format: double }
+        cost_per_1m_output_tokens_usd: { type: [number, "null"], format: double }
+        secret_id: { type: [string, "null"], format: uuid }
+        enabled: { type: boolean }
+        tuning: { $ref: "#/components/schemas/ProviderTuningInput" }
+    ModelCatalogEntryInput:
+      type: object
+      required: [provider_kind, capability, model_id]
+      additionalProperties: false
+      properties:
+        provider_kind: { $ref: "#/components/schemas/AiProviderKind" }
+        capability: { $ref: "#/components/schemas/ModelCapability" }
+        model_id: { type: string }
+        label: { type: [string, "null"] }
+        recommended: { type: boolean }
+        usage_tier:
+          type: [string, "null"]
+          enum: [low, medium, high, extra_high, null]
+        context: { type: [string, "null"] }
+        modality: { type: [string, "null"] }
+        best_for: { type: [string, "null"] }
+    PaperlessArchiveProfileInput:
+      type: object
+      required: [name, base_url]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        base_url: { type: string }
+        token_secret_id: { type: [string, "null"], format: uuid }
+        enabled: { type: boolean }
+    PaperlessSettingsInput:
+      type: object
+      required: [base_url, timeout_seconds]
+      additionalProperties: false
+      properties:
+        base_url: { type: string }
+        public_url: { type: [string, "null"] }
+        token_secret_id: { type: [string, "null"], format: uuid }
+        timeout_seconds: { type: integer, minimum: 0 }
+        login_bridge_enabled: { type: boolean }
+        delta_sync_enabled: { type: boolean }
+        delta_sync_overlap_minutes: { type: integer, format: int64 }
+        active_archive: { type: string }
+        archive_profiles:
+          type: array
+          items: { $ref: "#/components/schemas/PaperlessArchiveProfileInput" }
+    AiSettingsInput:
+      type: object
+      additionalProperties: false
+      properties:
+        default_provider: { type: string }
+        ollama_base_url: { type: string }
+        default_text_model: { type: string }
+        default_vision_model: { type: string }
+        stage_models:
+          type: array
+          items: { $ref: "#/components/schemas/StageModelOverride" }
+        providers:
+          type: array
+          items: { $ref: "#/components/schemas/AiProviderSettingsInput" }
+        external_provider_warning_acknowledged: { type: boolean }
+        fallback_vision_model: { type: [string, "null"] }
+        requeue_vision_crashes_on_startup: { type: boolean }
+        ollama_vision_num_ctx: { type: integer, format: int64 }
+        ollama_text_num_ctx: { type: integer, format: int64 }
+        consensus_secondary_text_model: { type: [string, "null"] }
+        consensus_date_tolerance_days: { type: integer, format: int64 }
+        model_catalog:
+          type: array
+          items: { $ref: "#/components/schemas/ModelCatalogEntryInput" }
+    SecuritySettingsInput:
+      type: object
+      additionalProperties: false
+      properties:
+        audit_retention_days: { type: integer, format: int64 }
+        ai_artifact_retention_days: { type: integer, format: int64 }
+        runs_retention_days: { type: integer, format: int64 }
+        ai_artifact_storage: { $ref: "#/components/schemas/AiArtifactStorageMode" }
+        api_token_expiry_required: { type: boolean }
+        api_token_default_ttl_days: { type: integer, format: int64 }
+        api_token_max_ttl_days: { type: integer, format: int64 }
+    NotificationSettingsInput:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        webhook_url_secret_id: { type: [string, "null"], format: uuid }
+        review_queue_threshold: { type: integer, format: int64 }
+        repeated_failure_threshold: { type: integer, format: int64 }
+        cooldown_minutes: { type: integer, format: int64 }
+    WorkflowTagsInput:
+      type: object
+      required:
+        - trigger_process
+        - trigger_ocr
+        - trigger_tags
+        - trigger_title
+        - trigger_correspondent
+        - trigger_document_type
+        - trigger_fields
+        - completion_processed
+        - completion_ocr
+        - completion_tagging
+        - completion_title
+        - completion_correspondent
+        - completion_document_type
+        - completion_fields
+        - review_needed
+        - failed
+        - failed_ocr
+        - failed_tagging
+      additionalProperties: false
+      properties:
+        trigger_process: { type: string }
+        trigger_ocr: { type: string }
+        trigger_tags: { type: string }
+        trigger_title: { type: string }
+        trigger_correspondent: { type: string }
+        trigger_document_type: { type: string }
+        trigger_document_date: { type: string }
+        trigger_fields: { type: string }
+        completion_processed: { type: string }
+        completion_ocr: { type: string }
+        completion_metadata: { type: string }
+        completion_tagging: { type: string }
+        completion_title: { type: string }
+        completion_correspondent: { type: string }
+        completion_document_type: { type: string }
+        completion_document_date: { type: string }
+        completion_fields: { type: string }
+        review_needed: { type: string }
+        failed: { type: string }
+        failed_ocr: { type: string }
+        failed_tagging: { type: string }
+    WorkflowRulesInput:
+      type: object
+      additionalProperties: false
+      properties:
+        include_tags:
+          type: array
+          items: { type: string }
+        exclude_tags:
+          type: array
+          items: { type: string }
+    WorkflowSettingsInput:
+      type: object
+      additionalProperties: false
+      properties:
+        mode: { $ref: "#/components/schemas/ProcessingModeInput" }
+        paused: { type: boolean }
+        dry_run: { type: boolean }
+        hourly_document_limit: { type: [integer, "null"], format: int64 }
+        daily_document_limit: { type: [integer, "null"], format: int64 }
+        tags: { $ref: "#/components/schemas/WorkflowTagsInput" }
+        rules: { $ref: "#/components/schemas/WorkflowRulesInput" }
+        enabled_stages:
+          type: array
+          items: { $ref: "#/components/schemas/Stage" }
+        fallback_to_review_on_validation_failure: { type: boolean }
+    OcrSettingsInput:
+      type: object
+      required: [page_limit, min_chars, renderer]
+      additionalProperties: false
+      properties:
+        page_limit: { type: integer, format: int32, minimum: 0 }
+        min_chars: { type: integer, minimum: 0 }
+        renderer: { type: string }
+        language_hint: { type: [string, "null"] }
+    TaggingSettingsInput:
+      type: object
+      required: [max_tags, allow_new_tags, confidence_threshold, old_tag_strategy]
+      additionalProperties: false
+      properties:
+        max_tags: { type: integer, minimum: 0 }
+        allow_new_tags: { type: boolean }
+        confidence_threshold: { type: number, format: float }
+        old_tag_strategy: { $ref: "#/components/schemas/OldTagStrategy" }
+        tag_output_language: { type: string }
+    MetadataSettingsInput:
+      type: object
+      required:
+        - overwrite_existing_correspondent
+        - overwrite_existing_document_type
+        - overwrite_existing_document_date
+        - allow_new_correspondents
+        - allow_new_document_types
+        - confidence_threshold
+      additionalProperties: false
+      properties:
+        overwrite_existing_correspondent: { type: boolean }
+        overwrite_existing_document_type: { type: boolean }
+        overwrite_existing_document_date: { type: boolean }
+        allow_new_correspondents: { type: boolean }
+        allow_new_document_types: { type: boolean }
+        confidence_threshold: { type: number, format: float }
+        title_confidence_threshold: { type: [number, "null"], format: float }
+        document_date_confidence_threshold: { type: [number, "null"], format: float }
+        correspondent_confidence_threshold: { type: [number, "null"], format: float }
+        document_type_confidence_threshold: { type: [number, "null"], format: float }
+        tags_confidence_threshold: { type: [number, "null"], format: float }
+        fields_confidence_threshold: { type: [number, "null"], format: float }
+        allowed_list_max: { type: integer, minimum: 0 }
+        document_date_anchor_required: { type: boolean }
+        document_date_anchor_penalty: { type: number, format: float }
+    CustomFieldMappingInput:
+      type: object
+      required: [field_name]
+      additionalProperties: false
+      properties:
+        field_name: { type: string }
+        enabled: { type: boolean }
+        aliases:
+          type: array
+          items: { type: string }
+        instructions: { type: [string, "null"] }
+    FieldSettingsInput:
+      type: object
+      required: [confidence_threshold, max_fields]
+      additionalProperties: false
+      properties:
+        confidence_threshold: { type: number, format: float }
+        max_fields: { type: integer, minimum: 0 }
+        mappings:
+          type: array
+          items: { $ref: "#/components/schemas/CustomFieldMappingInput" }
+    UiSettingsInput:
+      type: object
+      additionalProperties: false
+      properties:
+        debug_console_enabled: { type: boolean }
+    RuntimeSettingsInput:
+      type: object
+      description: Backward-compatible partial settings document accepted by Serde defaults.
+      additionalProperties: false
+      properties:
+        paperless: { $ref: "#/components/schemas/PaperlessSettingsInput" }
+        ai: { $ref: "#/components/schemas/AiSettingsInput" }
+        security: { $ref: "#/components/schemas/SecuritySettingsInput" }
+        notifications: { $ref: "#/components/schemas/NotificationSettingsInput" }
+        workflow: { $ref: "#/components/schemas/WorkflowSettingsInput" }
+        ocr: { $ref: "#/components/schemas/OcrSettingsInput" }
+        tagging: { $ref: "#/components/schemas/TaggingSettingsInput" }
+        metadata: { $ref: "#/components/schemas/MetadataSettingsInput" }
+        fields: { $ref: "#/components/schemas/FieldSettingsInput" }
+        ui: { $ref: "#/components/schemas/UiSettingsInput" }
     UpdateSettingsRequest:
       type: object
       required: [settings]
       properties:
-        settings: { $ref: "#/components/schemas/RuntimeSettings" }
+        settings: { $ref: "#/components/schemas/RuntimeSettingsInput" }
         paperless_token:
           type: [string, "null"]
         notification_webhook_url:

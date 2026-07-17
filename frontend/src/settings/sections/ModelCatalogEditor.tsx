@@ -85,7 +85,7 @@ export function ModelCatalogEditor({
                     aria-label={t('settings.catalog.col.usage')}
                     onChange={(event) =>
                       updateAt(index, {
-                        usage_tier: event.target.value === '' ? null : (event.target.value as ModelUsageTier)
+                        usage_tier: event.target.value === '' ? undefined : (event.target.value as ModelUsageTier)
                       })
                     }
                   >
@@ -102,7 +102,7 @@ export function ModelCatalogEditor({
                     value={entry.context ?? ''}
                     aria-label={t('settings.catalog.col.context')}
                     onChange={(event) =>
-                      updateAt(index, { context: event.target.value.trim() === '' ? null : event.target.value })
+                      updateAt(index, { context: event.target.value.trim() === '' ? undefined : event.target.value })
                     }
                   />
                 </td>
@@ -111,7 +111,7 @@ export function ModelCatalogEditor({
                     value={entry.best_for ?? ''}
                     aria-label={t('settings.catalog.col.best_for')}
                     onChange={(event) =>
-                      updateAt(index, { best_for: event.target.value.trim() === '' ? null : event.target.value })
+                      updateAt(index, { best_for: event.target.value.trim() === '' ? undefined : event.target.value })
                     }
                   />
                 </td>

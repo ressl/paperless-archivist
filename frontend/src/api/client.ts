@@ -6,71 +6,18 @@ export type MetadataFieldOutcome = components['schemas']['MetadataFieldOutcome']
 export type AiRuntimeHints = components['schemas']['AiRuntimeHints'];
 export type AiLoadedModel = components['schemas']['AiLoadedModel'];
 
-// Per-provider tuning block (v1.6.2). Mirrors archivist_core::ProviderTuning.
-// All fields are optional: when null/undefined, the global setting in
-// workflow / ocr / metadata / tagging applies. See docs/PROVIDER_TUNING_PLAN.md.
-export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high';
-
-export type StructuredOutputMode = 'auto' | 'json_object' | 'off';
-
-export type ModelUsageTier = 'low' | 'medium' | 'high' | 'extra_high';
-
-// Editable model-picker catalog entry (v1.6.3). Mirrors
-// archivist_core::ModelCatalogEntry; persisted in runtime_settings.
-export type ModelCatalogEntry = {
-  provider_kind: AiProviderKind;
-  capability: 'text' | 'vision';
-  model_id: string;
-  label?: string | null;
-  recommended: boolean;
-  usage_tier?: ModelUsageTier | null;
-  context?: string | null;
-  modality?: string | null;
-  best_for?: string | null;
-};
-
-export type ProviderTuning = {
-  worker_concurrency?: number | null;
-  consensus_secondary_text_model?: string | null;
-  consensus_date_tolerance_days?: number | null;
-  text_num_ctx?: number | null;
-  vision_num_ctx?: number | null;
-  reasoning_effort?: ReasoningEffort | null;
-  max_output_tokens?: number | null;
-  structured_output?: StructuredOutputMode | null;
-  ocr_page_limit?: number | null;
-  hourly_document_limit?: number | null;
-  daily_document_limit?: number | null;
-  metadata_confidence_threshold?: number | null;
-  title_confidence_threshold?: number | null;
-  correspondent_confidence_threshold?: number | null;
-  document_type_confidence_threshold?: number | null;
-  document_date_confidence_threshold?: number | null;
-  tags_confidence_threshold?: number | null;
-  fields_confidence_threshold?: number | null;
-  max_tags?: number | null;
-  allowed_list_max?: number | null;
-  request_timeout_seconds?: number | null;
-};
-
-export type Role = 'viewer' | 'reviewer' | 'operator' | 'admin' | 'auditor';
-export type Stage = 'ocr' | 'metadata';
-export type PipelineStage = Stage | 'apply';
-export type ProcessingMode = 'manual_review' | 'auto_select_review' | 'full_auto';
-export type AiProviderKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible' | 'mineru';
-
-export type AiProvider = {
-  name: string;
-  kind: AiProviderKind;
-  base_url: string;
-  default_text_model?: string | null;
-  default_vision_model?: string | null;
-  cost_per_1m_input_tokens_usd?: number | null;
-  cost_per_1m_output_tokens_usd?: number | null;
-  secret_id?: string | null;
-  enabled: boolean;
-  tuning?: ProviderTuning;
-};
+export type ReasoningEffort = components['schemas']['ReasoningEffort'];
+export type StructuredOutputMode = components['schemas']['StructuredOutputMode'];
+export type ModelCapability = components['schemas']['ModelCapability'];
+export type ModelUsageTier = components['schemas']['ModelUsageTier'];
+export type ModelCatalogEntry = components['schemas']['ModelCatalogEntry'];
+export type ProviderTuning = components['schemas']['ProviderTuning'];
+export type Role = components['schemas']['Role'];
+export type PipelineStage = components['schemas']['Stage'];
+export type Stage = Exclude<PipelineStage, 'apply'>;
+export type ProcessingMode = components['schemas']['ProcessingMode'];
+export type AiProviderKind = components['schemas']['AiProviderKind'];
+export type AiProvider = components['schemas']['AiProviderSettings'];
 
 export type OllamaInstalledModel = {
   name: string;
@@ -96,111 +43,8 @@ export type CompletionTagReconcileResult = {
   applied: number[];
 };
 
-export type RuntimeSettings = {
-  paperless: {
-    base_url: string;
-    public_url?: string | null;
-    token_secret_id?: string | null;
-    timeout_seconds: number;
-    login_bridge_enabled: boolean;
-    delta_sync_enabled: boolean;
-    delta_sync_overlap_minutes: number;
-    active_archive: string;
-    archive_profiles: Array<{
-      name: string;
-      base_url: string;
-      token_secret_id?: string | null;
-      enabled: boolean;
-    }>;
-  };
-  ai: {
-    default_provider: string;
-    ollama_base_url: string;
-    default_text_model: string;
-    default_vision_model: string;
-    stage_models: Array<{ stage: Stage; provider: string; model: string }>;
-    providers: AiProvider[];
-    external_provider_warning_acknowledged: boolean;
-    fallback_vision_model?: string | null;
-    requeue_vision_crashes_on_startup?: boolean;
-    ollama_vision_num_ctx?: number;
-    ollama_text_num_ctx?: number;
-    model_catalog: ModelCatalogEntry[];
-  };
-  security: {
-    audit_retention_days: number;
-    ai_artifact_retention_days: number;
-    runs_retention_days: number;
-    ai_artifact_storage: 'full' | 'redacted' | 'metadata_only';
-    api_token_expiry_required: boolean;
-    api_token_default_ttl_days: number;
-    api_token_max_ttl_days: number;
-  };
-  notifications: {
-    enabled: boolean;
-    webhook_url_secret_id?: string | null;
-    review_queue_threshold: number;
-    repeated_failure_threshold: number;
-    cooldown_minutes: number;
-  };
-  workflow: {
-    mode: ProcessingMode;
-    paused: boolean;
-    dry_run: boolean;
-    hourly_document_limit?: number | null;
-    daily_document_limit?: number | null;
-    tags: Record<string, string>;
-    rules: {
-      include_tags: string[];
-      exclude_tags: string[];
-    };
-    enabled_stages: Stage[];
-    fallback_to_review_on_validation_failure: boolean;
-  };
-  ocr: {
-    page_limit: number;
-    min_chars: number;
-    renderer: string;
-    language_hint?: string | null;
-  };
-  tagging: {
-    max_tags: number;
-    allow_new_tags: boolean;
-    confidence_threshold: number;
-    old_tag_strategy: string;
-    tag_output_language: string;
-  };
-  metadata: {
-    overwrite_existing_correspondent: boolean;
-    overwrite_existing_document_type: boolean;
-    overwrite_existing_document_date: boolean;
-    allow_new_correspondents: boolean;
-    allow_new_document_types: boolean;
-    confidence_threshold: number;
-    document_date_confidence_threshold: number;
-    title_confidence_threshold?: number;
-    correspondent_confidence_threshold?: number;
-    document_type_confidence_threshold?: number;
-    tags_confidence_threshold?: number;
-    fields_confidence_threshold?: number;
-    allowed_list_max?: number;
-    document_date_anchor_required?: boolean;
-    document_date_anchor_penalty?: number;
-  };
-  fields: {
-    max_fields: number;
-    confidence_threshold: number;
-    mappings: Array<{
-      field_name: string;
-      enabled: boolean;
-      aliases: string[];
-      instructions?: string | null;
-    }>;
-  };
-  ui?: {
-    debug_console_enabled?: boolean;
-  };
-};
+export type RuntimeSettings = components['schemas']['RuntimeSettings'];
+export type RuntimeSettingsInput = components['schemas']['RuntimeSettingsInput'];
 
 export type Permissions = {
   read_dashboard: boolean;
@@ -826,7 +670,7 @@ export const api = {
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   me: () => request<Me>('/api/auth/me'),
   settings: () => request<RuntimeSettings>('/api/settings'),
-  saveSettings: (settings: RuntimeSettings, paperlessToken?: string, providerSecrets?: Record<string, string>, notificationWebhookUrl?: string) =>
+  saveSettings: (settings: RuntimeSettingsInput, paperlessToken?: string, providerSecrets?: Record<string, string>, notificationWebhookUrl?: string) =>
     request<RuntimeSettings>('/api/settings', {
       method: 'PUT',
       body: JSON.stringify({

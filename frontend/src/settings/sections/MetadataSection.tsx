@@ -35,7 +35,7 @@ export function MetadataSection({
           max={1}
           step={0.05}
           integer={false}
-          value={value.document_date_confidence_threshold}
+          value={value.document_date_confidence_threshold ?? value.confidence_threshold}
           onCommit={(document_date_confidence_threshold) =>
             onChange({ document_date_confidence_threshold })
           }

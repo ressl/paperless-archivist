@@ -89,7 +89,7 @@ export function AiDefaultsSection({
           value={ai.fallback_vision_model ?? ''}
           catalog={catalog}
           ollamaState={ollamaState}
-          onChange={(value) => onChange({ fallback_vision_model: value.trim() === '' ? null : value })}
+          onChange={(value) => onChange({ fallback_vision_model: value.trim() === '' ? undefined : value })}
           onRefresh={onRefreshModels}
         />
         <small>{t('settings.ai.vision_crash_fallback_hint')}</small>

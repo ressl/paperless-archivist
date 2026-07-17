@@ -2418,21 +2418,301 @@ export interface components {
         Stage: "ocr" | "metadata" | "apply";
         /** @enum {string} */
         ProcessingMode: "manual_review" | "auto_select_review" | "full_auto";
+        /**
+         * @description Settings input accepts the two historical Serde aliases.
+         * @enum {string}
+         */
+        ProcessingModeInput: "manual_review" | "review" | "auto_select_review" | "full_auto" | "autopilot";
         /** @enum {string} */
         AiProviderKind: "ollama" | "openai" | "anthropic" | "openai_compatible" | "mineru";
+        /**
+         * @description Reasoning or thinking effort requested from a capable model.
+         * @example medium
+         * @enum {string}
+         */
+        ReasoningEffort: "off" | "low" | "medium" | "high";
+        /**
+         * @description Wire format used for schema-constrained OpenAI-compatible responses.
+         * @example json_object
+         * @enum {string}
+         */
+        StructuredOutputMode: "auto" | "json_object" | "off";
+        /** @enum {string} */
+        ModelCapability: "text" | "vision";
+        /** @enum {string} */
+        ModelUsageTier: "low" | "medium" | "high" | "extra_high";
+        /** @enum {string} */
+        AiArtifactStorageMode: "full" | "redacted" | "metadata_only";
+        /** @enum {string} */
+        OldTagStrategy: "keep_existing" | "replace_ai_managed" | "remove_all_business";
+        /** @description Optional per-provider overrides. An omitted or null member inherits its global setting; the API serializes unset members as null. */
+        ProviderTuning: {
+            /**
+             * Format: int64
+             * @description Live worker pool size, capped by the deployment environment.
+             * @example 2
+             */
+            worker_concurrency: number | null;
+            /** @description Secondary text model used for metadata consensus; null disables it. */
+            consensus_secondary_text_model: string | null;
+            /** Format: int64 */
+            consensus_date_tolerance_days: number | null;
+            /**
+             * Format: int64
+             * @description Ollama text context override; ignored by cloud providers.
+             */
+            text_num_ctx: number | null;
+            /**
+             * Format: int64
+             * @description Ollama vision context override; ignored by cloud providers.
+             */
+            vision_num_ctx: number | null;
+            /**
+             * @description Reasoning/thinking effort; null inherits off.
+             * @example medium
+             * @enum {string|null}
+             */
+            reasoning_effort: "off" | "low" | "medium" | "high" | null;
+            /**
+             * Format: int64
+             * @description Output-token cap sent to OpenAI-compatible providers. Reasoning tokens count toward this budget; null lets the server choose its default.
+             * @example 8192
+             */
+            max_output_tokens: number | null;
+            /**
+             * @description auto uses strict JSON schema, json_object uses compatibility mode, and off relies on prompt steering; null inherits auto.
+             * @example json_object
+             * @enum {string|null}
+             */
+            structured_output: "auto" | "json_object" | "off" | null;
+            /** Format: int32 */
+            ocr_page_limit: number | null;
+            /** Format: int64 */
+            hourly_document_limit: number | null;
+            /** Format: int64 */
+            daily_document_limit: number | null;
+            /** Format: float */
+            metadata_confidence_threshold: number | null;
+            /** Format: float */
+            title_confidence_threshold: number | null;
+            /** Format: float */
+            correspondent_confidence_threshold: number | null;
+            /** Format: float */
+            document_type_confidence_threshold: number | null;
+            /** Format: float */
+            document_date_confidence_threshold: number | null;
+            /** Format: float */
+            tags_confidence_threshold: number | null;
+            /** Format: float */
+            fields_confidence_threshold: number | null;
+            /** Format: int64 */
+            max_tags: number | null;
+            /** Format: int64 */
+            allowed_list_max: number | null;
+            /**
+             * Format: int64
+             * @description Per-request provider timeout in seconds. Null or zero on legacy input inherits the built-in 180-second default.
+             * @example 240
+             */
+            request_timeout_seconds: number | null;
+        };
         AiProviderSettings: {
             name: string;
             kind: components["schemas"]["AiProviderKind"];
             base_url: string;
-            default_text_model?: string | null;
-            default_vision_model?: string | null;
+            default_text_model: string | null;
+            default_vision_model: string | null;
             /** Format: double */
-            cost_per_1m_input_tokens_usd?: number | null;
+            cost_per_1m_input_tokens_usd: number | null;
             /** Format: double */
-            cost_per_1m_output_tokens_usd?: number | null;
+            cost_per_1m_output_tokens_usd: number | null;
             /** Format: uuid */
-            secret_id?: string | null;
+            secret_id: string | null;
             enabled: boolean;
+            tuning: components["schemas"]["ProviderTuning"];
+        };
+        StageModelOverride: {
+            stage: components["schemas"]["Stage"];
+            provider: string;
+            model: string;
+        };
+        ModelCatalogEntry: {
+            provider_kind: components["schemas"]["AiProviderKind"];
+            capability: components["schemas"]["ModelCapability"];
+            model_id: string;
+            label?: string;
+            recommended: boolean;
+            /** @enum {string} */
+            usage_tier?: "low" | "medium" | "high" | "extra_high";
+            context?: string;
+            modality?: string;
+            best_for?: string;
+        };
+        PaperlessArchiveProfile: {
+            name: string;
+            base_url: string;
+            /** Format: uuid */
+            token_secret_id: string | null;
+            enabled: boolean;
+        };
+        PaperlessSettings: {
+            base_url: string;
+            public_url: string | null;
+            /** Format: uuid */
+            token_secret_id: string | null;
+            /** Format: int64 */
+            timeout_seconds: number;
+            login_bridge_enabled: boolean;
+            delta_sync_enabled: boolean;
+            /** Format: int64 */
+            delta_sync_overlap_minutes: number;
+            active_archive: string;
+            archive_profiles: components["schemas"]["PaperlessArchiveProfile"][];
+        };
+        AiSettings: {
+            default_provider: string;
+            ollama_base_url: string;
+            default_text_model: string;
+            default_vision_model: string;
+            stage_models: components["schemas"]["StageModelOverride"][];
+            providers: components["schemas"]["AiProviderSettings"][];
+            external_provider_warning_acknowledged: boolean;
+            /** @description Omitted when no explicit fallback is configured. */
+            fallback_vision_model?: string;
+            requeue_vision_crashes_on_startup: boolean;
+            /** Format: int64 */
+            ollama_vision_num_ctx: number;
+            /** Format: int64 */
+            ollama_text_num_ctx: number;
+            /** @description Omitted when the consensus check is disabled. */
+            consensus_secondary_text_model?: string;
+            /** Format: int64 */
+            consensus_date_tolerance_days: number;
+            model_catalog: components["schemas"]["ModelCatalogEntry"][];
+        };
+        SecuritySettings: {
+            /** Format: int64 */
+            audit_retention_days: number;
+            /** Format: int64 */
+            ai_artifact_retention_days: number;
+            /** Format: int64 */
+            runs_retention_days: number;
+            ai_artifact_storage: components["schemas"]["AiArtifactStorageMode"];
+            api_token_expiry_required: boolean;
+            /** Format: int64 */
+            api_token_default_ttl_days: number;
+            /** Format: int64 */
+            api_token_max_ttl_days: number;
+        };
+        NotificationSettings: {
+            enabled: boolean;
+            /** Format: uuid */
+            webhook_url_secret_id: string | null;
+            /** Format: int64 */
+            review_queue_threshold: number;
+            /** Format: int64 */
+            repeated_failure_threshold: number;
+            /** Format: int64 */
+            cooldown_minutes: number;
+        };
+        WorkflowTags: {
+            trigger_process: string;
+            trigger_ocr: string;
+            trigger_tags: string;
+            trigger_title: string;
+            trigger_correspondent: string;
+            trigger_document_type: string;
+            trigger_document_date: string;
+            trigger_fields: string;
+            completion_processed: string;
+            completion_ocr: string;
+            completion_metadata: string;
+            completion_tagging: string;
+            completion_title: string;
+            completion_correspondent: string;
+            completion_document_type: string;
+            completion_document_date: string;
+            completion_fields: string;
+            review_needed: string;
+            failed: string;
+            failed_ocr: string;
+            failed_tagging: string;
+        };
+        WorkflowRules: {
+            include_tags: string[];
+            exclude_tags: string[];
+        };
+        WorkflowSettings: {
+            mode: components["schemas"]["ProcessingMode"];
+            paused: boolean;
+            dry_run: boolean;
+            /** Format: int64 */
+            hourly_document_limit: number | null;
+            /** Format: int64 */
+            daily_document_limit: number | null;
+            tags: components["schemas"]["WorkflowTags"];
+            rules: components["schemas"]["WorkflowRules"];
+            enabled_stages: components["schemas"]["Stage"][];
+            fallback_to_review_on_validation_failure: boolean;
+        };
+        OcrSettings: {
+            /** Format: int32 */
+            page_limit: number;
+            /** Format: int64 */
+            min_chars: number;
+            renderer: string;
+            language_hint: string | null;
+        };
+        TaggingSettings: {
+            /** Format: int64 */
+            max_tags: number;
+            allow_new_tags: boolean;
+            /** Format: float */
+            confidence_threshold: number;
+            old_tag_strategy: components["schemas"]["OldTagStrategy"];
+            tag_output_language: string;
+        };
+        MetadataSettings: {
+            overwrite_existing_correspondent: boolean;
+            overwrite_existing_document_type: boolean;
+            overwrite_existing_document_date: boolean;
+            allow_new_correspondents: boolean;
+            allow_new_document_types: boolean;
+            /** Format: float */
+            confidence_threshold: number;
+            /** Format: float */
+            title_confidence_threshold: number | null;
+            /** Format: float */
+            document_date_confidence_threshold: number | null;
+            /** Format: float */
+            correspondent_confidence_threshold: number | null;
+            /** Format: float */
+            document_type_confidence_threshold: number | null;
+            /** Format: float */
+            tags_confidence_threshold: number | null;
+            /** Format: float */
+            fields_confidence_threshold: number | null;
+            /** Format: int64 */
+            allowed_list_max: number;
+            document_date_anchor_required: boolean;
+            /** Format: float */
+            document_date_anchor_penalty: number;
+        };
+        CustomFieldMapping: {
+            field_name: string;
+            enabled: boolean;
+            aliases: string[];
+            instructions: string | null;
+        };
+        FieldSettings: {
+            /** Format: float */
+            confidence_threshold: number;
+            /** Format: int64 */
+            max_fields: number;
+            mappings: components["schemas"]["CustomFieldMapping"][];
+        };
+        UiSettings: {
+            debug_console_enabled: boolean;
         };
         LoginRequest: {
             username: string;
@@ -2466,10 +2746,262 @@ export interface components {
             paperless_login_enabled?: boolean;
         };
         RuntimeSettings: {
-            [key: string]: unknown;
+            paperless: components["schemas"]["PaperlessSettings"];
+            ai: components["schemas"]["AiSettings"];
+            security: components["schemas"]["SecuritySettings"];
+            notifications: components["schemas"]["NotificationSettings"];
+            workflow: components["schemas"]["WorkflowSettings"];
+            ocr: components["schemas"]["OcrSettings"];
+            tagging: components["schemas"]["TaggingSettings"];
+            metadata: components["schemas"]["MetadataSettings"];
+            fields: components["schemas"]["FieldSettings"];
+            ui: components["schemas"]["UiSettings"];
+        };
+        /** @description Partial provider tuning accepted on settings updates; omitted or null fields inherit. */
+        ProviderTuningInput: {
+            /** Format: int64 */
+            worker_concurrency?: number | null;
+            consensus_secondary_text_model?: string | null;
+            /** Format: int64 */
+            consensus_date_tolerance_days?: number | null;
+            /** Format: int64 */
+            text_num_ctx?: number | null;
+            /** Format: int64 */
+            vision_num_ctx?: number | null;
+            /** @enum {string|null} */
+            reasoning_effort?: "off" | "low" | "medium" | "high" | null;
+            /** Format: int64 */
+            max_output_tokens?: number | null;
+            /** @enum {string|null} */
+            structured_output?: "auto" | "json_object" | "off" | null;
+            /** Format: int32 */
+            ocr_page_limit?: number | null;
+            /** Format: int64 */
+            hourly_document_limit?: number | null;
+            /** Format: int64 */
+            daily_document_limit?: number | null;
+            /** Format: float */
+            metadata_confidence_threshold?: number | null;
+            /** Format: float */
+            title_confidence_threshold?: number | null;
+            /** Format: float */
+            correspondent_confidence_threshold?: number | null;
+            /** Format: float */
+            document_type_confidence_threshold?: number | null;
+            /** Format: float */
+            document_date_confidence_threshold?: number | null;
+            /** Format: float */
+            tags_confidence_threshold?: number | null;
+            /** Format: float */
+            fields_confidence_threshold?: number | null;
+            /** Format: int64 */
+            max_tags?: number | null;
+            /** Format: int64 */
+            allowed_list_max?: number | null;
+            /** Format: int64 */
+            request_timeout_seconds?: number | null;
+        };
+        AiProviderSettingsInput: {
+            name: string;
+            kind: components["schemas"]["AiProviderKind"];
+            base_url: string;
+            default_text_model?: string | null;
+            default_vision_model?: string | null;
+            /** Format: double */
+            cost_per_1m_input_tokens_usd?: number | null;
+            /** Format: double */
+            cost_per_1m_output_tokens_usd?: number | null;
+            /** Format: uuid */
+            secret_id?: string | null;
+            enabled: boolean;
+            tuning?: components["schemas"]["ProviderTuningInput"];
+        };
+        ModelCatalogEntryInput: {
+            provider_kind: components["schemas"]["AiProviderKind"];
+            capability: components["schemas"]["ModelCapability"];
+            model_id: string;
+            label?: string | null;
+            recommended?: boolean;
+            /** @enum {string|null} */
+            usage_tier?: "low" | "medium" | "high" | "extra_high" | null;
+            context?: string | null;
+            modality?: string | null;
+            best_for?: string | null;
+        };
+        PaperlessArchiveProfileInput: {
+            name: string;
+            base_url: string;
+            /** Format: uuid */
+            token_secret_id?: string | null;
+            enabled?: boolean;
+        };
+        PaperlessSettingsInput: {
+            base_url: string;
+            public_url?: string | null;
+            /** Format: uuid */
+            token_secret_id?: string | null;
+            timeout_seconds: number;
+            login_bridge_enabled?: boolean;
+            delta_sync_enabled?: boolean;
+            /** Format: int64 */
+            delta_sync_overlap_minutes?: number;
+            active_archive?: string;
+            archive_profiles?: components["schemas"]["PaperlessArchiveProfileInput"][];
+        };
+        AiSettingsInput: {
+            default_provider?: string;
+            ollama_base_url?: string;
+            default_text_model?: string;
+            default_vision_model?: string;
+            stage_models?: components["schemas"]["StageModelOverride"][];
+            providers?: components["schemas"]["AiProviderSettingsInput"][];
+            external_provider_warning_acknowledged?: boolean;
+            fallback_vision_model?: string | null;
+            requeue_vision_crashes_on_startup?: boolean;
+            /** Format: int64 */
+            ollama_vision_num_ctx?: number;
+            /** Format: int64 */
+            ollama_text_num_ctx?: number;
+            consensus_secondary_text_model?: string | null;
+            /** Format: int64 */
+            consensus_date_tolerance_days?: number;
+            model_catalog?: components["schemas"]["ModelCatalogEntryInput"][];
+        };
+        SecuritySettingsInput: {
+            /** Format: int64 */
+            audit_retention_days?: number;
+            /** Format: int64 */
+            ai_artifact_retention_days?: number;
+            /** Format: int64 */
+            runs_retention_days?: number;
+            ai_artifact_storage?: components["schemas"]["AiArtifactStorageMode"];
+            api_token_expiry_required?: boolean;
+            /** Format: int64 */
+            api_token_default_ttl_days?: number;
+            /** Format: int64 */
+            api_token_max_ttl_days?: number;
+        };
+        NotificationSettingsInput: {
+            enabled?: boolean;
+            /** Format: uuid */
+            webhook_url_secret_id?: string | null;
+            /** Format: int64 */
+            review_queue_threshold?: number;
+            /** Format: int64 */
+            repeated_failure_threshold?: number;
+            /** Format: int64 */
+            cooldown_minutes?: number;
+        };
+        WorkflowTagsInput: {
+            trigger_process: string;
+            trigger_ocr: string;
+            trigger_tags: string;
+            trigger_title: string;
+            trigger_correspondent: string;
+            trigger_document_type: string;
+            trigger_document_date?: string;
+            trigger_fields: string;
+            completion_processed: string;
+            completion_ocr: string;
+            completion_metadata?: string;
+            completion_tagging: string;
+            completion_title: string;
+            completion_correspondent: string;
+            completion_document_type: string;
+            completion_document_date?: string;
+            completion_fields: string;
+            review_needed: string;
+            failed: string;
+            failed_ocr: string;
+            failed_tagging: string;
+        };
+        WorkflowRulesInput: {
+            include_tags?: string[];
+            exclude_tags?: string[];
+        };
+        WorkflowSettingsInput: {
+            mode?: components["schemas"]["ProcessingModeInput"];
+            paused?: boolean;
+            dry_run?: boolean;
+            /** Format: int64 */
+            hourly_document_limit?: number | null;
+            /** Format: int64 */
+            daily_document_limit?: number | null;
+            tags?: components["schemas"]["WorkflowTagsInput"];
+            rules?: components["schemas"]["WorkflowRulesInput"];
+            enabled_stages?: components["schemas"]["Stage"][];
+            fallback_to_review_on_validation_failure?: boolean;
+        };
+        OcrSettingsInput: {
+            /** Format: int32 */
+            page_limit: number;
+            min_chars: number;
+            renderer: string;
+            language_hint?: string | null;
+        };
+        TaggingSettingsInput: {
+            max_tags: number;
+            allow_new_tags: boolean;
+            /** Format: float */
+            confidence_threshold: number;
+            old_tag_strategy: components["schemas"]["OldTagStrategy"];
+            tag_output_language?: string;
+        };
+        MetadataSettingsInput: {
+            overwrite_existing_correspondent: boolean;
+            overwrite_existing_document_type: boolean;
+            overwrite_existing_document_date: boolean;
+            allow_new_correspondents: boolean;
+            allow_new_document_types: boolean;
+            /** Format: float */
+            confidence_threshold: number;
+            /** Format: float */
+            title_confidence_threshold?: number | null;
+            /** Format: float */
+            document_date_confidence_threshold?: number | null;
+            /** Format: float */
+            correspondent_confidence_threshold?: number | null;
+            /** Format: float */
+            document_type_confidence_threshold?: number | null;
+            /** Format: float */
+            tags_confidence_threshold?: number | null;
+            /** Format: float */
+            fields_confidence_threshold?: number | null;
+            allowed_list_max?: number;
+            document_date_anchor_required?: boolean;
+            /** Format: float */
+            document_date_anchor_penalty?: number;
+        };
+        CustomFieldMappingInput: {
+            field_name: string;
+            enabled?: boolean;
+            aliases?: string[];
+            instructions?: string | null;
+        };
+        FieldSettingsInput: {
+            /** Format: float */
+            confidence_threshold: number;
+            max_fields: number;
+            mappings?: components["schemas"]["CustomFieldMappingInput"][];
+        };
+        UiSettingsInput: {
+            debug_console_enabled?: boolean;
+        };
+        /** @description Backward-compatible partial settings document accepted by Serde defaults. */
+        RuntimeSettingsInput: {
+            paperless?: components["schemas"]["PaperlessSettingsInput"];
+            ai?: components["schemas"]["AiSettingsInput"];
+            security?: components["schemas"]["SecuritySettingsInput"];
+            notifications?: components["schemas"]["NotificationSettingsInput"];
+            workflow?: components["schemas"]["WorkflowSettingsInput"];
+            ocr?: components["schemas"]["OcrSettingsInput"];
+            tagging?: components["schemas"]["TaggingSettingsInput"];
+            metadata?: components["schemas"]["MetadataSettingsInput"];
+            fields?: components["schemas"]["FieldSettingsInput"];
+            ui?: components["schemas"]["UiSettingsInput"];
         };
         UpdateSettingsRequest: {
-            settings: components["schemas"]["RuntimeSettings"];
+            settings: components["schemas"]["RuntimeSettingsInput"];
             paperless_token?: string | null;
             notification_webhook_url?: string | null;
             provider_secrets?: {

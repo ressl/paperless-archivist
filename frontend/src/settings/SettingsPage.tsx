@@ -243,8 +243,11 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             base_url: '',
             default_text_model: openAiCompatibleDefaults.default_text_model,
             default_vision_model: openAiCompatibleDefaults.default_vision_model,
+            cost_per_1m_input_tokens_usd: null,
+            cost_per_1m_output_tokens_usd: null,
             secret_id: null,
-            enabled: true
+            enabled: true,
+            tuning: { ...TUNING_PRESETS.openai_compatible }
           }
         ]
       }
