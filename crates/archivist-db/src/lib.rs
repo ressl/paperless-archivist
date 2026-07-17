@@ -257,6 +257,7 @@ pub struct AuditEventRecord {
     pub metadata: Option<Value>,
     pub prev_event_hash: Option<String>,
     pub event_hash: Option<String>,
+    pub hash_version: Option<i16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +265,8 @@ pub struct AuditIntegrityReport {
     pub ok: bool,
     pub checked_events: i64,
     pub legacy_events: i64,
+    pub v1_events: i64,
+    pub v2_events: i64,
     pub latest_event_hash: Option<String>,
     pub broken_event_id: Option<Uuid>,
     pub broken_reason: Option<String>,
@@ -8208,16 +8211,18 @@ async fn append_audit_tx(
     .transpose()?;
     let id = Uuid::now_v7();
     let created_at = Utc::now();
-    let event_hash = audit_event_hash(id, created_at, &prev_event_hash, &event);
+    let hash_version = AUDIT_HASH_VERSION_V2;
+    let event_hash = audit_event_hash_v2(id, created_at, &prev_event_hash, &event);
 
     sqlx::query(
         r#"
         insert into audit_events (
           id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
           source_ip, user_agent,
-          before, after, metadata, outcome, error_message, prev_event_hash, event_hash, created_at
+          before, after, metadata, outcome, error_message, prev_event_hash, event_hash,
+          hash_version, created_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         "#,
     )
     .bind(id)
@@ -8236,13 +8241,17 @@ async fn append_audit_tx(
     .bind(&event.error_message)
     .bind(&prev_event_hash)
     .bind(&event_hash)
+    .bind(hash_version)
     .bind(created_at)
     .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-fn audit_event_hash(
+const AUDIT_HASH_VERSION_V1: i16 = 1;
+const AUDIT_HASH_VERSION_V2: i16 = 2;
+
+fn audit_event_hash_v1(
     id: Uuid,
     created_at: DateTime<Utc>,
     prev_event_hash: &Option<String>,
@@ -8267,11 +8276,54 @@ fn audit_event_hash(
     short_hash(&canonical.to_string())
 }
 
+fn audit_event_hash_v2(
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    prev_event_hash: &Option<String>,
+    event: &AuditEventInput,
+) -> String {
+    let canonical = json!({
+        "hash_version": AUDIT_HASH_VERSION_V2,
+        "id": id,
+        "created_at": created_at,
+        "prev_event_hash": prev_event_hash,
+        "run_id": event.run_id,
+        "job_id": event.job_id,
+        "paperless_document_id": event.paperless_document_id,
+        "event_type": &event.event_type,
+        "actor_type": &event.actor_type,
+        "actor_id": &event.actor_id,
+        "source_ip": &event.source_ip,
+        "user_agent": &event.user_agent,
+        "before": &event.before,
+        "after": &event.after,
+        "metadata": &event.metadata,
+        "outcome": &event.outcome,
+        "error_message": &event.error_message,
+    });
+    short_hash(&canonical.to_string())
+}
+
+fn audit_event_hash_for_version(
+    hash_version: i16,
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    prev_event_hash: &Option<String>,
+    event: &AuditEventInput,
+) -> Option<String> {
+    match hash_version {
+        AUDIT_HASH_VERSION_V1 => Some(audit_event_hash_v1(id, created_at, prev_event_hash, event)),
+        AUDIT_HASH_VERSION_V2 => Some(audit_event_hash_v2(id, created_at, prev_event_hash, event)),
+        _ => None,
+    }
+}
+
 pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEventRecord>> {
     let rows = sqlx::query(
         r#"
         select id, event_type, actor_type, actor_id, paperless_document_id,
-               outcome, error_message, created_at, metadata, prev_event_hash, event_hash
+               outcome, error_message, created_at, metadata, prev_event_hash, event_hash,
+               hash_version
           from audit_events
          order by created_at desc
          limit $1
@@ -8294,6 +8346,7 @@ pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEve
                 metadata: row.try_get("metadata")?,
                 prev_event_hash: row.try_get("prev_event_hash")?,
                 event_hash: row.try_get("event_hash")?,
+                hash_version: row.try_get("hash_version")?,
             })
         })
         .collect()
@@ -8302,11 +8355,19 @@ pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEve
 pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityReport> {
     use futures::TryStreamExt;
 
-    let legacy_events: i64 =
-        sqlx::query("select count(*)::bigint as count from audit_events where event_hash is null")
-            .fetch_one(pool)
-            .await?
-            .try_get("count")?;
+    let coverage = sqlx::query(
+        r#"
+        select count(*) filter (where event_hash is null)::bigint as legacy_events,
+               count(*) filter (where event_hash is not null and hash_version = 1)::bigint as v1_events,
+               count(*) filter (where event_hash is not null and hash_version = 2)::bigint as v2_events
+          from audit_events
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    let legacy_events: i64 = coverage.try_get("legacy_events")?;
+    let v1_events: i64 = coverage.try_get("v1_events")?;
+    let v2_events: i64 = coverage.try_get("v2_events")?;
 
     // Stream the audit chain instead of loading the entire table into memory.
     // Verification is intrinsically streamable: each row's prev_event_hash
@@ -8315,8 +8376,8 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
     let mut stream = sqlx::query(
         r#"
         select id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
-               before, after, metadata, outcome, error_message, created_at,
-               prev_event_hash, event_hash
+               source_ip, user_agent, before, after, metadata, outcome, error_message, created_at,
+               prev_event_hash, event_hash, hash_version
           from audit_events
          where event_hash is not null
          order by chain_position asc
@@ -8331,6 +8392,7 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
         let created_at: DateTime<Utc> = row.try_get("created_at")?;
         let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
         let event_hash: String = row.try_get("event_hash")?;
+        let hash_version: Option<i16> = row.try_get("hash_version")?;
         if let Some(expected_prev) = &latest_event_hash
             && prev_event_hash.as_ref() != Some(expected_prev)
         {
@@ -8338,6 +8400,8 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
                 ok: false,
                 checked_events,
                 legacy_events,
+                v1_events,
+                v2_events,
                 latest_event_hash,
                 broken_event_id: Some(id),
                 broken_reason: Some("previous event hash does not match chain".to_owned()),
@@ -8355,17 +8419,30 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
             metadata: row.try_get("metadata")?,
             outcome: row.try_get("outcome")?,
             error_message: row.try_get("error_message")?,
-            // source_ip / user_agent are persisted but not part of the
-            // audit hash chain; leave None when reconstructing for verify.
-            source_ip: None,
-            user_agent: None,
+            source_ip: row.try_get("source_ip")?,
+            user_agent: row.try_get("user_agent")?,
         };
-        let expected_hash = audit_event_hash(id, created_at, &prev_event_hash, &event);
+        let Some(expected_hash) = hash_version.and_then(|version| {
+            audit_event_hash_for_version(version, id, created_at, &prev_event_hash, &event)
+        }) else {
+            return Ok(AuditIntegrityReport {
+                ok: false,
+                checked_events,
+                legacy_events,
+                v1_events,
+                v2_events,
+                latest_event_hash,
+                broken_event_id: Some(id),
+                broken_reason: Some("unsupported or missing audit hash version".to_owned()),
+            });
+        };
         if expected_hash != event_hash {
             return Ok(AuditIntegrityReport {
                 ok: false,
                 checked_events,
                 legacy_events,
+                v1_events,
+                v2_events,
                 latest_event_hash,
                 broken_event_id: Some(id),
                 broken_reason: Some("event hash does not match event payload".to_owned()),
@@ -8379,6 +8456,8 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
         ok: true,
         checked_events,
         legacy_events,
+        v1_events,
+        v2_events,
         latest_event_hash,
         broken_event_id: None,
         broken_reason: None,
@@ -9981,6 +10060,77 @@ pub struct BlockedQueuedCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn audit_hash_fixture(source_ip: Option<&str>, user_agent: Option<&str>) -> AuditEventInput {
+        AuditEventInput {
+            event_type: "user.roles_changed".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some("actor-17".to_owned()),
+            run_id: Some(Uuid::parse_str("018f0000-0000-7000-8000-000000000001").unwrap()),
+            job_id: Some(Uuid::parse_str("018f0000-0000-7000-8000-000000000002").unwrap()),
+            paperless_document_id: Some(4904),
+            before: Some(json!({ "roles": ["admin"] })),
+            after: Some(json!({ "roles": ["viewer"] })),
+            metadata: Some(json!({ "reason": "fixture" })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: source_ip.map(str::to_owned),
+            user_agent: user_agent.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn audit_hash_v1_canonical_fixture_is_stable() {
+        let id = Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap();
+        let created_at = "2026-07-17T08:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let previous = Some("previous-event-hash".to_owned());
+        let event = audit_hash_fixture(Some("203.0.113.17"), Some("Archivist-Test/2"));
+
+        assert_eq!(
+            audit_event_hash_v1(id, created_at, &previous, &event),
+            "ffd758b87049d65f9446a44190021fe0f1886a6fbaecace90a28de3c3d9368ea"
+        );
+    }
+
+    #[test]
+    fn audit_hash_v1_ignores_origin_but_v2_binds_values_and_nulls() {
+        let id = Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap();
+        let created_at = "2026-07-17T08:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let previous = Some("previous-event-hash".to_owned());
+        let with_origin = audit_hash_fixture(Some("203.0.113.17"), Some("Archivist-Test/2"));
+        let other_origin = audit_hash_fixture(Some("203.0.113.18"), Some("Archivist-Test/3"));
+        let null_origin = audit_hash_fixture(None, None);
+
+        assert_eq!(
+            audit_event_hash_v1(id, created_at, &previous, &with_origin),
+            audit_event_hash_v1(id, created_at, &previous, &other_origin)
+        );
+        let v2 = audit_event_hash_v2(id, created_at, &previous, &with_origin);
+        assert_eq!(
+            v2,
+            "55f41a0611b9a83a4e7abdf657f9ffc463ecf49ffd575699a29c6c113d4073a7"
+        );
+        assert_ne!(
+            v2,
+            audit_event_hash_v2(id, created_at, &previous, &other_origin)
+        );
+        assert!(
+            audit_event_hash_for_version(99, id, created_at, &previous, &with_origin).is_none()
+        );
+        assert_ne!(
+            v2,
+            audit_event_hash_v2(id, created_at, &previous, &null_origin)
+        );
+        assert_ne!(
+            audit_event_hash_v2(id, created_at, &previous, &null_origin),
+            audit_event_hash_v2(
+                id,
+                created_at,
+                &previous,
+                &audit_hash_fixture(Some("203.0.113.17"), None)
+            )
+        );
+    }
 
     #[test]
     fn hashes_tokens_without_returning_raw_value() {

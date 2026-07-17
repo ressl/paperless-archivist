@@ -697,6 +697,7 @@ export const enMessages = {
   'audit.chain_verified': 'Audit chain verified',
   'audit.chain_problem': 'Audit chain problem',
   'audit.checked_events': 'Checked {count} hashed events.',
+  'audit.hash_coverage': 'Hash coverage: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} legacy events predate hash-chain tracking.',
   'audit.retention_applied': 'Retention applied',
   'audit.retention_summary': 'Deleted {artifacts} AI artifacts, {events} audit events, and {ocr_pages} cached OCR pages outside retention.',

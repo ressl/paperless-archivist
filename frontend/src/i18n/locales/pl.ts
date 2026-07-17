@@ -699,6 +699,7 @@ const plMessages: Record<MessageKey, string> = {
   'audit.chain_verified': 'Łańcuch audytu zweryfikowany',
   'audit.chain_problem': 'Problem z łańcuchem audytu',
   'audit.checked_events': 'Sprawdzono {count} zdarzeń z haszem.',
+  'audit.hash_coverage': 'Pokrycie haszami: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} starszych zdarzeń pochodzi sprzed śledzenia łańcuchem haszy.',
   'audit.retention_applied': 'Retencja zastosowana',
   'audit.retention_summary': 'Usunięto {artifacts} artefaktów AI, {events} zdarzeń audytu i {ocr_pages} stron OCR z pamięci podręcznej poza okresem retencji.',

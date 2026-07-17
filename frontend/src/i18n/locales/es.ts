@@ -699,6 +699,7 @@ const esMessages: Record<MessageKey, string> = {
   'audit.chain_verified': 'Cadena de auditoría verificada',
   'audit.chain_problem': 'Problema en la cadena de auditoría',
   'audit.checked_events': '{count} eventos con hash verificados.',
+  'audit.hash_coverage': 'Cobertura de hash: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} eventos antiguos son anteriores al seguimiento por cadena de hash.',
   'audit.retention_applied': 'Retención aplicada',
   'audit.retention_summary': 'Se eliminaron {artifacts} artefactos de IA, {events} eventos de auditoría y {ocr_pages} páginas OCR en caché fuera de la retención.',

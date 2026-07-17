@@ -2958,6 +2958,10 @@ export interface components {
             checked_events: number;
             /** Format: int64 */
             legacy_events: number;
+            /** Format: int64 */
+            v1_events: number;
+            /** Format: int64 */
+            v2_events: number;
             latest_event_hash?: string | null;
             /** Format: uuid */
             broken_event_id?: string | null;

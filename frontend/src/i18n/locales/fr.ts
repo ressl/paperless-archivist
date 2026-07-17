@@ -699,6 +699,7 @@ const frMessages: Record<MessageKey, string> = {
   'audit.chain_verified': "Chaîne d’audit vérifiée",
   'audit.chain_problem': "Problème de chaîne d’audit",
   'audit.checked_events': '{count} événements hachés vérifiés.',
+  'audit.hash_coverage': 'Couverture des hachages : v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} anciens événements sont antérieurs au suivi par chaîne de hachage.',
   'audit.retention_applied': 'Rétention appliquée',
   'audit.retention_summary': "{artifacts} artefacts d’IA, {events} événements d’audit et {ocr_pages} pages OCR en cache hors rétention supprimés.",

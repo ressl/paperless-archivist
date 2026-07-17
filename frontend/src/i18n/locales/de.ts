@@ -699,6 +699,7 @@ const deMessages: Record<MessageKey, string> = {
   'audit.chain_verified': 'Audit-Kette verifiziert',
   'audit.chain_problem': 'Problem mit Audit-Kette',
   'audit.checked_events': '{count} gehashte Ereignisse geprüft.',
+  'audit.hash_coverage': 'Hash-Abdeckung: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} ältere Ereignisse stammen aus der Zeit vor der Hash-Ketten-Verfolgung.',
   'audit.retention_applied': 'Aufbewahrung angewendet',
   'audit.retention_summary': '{artifacts} KI-Artefakte, {events} Audit-Ereignisse und {ocr_pages} gecachte OCR-Seiten außerhalb der Aufbewahrungsfrist gelöscht.',

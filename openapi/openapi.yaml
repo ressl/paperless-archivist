@@ -777,11 +777,13 @@ components:
       additionalProperties: true
     AuditIntegrityReport:
       type: object
-      required: [ok, checked_events, legacy_events]
+      required: [ok, checked_events, legacy_events, v1_events, v2_events]
       properties:
         ok: { type: boolean }
         checked_events: { type: integer, format: int64 }
         legacy_events: { type: integer, format: int64 }
+        v1_events: { type: integer, format: int64 }
+        v2_events: { type: integer, format: int64 }
         latest_event_hash: { type: [string, "null"] }
         broken_event_id: { type: [string, "null"], format: uuid }
         broken_reason: { type: [string, "null"] }

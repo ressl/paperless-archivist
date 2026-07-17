@@ -5934,7 +5934,7 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     let pool = state.pool.clone();
     tokio::spawn(async move {
-        const HEADER: &str = "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash,source_ip,user_agent\n";
+        const HEADER: &str = "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash,hash_version,source_ip,user_agent\n";
         if tx
             .send(Ok(Bytes::from_static(HEADER.as_bytes())))
             .await
@@ -5946,7 +5946,7 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
             r#"
             select id, event_type, actor_type, actor_id, paperless_document_id,
                    outcome, error_message, created_at, metadata,
-                   prev_event_hash, event_hash, source_ip, user_agent
+                   prev_event_hash, event_hash, hash_version, source_ip, user_agent
               from audit_events
              order by created_at desc, id desc
             "#,
@@ -6007,6 +6007,7 @@ fn audit_csv_row(row: &sqlx::postgres::PgRow) -> Result<String, sqlx::Error> {
     let metadata: Option<Value> = row.try_get("metadata")?;
     let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
     let event_hash: Option<String> = row.try_get("event_hash")?;
+    let hash_version: Option<i16> = row.try_get("hash_version")?;
     let source_ip: Option<String> = row.try_get("source_ip")?;
     let user_agent: Option<String> = row.try_get("user_agent")?;
     let cells = [
@@ -6023,6 +6024,9 @@ fn audit_csv_row(row: &sqlx::postgres::PgRow) -> Result<String, sqlx::Error> {
         metadata.map(|value| value.to_string()).unwrap_or_default(),
         prev_event_hash.unwrap_or_default(),
         event_hash.unwrap_or_default(),
+        hash_version
+            .map(|version| version.to_string())
+            .unwrap_or_default(),
         source_ip.unwrap_or_default(),
         user_agent.unwrap_or_default(),
     ];

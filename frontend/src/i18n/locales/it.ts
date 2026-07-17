@@ -699,6 +699,7 @@ const itMessages: Record<MessageKey, string> = {
   'audit.chain_verified': 'Catena di audit verificata',
   'audit.chain_problem': 'Problema con la catena di audit',
   'audit.checked_events': '{count} eventi con hash verificati.',
+  'audit.hash_coverage': 'Copertura hash: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} eventi precedenti risalgono a prima del tracciamento tramite catena di hash.',
   'audit.retention_applied': 'Conservazione applicata',
   'audit.retention_summary': 'Eliminati {artifacts} artefatti IA, {events} eventi di audit e {ocr_pages} pagine OCR in cache fuori dalla conservazione.',

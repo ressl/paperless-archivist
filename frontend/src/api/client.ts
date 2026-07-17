@@ -606,6 +606,7 @@ export type AuditEvent = {
   metadata?: unknown;
   prev_event_hash?: string | null;
   event_hash?: string | null;
+  hash_version?: number | null;
 };
 
 export type ApiToken = {
@@ -622,6 +623,8 @@ export type AuditIntegrityReport = {
   ok: boolean;
   checked_events: number;
   legacy_events: number;
+  v1_events: number;
+  v2_events: number;
   latest_event_hash?: string | null;
   broken_event_id?: string | null;
   broken_reason?: string | null;
