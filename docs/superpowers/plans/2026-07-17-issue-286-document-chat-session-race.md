@@ -27,4 +27,4 @@
 
 - [x] Run the focused race tests, full Frontend tests, lint, typecheck, build, formatting/diff checks, and secret scan.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify branch and MR pipelines, document evidence, and close #286 only when green.
+- [x] Commit/push, verify branch and MR pipelines, document evidence, and close #286 only when green.
