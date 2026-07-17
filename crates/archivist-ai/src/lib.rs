@@ -380,11 +380,13 @@ pub struct ChatRequest {
     #[serde(default)]
     pub response_schema: Option<Value>,
     /// Reasoning / thinking effort for capable models. The worker populates it
-    /// from the resolved provider's tuning. `None`/`Off` leaves the request
-    /// unchanged. Applied per provider in the payload builders: OpenAI
-    /// `reasoning_effort`, Anthropic extended thinking (which also drops the
-    /// forced `tool_choice`), Ollama `think`. Non-capable models are left
-    /// untouched. Added v1.6.3.
+    /// from the resolved provider's tuning. `None` leaves ordinary providers
+    /// unchanged, while the exact MiniMax M3 integration rejects it because
+    /// every configured M3 request must carry a resolved mode. `Off` maps to
+    /// M3's explicit `thinking_mode=disabled`. Applied per provider in the
+    /// payload builders: OpenAI `reasoning_effort`, MiniMax M3
+    /// `chat_template_kwargs.thinking_mode`, Anthropic extended thinking, and
+    /// Ollama `think`. Non-capable models are left untouched. Added v1.6.3.
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Output-token cap forwarded as `max_tokens` by the OpenAI-compatible
@@ -728,6 +730,10 @@ pub fn build_ollama_chat_payload(request: &ChatRequest) -> Value {
     payload
 }
 
+/// Exact public model identity whose chat template accepts MiniMax M3's
+/// `thinking_mode` extension.
+pub const MINIMAX_M3_MODEL: &str = "ressl/MiniMax-M3-uncensored-NVFP4";
+
 /// Builds the JSON payload posted to OpenAI / OpenAI-compatible
 /// `/chat/completions`. When `response_schema` is set on the request,
 /// the payload includes `response_format: {type: "json_schema",
@@ -735,8 +741,9 @@ pub fn build_ollama_chat_payload(request: &ChatRequest) -> Value {
 /// Outputs feature guarantees the response will match the schema (no
 /// out-of-vocabulary enum values, no missing required fields). Extracted
 /// as a free function so the wire shape is unit-testable without
-/// spinning up the HTTP client.
-pub fn build_openai_chat_payload(request: &ChatRequest) -> Value {
+/// spinning up the HTTP client. MiniMax M3 additionally requires a resolved
+/// reasoning effort and maps it to `chat_template_kwargs.thinking_mode`.
+pub fn build_openai_chat_payload(request: &ChatRequest) -> Result<Value> {
     let messages = if openai_model_rejects_system_role(&request.model) {
         // These snapshots 400 on a `system` message; prepend the system
         // prompt to the user turn instead so the steering survives.
@@ -757,6 +764,26 @@ pub fn build_openai_chat_payload(request: &ChatRequest) -> Value {
         "temperature": request.temperature,
         "messages": messages,
     });
+    if request.model == MINIMAX_M3_MODEL {
+        let effort = request.reasoning_effort.ok_or_else(|| {
+            anyhow!(
+                "MiniMax M3 request has no resolved reasoning effort; resolve provider tuning \
+                 before building the request so chat_template_kwargs.thinking_mode is explicit"
+            )
+        })?;
+        let thinking_mode = match effort {
+            ReasoningEffort::Off => "disabled",
+            ReasoningEffort::Low => "adaptive",
+            ReasoningEffort::Medium | ReasoningEffort::High => "enabled",
+        };
+        payload
+            .as_object_mut()
+            .expect("payload is an object literal")
+            .insert(
+                "chat_template_kwargs".to_owned(),
+                json!({ "thinking_mode": thinking_mode }),
+            );
+    }
     if let Some(effort) = request.reasoning_effort.filter(|effort| effort.is_on()) {
         // Only the reasoning-capable families (o-series, gpt-5+) accept the
         // `reasoning_effort` parameter; plain chat models reject it. Those
@@ -818,7 +845,7 @@ pub fn build_openai_chat_payload(request: &ChatRequest) -> Value {
             StructuredOutputMode::Off => {}
         }
     }
-    payload
+    Ok(payload)
 }
 
 /// OpenAI `reasoning_effort` string for an on-level. `Off` should be filtered
@@ -1033,7 +1060,7 @@ impl OpenAiCompatibleClient {
 impl TextProvider for OpenAiCompatibleClient {
     async fn chat(&self, request: ChatRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let mut payload = build_openai_chat_payload(&request);
+        let mut payload = build_openai_chat_payload(&request)?;
         // Self-healing is only armed in Auto mode: JsonObject/Off are already
         // the operator's explicit compatibility choice.
         let retryable = payload.get("response_format").is_some()
@@ -1293,26 +1320,48 @@ impl VisionProvider for MineruClient {
     }
 }
 
-/// Removes `<think>...</think>` reasoning blocks that thinking models
-/// (MiniMax-M2, DeepSeek-R1, QwQ) emit inline when the serving layer does
-/// not split them into `reasoning_content`. An unterminated `<think>`
-/// drops everything from the tag to the end — the model never surfaced a
-/// final answer after it.
+/// Removes inline reasoning blocks emitted as either `<think>...</think>` or
+/// MiniMax's `<mm:think>...</mm:think>`. Family-specific depth counters keep a
+/// wrong closing tag from releasing the other family's reasoning block. Mixed
+/// or nested malformed output stays hidden until every observed opener is
+/// closed by its own family; an unterminated block drops the entire tail.
 fn strip_think_blocks(text: &str) -> String {
+    const TAGS: [(&str, usize, bool); 4] = [
+        ("<think>", 0, true),
+        ("<mm:think>", 1, true),
+        ("</think>", 0, false),
+        ("</mm:think>", 1, false),
+    ];
+
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = rest.find("<think>") {
-        output.push_str(&rest[..start]);
-        match rest[start..].find("</think>") {
-            Some(end_rel) => rest = &rest[start + end_rel + "</think>".len()..],
-            None => {
-                rest = "";
-                break;
-            }
+    let mut depths = [0_u32; 2];
+    while let Some((offset, tag, family, is_open)) = TAGS
+        .iter()
+        .filter_map(|(tag, family, is_open)| {
+            rest.find(tag)
+                .map(|offset| (offset, *tag, *family, *is_open))
+        })
+        .min_by_key(|(offset, _, _, _)| *offset)
+    {
+        if depths == [0, 0] {
+            output.push_str(&rest[..offset]);
         }
+        if is_open {
+            depths[family] = depths[family].saturating_add(1);
+        } else {
+            depths[family] = depths[family].saturating_sub(1);
+        }
+        rest = &rest[offset + tag.len()..];
     }
-    output.push_str(rest);
+    if depths == [0, 0] {
+        output.push_str(rest);
+    }
     output
+}
+
+fn contains_reasoning_open_tag(text: &str) -> bool {
+    text.contains("<think>") || text.contains("<mm:think>")
 }
 
 /// Extracts the assistant text from an OpenAI-style chat/vision response,
@@ -1333,15 +1382,15 @@ fn extract_openai_message_text(raw: &Value) -> Result<String> {
     let stripped = strip_think_blocks(content);
     let trimmed = stripped.trim();
     if trimmed.is_empty() {
-        let had_think = content.contains("<think>");
+        let had_think = contains_reasoning_open_tag(content);
         let reasoning_only = message
             .and_then(|message| message.get("reasoning_content"))
             .and_then(Value::as_str)
             .is_some_and(|reasoning| !reasoning.trim().is_empty());
         if had_think || reasoning_only {
             return Err(anyhow!(
-                "model returned only reasoning content and no final answer — \
-                 check the server's reasoning-parser configuration"
+                "model returned only reasoning content and no final answer; check the server's \
+                 reasoning-parser configuration and the request's thinking_mode contract"
             ));
         }
         return Ok(String::new());
@@ -3377,7 +3426,7 @@ mod tests {
             max_output_tokens: None,
             structured_output: None,
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         let response_format = payload.get("response_format").expect("response_format set");
         assert_eq!(response_format["type"], "json_schema");
         assert_eq!(response_format["json_schema"]["strict"], true);
@@ -3401,7 +3450,7 @@ mod tests {
             max_output_tokens: None,
             structured_output: None,
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert!(payload.get("response_format").is_none());
     }
 
@@ -3498,16 +3547,91 @@ mod tests {
             max_output_tokens: None,
             structured_output: None,
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert_eq!(payload.get("reasoning_effort"), Some(&json!("high")));
         // Reasoning models reject a custom sampling temperature, so it is dropped.
         assert!(payload.get("temperature").is_none());
 
         // A plain chat model ignores the effort and keeps its temperature.
         request.model = "gpt-4o-mini".to_owned();
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert!(payload.get("reasoning_effort").is_none());
         assert_eq!(payload.get("temperature"), Some(&json!(0.0)));
+    }
+
+    #[test]
+    fn minimax_m3_chat_payload_maps_every_reasoning_effort_to_thinking_mode() {
+        let mut request = ChatRequest {
+            model: "ressl/MiniMax-M3-uncensored-NVFP4".to_owned(),
+            system_prompt: String::new(),
+            user_prompt: "hi".to_owned(),
+            temperature: 0.2,
+            num_ctx: None,
+            response_schema: None,
+            reasoning_effort: Some(ReasoningEffort::Off),
+            max_output_tokens: None,
+            structured_output: None,
+        };
+
+        for (effort, expected) in [
+            (ReasoningEffort::Off, "disabled"),
+            (ReasoningEffort::Low, "adaptive"),
+            (ReasoningEffort::Medium, "enabled"),
+            (ReasoningEffort::High, "enabled"),
+        ] {
+            request.reasoning_effort = Some(effort);
+            let payload = build_openai_chat_payload(&request).expect("valid M3 payload");
+            assert_eq!(
+                payload["chat_template_kwargs"]["thinking_mode"], expected,
+                "wrong thinking_mode for {effort:?}"
+            );
+            assert!(payload.get("reasoning_effort").is_none());
+        }
+    }
+
+    #[test]
+    fn minimax_m3_chat_payload_rejects_unresolved_reasoning_effort() {
+        let request = ChatRequest {
+            model: MINIMAX_M3_MODEL.to_owned(),
+            system_prompt: String::new(),
+            user_prompt: "hi".to_owned(),
+            temperature: 0.2,
+            num_ctx: None,
+            response_schema: None,
+            reasoning_effort: None,
+            max_output_tokens: None,
+            structured_output: None,
+        };
+        let error = build_openai_chat_payload(&request).unwrap_err().to_string();
+        assert!(error.contains("resolved reasoning effort"), "got: {error}");
+        assert!(error.contains("thinking_mode"), "got: {error}");
+    }
+
+    #[test]
+    fn minimax_m3_fields_are_not_sent_to_lookalikes_or_other_models() {
+        for model in [
+            "other/MiniMax-M3-uncensored-NVFP4",
+            "ressl/MiniMax-M3-uncensored-NVFP4-copy",
+            "nvidia/MiniMax-M2.7-NVFP4",
+            "gpt-4o-mini",
+        ] {
+            let request = ChatRequest {
+                model: model.to_owned(),
+                system_prompt: String::new(),
+                user_prompt: "hi".to_owned(),
+                temperature: 0.2,
+                num_ctx: None,
+                response_schema: None,
+                reasoning_effort: Some(ReasoningEffort::High),
+                max_output_tokens: None,
+                structured_output: None,
+            };
+            let payload = build_openai_chat_payload(&request).expect("valid non-M3 payload");
+            assert!(
+                payload.get("chat_template_kwargs").is_none(),
+                "unexpected M3 fields for {model}"
+            );
+        }
     }
 
     #[test]
@@ -4306,7 +4430,7 @@ mod tests {
             max_output_tokens: Some(8192),
             structured_output: None,
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert_eq!(payload["max_tokens"], 8192);
     }
 
@@ -4325,6 +4449,7 @@ mod tests {
         };
         assert!(
             build_openai_chat_payload(&request)
+                .expect("valid payload")
                 .get("max_tokens")
                 .is_none()
         );
@@ -4344,7 +4469,7 @@ mod tests {
             max_output_tokens: None,
             structured_output: Some(StructuredOutputMode::JsonObject),
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert_eq!(payload["response_format"], json!({ "type": "json_object" }));
     }
 
@@ -4364,6 +4489,7 @@ mod tests {
         };
         assert!(
             build_openai_chat_payload(&request)
+                .expect("valid payload")
                 .get("response_format")
                 .is_none()
         );
@@ -4387,6 +4513,31 @@ mod tests {
     }
 
     #[test]
+    fn strip_think_blocks_handles_minimax_and_mixed_reasoning_blocks() {
+        assert_eq!(
+            strip_think_blocks("<mm:think>plan</mm:think>answer"),
+            "answer"
+        );
+        assert_eq!(
+            strip_think_blocks("a<mm:think>x</mm:think>b<think>y</think>c<mm:think>z</mm:think>d"),
+            "abcd"
+        );
+        assert_eq!(strip_think_blocks("answer<mm:think>never closed"), "answer");
+        assert_eq!(
+            strip_think_blocks("a<think>x<mm:think>y</think>z</mm:think>b"),
+            "ab"
+        );
+        assert_eq!(
+            strip_think_blocks("prefix<mm:think>secret</think>must not leak"),
+            "prefix"
+        );
+        assert_eq!(
+            strip_think_blocks("prefix<think>secret</mm:think>must not leak"),
+            "prefix"
+        );
+    }
+
+    #[test]
     fn extract_openai_message_text_strips_think_and_trims() {
         let raw = json!({ "choices": [{ "message": {
             "content": "<think>reasoning...</think>\n  final answer  " } }] });
@@ -4406,6 +4557,12 @@ mod tests {
         let raw =
             json!({ "choices": [{ "message": { "content": "<think>only thoughts</think>" } }] });
         assert!(extract_openai_message_text(&raw).is_err());
+
+        let raw = json!({ "choices": [{ "message": {
+            "content": "<mm:think>only MiniMax thoughts</mm:think>" } }] });
+        let error = extract_openai_message_text(&raw).unwrap_err().to_string();
+        assert!(error.contains("reasoning-parser"), "got: {error}");
+        assert!(error.contains("thinking_mode"), "got: {error}");
     }
 
     #[test]
