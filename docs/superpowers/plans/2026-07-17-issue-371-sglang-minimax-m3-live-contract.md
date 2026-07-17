@@ -44,4 +44,4 @@
 - [x] Run mock tests, docs links, YAML/config validation, Rust/frontend regression gates, formatting, and secret scans.
 - [x] Run the full harness against the pinned live SGLang/M3 deployment and record only the public/redacted report evidence in #371.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #371 only when green.
+- [x] Commit/push, verify both GitLab pipelines, document evidence, and close #371 only when green.
