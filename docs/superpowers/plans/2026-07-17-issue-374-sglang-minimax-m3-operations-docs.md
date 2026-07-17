@@ -34,5 +34,5 @@
 
 - [x] Run the documentation link checker and validate every documented command against script help/configuration behavior.
 - [x] Scan changed documentation for credentials, private hosts, private registries, and internal-only URLs.
-- [ ] Obtain an independent Critical/Important review and resolve every finding.
+- [x] Obtain an independent Critical/Important review and resolve every finding.
 - [ ] Commit/push, verify branch and MR pipelines, document evidence, and close #374 only when green.
