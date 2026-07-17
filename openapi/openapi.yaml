@@ -16,6 +16,10 @@ components:
     bearerToken:
       type: http
       scheme: bearer
+    metricsToken:
+      type: http
+      scheme: bearer
+      description: Dedicated bearer token configured through ARCHIVIST_METRICS_TOKEN; application API tokens are not accepted.
     webhookSecret:
       type: apiKey
       in: header
@@ -2244,13 +2248,17 @@ paths:
               schema: { type: string }
   /metrics:
     get:
-      security: []
+      description: Returns Prometheus exposition only when the dedicated metrics bearer token is configured and valid.
+      security:
+        - metricsToken: []
       responses:
         "200":
           description: Prometheus metrics
           content:
             text/plain:
               schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /api/auth/login:
     post:
       security: []

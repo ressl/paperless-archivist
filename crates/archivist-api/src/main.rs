@@ -573,19 +573,17 @@ async fn readyz(State(state): State<AppState>) -> ApiResult<&'static str> {
     Ok("ready")
 }
 
-async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
-    // /metrics sits outside the session-auth middleware so Prometheus can
-    // scrape it, but it discloses operational internals (queue depth, failure
-    // counts, latencies) and every hit runs aggregate queries. Require the
-    // dedicated scrape token; disabled (503) when unconfigured — same
-    // contract as the inbound webhook.
-    let Some(expected) = state.config.metrics_token.as_ref() else {
+fn authorize_metrics_request(
+    expected: Option<&SecretString>,
+    headers: &HeaderMap,
+) -> ApiResult<()> {
+    let Some(expected) = expected else {
         return Err(ApiError::service_unavailable(
             "metrics disabled: set ARCHIVIST_METRICS_TOKEN",
         ));
     };
     let provided = headers
-        .get("authorization")
+        .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or_default();
@@ -595,6 +593,16 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult
     {
         return Err(ApiError::unauthorized("invalid metrics token"));
     }
+    Ok(())
+}
+
+async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
+    // /metrics sits outside the session-auth middleware so Prometheus can
+    // scrape it, but it discloses operational internals (queue depth, failure
+    // counts, latencies) and every hit runs aggregate queries. Require the
+    // dedicated scrape token; disabled (503) when unconfigured — same
+    // contract as the inbound webhook.
+    authorize_metrics_request(state.config.metrics_token.as_ref(), &headers)?;
     let snapshot = db_metrics_snapshot(&state.pool).await?;
     // Migrated series now live in `metrics_counters` (real monotone counters that
     // survive audit retention). Read them here and serve them as `# TYPE counter`
@@ -643,6 +651,9 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult
             "# HELP paperless_archivist_job_retries_scheduled_total Job retries scheduled after transient failures (monotone counter)\n",
             "# TYPE paperless_archivist_job_retries_scheduled_total counter\n",
             "paperless_archivist_job_retries_scheduled_total {}\n",
+            "# HELP paperless_archivist_job_failures_total Jobs that reached a permanent failed state (monotone counter)\n",
+            "# TYPE paperless_archivist_job_failures_total counter\n",
+            "paperless_archivist_job_failures_total {}\n",
             // Provider quota-exhausted events: the rate of this counter is the
             // signal the #311 quota alert targets. Incremented once per job that
             // a provider rejects with a usage-cap signal (before the cooldown is
@@ -701,6 +712,7 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult
         counter("selector_runs_total"),
         counter("selector_documents_queued_total"),
         counter("job_retries_scheduled_total"),
+        counter("job_failures_total"),
         counter("provider_quota_total"),
         snapshot.model_errors_total,
         counter("apply_success_total"),
@@ -7897,6 +7909,45 @@ fn verify_dummy_password(password: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_authorization_contract_is_dedicated_and_non_disclosing() {
+        let headers = HeaderMap::new();
+        let disabled =
+            authorize_metrics_request(None, &headers).expect_err("an unset token disables metrics");
+        assert_eq!(disabled.status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let secret_value = "metrics-test-secret";
+        let expected = SecretString::from(secret_value.to_owned());
+        let missing = authorize_metrics_request(Some(&expected), &headers)
+            .expect_err("a configured endpoint requires bearer auth");
+        assert_eq!(missing.status, StatusCode::UNAUTHORIZED);
+
+        let mut wrong_headers = HeaderMap::new();
+        wrong_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer wrong-token"),
+        );
+        let wrong = authorize_metrics_request(Some(&expected), &wrong_headers)
+            .expect_err("a wrong bearer token is rejected");
+        assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+
+        let mut valid_headers = HeaderMap::new();
+        valid_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {secret_value}"))
+                .expect("test authorization header"),
+        );
+        authorize_metrics_request(Some(&expected), &valid_headers)
+            .expect("the dedicated metrics token is accepted");
+
+        for error in [disabled, missing, wrong] {
+            assert!(
+                !format!("{error:?}").contains(secret_value),
+                "metrics errors must never disclose the configured token"
+            );
+        }
+    }
 
     #[test]
     fn provider_secret_names_are_canonicalized_before_persistence() {

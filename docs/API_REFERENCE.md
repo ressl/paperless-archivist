@@ -47,12 +47,17 @@ Common status codes:
 | --- | --- | --- |
 | `GET` | `/healthz` | Process liveness check. |
 | `GET` | `/readyz` | Database readiness check. |
-| `GET` | `/metrics` | Prometheus metrics. |
 | `POST` | `/api/auth/login` | Create a browser session. |
 | `POST` | `/api/auth/paperless-login` | Create a browser session through the optional Paperless login bridge. |
 | `GET` | `/api/auth/oidc/config` | Return whether SSO is enabled and the login URL. |
 | `GET` | `/api/auth/oidc/login` | Start Authorization Code + PKCE and redirect to the OIDC provider. |
 | `GET` | `/api/auth/oidc/callback` | Validate the OIDC response and create a browser session. |
+
+`GET /metrics` is an operator integration endpoint, not an unauthenticated
+public endpoint. It accepts only the dedicated bearer value configured through
+`ARCHIVIST_METRICS_TOKEN`: an unset token returns `503`, a missing or invalid
+token returns `401`, and a valid token returns the Prometheus exposition with
+`200`. Normal Archivist API bearer tokens are not accepted.
 
 ## Auth And Sessions
 
