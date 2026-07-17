@@ -114,20 +114,21 @@ function routerFunctionBody() {
 
 const routerFunction = routerFunctionBody();
 
-function routerNames() {
-  const names = [
-    ...routerFunction.matchAll(/\blet\s+([A-Za-z_]\w*)\s*=\s*Router::new\(\)/g)
-  ].map((match) => match[1]);
+function routerDeclarations() {
+  const declarations = new Map();
+  for (const match of routerFunction.matchAll(
+    /\blet\s+([A-Za-z_]\w*)\s*=\s*Router::new\(\)/g
+  )) {
+    const name = match[1];
+    assert.ok(!declarations.has(name), `duplicate local Router::new() declaration: ${name}`);
+    declarations.set(name, match.index + match[0].indexOf('Router::new()'));
+  }
+  const names = [...declarations.keys()];
   assert.ok(names.includes('app'), 'top-level app = Router::new() declaration not found');
-  assert.equal(new Set(names).size, names.length, 'duplicate local Router::new() declaration');
-  return names;
+  return declarations;
 }
 
-function routerInitializer(name) {
-  const declaration = new RegExp(`\\blet\\s+${name}\\s*=\\s*Router::new\\(\\)`);
-  const match = declaration.exec(routerFunction);
-  assert.ok(match, `Axum router declaration not found: ${name}`);
-  const expressionStart = match.index + match[0].indexOf('Router::new()');
+function routerInitializer(name, expressionStart) {
   const end = scanRust(routerFunction, expressionStart, (state) => {
     if (
       state.current === ';' &&
@@ -154,13 +155,20 @@ function matchingParenthesis(source, opening) {
 
 function callArguments(source, callName) {
   const calls = [];
-  const pattern = new RegExp(`\\.${callName}\\s*\\(`, 'g');
-  let match;
-  while ((match = pattern.exec(source)) !== null) {
-    const opening = match.index + match[0].lastIndexOf('(');
+  const marker = `.${callName}`;
+  let searchFrom = 0;
+  while (searchFrom < source.length) {
+    const markerIndex = source.indexOf(marker, searchFrom);
+    if (markerIndex === -1) break;
+    let opening = markerIndex + marker.length;
+    while (/\s/.test(source[opening])) opening += 1;
+    if (source[opening] !== '(') {
+      searchFrom = opening;
+      continue;
+    }
     const closing = matchingParenthesis(source, opening);
     calls.push(source.slice(opening + 1, closing));
-    pattern.lastIndex = closing + 1;
+    searchFrom = closing + 1;
   }
   return calls;
 }
@@ -233,7 +241,10 @@ function runtimeRoutePairs() {
       `.${unsupported}(...) is not introspectable; document the route and extend the verifier before using it`
     );
   }
-  const initializers = new Map(routerNames().map((name) => [name, routerInitializer(name)]));
+  const declarations = routerDeclarations();
+  const initializers = new Map(
+    [...declarations].map(([name, start]) => [name, routerInitializer(name, start)])
+  );
   for (const supported of ['route', 'nest', 'merge']) {
     const discovered = callArguments(routerFunction, supported).length;
     const assigned = [...initializers.values()].reduce(
