@@ -47,4 +47,4 @@
 - [x] Replace handwritten settings/provider/catalog/enums with aliases of generated component schemas.
 - [x] Preserve the UI business-stage subset as `Exclude<PipelineStage, 'apply'>`.
 - [x] Run the Serde fixture test, OpenAPI fixture validator, generator diff, TypeScript typecheck, frontend tests, and production build.
-- [ ] Run repository formatting/diff checks, obtain independent review, commit, push, and close #353 only after the MR pipeline is green.
+- [x] Run repository formatting/diff checks, obtain independent review, commit, push, and close #353 only after the MR pipeline is green.
