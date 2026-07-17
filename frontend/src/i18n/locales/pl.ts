@@ -555,6 +555,15 @@ const plMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Aktywny',
   'settings.provider.add': 'Dodaj providera',
+  'settings.provider.remove': 'Usuń providera',
+  'settings.provider.builtin_disable_only':
+    'Wbudowanych providerów nie można usunąć; zamiast tego wyłącz ich.',
+  'settings.provider.reference_default': 'domyślny provider',
+  'settings.provider.reference_stage': 'etap {stage}',
+  'settings.provider.remove_blocked':
+    'Nie można usunąć providera „{provider}”, ponieważ odwołują się do niego: {references}. Najpierw wybierz innego providera.',
+  'settings.provider.remove_confirm':
+    'Usunąć niestandardowego providera „{provider}”? Niezapisany klucz API i wczytana lista modeli zostaną odrzucone lokalnie. Zapisana konfiguracja zmieni się dopiero po naciśnięciu Zapisz.',
   'settings.provider.validation.name_required': 'Nazwa providera jest wymagana.',
   'settings.provider.validation.name_duplicate':
     'Nazwa koliduje z providerem „{name}”. Wielkość liter nie ma znaczenia.',

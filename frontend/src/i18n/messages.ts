@@ -553,6 +553,15 @@ export const enMessages = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Enabled',
   'settings.provider.add': 'Add Provider',
+  'settings.provider.remove': 'Remove Provider',
+  'settings.provider.builtin_disable_only':
+    'Built-in providers cannot be removed; disable them instead.',
+  'settings.provider.reference_default': 'default provider',
+  'settings.provider.reference_stage': 'stage {stage}',
+  'settings.provider.remove_blocked':
+    'Provider "{provider}" cannot be removed because it is referenced by: {references}. Select another provider first.',
+  'settings.provider.remove_confirm':
+    'Remove custom provider "{provider}"? Its unsaved API key and loaded model list will be discarded locally. The saved configuration changes only after you press Save.',
   'settings.provider.validation.name_required': 'Provider name is required.',
   'settings.provider.validation.name_duplicate':
     'Provider name conflicts with provider "{name}". Names must be unique regardless of case.',

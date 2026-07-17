@@ -555,6 +555,15 @@ const deMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API-Key',
   'settings.provider.enabled': 'Aktiv',
   'settings.provider.add': 'Provider hinzufügen',
+  'settings.provider.remove': 'Provider entfernen',
+  'settings.provider.builtin_disable_only':
+    'Integrierte Provider können nicht entfernt werden; deaktiviere sie stattdessen.',
+  'settings.provider.reference_default': 'Standard-Provider',
+  'settings.provider.reference_stage': 'Stufe {stage}',
+  'settings.provider.remove_blocked':
+    'Provider „{provider}“ kann nicht entfernt werden, weil er hier referenziert wird: {references}. Wähle zuerst einen anderen Provider.',
+  'settings.provider.remove_confirm':
+    'Eigenen Provider „{provider}“ entfernen? Sein nicht gespeicherter API-Key und die geladene Modellliste werden lokal verworfen. Die gespeicherte Konfiguration ändert sich erst, wenn du Speichern drückst.',
   'settings.provider.validation.name_required': 'Ein Provider-Name ist erforderlich.',
   'settings.provider.validation.name_duplicate':
     'Der Provider-Name kollidiert mit Provider „{name}“. Groß-/Kleinschreibung zählt nicht.',

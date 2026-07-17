@@ -1,8 +1,9 @@
 import { useId } from 'react';
+import { Trash2 } from 'lucide-react';
 import { AiProviderKind, ModelCatalogEntry, ProviderTuning, RuntimeSettings } from '../../api/client';
 import { recommendedModel } from '../../modelCatalog';
 import { useI18n } from '../../i18n/I18nProvider';
-import { FormField } from '../../lib/ui';
+import { Button, FormField } from '../../lib/ui';
 import { ProviderModelSelect } from './ProviderModelSelect';
 import { TuningDisclosure, type TuningField } from './tuning';
 import { optionalNumber } from './helpers';
@@ -22,7 +23,10 @@ export function ProviderCard({
   onChangeTuning,
   onResetTuningBlock,
   onRefreshModels,
-  errors = {}
+  errors = {},
+  builtIn,
+  removalError,
+  onRemove
 }: {
   provider: Provider;
   catalog: ModelCatalogEntry[];
@@ -35,6 +39,9 @@ export function ProviderCard({
   onResetTuningBlock: (fields: readonly TuningField[]) => void;
   onRefreshModels: () => void;
   errors?: ProviderFieldErrors;
+  builtIn: boolean;
+  removalError?: string;
+  onRemove: () => void;
 }) {
   const { t } = useI18n();
   const ids = {
@@ -54,6 +61,7 @@ export function ProviderCard({
         <input
           id={ids.name}
           value={provider.name}
+          disabled={builtIn}
           aria-label={t('settings.provider.name')}
           aria-invalid={Boolean(errors.name)}
           aria-describedby={errors.name ? nameErrorId : undefined}
@@ -164,6 +172,23 @@ export function ProviderCard({
         />
         {t('settings.provider.enabled')}
       </label>
+      {builtIn ? (
+        <p className="field-hint">{t('settings.provider.builtin_disable_only')}</p>
+      ) : (
+        <Button
+          type="button"
+          variant="secondary"
+          icon={<Trash2 size={16} aria-hidden="true" />}
+          onClick={onRemove}
+        >
+          {t('settings.provider.remove')}
+        </Button>
+      )}
+      {removalError && (
+        <p className="field-hint error" role="alert">
+          {removalError}
+        </p>
+      )}
       <TuningDisclosure
         provider={provider}
         globals={globals}

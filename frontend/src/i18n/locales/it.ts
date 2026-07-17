@@ -555,6 +555,15 @@ const itMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Attivo',
   'settings.provider.add': 'Aggiungi provider',
+  'settings.provider.remove': 'Rimuovi provider',
+  'settings.provider.builtin_disable_only':
+    'I provider integrati non possono essere rimossi; disattivali invece.',
+  'settings.provider.reference_default': 'provider predefinito',
+  'settings.provider.reference_stage': 'fase {stage}',
+  'settings.provider.remove_blocked':
+    'Il provider «{provider}» non può essere rimosso perché è referenziato da: {references}. Seleziona prima un altro provider.',
+  'settings.provider.remove_confirm':
+    'Rimuovere il provider personalizzato «{provider}»? La chiave API non salvata e l’elenco dei modelli caricato verranno eliminati localmente. La configurazione salvata cambierà solo dopo aver premuto Salva.',
   'settings.provider.validation.name_required': 'Il nome del provider è obbligatorio.',
   'settings.provider.validation.name_duplicate':
     'Il nome è in conflitto con il provider «{name}». Le maiuscole non contano.',

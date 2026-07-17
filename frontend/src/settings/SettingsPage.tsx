@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Save, UserPlus } from 'lucide-react';
 import {
   api,
@@ -9,6 +9,7 @@ import {
 } from '../api/client';
 import {
   defaultProvider,
+  isBuiltInProviderName,
   isOllamaCloudProvider,
   providerDefaults,
   recommendedModel,
@@ -62,6 +63,16 @@ function providerSecretsByName(
     if (secret && provider.name) out[provider.name] = secret;
   });
   return out;
+}
+
+export function shiftIndexedProviderState<T>(current: Record<number, T>, removedIndex: number) {
+  const shifted: Record<number, T> = {};
+  Object.entries(current).forEach(([rawIndex, value]) => {
+    const index = Number(rawIndex);
+    if (index < removedIndex) shifted[index] = value;
+    if (index > removedIndex) shifted[index - 1] = value;
+  });
+  return shifted;
 }
 
 type ProviderConfigurationValidation = {
@@ -172,6 +183,8 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
   // the provider's stable list index rather than its mutable display name, so
   // renaming a provider no longer drops the in-progress secret or model list.
   const [providerSecrets, setProviderSecrets] = useState<Record<number, string>>({});
+  const [providerBuiltIns, setProviderBuiltIns] = useState<boolean[]>([]);
+  const [providerRemovalErrors, setProviderRemovalErrors] = useState<Record<number, string>>({});
   const [notificationWebhook, setNotificationWebhook] = useState('');
   const [ollamaModels, setOllamaModels] = useState<Record<number, OllamaModelLoadState>>({});
   const [paperlessTest, setPaperlessTest] = useState<ConnectionTestState | null>(null);
@@ -179,8 +192,10 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
   const [notificationTest, setNotificationTest] = useState<ConnectionTestState | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const providerStateGeneration = useRef(0);
 
   const loadOllamaModels = (index: number, providerName: string) => {
+    const generation = providerStateGeneration.current;
     setOllamaModels((current) => ({
       ...current,
       [index]: {
@@ -193,6 +208,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
     return api
       .ollamaModels(providerName)
       .then((data) => {
+        if (providerStateGeneration.current !== generation) return;
         setOllamaModels((current) => ({
           ...current,
           [index]: {
@@ -204,6 +220,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         }));
       })
       .catch((err: unknown) => {
+        if (providerStateGeneration.current !== generation) return;
         // Surface the real server error (e.g. "… requires an API key", a 401,
         // or an unreachable host) instead of always blaming Ollama — model
         // discovery now covers OpenAI/Anthropic/OpenAI-compatible too.
@@ -234,6 +251,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       .settings()
       .then((data) => {
         const nextSettings = withModelDefaults(data);
+        setProviderBuiltIns(
+          nextSettings.ai.providers.map((provider) => isBuiltInProviderName(provider.name))
+        );
         setSettings(nextSettings);
         setSavedSettings(nextSettings);
         refreshInstalledOllamaModels(nextSettings);
@@ -253,6 +273,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
     // Any further edit invalidates the "Saved" confirmation so it can't linger
     // over a now-dirty form. (#296)
     setResult(null);
+    setProviderRemovalErrors({});
     setSettings((current) => (current ? updater(current) : current));
   };
 
@@ -334,7 +355,8 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       };
     });
   const openAiCompatibleDefaults = providerDefaults('openai_compatible');
-  const addProvider = () =>
+  const addProvider = () => {
+    setProviderBuiltIns((current) => [...current, false]);
     update((s) => ({
       ...s,
       ai: {
@@ -356,6 +378,68 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         ]
       }
     }));
+  };
+
+  const removeProvider = (index: number) => {
+    const provider = settings.ai.providers[index];
+    if (!provider || providerBuiltIns[index]) return;
+    const references: string[] = [];
+    if (settings.ai.default_provider.trim().toLowerCase() === provider.name.trim().toLowerCase()) {
+      references.push(t('settings.provider.reference_default'));
+    }
+    settings.ai.stage_models
+      .filter(
+        (override) =>
+          override.provider.trim().toLowerCase() === provider.name.trim().toLowerCase()
+      )
+      .forEach((override) =>
+        references.push(t('settings.provider.reference_stage', { stage: override.stage }))
+      );
+    if (references.length > 0) {
+      setProviderRemovalErrors((current) => ({
+        ...current,
+        [index]: t('settings.provider.remove_blocked', {
+          provider: provider.name.trim(),
+          references: references.join(', ')
+        })
+      }));
+      return;
+    }
+    if (
+      !window.confirm(
+        t('settings.provider.remove_confirm', { provider: provider.name.trim() })
+      )
+    ) {
+      return;
+    }
+
+    const interruptedLoads = settings.ai.providers.flatMap((entry, providerIndex) =>
+      providerIndex !== index && ollamaModels[providerIndex]?.loading
+        ? [
+            {
+              index: providerIndex > index ? providerIndex - 1 : providerIndex,
+              providerName: entry.name
+            }
+          ]
+        : []
+    );
+    providerStateGeneration.current += 1;
+    setProviderBuiltIns((current) => current.filter((_, providerIndex) => providerIndex !== index));
+    setProviderSecrets((current) => shiftIndexedProviderState(current, index));
+    setOllamaModels((current) => shiftIndexedProviderState(current, index));
+    setProviderRemovalErrors((current) => shiftIndexedProviderState(current, index));
+    setProviderTest(null);
+    update((current) => ({
+      ...current,
+      ai: {
+        ...current.ai,
+        providers: current.ai.providers.filter((_, providerIndex) => providerIndex !== index)
+      }
+    }));
+    interruptedLoads.forEach(({ index: nextIndex, providerName }) => {
+      void loadOllamaModels(nextIndex, providerName);
+    });
+  };
 
   const selectedDefaultProvider = defaultProvider(settings);
   const selectedDefaultProviderIndex = settings.ai.providers.findIndex(
@@ -490,6 +574,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           .saveSettings(settings, token, providerSecretsByName(settings, providerSecrets), notificationWebhook)
           .then((saved) => {
             const nextSettings = withModelDefaults(saved);
+            setProviderBuiltIns(
+              nextSettings.ai.providers.map((provider) => isBuiltInProviderName(provider.name))
+            );
             setSettings(nextSettings);
             setSavedSettings(nextSettings);
             setToken('');
@@ -574,6 +661,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             onResetTuningBlock={(fields) => resetProviderTuningBlock(index, fields)}
             onRefreshModels={() => loadOllamaModels(index, provider.name)}
             errors={providerValidation.providerErrors[index]}
+            builtIn={providerBuiltIns[index] ?? false}
+            removalError={providerRemovalErrors[index]}
+            onRemove={() => removeProvider(index)}
           />
         ))}
       </div>

@@ -555,6 +555,15 @@ const frMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Activé',
   'settings.provider.add': 'Ajouter un provider',
+  'settings.provider.remove': 'Supprimer le provider',
+  'settings.provider.builtin_disable_only':
+    'Les providers intégrés ne peuvent pas être supprimés ; désactivez-les à la place.',
+  'settings.provider.reference_default': 'provider par défaut',
+  'settings.provider.reference_stage': 'étape {stage}',
+  'settings.provider.remove_blocked':
+    'Le provider « {provider} » ne peut pas être supprimé, car il est référencé par : {references}. Sélectionnez d’abord un autre provider.',
+  'settings.provider.remove_confirm':
+    'Supprimer le provider personnalisé « {provider} » ? Sa clé API non enregistrée et la liste de modèles chargée seront supprimées localement. La configuration enregistrée ne changera qu’après avoir cliqué sur Enregistrer.',
   'settings.provider.validation.name_required': 'Le nom du provider est obligatoire.',
   'settings.provider.validation.name_duplicate':
     'Le nom entre en conflit avec le provider « {name} ». La casse est ignorée.',

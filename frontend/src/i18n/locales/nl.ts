@@ -555,6 +555,15 @@ const nlMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Actief',
   'settings.provider.add': 'Provider toevoegen',
+  'settings.provider.remove': 'Provider verwijderen',
+  'settings.provider.builtin_disable_only':
+    'Ingebouwde providers kunnen niet worden verwijderd; schakel ze in plaats daarvan uit.',
+  'settings.provider.reference_default': 'standaardprovider',
+  'settings.provider.reference_stage': 'fase {stage}',
+  'settings.provider.remove_blocked':
+    'Provider ‘{provider}’ kan niet worden verwijderd omdat ernaar wordt verwezen door: {references}. Selecteer eerst een andere provider.',
+  'settings.provider.remove_confirm':
+    'Aangepaste provider ‘{provider}’ verwijderen? De niet-opgeslagen API-sleutel en geladen modellenlijst worden lokaal verwijderd. De opgeslagen configuratie verandert pas nadat je op Opslaan drukt.',
   'settings.provider.validation.name_required': 'De providernaam is verplicht.',
   'settings.provider.validation.name_duplicate':
     'De naam conflicteert met provider ‘{name}’. Hoofdletters worden genegeerd.',

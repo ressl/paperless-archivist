@@ -54,6 +54,23 @@ const ollamaCloudProvider: AiProvider = {
   }
 };
 
+const builtInProviderNames = new Set([
+  'ollama',
+  'ollama-cloud',
+  'openai',
+  'anthropic',
+  'openai-compatible',
+  'mineru'
+]);
+
+function normalizedProviderName(name: string) {
+  return name.trim().toLowerCase();
+}
+
+export function isBuiltInProviderName(name: string) {
+  return builtInProviderNames.has(normalizedProviderName(name));
+}
+
 const localOllamaTextModels: ModelOption[] = [
   { value: 'qwen3:8b', label: 'qwen3:8b', recommendation: true },
   { value: 'qwen3:4b', label: 'qwen3:4b' },
@@ -330,7 +347,11 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
   const notifications = settings.notifications as Partial<RuntimeSettings['notifications']> | undefined;
   const paperless = settings.paperless as Partial<RuntimeSettings['paperless']>;
   const fields = settings.fields as Partial<RuntimeSettings['fields']>;
-  if (!knownProviders.some((provider) => provider.name === ollamaCloudProvider.name)) {
+  if (
+    !knownProviders.some(
+      (provider) => normalizedProviderName(provider.name) === ollamaCloudProvider.name
+    )
+  ) {
     knownProviders.push(ollamaCloudProvider);
   }
   const providers = knownProviders.map((provider) => ({
@@ -338,7 +359,10 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
     default_text_model: provider.default_text_model || recommendedModel(provider, 'text'),
     default_vision_model: provider.default_vision_model || recommendedModel(provider, 'vision')
   }));
-  const selectedProvider = providers.find((provider) => provider.name === settings.ai.default_provider) ?? localOllamaProvider;
+  const defaultProviderName = normalizedProviderName(settings.ai.default_provider);
+  const selectedProvider =
+    providers.find((provider) => normalizedProviderName(provider.name) === defaultProviderName) ??
+    localOllamaProvider;
   return {
     ...settings,
     paperless: {

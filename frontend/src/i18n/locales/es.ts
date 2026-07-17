@@ -555,6 +555,15 @@ const esMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Activo',
   'settings.provider.add': 'Añadir provider',
+  'settings.provider.remove': 'Eliminar provider',
+  'settings.provider.builtin_disable_only':
+    'Los providers integrados no se pueden eliminar; desactívalos en su lugar.',
+  'settings.provider.reference_default': 'provider predeterminado',
+  'settings.provider.reference_stage': 'etapa {stage}',
+  'settings.provider.remove_blocked':
+    'El provider «{provider}» no se puede eliminar porque está referenciado por: {references}. Selecciona primero otro provider.',
+  'settings.provider.remove_confirm':
+    '¿Eliminar el provider personalizado «{provider}»? Su clave API no guardada y la lista de modelos cargada se descartarán localmente. La configuración guardada solo cambiará después de pulsar Guardar.',
   'settings.provider.validation.name_required': 'El nombre del provider es obligatorio.',
   'settings.provider.validation.name_duplicate':
     'El nombre entra en conflicto con el provider «{name}». No se distinguen mayúsculas.',
