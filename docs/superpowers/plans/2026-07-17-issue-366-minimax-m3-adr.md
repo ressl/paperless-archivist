@@ -16,10 +16,10 @@
 **Files:**
 - Modify: `docs/ARCHITECTURE_DECISIONS.md`
 
-- [ ] Select text-first scope and enumerate every text/control-plane consumer.
-- [ ] Keep SGLang under `openai_compatible` and pin the exact model identity.
-- [ ] Define `ReasoningEffort` to `thinking_mode` mapping, omission behavior, parser fallback, and failure semantics.
-- [ ] Define the future vision gate, OCR dependencies, risks, alternatives, and migration behavior.
+- [x] Select text-first scope and enumerate every text/control-plane consumer.
+- [x] Keep SGLang under `openai_compatible` and pin the exact model identity.
+- [x] Define `ReasoningEffort` to `thinking_mode` mapping, omission behavior, parser fallback, and failure semantics.
+- [x] Define the future vision gate, OCR dependencies, risks, alternatives, and migration behavior.
 
 ### Task 3: Supersede the M2.7 design precisely
 
@@ -27,11 +27,11 @@
 - Modify: `docs/superpowers/specs/2026-07-07-mineru-sglang-providers-design.md`
 - Modify: `docs/FEATURE_REFERENCE.md`
 
-- [ ] Mark the old design as partially superseded while retaining its still-valid protocol and MinerU decisions.
-- [ ] Point the feature reference at the ADR and distinguish current text scope from optional vision capability.
+- [x] Mark the old design as partially superseded while retaining its still-valid protocol and MinerU decisions.
+- [x] Point the feature reference at the ADR and distinguish current text scope from optional vision capability.
 
 ### Task 4: Verify and deliver
 
-- [ ] Check source links, Markdown/diff hygiene, model/template/runtime fingerprints, and repository lint.
-- [ ] Obtain an independent Critical/Important review and resolve every finding.
+- [x] Check source links, Markdown/diff hygiene, model/template/runtime fingerprints, and repository lint.
+- [x] Obtain an independent Critical/Important review and resolve every finding.
 - [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #366 only when green.

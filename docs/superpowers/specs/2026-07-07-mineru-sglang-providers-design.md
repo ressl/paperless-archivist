@@ -1,6 +1,15 @@
 # Spec: MinerU-Provider-Kind + Reasoning-Haertung fuer OpenAI-kompatible Backends (SGLang/MiniMax)
 
-Datum: 2026-07-07 · Status: vom Nutzer freigegebenes Design · Scope: nur App-Seite (kein Deployment)
+Datum: 2026-07-07 · Status: teilweise ersetzt · Scope: nur App-Seite (kein Deployment)
+
+> **Ersetzungshinweis (2026-07-17):**
+> [ADR-014](../../ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider)
+> ersetzt das Zielmodell M2.7 durch
+> `ressl/MiniMax-M3-uncensored-NVFP4`, legt den Text-first-Scope und
+> `chat_template_kwargs.thinking_mode` fest und erweitert den defensiven
+> Parser auf `<mm:think>`. Weiterhin gueltig sind insbesondere der
+> `openai_compatible`-Grundsatz, MinerU als separater OCR-Provider, die
+> Structured-Output-Selbstheilung und `max_output_tokens`.
 
 ## 1. Ziel
 

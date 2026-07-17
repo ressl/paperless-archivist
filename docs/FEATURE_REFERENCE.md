@@ -59,6 +59,18 @@ limitation: the document-chat path and other API-side helper calls
 `max_output_tokens`; worker stage calls (OCR, metadata, tagging,
 consensus) do.
 
+[ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider)
+defines the accepted MiniMax M3 integration contract. The exact target is
+`ressl/MiniMax-M3-uncensored-NVFP4` under the existing
+`openai_compatible` protocol. Its initial product scope is text-only:
+metadata/classification, consensus, the current text-wrapper OCR prompt test,
+the planned consolidated metadata prompt tester (#369), provider testing, and
+Document Chat. The OCR prompt test does not invoke OCR or send an image. OCR
+itself remains on MinerU/Ollama; M3 image input is informational until the
+linked OCR and live-contract gates pass. M3 request and
+`<mm:think>` response support are delivered by the follow-up implementation
+and contract issues #367 through #371.
+
 ## OCR Pipeline
 
 The OCR stage downloads the Paperless original through the backend/worker,
