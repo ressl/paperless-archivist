@@ -40,4 +40,4 @@
 - [x] Replace the obsolete API-helper tuning limitation with the now-shared behavior.
 - [x] Run focused red/green tests, API/Core/AI tests, workspace checks, formatting, lint, and documentation checks.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #368 only when green.
+- [x] Commit/push, verify both GitLab pipelines, document evidence, and close #368 only when green.
