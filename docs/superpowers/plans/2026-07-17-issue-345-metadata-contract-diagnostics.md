@@ -29,4 +29,4 @@
 
 - [x] Run targeted parser and worker-routing tests.
 - [x] Run formatting, Clippy, workspace tests, audit, deny, frontend gates, and PostgreSQL integration tests.
-- [ ] Commit, push, inspect the MR pipeline, document evidence, and close #345 only after the remote gate is green.
+- [x] Commit, push, inspect the MR pipeline, document evidence, and close #345 only after the remote gate is green.
