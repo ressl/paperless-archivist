@@ -10,6 +10,10 @@ production-like Docker Compose, generic Kubernetes, and local development.
 - Docker with Compose support for the recommended quick start.
 - Optional Ollama for local AI.
 - Optional OpenAI, Anthropic, Ollama Cloud, or OpenAI-compatible API key.
+- Optional SGLang for the exact text-only MiniMax M3 integration. Use the
+  model/runtime pins and parser requirements in the
+  [operations runbook](OPERATIONS.md#sglangminimax-m3-operations); Archivist
+  does not install or manage the inference runtime.
 
 Paperless Archivist does not require direct access to the Paperless database.
 It only uses the Paperless REST API.
@@ -119,6 +123,11 @@ Then patch:
 - NetworkPolicy according to your cluster
 
 See [`deploy/kubernetes/README.md`](../deploy/kubernetes/README.md).
+In-cluster SGLang or MinerU endpoints require the public-safe
+[`custom-ai-egress` component](../deploy/kubernetes/README.md#opt-in-egress-to-custom-ai-providers)
+adapted to the real namespace labels, pod labels, and Service target ports in
+your private overlay. Do not replace it with unrestricted namespace or private
+CIDR egress.
 
 ## Local Development
 
@@ -168,6 +177,10 @@ npm --prefix frontend run generate:client
 8. Run Dashboard Sync.
 9. Queue one OCR job and one tagging job.
 10. Review results before enabling autopilot.
+
+For SGLang/MiniMax M3, follow the dedicated
+[Settings procedure](USER_GUIDE.md#sglang-with-minimax-m3-text-only), then run
+the opt-in live contract before production use.
 
 ## Commercial Providers
 

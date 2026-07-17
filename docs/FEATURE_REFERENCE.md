@@ -63,15 +63,19 @@ or discard that provider profile.
 [ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider)
 defines the accepted MiniMax M3 integration contract. The exact target is
 `ressl/MiniMax-M3-uncensored-NVFP4` under the existing
-`openai_compatible` protocol. Its initial product scope is text-only:
+`openai_compatible` protocol. Its product scope is text-only:
 metadata/classification, consensus, the current text-wrapper OCR prompt test,
-the planned consolidated metadata prompt tester (#369), provider testing, and
-Document Chat. The OCR prompt test does not invoke OCR or send an image. OCR
-itself remains on MinerU/Ollama; M3 image input is informational until the
-linked OCR and live-contract gates pass. M3 request and
-`thinking_mode` and `<mm:think>` response support are implemented by #367;
-shared API-consumer tuning is implemented by #368. The remaining catalog,
-live-contract, and operations gates are tracked in #369 through #371.
+the consolidated metadata prompt tester, provider testing, and Document Chat.
+The OCR prompt test does not invoke OCR or send an image. OCR itself remains on
+MinerU/Ollama; M3 image input is informational until the linked OCR and
+live-contract gates pass. `thinking_mode` and `<mm:think>` response support are
+applied on every selected M3 request, while worker stages, Prompt Tester,
+provider test, and Document Chat share the selected provider's effective
+tuning and timeout. The disabled M3 preset, live contract, and measured
+capacity profile are complete; operators should use the
+[Settings guide](USER_GUIDE.md#sglang-with-minimax-m3-text-only) and
+[operations runbook](OPERATIONS.md#sglangminimax-m3-operations). M3 vision/OCR
+still requires a separate ADR update plus the #322 through #338 gates.
 
 ## OCR Pipeline
 

@@ -105,6 +105,7 @@ Archivist ships with default provider records:
 - `openai`
 - `anthropic`
 - `openai-compatible`
+- `sglang-minimax-m3`
 - `mineru`
 
 Commercial providers usually only need an API key. Local Ollama usually needs
@@ -200,33 +201,94 @@ service in front of a vision-language OCR model):
 - The OCR prompt setting has no effect for this kind, since MinerU ignores
   prompt, temperature, and context-size parameters.
 
-### Example: SGLang (MiniMax) + MinerU
+### SGLang With MiniMax M3 (Text Only)
 
-A common local setup uses an OpenAI-compatible SGLang server for every text
-stage and MinerU only for OCR. Configure both provider cards in `Settings`,
-then set `Default provider` to the SGLang entry in the `AI Defaults` section.
-The resulting provider settings look like this (`base_url`/host values are
-placeholders):
+Archivist includes a disabled `sglang-minimax-m3` provider preset for the exact
+model `ressl/MiniMax-M3-uncensored-NVFP4`. It uses the existing
+`openai_compatible` protocol; there is no separate SGLang provider kind. The
+preset is deliberately text-only and has no vision model.
+
+Before enabling it, the SGLang operator must pin a runtime/model pair accepted
+by [ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider),
+serve the exact model ID through `GET /v1/models`, and launch SGLang with
+`--reasoning-parser auto` and `--tool-call-parser auto`. The parser flags are
+required for separated `reasoning_content` and standard OpenAI tool calls. A
+mutable SGLang development tag is not a production pin.
+
+Configure the preset in `Settings`:
+
+1. Set `Base URL` to the credential-free OpenAI-compatible `/v1` endpoint,
+   for example `https://sglang.example.invalid/v1`.
+2. Enter the API key in the password field if the endpoint requires one. Save
+   it through Settings so Archivist stores an encrypted secret reference;
+   never paste a key into exported settings or documentation.
+3. Click `Refresh` and confirm the model list contains exactly
+   `ressl/MiniMax-M3-uncensored-NVFP4`.
+4. Keep the preset values `Worker concurrency = 1`, `Max output tokens = 4096`,
+   `Structured output = auto`, `Request timeout = 180 seconds`, and reasoning
+   unset/off for the conservative default profile.
+5. Enable the provider, save, select it as `Default provider` under
+   `AI Defaults`, and run `Test`. Then test one Prompt Tester request and one
+   Document Chat request before enabling worker automation.
+
+The public-safe settings shape is:
 
 ```jsonc
 // settings.ai.providers (excerpt)
-{ "name": "sglang-minimax", "kind": "openai_compatible",
-  "base_url": "http://<omega>:<port>/v1",
-  "default_text_model": "nvidia/MiniMax-M2.7-NVFP4",
-  "tuning": { "max_output_tokens": 8192 } },
+{ "name": "sglang-minimax-m3", "kind": "openai_compatible",
+  "base_url": "https://sglang.example.invalid/v1",
+  "default_text_model": "ressl/MiniMax-M3-uncensored-NVFP4",
+  "default_vision_model": null,
+  "secret_id": "secret-reference-created-by-settings",
+  "enabled": true,
+  "tuning": {
+    "worker_concurrency": 1,
+    "reasoning_effort": null,
+    "max_output_tokens": 4096,
+    "structured_output": "auto",
+    "request_timeout_seconds": 180
+  } }
+// settings.ai.default_provider = "sglang-minimax-m3"
+```
+
+Archivist maps its effective reasoning setting to the M3 chat template on
+every request:
+
+| Archivist setting | M3 `thinking_mode` |
+| --- | --- |
+| unset or `off` | `disabled` |
+| `low` | `adaptive` |
+| `medium` or `high` | `enabled` |
+
+`max_output_tokens` is the total cap for reasoning plus the final answer. In
+`auto` structured-output mode, schema consumers first send strict JSON Schema;
+a schema-related HTTP 400 gets one bounded retry without `response_format`.
+Schema-free consumers, including Document Chat, do not acquire a schema merely
+because the provider uses `auto`. Prompt Tester, provider test, Document Chat,
+and worker text stages all use the selected provider's effective tuning and
+timeout.
+
+For OCR, configure MinerU or Ollama separately. A common split is:
+
+```jsonc
 { "name": "mineru", "kind": "mineru",
-  "base_url": "http://<mineru-host>:<port>",
+  "base_url": "https://mineru.example.invalid",
   "default_vision_model": "mineru" }
-// settings.ai.default_provider = "sglang-minimax"
+// settings.ai.default_provider = "sglang-minimax-m3"
 // settings.ai.stage_models = [{ "stage": "ocr", "provider": "mineru", "model": "mineru" }]
 ```
 
-Because MinerU rejects text requests, the OCR stage needs the `stage_models`
-override shown above so only OCR routes to MinerU while every other stage
-keeps using the default SGLang provider. There is no Settings UI control for
-`stage_models` yet; an admin sets it by calling `PUT /api/settings` (for
-example with a scoped API token) with the desired `ai.stage_models` array
-alongside the rest of the settings JSON returned by `GET /api/settings`.
+The OCR override routes only page images to MinerU while every text consumer
+uses M3. The current Settings UI does not edit `stage_models`; an administrator
+reads the current document with `GET /api/settings`, preserves the other
+settings, and sends the added override through `PUT /api/settings` using a
+scoped API token. M3 vision remains outside release scope until ADR-014 is
+updated, the live image contract and OCR quality/capacity gates pass, and
+issues #322 through #338 (especially #323, #324, #326, and #327) are complete.
+The current OCR prompt tester is only a text wrapper around sample OCR text; it
+does not send an image to M3. See the
+[operations runbook](OPERATIONS.md#sglangminimax-m3-operations) for live
+validation, NetworkPolicy, capacity, and symptom-specific troubleshooting.
 
 ## Sync Inventory
 

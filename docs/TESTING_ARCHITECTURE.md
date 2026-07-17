@@ -132,6 +132,20 @@ as `passed_with_informational_failure`. Exit code `1` means a live contract
 failed, and `2` means configuration was invalid. Setting
 `SGLANG_CONTRACT_VISION_SCOPE=gate` makes image failure return `1`.
 
+For an operator acceptance run that excludes the informational image probe,
+select the release-gating text matrix explicitly:
+
+```bash
+SGLANG_CONTRACT_BASE_URL=https://sglang.example.invalid/v1 \
+SGLANG_CONTRACT_API_KEY_FILE=/run/secrets/sglang-key \
+SGLANG_CONTRACTS=models,text,schema,reasoning-disabled,reasoning-enabled,reasoning-adaptive,tool \
+node scripts/verify/sglang_minimax_m3_contract.mjs
+```
+
+Runtime/parser prerequisites, the API/worker validation order, and failure
+remediation are in the
+[operations runbook](OPERATIONS.md#sglangminimax-m3-operations).
+
 The versioned report contains public model/runtime/image fingerprints,
 per-contract latency, status, and at most 512 characters of redacted failure
 diagnostics. It never contains the endpoint, authorization value, request

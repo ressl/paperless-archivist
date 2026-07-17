@@ -93,6 +93,12 @@ throughput by about 13% versus two while increasing p50 latency from 1.01 to
 method, p50/p95, throughput, timeout/error rates, the mixed application-path
 E2E gate, retry bounds, and the revalidation command.
 
+This profile is evidence for the exact reviewed pins and two request slots,
+not a general SGLang capacity promise. Follow the
+[M3 operations runbook](OPERATIONS.md#sglangminimax-m3-operations) for the
+validation order and symptom-specific timeout, parser, schema, authentication,
+and NetworkPolicy diagnostics before changing the profile.
+
 ### OCR vision fallback lease fencing
 
 One OCR page can involve three high-level provider calls when an Ollama vision

@@ -8,6 +8,13 @@
 
 ## Unreleased
 
+- **SGLang/MiniMax M3 operator runbook (#374):** the disabled text-only
+  `sglang-minimax-m3` preset now has one public-safe setup and troubleshooting
+  path covering the exact model identity, immutable runtime pins, required
+  reasoning/tool parsers, Thinking mapping, output/schema/timeout behavior,
+  encrypted secret references, `/models` discovery, live contract, measured
+  capacity, and opt-in Kubernetes egress. The old M2.7 example is explicitly
+  historical; M3 vision/OCR remains gated behind ADR-014 and #322 through #338.
 - **Document Chat request ownership (#286):** initial message loads and the
   slow post-send refresh now share one session-plus-generation commit guard.
   Switching A -> B (including A -> B -> A) invalidates stale responses and
