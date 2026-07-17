@@ -4,7 +4,7 @@
 
 **Goal:** Keep every runtime Axum route discoverable in OpenAPI and prevent path or method drift in CI.
 
-**Architecture:** A Node contract scanner extracts `.route(...)` calls from the four named Axum router builders, applies their runtime nest prefixes, and compares the resulting method/path set bidirectionally with the OpenAPI paths map. Missing endpoint contracts use closed reusable schemas and shared JSON error responses. A compile-time TypeScript assertion proves that the regenerated client exposes the newly documented routes.
+**Architecture:** A Node contract scanner discovers the local Axum `Router::new()` graph, follows `.nest(...)` and `.merge(...)` edges from the top-level app, applies their runtime prefixes, and compares every resulting method/path pair bidirectionally with the OpenAPI paths map. Missing endpoint contracts use closed reusable schemas and shared JSON error responses. A compile-time TypeScript assertion proves that the regenerated client exposes the newly documented routes.
 
 **Tech Stack:** Axum/Rust source, OpenAPI 3.1, Node.js/YAML, openapi-typescript, TypeScript 6.
 
@@ -24,22 +24,22 @@
 - Modify: `frontend/package.json`
 - Modify: `.gitlab-ci.yml`
 
-- [ ] Implement balanced source scanning for protected, public-auth, webhook, and top-level routers.
-- [ ] Parse OpenAPI YAML and compare normalized path/method pairs in both directions.
-- [ ] Demonstrate the current contract fails with the exact undocumented runtime routes.
-- [ ] Wire the contract into the frontend OpenAPI validation job.
+- [x] Implement balanced source scanning that discovers and traverses the mounted router graph.
+- [x] Parse OpenAPI YAML and compare normalized path/method pairs in both directions.
+- [x] Demonstrate the current contract fails with the exact undocumented runtime routes.
+- [x] Wire the contract into the frontend OpenAPI validation job.
 
 ### Task 2: Document every missing runtime route
 
 **Files:**
 - Modify: `openapi/openapi.yaml`
 
-- [ ] Add prompt experiments and inventory duplicate contracts.
-- [ ] Add selected and failed batch rerun contracts.
-- [ ] Add review auto-fix preview, bulk, and single-item contracts.
-- [ ] Add unblock, provider cooldown read/clear, and scheduled-retry release contracts.
-- [ ] Add the shared-secret Paperless webhook contract outside cookie/bearer security.
-- [ ] Define closed request/response/error schemas with correct required, nullable, bounds, UUID, date-time, and authentication semantics.
+- [x] Add prompt experiments and inventory duplicate contracts.
+- [x] Add selected and failed batch rerun contracts.
+- [x] Add review auto-fix preview, bulk, and single-item contracts.
+- [x] Add unblock, provider cooldown read/clear, and scheduled-retry release contracts.
+- [x] Add the shared-secret Paperless webhook contract outside cookie/bearer security.
+- [x] Define closed request/response/error schemas with correct required, nullable, bounds, UUID, date-time, and authentication semantics.
 
 ### Task 3: Regenerate and verify the client contract
 
@@ -47,7 +47,7 @@
 - Modify: `frontend/src/api/schema.ts`
 - Add: `frontend/src/api/schema.contract.ts`
 
-- [ ] Add compile-time assertions for every newly documented generated path/method.
-- [ ] Regenerate `schema.ts` and prove a second generation is diff-free.
-- [ ] Run route/settings contracts, TypeScript typecheck, frontend tests/build, Rust tests/format, and repository diff checks.
+- [x] Add compile-time assertions for every newly documented generated path/method.
+- [x] Regenerate `schema.ts` and prove a second generation is diff-free.
+- [x] Run route/settings contracts, TypeScript typecheck, frontend tests/build, Rust tests/format, and repository diff checks.
 - [ ] Obtain independent review, commit, push, and close #354 only after the MR pipeline is green.

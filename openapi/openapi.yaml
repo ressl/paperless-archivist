@@ -16,7 +16,74 @@ components:
     bearerToken:
       type: http
       scheme: bearer
+    webhookSecret:
+      type: apiKey
+      in: header
+      name: X-Webhook-Secret
+      description: Shared secret configured through ARCHIVIST_WEBHOOK_SECRET.
+  responses:
+    BadRequest:
+      description: Invalid path, query, or request payload
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+        text/plain:
+          schema: { type: string }
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Forbidden:
+      description: Authenticated principal lacks the required permission or session type
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    InternalServerError:
+      description: Internal server or persistence error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    ServiceUnavailable:
+      description: Endpoint or required service is unavailable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    PayloadTooLarge:
+      description: Request body exceeds the configured route limit
+      content:
+        text/plain:
+          schema: { type: string }
+    UnsupportedMediaType:
+      description: JSON request body has a missing or unsupported Content-Type
+      content:
+        text/plain:
+          schema: { type: string }
+    UnprocessableEntity:
+      description: JSON is syntactically valid but cannot be deserialized into the request type
+      content:
+        text/plain:
+          schema: { type: string }
+  parameters:
+    ConditionalCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required for cookieSession authentication; omit when bearerToken is used.
+      schema: { type: string }
+    RequiredCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: CSRF token paired with the interactive pa_session cookie.
+      schema: { type: string }
   schemas:
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: string }
     Role:
       type: string
       enum: [viewer, reviewer, operator, admin, auditor]
@@ -1626,6 +1693,216 @@ components:
           type: [string, "null"]
         last_model:
           type: [string, "null"]
+    PromptExperiment:
+      type: object
+      additionalProperties: false
+      required: [group, total, approved, rejected, edited, applied, mean_confidence]
+      properties:
+        group: { type: string }
+        total: { type: integer, format: int64, minimum: 0 }
+        approved: { type: integer, format: int64, minimum: 0 }
+        rejected: { type: integer, format: int64, minimum: 0 }
+        edited: { type: integer, format: int64, minimum: 0 }
+        applied: { type: integer, format: int64, minimum: 0 }
+        mean_confidence: { type: [number, "null"], format: double }
+    PromptExperimentsResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PromptExperiment" }
+    DuplicateDocument:
+      type: object
+      additionalProperties: false
+      required: [paperless_document_id, title]
+      properties:
+        paperless_document_id: { type: integer, format: int32 }
+        title: { type: [string, "null"] }
+    DuplicateGroup:
+      type: object
+      additionalProperties: false
+      required: [hash, documents]
+      properties:
+        hash: { type: string }
+        documents:
+          type: array
+          minItems: 2
+          items: { $ref: "#/components/schemas/DuplicateDocument" }
+    InventoryDuplicatesResponse:
+      type: object
+      additionalProperties: false
+      required: [groups, paperless_base]
+      properties:
+        groups:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/DuplicateGroup" }
+        paperless_base:
+          type: string
+          description: Public Paperless URL without a trailing slash, falling back to base_url.
+    QueueCountResponse:
+      type: object
+      additionalProperties: false
+      required: [queued]
+      properties:
+        queued: { type: integer, format: int64, minimum: 0 }
+    RerunBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [document_ids, stages]
+      properties:
+        document_ids:
+          type: array
+          minItems: 1
+          items: { type: integer, format: int32 }
+        stages:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/Stage" }
+    RerunFailedBatchResponse:
+      type: object
+      additionalProperties: false
+      required: [queued, candidates]
+      properties:
+        queued: { type: integer, format: int64, minimum: 0 }
+        candidates: { type: integer, format: int64, minimum: 0 }
+    ReviewAutoFixRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        limit:
+          type: [integer, "null"]
+          format: int64
+          description: Requested batch size; the runtime clamps values to the range 1 through 2000.
+    ReviewAutoFixPreviewSample:
+      type: object
+      additionalProperties: false
+      required: [id, paperless_document_id, stage, action, fields_dropped]
+      properties:
+        id: { type: string, format: uuid }
+        paperless_document_id: { type: integer, format: int32 }
+        stage: { $ref: "#/components/schemas/Stage" }
+        action: { type: string, enum: [apply, reject] }
+        fields_dropped:
+          type: array
+          items: { type: string }
+    ReviewAutoFixPreviewResponse:
+      type: object
+      additionalProperties: false
+      required: [total_pending, would_apply, would_reject, sample]
+      properties:
+        total_pending: { type: integer, format: int64, minimum: 0 }
+        would_apply: { type: integer, format: int64, minimum: 0 }
+        would_reject: { type: integer, format: int64, minimum: 0 }
+        sample:
+          type: array
+          maxItems: 20
+          items: { $ref: "#/components/schemas/ReviewAutoFixPreviewSample" }
+    ReviewAutoFixError:
+      type: object
+      additionalProperties: false
+      required: [id, error]
+      properties:
+        id: { type: string, format: uuid }
+        error: { type: string }
+    ReviewAutoFixBulkResponse:
+      type: object
+      additionalProperties: false
+      required: [applied, rejected, errors]
+      properties:
+        applied: { type: integer, format: int64, minimum: 0 }
+        rejected: { type: integer, format: int64, minimum: 0 }
+        errors:
+          type: array
+          items: { $ref: "#/components/schemas/ReviewAutoFixError" }
+    ReviewAutoFixSingleResponse:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: { type: string, enum: [applied, rejected] }
+    UnblockJobsRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        error_substring:
+          type: [string, "null"]
+          description: Restrict requeueing to failed predecessor errors containing this text.
+        clear_provider_cooldowns:
+          type: boolean
+          description: Defaults to true when omitted.
+          example: true
+    UnblockJobsResponse:
+      type: object
+      additionalProperties: false
+      required: [predecessors_requeued, runs_unblocked, cooldowns_cleared, retries_released]
+      properties:
+        predecessors_requeued: { type: integer, format: int64, minimum: 0 }
+        runs_unblocked: { type: integer, format: int64, minimum: 0 }
+        cooldowns_cleared: { type: integer, format: int64, minimum: 0 }
+        retries_released: { type: integer, format: int64, minimum: 0 }
+    ProviderCooldown:
+      type: object
+      additionalProperties: false
+      required: [provider_name, cooldown_until, reason, set_at]
+      properties:
+        provider_name: { type: string }
+        cooldown_until: { type: string, format: date-time }
+        reason: { type: string }
+        set_at: { type: string, format: date-time }
+    ProviderCooldownsResponse:
+      type: object
+      additionalProperties: false
+      required: [cooldowns]
+      properties:
+        cooldowns:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderCooldown" }
+    ClearProviderCooldownRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        provider_name:
+          type: [string, "null"]
+          description: Provider to clear; omit or set null to clear every active cooldown.
+    ClearProviderCooldownResponse:
+      type: object
+      additionalProperties: false
+      required: [cleared, released]
+      properties:
+        cleared: { type: integer, format: int64, minimum: 0 }
+        released: { type: integer, format: int64, minimum: 0 }
+    ReleaseScheduledRetriesResponse:
+      type: object
+      additionalProperties: false
+      required: [released]
+      properties:
+        released: { type: integer, format: int64, minimum: 0 }
+    WebhookConsumedRequest:
+      description: A non-empty document batch, one document, or both shapes together.
+      anyOf:
+        - type: object
+          additionalProperties: false
+          required: [document_ids]
+          properties:
+            document_ids:
+              type: array
+              minItems: 1
+              items: { type: integer, format: int32, minimum: 1 }
+            document_id:
+              type: [integer, "null"]
+              format: int32
+              minimum: 1
+        - type: object
+          additionalProperties: false
+          required: [document_id]
+          properties:
+            document_ids:
+              type: [array, "null"]
+              items: { type: integer, format: int32, minimum: 1 }
+            document_id: { type: integer, format: int32, minimum: 1 }
     TestPromptRequest:
       type: object
       required: [stage, content]
@@ -1906,6 +2183,32 @@ paths:
           schema: { type: string }
       responses:
         "303": { description: Login completed and session cookies issued }
+  /api/webhooks/paperless/document-consumed:
+    post:
+      summary: Queue newly consumed Paperless documents immediately
+      description: >-
+        Machine-to-machine endpoint outside user authentication. The shared
+        X-Webhook-Secret is compared against ARCHIVIST_WEBHOOK_SECRET.
+      security:
+        - webhookSecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookConsumedRequest" }
+      responses:
+        "202":
+          description: Documents accepted and queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueCountResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /api/auth/logout:
     post:
       responses:
@@ -2057,6 +2360,19 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/PromptUsage" }
+  /api/prompts/experiments:
+    get:
+      summary: Aggregate prompt experiment review outcomes
+      description: Requires the settings:read permission.
+      responses:
+        "200":
+          description: Prompt experiment outcome groups
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PromptExperimentsResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/prompts/{id}/activate:
     post:
       parameters:
@@ -2222,6 +2538,19 @@ paths:
           description: Inventory page
         "400":
           description: Unparseable date_from/date_to filter
+  /api/inventory/duplicates:
+    get:
+      summary: List OCR-content duplicate groups
+      description: Requires the inventory:read permission; results are capped at 200 groups.
+      responses:
+        "200":
+          description: Documents grouped by their shared OCR content hash
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventoryDuplicatesResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/ai/runtime-hints:
     get:
       summary: Live runtime hints for a provider (loaded model, VRAM, version)
@@ -2347,6 +2676,45 @@ paths:
     post:
       responses:
         "200": { description: Queued missing full pipeline jobs }
+  /api/batches/rerun:
+    post:
+      summary: Queue selected documents and stages again
+      description: Requires the batches:write permission. Duplicate document IDs are coalesced.
+      parameters:
+        - $ref: "#/components/parameters/ConditionalCsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RerunBatchRequest" }
+      responses:
+        "200":
+          description: Selected reruns queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueCountResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/batches/rerun-failed:
+    post:
+      summary: Queue every currently failed document again
+      description: Requires the batches:write permission; active reruns are skipped.
+      parameters:
+        - $ref: "#/components/parameters/ConditionalCsrfToken"
+      responses:
+        "200":
+          description: Failed-document rerun summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RerunFailedBatchResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews:
     get:
       parameters:
@@ -2358,6 +2726,56 @@ paths:
           schema: { type: integer, default: 100 }
       responses:
         "200": { description: Review queue }
+  /api/reviews/auto-fix-preview:
+    post:
+      summary: Preview deterministic cleanup of pending reviews
+      description: Requires the reviews:write permission; bearer tokens are accepted.
+      parameters:
+        - $ref: "#/components/parameters/ConditionalCsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReviewAutoFixRequest" }
+      responses:
+        "200":
+          description: Preview counts and a bounded decision sample
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewAutoFixPreviewResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/reviews/auto-fix:
+    post:
+      summary: Apply deterministic cleanup to pending reviews
+      description: Requires the reviews:write permission and an interactive user session.
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReviewAutoFixRequest" }
+      responses:
+        "200":
+          description: Applied, rejected, and per-item failure counts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewAutoFixBulkResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/{id}/approve:
     post:
       parameters:
@@ -2415,6 +2833,28 @@ paths:
                   additionalProperties: true
       responses:
         "200": { description: Edited and applied }
+  /api/reviews/{id}/auto-fix:
+    post:
+      summary: Apply deterministic cleanup to one pending review
+      description: Requires the reviews:write permission and an interactive user session.
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Review applied or rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewAutoFixSingleResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/operations/recovery:
     get:
       parameters:
@@ -2453,6 +2893,88 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RecoveryActionResponse" }
+  /api/operations/unblock-jobs:
+    post:
+      summary: Requeue failed predecessor jobs and optionally clear provider cooldowns
+      description: Requires the runs:write permission and an interactive user session.
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UnblockJobsRequest" }
+      responses:
+        "200":
+          description: Unblock and cooldown-release counts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UnblockJobsResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/operations/provider-cooldowns:
+    get:
+      summary: List active AI provider cooldowns
+      description: Requires the runs:read permission.
+      responses:
+        "200":
+          description: Active cooldowns
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderCooldownsResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/operations/provider-cooldowns/clear:
+    post:
+      summary: Clear one or all provider cooldowns and wake deferred jobs
+      description: Requires the runs:write permission and an interactive user session.
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClearProviderCooldownRequest" }
+      responses:
+        "200":
+          description: Cleared cooldown and released job counts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearProviderCooldownResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/operations/release-scheduled-retries:
+    post:
+      summary: Wake jobs deferred by a cooldown or another backoff
+      description: Requires the runs:write permission and an interactive user session.
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+      responses:
+        "200":
+          description: Released job count
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReleaseScheduledRetriesResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/audit:
     get:
       parameters:

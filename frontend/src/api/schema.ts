@@ -295,6 +295,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/webhooks/paperless/document-consumed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue newly consumed Paperless documents immediately
+         * @description Machine-to-machine endpoint outside user authentication. The shared X-Webhook-Secret is compared against ARCHIVIST_WEBHOOK_SECRET.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["WebhookConsumedRequest"];
+                };
+            };
+            responses: {
+                /** @description Documents accepted and queued */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["QueueCountResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/logout": {
         parameters: {
             query?: never;
@@ -821,6 +871,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/prompts/experiments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Aggregate prompt experiment review outcomes
+         * @description Requires the settings:read permission.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Prompt experiment outcome groups */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PromptExperimentsResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/prompts/{id}/activate": {
         parameters: {
             query?: never;
@@ -1251,6 +1343,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/inventory/duplicates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List OCR-content duplicate groups
+         * @description Requires the inventory:read permission; results are capped at 200 groups.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Documents grouped by their shared OCR content hash */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["InventoryDuplicatesResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ai/runtime-hints": {
         parameters: {
             query?: never;
@@ -1587,6 +1721,104 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/rerun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue selected documents and stages again
+         * @description Requires the batches:write permission. Duplicate document IDs are coalesced.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Required for cookieSession authentication; omit when bearerToken is used. */
+                    "X-CSRF-Token"?: components["parameters"]["ConditionalCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RerunBatchRequest"];
+                };
+            };
+            responses: {
+                /** @description Selected reruns queued */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["QueueCountResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/rerun-failed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue every currently failed document again
+         * @description Requires the batches:write permission; active reruns are skipped.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Required for cookieSession authentication; omit when bearerToken is used. */
+                    "X-CSRF-Token"?: components["parameters"]["ConditionalCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Failed-document rerun summary */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RerunFailedBatchResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reviews": {
         parameters: {
             query?: never;
@@ -1617,6 +1849,112 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/auto-fix-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview deterministic cleanup of pending reviews
+         * @description Requires the reviews:write permission; bearer tokens are accepted.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Required for cookieSession authentication; omit when bearerToken is used. */
+                    "X-CSRF-Token"?: components["parameters"]["ConditionalCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ReviewAutoFixRequest"];
+                };
+            };
+            responses: {
+                /** @description Preview counts and a bounded decision sample */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReviewAutoFixPreviewResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/auto-fix": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply deterministic cleanup to pending reviews
+         * @description Requires the reviews:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ReviewAutoFixRequest"];
+                };
+            };
+            responses: {
+                /** @description Applied, rejected, and per-item failure counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReviewAutoFixBulkResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -1777,6 +2115,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/reviews/{id}/auto-fix": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply deterministic cleanup to one pending review
+         * @description Requires the reviews:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Review applied or rejected */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReviewAutoFixSingleResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/operations/recovery": {
         parameters: {
             query?: never;
@@ -1884,6 +2270,199 @@ export interface paths {
                         "application/json": components["schemas"]["RecoveryActionResponse"];
                     };
                 };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/unblock-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Requeue failed predecessor jobs and optionally clear provider cooldowns
+         * @description Requires the runs:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UnblockJobsRequest"];
+                };
+            };
+            responses: {
+                /** @description Unblock and cooldown-release counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UnblockJobsResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/provider-cooldowns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active AI provider cooldowns
+         * @description Requires the runs:read permission.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Active cooldowns */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderCooldownsResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/provider-cooldowns/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear one or all provider cooldowns and wake deferred jobs
+         * @description Requires the runs:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ClearProviderCooldownRequest"];
+                };
+            };
+            responses: {
+                /** @description Cleared cooldown and released job counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ClearProviderCooldownResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/release-scheduled-retries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Wake jobs deferred by a cooldown or another backoff
+         * @description Requires the runs:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Released job count */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReleaseScheduledRetriesResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
             };
         };
         delete?: never;
@@ -2412,6 +2991,9 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ErrorResponse: {
+            error: string;
+        };
         /** @enum {string} */
         Role: "viewer" | "reviewer" | "operator" | "admin" | "auditor";
         /** @enum {string} */
@@ -3600,6 +4182,148 @@ export interface components {
             last_provider?: string | null;
             last_model?: string | null;
         };
+        PromptExperiment: {
+            group: string;
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            approved: number;
+            /** Format: int64 */
+            rejected: number;
+            /** Format: int64 */
+            edited: number;
+            /** Format: int64 */
+            applied: number;
+            /** Format: double */
+            mean_confidence: number | null;
+        };
+        PromptExperimentsResponse: {
+            items: components["schemas"]["PromptExperiment"][];
+        };
+        DuplicateDocument: {
+            /** Format: int32 */
+            paperless_document_id: number;
+            title: string | null;
+        };
+        DuplicateGroup: {
+            hash: string;
+            documents: components["schemas"]["DuplicateDocument"][];
+        };
+        InventoryDuplicatesResponse: {
+            groups: components["schemas"]["DuplicateGroup"][];
+            /** @description Public Paperless URL without a trailing slash, falling back to base_url. */
+            paperless_base: string;
+        };
+        QueueCountResponse: {
+            /** Format: int64 */
+            queued: number;
+        };
+        RerunBatchRequest: {
+            document_ids: number[];
+            stages: components["schemas"]["Stage"][];
+        };
+        RerunFailedBatchResponse: {
+            /** Format: int64 */
+            queued: number;
+            /** Format: int64 */
+            candidates: number;
+        };
+        ReviewAutoFixRequest: {
+            /**
+             * Format: int64
+             * @description Requested batch size; the runtime clamps values to the range 1 through 2000.
+             */
+            limit?: number | null;
+        };
+        ReviewAutoFixPreviewSample: {
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            paperless_document_id: number;
+            stage: components["schemas"]["Stage"];
+            /** @enum {string} */
+            action: "apply" | "reject";
+            fields_dropped: string[];
+        };
+        ReviewAutoFixPreviewResponse: {
+            /** Format: int64 */
+            total_pending: number;
+            /** Format: int64 */
+            would_apply: number;
+            /** Format: int64 */
+            would_reject: number;
+            sample: components["schemas"]["ReviewAutoFixPreviewSample"][];
+        };
+        ReviewAutoFixError: {
+            /** Format: uuid */
+            id: string;
+            error: string;
+        };
+        ReviewAutoFixBulkResponse: {
+            /** Format: int64 */
+            applied: number;
+            /** Format: int64 */
+            rejected: number;
+            errors: components["schemas"]["ReviewAutoFixError"][];
+        };
+        ReviewAutoFixSingleResponse: {
+            /** @enum {string} */
+            action: "applied" | "rejected";
+        };
+        UnblockJobsRequest: {
+            /** @description Restrict requeueing to failed predecessor errors containing this text. */
+            error_substring?: string | null;
+            /**
+             * @description Defaults to true when omitted.
+             * @example true
+             */
+            clear_provider_cooldowns?: boolean;
+        };
+        UnblockJobsResponse: {
+            /** Format: int64 */
+            predecessors_requeued: number;
+            /** Format: int64 */
+            runs_unblocked: number;
+            /** Format: int64 */
+            cooldowns_cleared: number;
+            /** Format: int64 */
+            retries_released: number;
+        };
+        ProviderCooldown: {
+            provider_name: string;
+            /** Format: date-time */
+            cooldown_until: string;
+            reason: string;
+            /** Format: date-time */
+            set_at: string;
+        };
+        ProviderCooldownsResponse: {
+            cooldowns: components["schemas"]["ProviderCooldown"][];
+        };
+        ClearProviderCooldownRequest: {
+            /** @description Provider to clear; omit or set null to clear every active cooldown. */
+            provider_name?: string | null;
+        };
+        ClearProviderCooldownResponse: {
+            /** Format: int64 */
+            cleared: number;
+            /** Format: int64 */
+            released: number;
+        };
+        ReleaseScheduledRetriesResponse: {
+            /** Format: int64 */
+            released: number;
+        };
+        /** @description A non-empty document batch, one document, or both shapes together. */
+        WebhookConsumedRequest: {
+            document_ids: number[];
+            /** Format: int32 */
+            document_id?: number | null;
+        } | {
+            document_ids?: number[] | null;
+            /** Format: int32 */
+            document_id: number;
+        };
         TestPromptRequest: {
             stage: components["schemas"]["Stage"];
             content: string;
@@ -3735,8 +4459,87 @@ export interface components {
             [key: string]: unknown;
         };
     };
-    responses: never;
-    parameters: never;
+    responses: {
+        /** @description Invalid path, query, or request payload */
+        BadRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+                "text/plain": string;
+            };
+        };
+        /** @description Missing or invalid authentication */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Authenticated principal lacks the required permission or session type */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Internal server or persistence error */
+        InternalServerError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Endpoint or required service is unavailable */
+        ServiceUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Request body exceeds the configured route limit */
+        PayloadTooLarge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /** @description JSON request body has a missing or unsupported Content-Type */
+        UnsupportedMediaType: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /** @description JSON is syntactically valid but cannot be deserialized into the request type */
+        UnprocessableEntity: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+    };
+    parameters: {
+        /** @description Required for cookieSession authentication; omit when bearerToken is used. */
+        ConditionalCsrfToken: string;
+        /** @description CSRF token paired with the interactive pa_session cookie. */
+        RequiredCsrfToken: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;

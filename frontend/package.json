@@ -6,6 +6,7 @@
   "packageManager": "pnpm@10.34.1",
   "scripts": {
     "generate:client": "openapi-typescript ../openapi/openapi.yaml -o src/api/schema.ts",
+    "contract:routes": "node ../scripts/verify/router_openapi_contract.mjs",
     "contract:settings": "node ../scripts/verify/runtime_settings_openapi_contract.mjs",
     "accessibility:check": "node ../scripts/verify/accessibility_static_check.mjs",
     "i18n:check": "node ../scripts/verify/i18n_translation_parity.mjs",

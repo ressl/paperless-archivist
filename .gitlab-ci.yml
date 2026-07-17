@@ -130,6 +130,7 @@ frontend:openapi-client:
     - .frontend_base
     - .default_retry
   script:
+    - pnpm contract:routes
     - pnpm contract:settings
     - pnpm generate:client
     - git diff --exit-code -- src/api/schema.ts
