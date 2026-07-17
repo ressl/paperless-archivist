@@ -201,6 +201,13 @@ service in front of a vision-language OCR model):
 - The OCR prompt setting has no effect for this kind, since MinerU ignores
   prompt, temperature, and context-size parameters.
 
+Only enable MinerU in production on a release that includes the safe OCR
+layout normalizer. MinerU Markdown can contain HTML tables; Archivist parses
+that layout into stable text while preserving empty columns and rejecting
+unsafe control characters. A scan that contains layout but no document text is
+reported as `OCR produced no text after layout markup normalization`, so it can
+be distinguished from a generic minimum-length failure. MinerU remains opt-in.
+
 ### SGLang With MiniMax M3 (Text Only)
 
 Archivist includes a disabled `sglang-minimax-m3` provider preset for the exact

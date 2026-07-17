@@ -8,13 +8,24 @@
 
 ## Unreleased
 
+- **Safe MinerU layout normalization (#322–#338):** OCR layout HTML is parsed
+  with a browser-grade HTML5 parser and rendered into stable archival text. Raw
+  `<` comparisons, quoted attributes, entities, empty table cells, block
+  boundaries, and fences exposed after parsing are covered by regressions;
+  `style`/`script`/`head`/`svg`/`noscript` content is discarded. Layout-only
+  output now fails with a dedicated permanent error instead of the generic
+  minimum-length error. Enabling MinerU remains opt-in.
+- **OCR hash upgrade note:** normalized content hashes change for
+  markup-bearing OCR pages. Duplicate detection does not bridge old-to-new
+  hashes across this one deployment boundary; no backfill is performed.
+  New-to-new matching remains stable.
 - **SGLang/MiniMax M3 operator runbook (#374):** the disabled text-only
   `sglang-minimax-m3` preset now has one public-safe setup and troubleshooting
   path covering the exact model identity, immutable runtime pins, required
   reasoning/tool parsers, Thinking mapping, output/schema/timeout behavior,
   encrypted secret references, `/models` discovery, live contract, measured
   capacity, and opt-in Kubernetes egress. The old M2.7 example is explicitly
-  historical; M3 vision/OCR remains gated behind ADR-014 and #322 through #338.
+  historical; M3 remains text-only and vision/OCR stays outside ADR-014.
 - **Document Chat request ownership (#286):** initial message loads and the
   slow post-send refresh now share one session-plus-generation commit guard.
   Switching A -> B (including A -> B -> A) invalidates stale responses and
