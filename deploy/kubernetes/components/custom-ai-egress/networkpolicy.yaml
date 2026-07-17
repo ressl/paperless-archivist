@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: paperless-archivist-custom-ai-egress
+spec:
+  # Both backends initiate model-provider calls: the API has provider tests and
+  # document chat, while the worker runs OCR and metadata jobs.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: paperless-archivist
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [api, worker]
+  policyTypes:
+    - Egress
+  egress:
+    # Public examples only. Patch the namespace, pod labels and Service target
+    # ports in your own overlay; do not copy assumptions from another cluster.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ai-services
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sglang
+      ports:
+        - protocol: TCP
+          port: 30000
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ai-services
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mineru
+      ports:
+        - protocol: TCP
+          port: 8001

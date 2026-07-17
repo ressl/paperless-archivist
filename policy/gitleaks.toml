@@ -10,3 +10,8 @@ paths = [
   '''(^|/)frontend/node_modules/''',
   '''(^|/)frontend/dist/''',
 ]
+# GitLab retains pipeline refs after a force-push. This exact UUID was used as
+# fixture data in superseded commit 87a1beb and is not a credential.
+regexes = [
+  '''018f47a8-7c2d-7fd2-9c34-6a5ee3b61723''',
+]

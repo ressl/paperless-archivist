@@ -295,6 +295,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/webhooks/paperless/document-consumed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue newly consumed Paperless documents immediately
+         * @description Machine-to-machine endpoint outside user authentication. The shared X-Webhook-Secret is compared against ARCHIVIST_WEBHOOK_SECRET.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["WebhookConsumedRequest"];
+                };
+            };
+            responses: {
+                /** @description Documents accepted and queued */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["QueueCountResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/logout": {
         parameters: {
             query?: never;
@@ -412,6 +462,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description List browser sessions. Requires an interactive cookie session; bearer tokens are always rejected regardless of scope. */
         get: {
             parameters: {
                 query?: never;
@@ -421,7 +472,7 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Sessions */
+                /** @description Own sessions, or all sessions for an administrator */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -431,6 +482,13 @@ export interface paths {
                             items?: components["schemas"]["Session"][];
                         };
                     };
+                };
+                /** @description Interactive cookie session required */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
                 };
             };
         };
@@ -451,6 +509,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Revoke a browser session as an administrator. Requires an interactive cookie session; bearer tokens are always rejected regardless of scope. */
         post: {
             parameters: {
                 query?: never;
@@ -464,6 +523,13 @@ export interface paths {
             responses: {
                 /** @description Session revoked */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Interactive administrator cookie session required */
+                403: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -617,14 +683,20 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProviderTestRequest"];
+                };
+            };
             responses: {
                 /** @description Provider connection result */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ProviderTestResponse"];
+                    };
                 };
             };
         };
@@ -795,6 +867,48 @@ export interface paths {
                         };
                     };
                 };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/prompts/experiments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Aggregate prompt experiment review outcomes
+         * @description Requires the settings:read permission.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Prompt experiment outcome groups */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PromptExperimentsResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
             };
         };
         put?: never;
@@ -1235,6 +1349,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/inventory/duplicates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List OCR-content duplicate groups
+         * @description Requires the inventory:read permission; results are capped at 200 groups.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Documents grouped by their shared OCR content hash */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["InventoryDuplicatesResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ai/runtime-hints": {
         parameters: {
             query?: never;
@@ -1571,6 +1727,104 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/rerun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue selected documents and stages again
+         * @description Requires the batches:write permission. Duplicate document IDs are coalesced.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Required for cookieSession authentication; omit when bearerToken is used. */
+                    "X-CSRF-Token"?: components["parameters"]["ConditionalCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RerunBatchRequest"];
+                };
+            };
+            responses: {
+                /** @description Selected reruns queued */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["QueueCountResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/rerun-failed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue every currently failed document again
+         * @description Requires the batches:write permission; active reruns are skipped.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Required for cookieSession authentication; omit when bearerToken is used. */
+                    "X-CSRF-Token"?: components["parameters"]["ConditionalCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Failed-document rerun summary */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RerunFailedBatchResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reviews": {
         parameters: {
             query?: never;
@@ -1601,6 +1855,112 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/auto-fix-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview deterministic cleanup of pending reviews
+         * @description Requires the reviews:write permission; bearer tokens are accepted.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Required for cookieSession authentication; omit when bearerToken is used. */
+                    "X-CSRF-Token"?: components["parameters"]["ConditionalCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ReviewAutoFixRequest"];
+                };
+            };
+            responses: {
+                /** @description Preview counts and a bounded decision sample */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReviewAutoFixPreviewResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/auto-fix": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply deterministic cleanup to pending reviews
+         * @description Requires the reviews:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ReviewAutoFixRequest"];
+                };
+            };
+            responses: {
+                /** @description Applied, rejected, and per-item failure counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReviewAutoFixBulkResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -1761,6 +2121,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/reviews/{id}/auto-fix": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply deterministic cleanup to one pending review
+         * @description Requires the reviews:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Review applied or rejected */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReviewAutoFixSingleResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/operations/recovery": {
         parameters: {
             query?: never;
@@ -1868,6 +2276,199 @@ export interface paths {
                         "application/json": components["schemas"]["RecoveryActionResponse"];
                     };
                 };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/unblock-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Requeue failed predecessor jobs and optionally clear provider cooldowns
+         * @description Requires the runs:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UnblockJobsRequest"];
+                };
+            };
+            responses: {
+                /** @description Unblock and cooldown-release counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UnblockJobsResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/provider-cooldowns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active AI provider cooldowns
+         * @description Requires the runs:read permission.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Active cooldowns */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderCooldownsResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/provider-cooldowns/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear one or all provider cooldowns and wake deferred jobs
+         * @description Requires the runs:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ClearProviderCooldownRequest"];
+                };
+            };
+            responses: {
+                /** @description Cleared cooldown and released job counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ClearProviderCooldownResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/release-scheduled-retries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Wake jobs deferred by a cooldown or another backoff
+         * @description Requires the runs:write permission and an interactive user session.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Released job count */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReleaseScheduledRetriesResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                500: components["responses"]["InternalServerError"];
             };
         };
         delete?: never;
@@ -2042,6 +2643,7 @@ export interface paths {
             };
         };
         put?: never;
+        /** @description Create a user. Usernames and non-empty emails share one trimmed, case-insensitive identity namespace. */
         post: {
             parameters: {
                 query?: never;
@@ -2063,6 +2665,20 @@ export interface paths {
             responses: {
                 /** @description Created user */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid or blank username */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Normalized username or email is already assigned */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -2138,6 +2754,13 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description Rejected because this is the last enabled administrator */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -2174,6 +2797,13 @@ export interface paths {
             responses: {
                 /** @description Updated user roles */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Rejected because this is the last enabled administrator */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -2367,27 +2997,310 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ErrorResponse: {
+            error: string;
+        };
         /** @enum {string} */
         Role: "viewer" | "reviewer" | "operator" | "admin" | "auditor";
         /** @enum {string} */
         Stage: "ocr" | "metadata" | "apply";
         /** @enum {string} */
         ProcessingMode: "manual_review" | "auto_select_review" | "full_auto";
+        /**
+         * @description Settings input accepts the two historical Serde aliases.
+         * @enum {string}
+         */
+        ProcessingModeInput: "manual_review" | "review" | "auto_select_review" | "full_auto" | "autopilot";
         /** @enum {string} */
         AiProviderKind: "ollama" | "openai" | "anthropic" | "openai_compatible" | "mineru";
+        /**
+         * @description Reasoning or thinking effort requested from a capable model.
+         * @example medium
+         * @enum {string}
+         */
+        ReasoningEffort: "off" | "low" | "medium" | "high";
+        /**
+         * @description Wire format used for schema-constrained OpenAI-compatible responses.
+         * @example json_object
+         * @enum {string}
+         */
+        StructuredOutputMode: "auto" | "json_object" | "off";
+        /** @enum {string} */
+        ModelCapability: "text" | "vision";
+        /** @enum {string} */
+        ModelUsageTier: "low" | "medium" | "high" | "extra_high";
+        /** @enum {string} */
+        AiArtifactStorageMode: "full" | "redacted" | "metadata_only";
+        /** @enum {string} */
+        OldTagStrategy: "keep_existing" | "replace_ai_managed" | "remove_all_business";
+        /** @description Optional per-provider overrides. An omitted or null member inherits its global setting; the API serializes unset members as null. */
+        ProviderTuning: {
+            /**
+             * Format: int64
+             * @description Live worker pool size, capped by the deployment environment.
+             * @example 2
+             */
+            worker_concurrency: number | null;
+            /** @description Secondary text model used for metadata consensus; null disables it. */
+            consensus_secondary_text_model: string | null;
+            /** Format: int64 */
+            consensus_date_tolerance_days: number | null;
+            /**
+             * Format: int64
+             * @description Ollama text context override; ignored by cloud providers.
+             */
+            text_num_ctx: number | null;
+            /**
+             * Format: int64
+             * @description Ollama vision context override; ignored by cloud providers.
+             */
+            vision_num_ctx: number | null;
+            /**
+             * @description Reasoning/thinking effort; null inherits off.
+             * @example medium
+             * @enum {string|null}
+             */
+            reasoning_effort: "off" | "low" | "medium" | "high" | null;
+            /**
+             * Format: int64
+             * @description Output-token cap sent to OpenAI-compatible providers. Reasoning tokens count toward this budget; null lets the server choose its default.
+             * @example 8192
+             */
+            max_output_tokens: number | null;
+            /**
+             * @description auto uses strict JSON schema, json_object uses compatibility mode, and off relies on prompt steering; null inherits auto.
+             * @example json_object
+             * @enum {string|null}
+             */
+            structured_output: "auto" | "json_object" | "off" | null;
+            /** Format: int32 */
+            ocr_page_limit: number | null;
+            /** Format: int64 */
+            hourly_document_limit: number | null;
+            /** Format: int64 */
+            daily_document_limit: number | null;
+            /** Format: float */
+            metadata_confidence_threshold: number | null;
+            /** Format: float */
+            title_confidence_threshold: number | null;
+            /** Format: float */
+            correspondent_confidence_threshold: number | null;
+            /** Format: float */
+            document_type_confidence_threshold: number | null;
+            /** Format: float */
+            document_date_confidence_threshold: number | null;
+            /** Format: float */
+            tags_confidence_threshold: number | null;
+            /** Format: float */
+            fields_confidence_threshold: number | null;
+            /** Format: int64 */
+            max_tags: number | null;
+            /** Format: int64 */
+            allowed_list_max: number | null;
+            /**
+             * Format: int64
+             * @description Per-request provider timeout in seconds. Null or zero on legacy input inherits the built-in 180-second default.
+             * @example 240
+             */
+            request_timeout_seconds: number | null;
+        };
         AiProviderSettings: {
             name: string;
             kind: components["schemas"]["AiProviderKind"];
             base_url: string;
-            default_text_model?: string | null;
-            default_vision_model?: string | null;
+            default_text_model: string | null;
+            default_vision_model: string | null;
             /** Format: double */
-            cost_per_1m_input_tokens_usd?: number | null;
+            cost_per_1m_input_tokens_usd: number | null;
             /** Format: double */
-            cost_per_1m_output_tokens_usd?: number | null;
+            cost_per_1m_output_tokens_usd: number | null;
             /** Format: uuid */
-            secret_id?: string | null;
+            secret_id: string | null;
             enabled: boolean;
+            tuning: components["schemas"]["ProviderTuning"];
+        };
+        StageModelOverride: {
+            stage: components["schemas"]["Stage"];
+            provider: string;
+            model: string;
+        };
+        ModelCatalogEntry: {
+            provider_kind: components["schemas"]["AiProviderKind"];
+            capability: components["schemas"]["ModelCapability"];
+            model_id: string;
+            label?: string;
+            recommended: boolean;
+            /** @enum {string} */
+            usage_tier?: "low" | "medium" | "high" | "extra_high";
+            context?: string;
+            modality?: string;
+            best_for?: string;
+        };
+        PaperlessArchiveProfile: {
+            name: string;
+            base_url: string;
+            /** Format: uuid */
+            token_secret_id: string | null;
+            enabled: boolean;
+        };
+        PaperlessSettings: {
+            base_url: string;
+            public_url: string | null;
+            /** Format: uuid */
+            token_secret_id: string | null;
+            /** Format: int64 */
+            timeout_seconds: number;
+            login_bridge_enabled: boolean;
+            delta_sync_enabled: boolean;
+            /** Format: int64 */
+            delta_sync_overlap_minutes: number;
+            active_archive: string;
+            archive_profiles: components["schemas"]["PaperlessArchiveProfile"][];
+        };
+        AiSettings: {
+            default_provider: string;
+            ollama_base_url: string;
+            default_text_model: string;
+            default_vision_model: string;
+            stage_models: components["schemas"]["StageModelOverride"][];
+            providers: components["schemas"]["AiProviderSettings"][];
+            external_provider_warning_acknowledged: boolean;
+            /** @description Omitted when no explicit fallback is configured. */
+            fallback_vision_model?: string;
+            requeue_vision_crashes_on_startup: boolean;
+            /** Format: int64 */
+            ollama_vision_num_ctx: number;
+            /** Format: int64 */
+            ollama_text_num_ctx: number;
+            /** @description Omitted when the consensus check is disabled. */
+            consensus_secondary_text_model?: string;
+            /** Format: int64 */
+            consensus_date_tolerance_days: number;
+            model_catalog: components["schemas"]["ModelCatalogEntry"][];
+        };
+        SecuritySettings: {
+            /** Format: int64 */
+            audit_retention_days: number;
+            /** Format: int64 */
+            ai_artifact_retention_days: number;
+            /** Format: int64 */
+            runs_retention_days: number;
+            ai_artifact_storage: components["schemas"]["AiArtifactStorageMode"];
+            api_token_expiry_required: boolean;
+            /** Format: int64 */
+            api_token_default_ttl_days: number;
+            /** Format: int64 */
+            api_token_max_ttl_days: number;
+        };
+        NotificationSettings: {
+            enabled: boolean;
+            /** Format: uuid */
+            webhook_url_secret_id: string | null;
+            /** Format: int64 */
+            review_queue_threshold: number;
+            /** Format: int64 */
+            repeated_failure_threshold: number;
+            /** Format: int64 */
+            cooldown_minutes: number;
+        };
+        WorkflowTags: {
+            trigger_process: string;
+            trigger_ocr: string;
+            trigger_tags: string;
+            trigger_title: string;
+            trigger_correspondent: string;
+            trigger_document_type: string;
+            trigger_document_date: string;
+            trigger_fields: string;
+            completion_processed: string;
+            completion_ocr: string;
+            completion_metadata: string;
+            completion_tagging: string;
+            completion_title: string;
+            completion_correspondent: string;
+            completion_document_type: string;
+            completion_document_date: string;
+            completion_fields: string;
+            review_needed: string;
+            failed: string;
+            failed_ocr: string;
+            failed_tagging: string;
+        };
+        WorkflowRules: {
+            include_tags: string[];
+            exclude_tags: string[];
+        };
+        WorkflowSettings: {
+            mode: components["schemas"]["ProcessingMode"];
+            paused: boolean;
+            dry_run: boolean;
+            /** Format: int64 */
+            hourly_document_limit: number | null;
+            /** Format: int64 */
+            daily_document_limit: number | null;
+            tags: components["schemas"]["WorkflowTags"];
+            rules: components["schemas"]["WorkflowRules"];
+            enabled_stages: components["schemas"]["Stage"][];
+            fallback_to_review_on_validation_failure: boolean;
+        };
+        OcrSettings: {
+            /** Format: int32 */
+            page_limit: number;
+            /** Format: int64 */
+            min_chars: number;
+            renderer: string;
+            language_hint: string | null;
+        };
+        TaggingSettings: {
+            /** Format: int64 */
+            max_tags: number;
+            allow_new_tags: boolean;
+            /** Format: float */
+            confidence_threshold: number;
+            old_tag_strategy: components["schemas"]["OldTagStrategy"];
+            tag_output_language: string;
+        };
+        MetadataSettings: {
+            overwrite_existing_correspondent: boolean;
+            overwrite_existing_document_type: boolean;
+            overwrite_existing_document_date: boolean;
+            allow_new_correspondents: boolean;
+            allow_new_document_types: boolean;
+            /** Format: float */
+            confidence_threshold: number;
+            /** Format: float */
+            title_confidence_threshold: number | null;
+            /** Format: float */
+            document_date_confidence_threshold: number | null;
+            /** Format: float */
+            correspondent_confidence_threshold: number | null;
+            /** Format: float */
+            document_type_confidence_threshold: number | null;
+            /** Format: float */
+            tags_confidence_threshold: number | null;
+            /** Format: float */
+            fields_confidence_threshold: number | null;
+            /** Format: int64 */
+            allowed_list_max: number;
+            document_date_anchor_required: boolean;
+            /** Format: float */
+            document_date_anchor_penalty: number;
+        };
+        CustomFieldMapping: {
+            field_name: string;
+            enabled: boolean;
+            aliases: string[];
+            instructions: string | null;
+        };
+        FieldSettings: {
+            /** Format: float */
+            confidence_threshold: number;
+            /** Format: int64 */
+            max_fields: number;
+            mappings: components["schemas"]["CustomFieldMapping"][];
+        };
+        UiSettings: {
+            debug_console_enabled: boolean;
         };
         LoginRequest: {
             username: string;
@@ -2421,10 +3334,284 @@ export interface components {
             paperless_login_enabled?: boolean;
         };
         RuntimeSettings: {
-            [key: string]: unknown;
+            paperless: components["schemas"]["PaperlessSettings"];
+            ai: components["schemas"]["AiSettings"];
+            security: components["schemas"]["SecuritySettings"];
+            notifications: components["schemas"]["NotificationSettings"];
+            workflow: components["schemas"]["WorkflowSettings"];
+            ocr: components["schemas"]["OcrSettings"];
+            tagging: components["schemas"]["TaggingSettings"];
+            metadata: components["schemas"]["MetadataSettings"];
+            fields: components["schemas"]["FieldSettings"];
+            ui: components["schemas"]["UiSettings"];
+        };
+        /** @description Partial provider tuning accepted on settings updates; omitted or null fields inherit. */
+        ProviderTuningInput: {
+            /** Format: int64 */
+            worker_concurrency?: number | null;
+            consensus_secondary_text_model?: string | null;
+            /** Format: int64 */
+            consensus_date_tolerance_days?: number | null;
+            /** Format: int64 */
+            text_num_ctx?: number | null;
+            /** Format: int64 */
+            vision_num_ctx?: number | null;
+            /** @enum {string|null} */
+            reasoning_effort?: "off" | "low" | "medium" | "high" | null;
+            /** Format: int64 */
+            max_output_tokens?: number | null;
+            /** @enum {string|null} */
+            structured_output?: "auto" | "json_object" | "off" | null;
+            /** Format: int32 */
+            ocr_page_limit?: number | null;
+            /** Format: int64 */
+            hourly_document_limit?: number | null;
+            /** Format: int64 */
+            daily_document_limit?: number | null;
+            /** Format: float */
+            metadata_confidence_threshold?: number | null;
+            /** Format: float */
+            title_confidence_threshold?: number | null;
+            /** Format: float */
+            correspondent_confidence_threshold?: number | null;
+            /** Format: float */
+            document_type_confidence_threshold?: number | null;
+            /** Format: float */
+            document_date_confidence_threshold?: number | null;
+            /** Format: float */
+            tags_confidence_threshold?: number | null;
+            /** Format: float */
+            fields_confidence_threshold?: number | null;
+            /** Format: int64 */
+            max_tags?: number | null;
+            /** Format: int64 */
+            allowed_list_max?: number | null;
+            /** Format: int64 */
+            request_timeout_seconds?: number | null;
+        };
+        AiProviderSettingsInput: {
+            name: string;
+            kind: components["schemas"]["AiProviderKind"];
+            base_url: string;
+            default_text_model?: string | null;
+            default_vision_model?: string | null;
+            /** Format: double */
+            cost_per_1m_input_tokens_usd?: number | null;
+            /** Format: double */
+            cost_per_1m_output_tokens_usd?: number | null;
+            /** Format: uuid */
+            secret_id?: string | null;
+            enabled: boolean;
+            tuning?: components["schemas"]["ProviderTuningInput"];
+        };
+        /** @description Transient provider draft tested without persistence. */
+        ProviderTestRequest: {
+            name: string;
+            kind: components["schemas"]["AiProviderKind"];
+            base_url: string;
+            model: string;
+            tuning: components["schemas"]["ProviderTuningInput"];
+            /** Format: uuid */
+            secret_id?: string | null;
+            /**
+             * Format: password
+             * @description Transient API secret used only for this probe and never persisted or returned.
+             */
+            secret?: string | null;
+        };
+        ProviderTestResponse: {
+            ok: boolean;
+            provider: string;
+            model: string;
+            /** @description Redacted failure detail. Never contains provider credentials. */
+            error?: string;
+        };
+        ModelCatalogEntryInput: {
+            provider_kind: components["schemas"]["AiProviderKind"];
+            capability: components["schemas"]["ModelCapability"];
+            model_id: string;
+            label?: string | null;
+            recommended?: boolean;
+            /** @enum {string|null} */
+            usage_tier?: "low" | "medium" | "high" | "extra_high" | null;
+            context?: string | null;
+            modality?: string | null;
+            best_for?: string | null;
+        };
+        PaperlessArchiveProfileInput: {
+            name: string;
+            base_url: string;
+            /** Format: uuid */
+            token_secret_id?: string | null;
+            enabled?: boolean;
+        };
+        PaperlessSettingsInput: {
+            base_url: string;
+            public_url?: string | null;
+            /** Format: uuid */
+            token_secret_id?: string | null;
+            timeout_seconds: number;
+            login_bridge_enabled?: boolean;
+            delta_sync_enabled?: boolean;
+            /** Format: int64 */
+            delta_sync_overlap_minutes?: number;
+            active_archive?: string;
+            archive_profiles?: components["schemas"]["PaperlessArchiveProfileInput"][];
+        };
+        AiSettingsInput: {
+            default_provider?: string;
+            ollama_base_url?: string;
+            default_text_model?: string;
+            default_vision_model?: string;
+            stage_models?: components["schemas"]["StageModelOverride"][];
+            providers?: components["schemas"]["AiProviderSettingsInput"][];
+            external_provider_warning_acknowledged?: boolean;
+            fallback_vision_model?: string | null;
+            requeue_vision_crashes_on_startup?: boolean;
+            /** Format: int64 */
+            ollama_vision_num_ctx?: number;
+            /** Format: int64 */
+            ollama_text_num_ctx?: number;
+            consensus_secondary_text_model?: string | null;
+            /** Format: int64 */
+            consensus_date_tolerance_days?: number;
+            model_catalog?: components["schemas"]["ModelCatalogEntryInput"][];
+        };
+        SecuritySettingsInput: {
+            /** Format: int64 */
+            audit_retention_days?: number;
+            /** Format: int64 */
+            ai_artifact_retention_days?: number;
+            /** Format: int64 */
+            runs_retention_days?: number;
+            ai_artifact_storage?: components["schemas"]["AiArtifactStorageMode"];
+            api_token_expiry_required?: boolean;
+            /** Format: int64 */
+            api_token_default_ttl_days?: number;
+            /** Format: int64 */
+            api_token_max_ttl_days?: number;
+        };
+        NotificationSettingsInput: {
+            enabled?: boolean;
+            /** Format: uuid */
+            webhook_url_secret_id?: string | null;
+            /** Format: int64 */
+            review_queue_threshold?: number;
+            /** Format: int64 */
+            repeated_failure_threshold?: number;
+            /** Format: int64 */
+            cooldown_minutes?: number;
+        };
+        WorkflowTagsInput: {
+            trigger_process: string;
+            trigger_ocr: string;
+            trigger_tags: string;
+            trigger_title: string;
+            trigger_correspondent: string;
+            trigger_document_type: string;
+            trigger_document_date?: string;
+            trigger_fields: string;
+            completion_processed: string;
+            completion_ocr: string;
+            completion_metadata?: string;
+            completion_tagging: string;
+            completion_title: string;
+            completion_correspondent: string;
+            completion_document_type: string;
+            completion_document_date?: string;
+            completion_fields: string;
+            review_needed: string;
+            failed: string;
+            failed_ocr: string;
+            failed_tagging: string;
+        };
+        WorkflowRulesInput: {
+            include_tags?: string[];
+            exclude_tags?: string[];
+        };
+        WorkflowSettingsInput: {
+            mode?: components["schemas"]["ProcessingModeInput"];
+            paused?: boolean;
+            dry_run?: boolean;
+            /** Format: int64 */
+            hourly_document_limit?: number | null;
+            /** Format: int64 */
+            daily_document_limit?: number | null;
+            tags?: components["schemas"]["WorkflowTagsInput"];
+            rules?: components["schemas"]["WorkflowRulesInput"];
+            enabled_stages?: components["schemas"]["Stage"][];
+            fallback_to_review_on_validation_failure?: boolean;
+        };
+        OcrSettingsInput: {
+            /** Format: int32 */
+            page_limit: number;
+            min_chars: number;
+            renderer: string;
+            language_hint?: string | null;
+        };
+        TaggingSettingsInput: {
+            max_tags: number;
+            allow_new_tags: boolean;
+            /** Format: float */
+            confidence_threshold: number;
+            old_tag_strategy: components["schemas"]["OldTagStrategy"];
+            tag_output_language?: string;
+        };
+        MetadataSettingsInput: {
+            overwrite_existing_correspondent: boolean;
+            overwrite_existing_document_type: boolean;
+            overwrite_existing_document_date: boolean;
+            allow_new_correspondents: boolean;
+            allow_new_document_types: boolean;
+            /** Format: float */
+            confidence_threshold: number;
+            /** Format: float */
+            title_confidence_threshold?: number | null;
+            /** Format: float */
+            document_date_confidence_threshold?: number | null;
+            /** Format: float */
+            correspondent_confidence_threshold?: number | null;
+            /** Format: float */
+            document_type_confidence_threshold?: number | null;
+            /** Format: float */
+            tags_confidence_threshold?: number | null;
+            /** Format: float */
+            fields_confidence_threshold?: number | null;
+            allowed_list_max?: number;
+            document_date_anchor_required?: boolean;
+            /** Format: float */
+            document_date_anchor_penalty?: number;
+        };
+        CustomFieldMappingInput: {
+            field_name: string;
+            enabled?: boolean;
+            aliases?: string[];
+            instructions?: string | null;
+        };
+        FieldSettingsInput: {
+            /** Format: float */
+            confidence_threshold: number;
+            max_fields: number;
+            mappings?: components["schemas"]["CustomFieldMappingInput"][];
+        };
+        UiSettingsInput: {
+            debug_console_enabled?: boolean;
+        };
+        /** @description Backward-compatible partial settings document accepted by Serde defaults. */
+        RuntimeSettingsInput: {
+            paperless?: components["schemas"]["PaperlessSettingsInput"];
+            ai?: components["schemas"]["AiSettingsInput"];
+            security?: components["schemas"]["SecuritySettingsInput"];
+            notifications?: components["schemas"]["NotificationSettingsInput"];
+            workflow?: components["schemas"]["WorkflowSettingsInput"];
+            ocr?: components["schemas"]["OcrSettingsInput"];
+            tagging?: components["schemas"]["TaggingSettingsInput"];
+            metadata?: components["schemas"]["MetadataSettingsInput"];
+            fields?: components["schemas"]["FieldSettingsInput"];
+            ui?: components["schemas"]["UiSettingsInput"];
         };
         UpdateSettingsRequest: {
-            settings: components["schemas"]["RuntimeSettings"];
+            settings: components["schemas"]["RuntimeSettingsInput"];
             paperless_token?: string | null;
             notification_webhook_url?: string | null;
             provider_secrets?: {
@@ -2923,6 +4110,10 @@ export interface components {
             suggested_patch: components["schemas"]["DocumentPatch"];
             edited_patch?: components["schemas"]["DocumentPatch"] | null;
             validation_warnings?: unknown;
+            /** @description Patch field names whose Paperless values changed after review creation. */
+            conflict_fields?: string[];
+            /** Format: date-time */
+            conflicted_at?: string | null;
             debug_context?: components["schemas"]["WorkflowDebugContext"] | null;
             /** @description Cached Paperless title from the document_inventory, surfaced so the review UI can show the actual document title instead of falling back to "Document {id}" when the suggested_patch has no title. */
             paperless_title?: string | null;
@@ -2940,6 +4131,10 @@ export interface components {
             checked_events: number;
             /** Format: int64 */
             legacy_events: number;
+            /** Format: int64 */
+            v1_events: number;
+            /** Format: int64 */
+            v2_events: number;
             latest_event_hash?: string | null;
             /** Format: uuid */
             broken_event_id?: string | null;
@@ -3015,6 +4210,148 @@ export interface components {
             last_provider?: string | null;
             last_model?: string | null;
         };
+        PromptExperiment: {
+            group: string;
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            approved: number;
+            /** Format: int64 */
+            rejected: number;
+            /** Format: int64 */
+            edited: number;
+            /** Format: int64 */
+            applied: number;
+            /** Format: double */
+            mean_confidence: number | null;
+        };
+        PromptExperimentsResponse: {
+            items: components["schemas"]["PromptExperiment"][];
+        };
+        DuplicateDocument: {
+            /** Format: int32 */
+            paperless_document_id: number;
+            title: string | null;
+        };
+        DuplicateGroup: {
+            hash: string;
+            documents: components["schemas"]["DuplicateDocument"][];
+        };
+        InventoryDuplicatesResponse: {
+            groups: components["schemas"]["DuplicateGroup"][];
+            /** @description Public Paperless URL without a trailing slash, falling back to base_url. */
+            paperless_base: string;
+        };
+        QueueCountResponse: {
+            /** Format: int64 */
+            queued: number;
+        };
+        RerunBatchRequest: {
+            document_ids: number[];
+            stages: components["schemas"]["Stage"][];
+        };
+        RerunFailedBatchResponse: {
+            /** Format: int64 */
+            queued: number;
+            /** Format: int64 */
+            candidates: number;
+        };
+        ReviewAutoFixRequest: {
+            /**
+             * Format: int64
+             * @description Requested batch size; the runtime clamps values to the range 1 through 2000.
+             */
+            limit?: number | null;
+        };
+        ReviewAutoFixPreviewSample: {
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            paperless_document_id: number;
+            stage: components["schemas"]["Stage"];
+            /** @enum {string} */
+            action: "apply" | "reject";
+            fields_dropped: string[];
+        };
+        ReviewAutoFixPreviewResponse: {
+            /** Format: int64 */
+            total_pending: number;
+            /** Format: int64 */
+            would_apply: number;
+            /** Format: int64 */
+            would_reject: number;
+            sample: components["schemas"]["ReviewAutoFixPreviewSample"][];
+        };
+        ReviewAutoFixError: {
+            /** Format: uuid */
+            id: string;
+            error: string;
+        };
+        ReviewAutoFixBulkResponse: {
+            /** Format: int64 */
+            applied: number;
+            /** Format: int64 */
+            rejected: number;
+            errors: components["schemas"]["ReviewAutoFixError"][];
+        };
+        ReviewAutoFixSingleResponse: {
+            /** @enum {string} */
+            action: "applied" | "rejected";
+        };
+        UnblockJobsRequest: {
+            /** @description Restrict requeueing to failed predecessor errors containing this text. */
+            error_substring?: string | null;
+            /**
+             * @description Defaults to true when omitted.
+             * @example true
+             */
+            clear_provider_cooldowns?: boolean;
+        };
+        UnblockJobsResponse: {
+            /** Format: int64 */
+            predecessors_requeued: number;
+            /** Format: int64 */
+            runs_unblocked: number;
+            /** Format: int64 */
+            cooldowns_cleared: number;
+            /** Format: int64 */
+            retries_released: number;
+        };
+        ProviderCooldown: {
+            provider_name: string;
+            /** Format: date-time */
+            cooldown_until: string;
+            reason: string;
+            /** Format: date-time */
+            set_at: string;
+        };
+        ProviderCooldownsResponse: {
+            cooldowns: components["schemas"]["ProviderCooldown"][];
+        };
+        ClearProviderCooldownRequest: {
+            /** @description Provider to clear; omit or set null to clear every active cooldown. */
+            provider_name?: string | null;
+        };
+        ClearProviderCooldownResponse: {
+            /** Format: int64 */
+            cleared: number;
+            /** Format: int64 */
+            released: number;
+        };
+        ReleaseScheduledRetriesResponse: {
+            /** Format: int64 */
+            released: number;
+        };
+        /** @description A non-empty document batch, one document, or both shapes together. */
+        WebhookConsumedRequest: {
+            document_ids: number[];
+            /** Format: int32 */
+            document_id?: number | null;
+        } | {
+            document_ids?: number[] | null;
+            /** Format: int32 */
+            document_id: number;
+        };
         TestPromptRequest: {
             stage: components["schemas"]["Stage"];
             content: string;
@@ -3023,12 +4360,74 @@ export interface components {
             provider_name?: string | null;
             model?: string | null;
         };
+        PromptTestParsed: components["schemas"]["OcrPromptTestParsed"] | components["schemas"]["MetadataPromptTestParsed"];
+        OcrPromptTestParsed: {
+            content: string;
+        };
+        MetadataPromptTestParsed: {
+            suggestion: components["schemas"]["PromptTestMetadataSuggestion"];
+            diagnostics: components["schemas"]["MetadataParseDiagnostics"];
+        };
+        PromptTestMetadataSuggestion: {
+            title?: components["schemas"]["PromptTestTitleSuggestion"];
+            document_type?: components["schemas"]["PromptTestChoiceSuggestion"];
+            correspondent?: components["schemas"]["PromptTestChoiceSuggestion"];
+            new_correspondent?: string;
+            document_date?: components["schemas"]["PromptTestDocumentDateSuggestion"];
+            tags?: components["schemas"]["PromptTestTagSuggestion"];
+            fields?: components["schemas"]["PromptTestFieldSuggestion"];
+        };
+        PromptTestTitleSuggestion: {
+            title: string;
+            /** Format: float */
+            confidence: number | null;
+        };
+        PromptTestChoiceSuggestion: {
+            name: string;
+            /** Format: float */
+            confidence: number | null;
+            evidence: string | null;
+        };
+        PromptTestDocumentDateSuggestion: {
+            date: string;
+            /** Format: float */
+            confidence: number | null;
+            evidence: string | null;
+            warnings: string[];
+        };
+        PromptTestTagSuggestion: {
+            tags: string[];
+            new_tags: string[];
+            /** Format: float */
+            confidence: number | null;
+        };
+        PromptTestFieldSuggestion: {
+            fields: components["schemas"]["PromptTestFieldValueSuggestion"][];
+            /** Format: float */
+            confidence: number | null;
+        };
+        PromptTestFieldValueSuggestion: {
+            name: string;
+            value: unknown;
+            /** Format: float */
+            confidence: number | null;
+        };
+        MetadataParseDiagnostics: {
+            /** @enum {string} */
+            status: "valid" | "omitted" | "contract_violation";
+            /** @enum {string} */
+            envelope_error?: "no_json" | "non_object";
+            decoded_fields: string[];
+            null_fields: string[];
+            invalid_fields: string[];
+            unknown_field_count: number;
+        };
         TestPromptResponse: {
             provider: string;
             model: string;
             stage: components["schemas"]["Stage"];
             raw_text: string;
-            parsed?: unknown;
+            parsed: components["schemas"]["PromptTestParsed"];
             validation_errors: string[];
             warnings: string[];
             /** Format: int32 */
@@ -3150,8 +4549,87 @@ export interface components {
             [key: string]: unknown;
         };
     };
-    responses: never;
-    parameters: never;
+    responses: {
+        /** @description Invalid path, query, or request payload */
+        BadRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+                "text/plain": string;
+            };
+        };
+        /** @description Missing or invalid authentication */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Authenticated principal lacks the required permission or session type */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Internal server or persistence error */
+        InternalServerError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Endpoint or required service is unavailable */
+        ServiceUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Request body exceeds the configured route limit */
+        PayloadTooLarge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /** @description JSON request body has a missing or unsupported Content-Type */
+        UnsupportedMediaType: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /** @description JSON is syntactically valid but cannot be deserialized into the request type */
+        UnprocessableEntity: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+    };
+    parameters: {
+        /** @description Required for cookieSession authentication; omit when bearerToken is used. */
+        ConditionalCsrfToken: string;
+        /** @description CSRF token paired with the interactive pa_session cookie. */
+        RequiredCsrfToken: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;

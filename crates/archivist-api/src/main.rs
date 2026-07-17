@@ -6,41 +6,52 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
-    AiResponse, AnthropicClient, ChatRequest, MineruClient, OllamaClient, OllamaLoadedModel,
-    OllamaModel, OpenAiCompatibleClient, TextProvider,
+    AiResponse, AnthropicClient, ChatRequest, MetadataEnvelopeError, MetadataParseStatus,
+    MineruClient, OllamaClient, OllamaLoadedModel, OllamaModel, OpenAiCompatibleClient,
+    PromptLanguageContext, TextProvider, parse_metadata_suggestion, prompt_for_metadata,
+    schema_for_metadata,
+};
+use archivist_apply::{
+    ApplyRequest, ReviewApplyConflict, ReviewApplyPrecondition, ReviewTagOperations, apply_document,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
-    AiProviderKind, AuditEventInput, DashboardProviderCostSummary, DashboardRange, DashboardStats,
-    DocumentChatSource, DocumentInventoryItem, DocumentPatch, Permission, ProcessingMode,
+    AiProviderKind, AiProviderSettings, AuditEventInput, DashboardProviderCostSummary,
+    DashboardRange, DashboardStats, DocumentChatSource, DocumentInventoryItem, DocumentPatch,
+    EffectiveTuning, MetadataFieldFlags, Permission, ProcessingMode, ProviderTuning,
     ProviderUsageStats, Role, RuntimeSettings, Stage, WorkflowRules, build_document_chat_prompt,
-    document_chat_snippet, document_chat_terms, roles_have_permission, score_document_chat_source,
+    detect_document_language, document_chat_snippet, document_chat_terms,
+    prefilter_allowed_list_lower, roles_have_permission, score_document_chat_source,
 };
 use archivist_db::{
-    AuthUser, DbPool, DocumentChatCandidate, MetadataApplyAudit, MetadataArtifact,
+    AmbiguousUserIdentityLinkError, AuthUser, DbPool, DocumentChatCandidate,
+    InvalidUserIdentityError, LastEnabledAdminError, MetadataApplyAudit, MetadataArtifact,
     MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry, ReviewItemRecord,
-    append_audit, apply_security_retention, connect, consume_oidc_login_state, count_reviews,
-    create_document_chat_session, create_oidc_login_state, create_run_with_jobs_with_priority,
-    create_runs_for_documents, create_session, create_user_with_roles, dashboard_bucket_labels,
-    dashboard_range_start, document_chat_session_visible, failed_document_ids, find_api_token,
-    find_session, find_user_for_login, get_backlog_counts, get_dashboard_live_status,
-    get_dashboard_stats, get_runtime_settings, has_any_user, hash_token, increment_metric_counter,
-    insert_document_chat_message, insert_document_chat_sources, latest_apply_audit_for_run,
-    latest_metadata_artifact_for_run, latest_metadata_run_for_document, list_audit_events,
-    list_document_chat_messages, list_document_chat_sessions, list_inventory,
-    list_prompt_experiments, list_prompt_usage, list_prompts, list_reviews, list_secret_references,
-    list_sessions, list_users, metadata_review_items_for_run,
-    metrics_snapshot as db_metrics_snapshot, migrate, paperless_sync_cursor,
-    provider_bucket_entries, queue_missing_pipeline, queue_missing_stage, read_metric_counters,
-    record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
-    recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
-    rotate_api_token, search_document_chat_candidates, set_user_enabled, set_user_roles,
-    statistics_throughput_rows, statistics_usage_rows, update_paperless_sync_cursor,
-    update_runtime_settings, update_user_password_hash, upsert_encrypted_secret,
-    upsert_inventory_item, upsert_oidc_user, upsert_paperless_custom_field,
-    upsert_paperless_named_entity, upsert_paperless_tag, verify_audit_integrity,
+    UserIdentityConflictError, append_audit, apply_security_retention, connect,
+    consume_oidc_login_state, count_reviews, create_document_chat_session, create_oidc_login_state,
+    create_run_with_jobs_with_priority, create_runs_for_documents, create_session,
+    create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
+    document_chat_session_visible, failed_document_ids, find_api_token,
+    find_or_create_paperless_bridge_user, find_paperless_bridge_user, find_session,
+    find_user_for_login, get_backlog_counts, get_dashboard_live_status, get_dashboard_stats,
+    get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
+    insert_document_chat_sources, latest_apply_audit_for_run, latest_metadata_artifact_for_run,
+    latest_metadata_run_for_document, list_allowed_named_entities, list_allowed_tag_names,
+    list_audit_events, list_custom_fields, list_document_chat_messages,
+    list_document_chat_sessions, list_inventory, list_prompt_experiments, list_prompt_usage,
+    list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
+    metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
+    paperless_sync_cursor, provider_bucket_entries, queue_missing_pipeline, queue_missing_stage,
+    read_metric_counters, record_login_failure, record_login_success, recover_stale_leases,
+    recover_stuck_runs, recovery_candidates, resolve_secret, review_decision,
+    revoke_session_by_admin, rotate_api_token, search_document_chat_candidates, set_user_enabled,
+    set_user_roles, statistics_throughput_rows, statistics_usage_rows,
+    update_paperless_sync_cursor, update_runtime_settings, update_user_password_hash,
+    upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+    verify_audit_integrity,
 };
-use archivist_paperless::{PaperlessClient, PaperlessDocumentDetail, PaperlessTag};
+use archivist_paperless::{PaperlessClient, PaperlessTag};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Argon2, Params};
@@ -1199,6 +1210,22 @@ struct PaperlessTokenResponse {
     token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PaperlessUiSettingsResponse {
+    user: PaperlessUserIdentity,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaperlessUserIdentity {
+    id: i64,
+    username: String,
+}
+
+struct PaperlessBridgeIdentity {
+    subject: String,
+    username: String,
+}
+
 async fn paperless_login(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1216,38 +1243,39 @@ async fn paperless_login(
         return Err(ApiError::unauthorized("invalid credentials"));
     }
 
-    if verify_paperless_credentials(&settings, paperless_username, &request.password)
-        .await
-        .is_err()
+    let bridge_identity = match verify_paperless_credentials(
+        &settings,
+        paperless_username,
+        &request.password,
+    )
+    .await
     {
-        record_login_failure(
-            &state.pool,
-            None,
-            &paperless_bridge_username(paperless_username),
-            source_ip.as_deref(),
-            user_agent.as_deref(),
-        )
-        .await?;
-        return Err(ApiError::unauthorized("invalid credentials"));
-    }
+        Ok(identity) => identity,
+        Err(_) => {
+            record_login_failure(
+                &state.pool,
+                None,
+                &paperless_bridge_username(paperless_username),
+                source_ip.as_deref(),
+                user_agent.as_deref(),
+            )
+            .await?;
+            return Err(ApiError::unauthorized("invalid credentials"));
+        }
+    };
 
-    let username = paperless_bridge_username(paperless_username);
-    let user = match find_user_for_login(&state.pool, &username).await? {
+    let username = paperless_bridge_username(&bridge_identity.username);
+    let user = match find_paperless_bridge_user(&state.pool, &bridge_identity.subject).await? {
         Some(user) => user,
         None => {
             let disabled_password_hash = hash_password(&random_token())?;
-            create_user_with_roles(
+            find_or_create_paperless_bridge_user(
                 &state.pool,
                 &username,
-                None,
+                &bridge_identity.subject,
                 &disabled_password_hash,
-                &[Role::Viewer],
-                None,
             )
-            .await?;
-            find_user_for_login(&state.pool, &username)
-                .await?
-                .ok_or_else(|| ApiError::internal("created Paperless bridge user was not found"))?
+            .await?
         }
     };
     if !user.enabled {
@@ -1274,7 +1302,7 @@ async fn paperless_login(
             after: None,
             metadata: Some(json!({
                 "username": user.username,
-                "paperless_username": paperless_username
+                "paperless_username": bridge_identity.username
             })),
             outcome: "success".to_owned(),
             error_message: None,
@@ -1306,14 +1334,15 @@ async fn verify_paperless_credentials(
     settings: &RuntimeSettings,
     username: &str,
     password: &str,
-) -> Result<()> {
+) -> Result<PaperlessBridgeIdentity> {
     // Same up-front SSRF validation as the other outbound tester paths —
     // this endpoint forwards user credentials to the configured URL.
     let base_url = validate_outbound_url(settings.paperless.base_url.trim())
         .await
         .map_err(|error| anyhow!("Paperless base URL rejected: {}", error.message))?;
-    let token_url = base_url
-        .join("api/token/")
+    let api_root = base_url.join("api/").context("build Paperless API root")?;
+    let token_url = api_root
+        .join("token/")
         .context("build Paperless token URL")?;
     let client = HttpClient::builder()
         .timeout(std::time::Duration::from_secs(
@@ -1342,10 +1371,42 @@ async fn verify_paperless_credentials(
         .json()
         .await
         .context("decode Paperless token response")?;
-    if token.token.trim().is_empty() {
+    let token = token.token.trim();
+    if token.is_empty() {
         return Err(anyhow!("Paperless returned an empty token"));
     }
-    Ok(())
+    let identity_url = api_root
+        .join("ui_settings/")
+        .context("build Paperless identity URL")?;
+    let identity_response = client
+        .get(identity_url)
+        .header(reqwest::header::AUTHORIZATION, format!("Token {token}"))
+        .send()
+        .await
+        .context("read authenticated Paperless identity")?;
+    let identity_status = identity_response.status();
+    if !identity_status.is_success() {
+        return Err(anyhow!(
+            "Paperless identity endpoint returned {identity_status}"
+        ));
+    }
+    let identity: PaperlessUiSettingsResponse = identity_response
+        .json()
+        .await
+        .context("decode authenticated Paperless identity")?;
+    let identity_username = identity.user.username.trim();
+    if identity.user.id <= 0 || identity_username.is_empty() {
+        return Err(anyhow!("Paperless returned an invalid user identity"));
+    }
+    Ok(PaperlessBridgeIdentity {
+        subject: paperless_user_subject(&api_root, identity.user.id),
+        username: identity_username.to_owned(),
+    })
+}
+
+fn paperless_user_subject(api_root: &Url, user_id: i64) -> String {
+    let instance_hash = hex::encode(Sha256::digest(api_root.as_str().as_bytes()));
+    format!("instance-sha256:{instance_hash}:user-id:{user_id}")
 }
 
 fn paperless_bridge_username(username: &str) -> String {
@@ -1458,18 +1519,21 @@ async fn change_password(
 }
 
 async fn sessions(State(state): State<AppState>, auth: Authenticated) -> ApiResult<Json<Value>> {
-    let user_id = if roles_have_permission(&auth.0.roles, Permission::ManageUsers) {
-        None
-    } else {
-        Some(
-            auth.0
-                .user_id
-                .ok_or_else(|| ApiError::forbidden("session listing requires a user session"))?,
-        )
-    };
+    let user_id = session_listing_user_filter(&auth.0)?;
     Ok(Json(
         json!({ "items": list_sessions(&state.pool, user_id).await? }),
     ))
+}
+
+fn session_listing_user_filter(auth: &AuthContext) -> Result<Option<Uuid>, ApiError> {
+    let user_id = require_user_session(auth, "session listing requires a user session")?;
+    Ok(
+        if roles_have_permission(&auth.roles, Permission::ManageUsers) {
+            None
+        } else {
+            Some(user_id)
+        },
+    )
 }
 
 async fn revoke_session_endpoint(
@@ -1499,6 +1563,52 @@ struct UpdateSettingsRequest {
     provider_secrets: Option<HashMap<String, String>>,
 }
 
+fn canonicalize_provider_secrets(
+    settings: &RuntimeSettings,
+    provider_secrets: HashMap<String, String>,
+) -> ApiResult<HashMap<String, String>> {
+    let mut canonical = HashMap::with_capacity(provider_secrets.len());
+    for (submitted_name, secret) in provider_secrets {
+        let submitted_name = submitted_name.trim();
+        let provider = settings
+            .ai
+            .providers
+            .iter()
+            .find(|provider| provider.name.eq_ignore_ascii_case(submitted_name))
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "AI provider secret target '{submitted_name}' is not configured"
+                ))
+            })?;
+        if canonical.insert(provider.name.clone(), secret).is_some() {
+            return Err(ApiError::bad_request(format!(
+                "multiple AI provider secrets resolve to '{}'",
+                provider.name
+            )));
+        }
+    }
+    Ok(canonical)
+}
+
+fn prepare_settings_update(request: &mut UpdateSettingsRequest) -> ApiResult<()> {
+    // Runtime normalization can append provider presets, so it must happen
+    // before provider validation and the enabled-URL preflight. Performing it
+    // again after those checks could create unchecked persisted providers.
+    request.settings = std::mem::take(&mut request.settings).normalized();
+    request
+        .settings
+        .ai
+        .normalize_and_validate_providers()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if let Some(provider_secrets) = request.provider_secrets.take() {
+        request.provider_secrets = Some(canonicalize_provider_secrets(
+            &request.settings,
+            provider_secrets,
+        )?);
+    }
+    Ok(())
+}
+
 #[tracing::instrument(
     skip(state, auth, request),
     fields(user_id = tracing::field::Empty)
@@ -1511,6 +1621,11 @@ async fn update_settings(
     require(&auth.0, Permission::WriteSettings)?;
     let actor_id = require_user_session(&auth.0, "settings updates require a user session")?;
     Span::current().record("user_id", tracing::field::display(actor_id));
+
+    // Validate and canonicalize every name-based AI reference before the
+    // first secret or settings write. Any failure therefore leaves both the
+    // runtime settings and all encrypted-secret mappings untouched.
+    prepare_settings_update(&mut request)?;
 
     // Config-time SSRF guard (SECURITY_DESIGN §4.3): outbound URLs are
     // validated when they are PERSISTED, not only when the operator happens
@@ -1560,10 +1675,14 @@ async fn update_settings(
             })?;
     }
     for provider in &request.settings.ai.providers {
-        let base_url = provider.base_url.trim();
-        if !provider.enabled || base_url.is_empty() {
+        if !provider.enabled {
             continue;
         }
+        let base_url = if provider.name.eq_ignore_ascii_case("ollama") {
+            request.settings.ai.ollama_base_url.trim()
+        } else {
+            provider.base_url.trim()
+        };
         validate_outbound_url_for_save(base_url)
             .await
             .map_err(|error| {
@@ -1650,13 +1769,9 @@ async fn update_settings(
             )
         });
 
-    // Persist — and below, return — the NORMALIZED settings so the PUT
-    // response, the audit payload and the next GET all agree (mirrors
-    // update_workflow_controls). Previously the raw request was stored
-    // verbatim and normalization only happened on read, so a clamped value
-    // came back different on the next GET than the response the frontend
-    // adopted as state (#313).
-    request.settings = request.settings.normalized();
+    // The preflight normalized the final provider inventory before any URL or
+    // secret checks. Persist — and below, return — that same normalized object
+    // so the PUT response, audit payload and next GET agree (#313).
     update_runtime_settings(&state.pool, &request.settings, actor_id).await?;
     info!(%actor_id, "runtime settings updated");
 
@@ -1800,32 +1915,35 @@ async fn test_prompt_endpoint(
 
     let settings = get_runtime_settings(&state.pool).await?;
     let sample_text = prompt_test_sample_text(&state, &settings, &request).await?;
-    let mut chat_request = build_prompt_test_chat_request(&request, &sample_text)
-        .await
+    let provider = prompt_test_provider(&settings, &request)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    chat_request.system_prompt = request.content.trim().to_owned();
 
-    let mut provider = if let Some(provider_name) = request
-        .provider_name
-        .as_deref()
-        .filter(|provider_name| !provider_name.trim().is_empty())
-    {
-        provider_by_name(&settings, provider_name)
+    let mut chat_request = match request.stage {
+        Stage::Ocr => build_ocr_prompt_test_chat_request(&sample_text),
+        Stage::Metadata => {
+            let enabled =
+                MetadataFieldFlags::from_enabled_stages(&settings.workflow.enabled_stages);
+            let catalog = load_metadata_prompt_test_catalog(&state.pool, enabled).await?;
+            build_metadata_prompt_test_chat_request(
+                &settings,
+                &provider.tuning,
+                &sample_text,
+                catalog,
+            )
             .map_err(|error| ApiError::bad_request(error.to_string()))?
-    } else {
-        provider_for_default_text(&settings)
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        }
+        Stage::Apply => {
+            return Err(ApiError::bad_request(format!(
+                "prompt testing is not supported for stage {}",
+                request.stage
+            )));
+        }
     };
-    if let Some(model) = request
-        .model
-        .as_deref()
-        .filter(|model| !model.trim().is_empty())
-    {
-        provider.model = model.trim().to_owned();
-    }
+    apply_prompt_test_system_prompt(&mut chat_request, &request.content);
     chat_request.model = provider.model.clone();
+    apply_api_provider_tuning(&provider, &mut chat_request);
 
-    let response = chat_with_default_provider(&state, &provider, chat_request.clone()).await?;
+    let response = chat_with_api_provider(&state, &provider, chat_request.clone()).await?;
     let parsed = parse_prompt_test_output(request.stage, &response.text);
     append_audit(
         &state.pool,
@@ -1843,6 +1961,7 @@ async fn test_prompt_endpoint(
                 "provider": provider.name,
                 "model": provider.model,
                 "sample_chars": sample_text.chars().count(),
+                "duration_ms": response.duration_ms,
                 "valid": parsed.validation_errors.is_empty()
             })),
             outcome: if parsed.validation_errors.is_empty() {
@@ -1869,9 +1988,35 @@ async fn test_prompt_endpoint(
     })))
 }
 
+fn prompt_test_provider(
+    settings: &RuntimeSettings,
+    request: &TestPromptRequest,
+) -> Result<ApiProvider> {
+    let mut provider = if let Some(provider_name) = request
+        .provider_name
+        .as_deref()
+        .filter(|provider_name| !provider_name.trim().is_empty())
+    {
+        provider_by_name(settings, provider_name)?
+    } else {
+        match request.stage {
+            Stage::Metadata => provider_for_stage_text(settings, Stage::Metadata)?,
+            Stage::Ocr | Stage::Apply => provider_for_default_text(settings)?,
+        }
+    };
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    {
+        provider.model = model.trim().to_owned();
+    }
+    Ok(provider)
+}
+
 #[derive(Debug)]
 struct PromptTestParsed {
-    parsed: Option<Value>,
+    parsed: Value,
     validation_errors: Vec<String>,
     warnings: Vec<String>,
 }
@@ -1912,50 +2057,182 @@ async fn prompt_test_sample_text(
     ))
 }
 
-async fn build_prompt_test_chat_request(
-    request: &TestPromptRequest,
-    sample_text: &str,
-) -> Result<ChatRequest> {
-    match request.stage {
-        Stage::Ocr => Ok(ChatRequest {
-            model: String::new(),
-            system_prompt: String::new(),
-            user_prompt: format!(
-                "Test this OCR prompt against sample text. Return the best OCR text only.\n\nSample text:\n{}",
-                sample_text.chars().take(12_000).collect::<String>()
-            ),
-            temperature: 0.0,
-            num_ctx: None,
-            response_schema: None,
-            reasoning_effort: None,
-            max_output_tokens: None,
-            structured_output: None,
-        }),
-        // Stage::Metadata uses the consolidated prompt builder added alongside the worker
-        // handler. The builder is registered in archivist-ai in a follow-up commit; until
-        // then, surface a clear error rather than silently testing a stale prompt.
-        Stage::Metadata => Err(anyhow!(
-            "prompt testing for the consolidated metadata stage is added in a later v1.4.0 commit"
-        )),
-        Stage::Apply => Err(anyhow!(
-            "prompt testing is not supported for stage {}",
-            request.stage
-        )),
+fn build_ocr_prompt_test_chat_request(sample_text: &str) -> ChatRequest {
+    ChatRequest {
+        model: String::new(),
+        system_prompt: String::new(),
+        user_prompt: format!(
+            "Test this OCR prompt against sample text. Return the best OCR text only.\n\nSample text:\n{}",
+            sample_text.chars().take(12_000).collect::<String>()
+        ),
+        temperature: 0.0,
+        num_ctx: None,
+        response_schema: None,
+        reasoning_effort: None,
+        max_output_tokens: None,
+        structured_output: None,
     }
+}
+
+#[derive(Debug)]
+struct MetadataPromptTestCatalog {
+    correspondents: Vec<String>,
+    document_types: Vec<String>,
+    tags: Vec<String>,
+    fields: Vec<(String, Option<String>)>,
+}
+
+async fn load_metadata_prompt_test_catalog(
+    pool: &DbPool,
+    enabled: MetadataFieldFlags,
+) -> ApiResult<MetadataPromptTestCatalog> {
+    let correspondents = if enabled.correspondent {
+        list_allowed_named_entities(pool, "paperless_correspondents").await?
+    } else {
+        Vec::new()
+    };
+    let document_types = if enabled.document_type {
+        list_allowed_named_entities(pool, "paperless_document_types").await?
+    } else {
+        Vec::new()
+    };
+    let tags = if enabled.tags {
+        list_allowed_tag_names(pool).await?
+    } else {
+        Vec::new()
+    };
+    let fields = if enabled.fields {
+        list_custom_fields(pool)
+            .await?
+            .into_iter()
+            .map(|field| (field.name, field.data_type))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(MetadataPromptTestCatalog {
+        correspondents,
+        document_types,
+        tags,
+        fields,
+    })
+}
+
+fn build_metadata_prompt_test_chat_request(
+    settings: &RuntimeSettings,
+    tuning: &EffectiveTuning,
+    sample_text: &str,
+    catalog: MetadataPromptTestCatalog,
+) -> Result<ChatRequest> {
+    let enabled = MetadataFieldFlags::from_enabled_stages(&settings.workflow.enabled_stages);
+    if !enabled.any() {
+        return Err(anyhow!(
+            "metadata prompt testing requires the metadata workflow stage to be enabled"
+        ));
+    }
+
+    let content_lower = sample_text.to_lowercase();
+    let allowed_list_max = tuning.allowed_list_max as usize;
+    let correspondents =
+        prefilter_allowed_list_lower(&content_lower, &catalog.correspondents, allowed_list_max);
+    let document_types =
+        prefilter_allowed_list_lower(&content_lower, &catalog.document_types, allowed_list_max);
+    let tags = prefilter_allowed_list_lower(&content_lower, &catalog.tags, allowed_list_max);
+    let fields = catalog
+        .fields
+        .into_iter()
+        .filter(|(name, _)| settings.fields.field_enabled(name))
+        .collect::<Vec<_>>();
+    let field_names = fields
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let detection = detect_document_language(sample_text);
+    let language = PromptLanguageContext::new(&detection, &settings.tagging.tag_output_language);
+    let mut request = prompt_for_metadata(
+        sample_text,
+        &correspondents,
+        &document_types,
+        &tags,
+        &fields,
+        &enabled,
+        &language,
+        tuning.max_tags as usize,
+        settings.fields.max_fields,
+        "",
+    );
+    request.response_schema = schema_for_metadata(
+        &correspondents,
+        &document_types,
+        &tags,
+        &field_names,
+        &enabled,
+        tuning.max_tags as usize,
+        settings.fields.max_fields,
+    );
+    Ok(request)
+}
+
+fn apply_prompt_test_system_prompt(request: &mut ChatRequest, content: &str) {
+    request.system_prompt = content.trim().to_owned();
 }
 
 fn parse_prompt_test_output(stage: Stage, text: &str) -> PromptTestParsed {
     match stage {
         Stage::Ocr => PromptTestParsed {
-            parsed: Some(json!({ "content": text })),
+            parsed: json!({ "content": text }),
             validation_errors: Vec::new(),
             warnings: Vec::new(),
         },
-        Stage::Metadata | Stage::Apply => PromptTestParsed {
-            parsed: None,
+        Stage::Metadata => parse_metadata_prompt_test_output(text),
+        Stage::Apply => PromptTestParsed {
+            parsed: Value::Null,
             validation_errors: vec![format!("unsupported stage: {stage}")],
             warnings: Vec::new(),
         },
+    }
+}
+
+fn parse_metadata_prompt_test_output(text: &str) -> PromptTestParsed {
+    let parsed = parse_metadata_suggestion(text);
+    let mut validation_errors = Vec::new();
+    if let Some(envelope_error) = parsed.diagnostics.envelope_error {
+        validation_errors.push(match envelope_error {
+            MetadataEnvelopeError::NoJson => {
+                "metadata response envelope is not valid JSON".to_owned()
+            }
+            MetadataEnvelopeError::NonObject => {
+                "metadata response must be a JSON object".to_owned()
+            }
+        });
+    }
+    if !parsed.diagnostics.invalid_fields.is_empty() {
+        validation_errors.push(format!(
+            "metadata field(s) have wrong types or unknown nested properties: {}",
+            parsed.diagnostics.invalid_fields.join(", ")
+        ));
+    }
+    if parsed.diagnostics.unknown_field_count > 0 {
+        validation_errors.push(format!(
+            "metadata response contains {} unknown field(s)",
+            parsed.diagnostics.unknown_field_count
+        ));
+    }
+
+    let mut warnings = parsed
+        .suggestion
+        .document_date
+        .as_ref()
+        .map(|date| date.warnings.clone())
+        .unwrap_or_default();
+    if parsed.diagnostics.status == MetadataParseStatus::Omitted {
+        warnings.push("metadata response omitted every requested field".to_owned());
+    }
+
+    PromptTestParsed {
+        parsed: json!(parsed),
+        validation_errors,
+        warnings,
     }
 }
 
@@ -1988,24 +2265,42 @@ async fn test_paperless(
     }
 }
 
+#[derive(Deserialize)]
+struct TestProviderRequest {
+    name: String,
+    kind: AiProviderKind,
+    base_url: String,
+    model: String,
+    #[serde(default)]
+    tuning: ProviderTuning,
+    secret_id: Option<Uuid>,
+    secret: Option<String>,
+}
+
 async fn test_provider(
     State(state): State<AppState>,
     auth: Authenticated,
+    Json(request): Json<TestProviderRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadSettings)?;
+    require(&auth.0, Permission::WriteSettings)?;
+    require_user_session(&auth.0, "provider tests require a user session")?;
     let settings = get_runtime_settings(&state.pool).await?;
-    let provider = provider_for_default_text(&settings)?;
-    if let Err(error) = validate_outbound_url(&provider.base_url).await {
-        return Ok(Json(json!({
-            "ok": false,
-            "error": format!("AI provider base URL rejected: {}", error.message),
-        })));
+    let provider = provider_test_target(&settings, &request)?;
+    let secret = provider_test_secret(&state, &settings, &provider, request.secret).await;
+    let response_secret = secret.as_ref().ok().and_then(|secret| secret.clone());
+    let result = async {
+        if let Err(error) = validate_outbound_url(&provider.base_url).await {
+            return Err(anyhow!("AI provider base URL rejected: {}", error.message));
+        }
+        let secret = secret?;
+        test_ai_provider(&provider, secret.clone()).await
     }
-    let result = test_ai_provider(&state, &provider).await;
-    match result {
-        Ok(value) => Ok(Json(json!({ "ok": true, "details": value }))),
-        Err(error) => Ok(Json(json!({ "ok": false, "error": error.to_string() }))),
-    }
+    .await;
+    Ok(Json(provider_test_response(
+        &provider,
+        result,
+        response_secret.as_ref(),
+    )))
 }
 
 async fn test_notification(
@@ -2583,6 +2878,110 @@ struct ApiProvider {
     base_url: String,
     model: String,
     secret_id: Option<Uuid>,
+    tuning: EffectiveTuning,
+}
+
+fn provider_test_target(
+    settings: &RuntimeSettings,
+    request: &TestProviderRequest,
+) -> Result<ApiProvider, ApiError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("provider name must not be blank"));
+    }
+    let model = request.model.trim();
+    if model.is_empty() && !matches!(request.kind, AiProviderKind::Mineru) {
+        return Err(ApiError::bad_request("provider model must not be blank"));
+    }
+    let model = if model.is_empty() { "mineru" } else { model };
+    let base_url = provider_base_url(name, &request.base_url).map_err(|error| {
+        ApiError::bad_request(format!("AI provider '{name}' base URL: {error}"))
+    })?;
+    let draft = AiProviderSettings {
+        name: name.to_owned(),
+        kind: request.kind.clone(),
+        base_url: base_url.clone(),
+        default_text_model: Some(model.to_owned()),
+        default_vision_model: None,
+        cost_per_1m_input_tokens_usd: None,
+        cost_per_1m_output_tokens_usd: None,
+        secret_id: request.secret_id,
+        enabled: true,
+        tuning: request.tuning.clone(),
+    };
+    let mut effective_settings = settings.clone();
+    effective_settings.ai.default_provider = draft.name.clone();
+    if let Some(index) = effective_settings
+        .ai
+        .providers
+        .iter()
+        .position(|provider| provider.name == draft.name)
+    {
+        effective_settings.ai.providers[index] = draft.clone();
+    } else {
+        effective_settings.ai.providers.push(draft.clone());
+    }
+    let tuning = effective_settings.effective_tuning_for_provider(&draft);
+    Ok(ApiProvider {
+        name: draft.name,
+        kind: draft.kind,
+        base_url,
+        model: model.to_owned(),
+        secret_id: draft.secret_id,
+        tuning,
+    })
+}
+
+async fn provider_test_secret(
+    state: &AppState,
+    settings: &RuntimeSettings,
+    provider: &ApiProvider,
+    transient: Option<String>,
+) -> Result<Option<SecretString>> {
+    if let Some(secret) = transient.filter(|secret| !secret.trim().is_empty()) {
+        return Ok(Some(SecretString::from(secret)));
+    }
+    if let Some(secret_id) = provider.secret_id
+        && !settings
+            .ai
+            .providers
+            .iter()
+            .any(|saved| saved.secret_id == Some(secret_id))
+    {
+        return Err(anyhow!(
+            "provider secret reference is not assigned to a saved AI provider"
+        ));
+    }
+    provider_secret(state, provider).await
+}
+
+fn provider_test_response(
+    provider: &ApiProvider,
+    result: Result<Value>,
+    secret: Option<&SecretString>,
+) -> Value {
+    match result {
+        Ok(_) => json!({
+            "ok": true,
+            "provider": provider.name,
+            "model": provider.model,
+        }),
+        Err(error) => {
+            let mut message = error.to_string();
+            if let Some(secret) = secret {
+                let exposed = secret.expose_secret();
+                if !exposed.is_empty() {
+                    message = message.replace(exposed, "[REDACTED]");
+                }
+            }
+            json!({
+                "ok": false,
+                "provider": provider.name,
+                "model": provider.model,
+                "error": message,
+            })
+        }
+    }
 }
 
 fn provider_by_name(settings: &RuntimeSettings, name: &str) -> Result<ApiProvider> {
@@ -2590,27 +2989,29 @@ fn provider_by_name(settings: &RuntimeSettings, name: &str) -> Result<ApiProvide
         .ai
         .providers
         .iter()
-        .find(|provider| provider.name == name)
+        .find(|provider| provider.name.eq_ignore_ascii_case(name))
         .cloned()
         .or_else(|| {
-            if name == "ollama" {
+            if name.eq_ignore_ascii_case("ollama") {
                 Some(archivist_core::AiProviderSettings::ollama_default())
             } else {
                 None
             }
         })
         .ok_or_else(|| anyhow!("AI provider '{name}' is not configured"))?;
-    if provider.name == "ollama" {
+    if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
     let model = settings.ai.default_model_for_provider(&provider, false);
-    let base_url = provider_base_url(&provider.kind, &provider.base_url);
+    let base_url = provider_base_url(&provider.name, &provider.base_url)?;
+    let tuning = settings.effective_tuning_for_provider(&provider);
     Ok(ApiProvider {
         name: provider.name,
         kind: provider.kind,
         base_url,
         model,
         secret_id: provider.secret_id,
+        tuning,
     })
 }
 
@@ -2619,10 +3020,15 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
         .ai
         .providers
         .iter()
-        .find(|provider| provider.enabled && provider.name == settings.ai.default_provider)
+        .find(|provider| {
+            provider.enabled
+                && provider
+                    .name
+                    .eq_ignore_ascii_case(&settings.ai.default_provider)
+        })
         .cloned()
         .or_else(|| {
-            if settings.ai.default_provider == "ollama" {
+            if settings.ai.default_provider.eq_ignore_ascii_case("ollama") {
                 Some(archivist_core::AiProviderSettings::ollama_default())
             } else {
                 None
@@ -2634,32 +3040,71 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
                 settings.ai.default_provider
             )
         })?;
-    if provider.name == "ollama" {
+    if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
     let model = settings.ai.default_model_for_provider(&provider, false);
-    let base_url = provider_base_url(&provider.kind, &provider.base_url);
+    let base_url = provider_base_url(&provider.name, &provider.base_url)?;
+    let tuning = settings.effective_tuning_for_provider(&provider);
     Ok(ApiProvider {
         name: provider.name,
         kind: provider.kind,
         base_url,
         model,
         secret_id: provider.secret_id,
+        tuning,
     })
 }
 
-fn provider_base_url(kind: &AiProviderKind, configured: &str) -> String {
+fn provider_for_stage_text(settings: &RuntimeSettings, stage: Stage) -> Result<ApiProvider> {
+    let stage_override = settings
+        .ai
+        .stage_models
+        .iter()
+        .find(|override_model| override_model.stage == stage);
+    let provider_name = stage_override
+        .map(|override_model| override_model.provider.as_str())
+        .unwrap_or(&settings.ai.default_provider);
+    let mut provider = settings
+        .ai
+        .providers
+        .iter()
+        .find(|provider| provider.enabled && provider.name.eq_ignore_ascii_case(provider_name))
+        .cloned()
+        .or_else(|| {
+            if provider_name.eq_ignore_ascii_case("ollama") {
+                Some(archivist_core::AiProviderSettings::ollama_default())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| anyhow!("AI provider '{provider_name}' is not configured or disabled"))?;
+    if provider.name.eq_ignore_ascii_case("ollama") {
+        provider.base_url = settings.ai.ollama_base_url.clone();
+    }
+    let model = settings
+        .ai
+        .model_for_stage_provider(&provider, stage, false);
+    let base_url = provider_base_url(&provider.name, &provider.base_url)?;
+    let tuning = settings.effective_tuning_for_provider(&provider);
+    Ok(ApiProvider {
+        name: provider.name,
+        kind: provider.kind,
+        base_url,
+        model,
+        secret_id: provider.secret_id,
+        tuning,
+    })
+}
+
+fn provider_base_url(provider_name: &str, configured: &str) -> Result<String> {
     let trimmed = configured.trim();
-    if !trimmed.is_empty() {
-        return trimmed.trim_end_matches('/').to_owned();
+    if trimmed.is_empty() {
+        return Err(anyhow!(
+            "AI provider '{provider_name}' has an empty base URL; repair the runtime settings"
+        ));
     }
-    match kind {
-        AiProviderKind::Ollama => "http://ollama:11434".to_owned(),
-        AiProviderKind::Openai => "https://api.openai.com/v1".to_owned(),
-        AiProviderKind::Anthropic => "https://api.anthropic.com/v1".to_owned(),
-        AiProviderKind::OpenaiCompatible => "http://localhost:8000/v1".to_owned(),
-        AiProviderKind::Mineru => "http://localhost:8001".to_owned(),
-    }
+    Ok(trimmed.trim_end_matches('/').to_owned())
 }
 
 async fn provider_secret(state: &AppState, provider: &ApiProvider) -> Result<Option<SecretString>> {
@@ -2669,91 +3114,114 @@ async fn provider_secret(state: &AppState, provider: &ApiProvider) -> Result<Opt
     resolve_secret(&state.pool, &state.config.secret_key, secret_id).await
 }
 
-async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Value> {
+fn apply_api_provider_tuning(provider: &ApiProvider, request: &mut ChatRequest) {
+    request.num_ctx = provider.tuning.text_num_ctx;
+    request.reasoning_effort = Some(provider.tuning.reasoning_effort);
+    request.max_output_tokens = provider.tuning.max_output_tokens;
+    request.structured_output = Some(provider.tuning.structured_output);
+}
+
+fn provider_test_chat_request(provider: &ApiProvider) -> ChatRequest {
+    let mut request = ChatRequest {
+        model: provider.model.clone(),
+        system_prompt: "Return only a short JSON provider health result.".to_owned(),
+        user_prompt: "Return {\"status\":\"ok\"}.".to_owned(),
+        temperature: 0.0,
+        num_ctx: None,
+        response_schema: Some(json!({
+            "type": "object",
+            "properties": { "status": { "type": "string" } },
+            "required": ["status"],
+            "additionalProperties": false
+        })),
+        reasoning_effort: None,
+        max_output_tokens: None,
+        structured_output: None,
+    };
+    apply_api_provider_tuning(provider, &mut request);
+    request
+}
+
+async fn test_ai_provider(provider: &ApiProvider, secret: Option<SecretString>) -> Result<Value> {
+    let timeout =
+        std::time::Duration::from_secs(u64::from(provider.tuning.request_timeout_seconds));
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client = OllamaClient::new(
+            let client = OllamaClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
-                provider_secret(state, provider).await?,
+                secret,
+                timeout,
             )?;
-            client.test_connection(Some(&provider.model)).await
+            let response = client.chat(provider_test_chat_request(provider)).await?;
+            Ok(json!({
+                "provider": response.provider,
+                "model": response.model,
+                "text": response.text,
+            }))
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
-            let client = OpenAiCompatibleClient::new(
+            let client = OpenAiCompatibleClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
-                provider_secret(state, provider).await?,
+                secret,
+                timeout,
             )?;
-            let response = client
-                .chat(ChatRequest {
-                    model: provider.model.clone(),
-                    system_prompt: "Return a short health check response.".to_owned(),
-                    user_prompt: "Return OK.".to_owned(),
-                    temperature: 0.0,
-                    num_ctx: None,
-                    response_schema: None,
-                    reasoning_effort: None,
-                    max_output_tokens: None,
-                    structured_output: None,
-                })
-                .await?;
+            let response = client.chat(provider_test_chat_request(provider)).await?;
             Ok(
                 json!({ "provider": response.provider, "model": response.model, "text": response.text }),
             )
         }
         AiProviderKind::Anthropic => {
-            let secret = provider_secret(state, provider).await?.ok_or_else(|| {
+            let secret = secret.ok_or_else(|| {
                 anyhow!("AI provider '{}' requires an API key secret", provider.name)
             })?;
-            let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
-            let response = client
-                .chat(ChatRequest {
-                    model: provider.model.clone(),
-                    system_prompt: "Return a short health check response.".to_owned(),
-                    user_prompt: "Return OK.".to_owned(),
-                    temperature: 0.0,
-                    num_ctx: None,
-                    response_schema: None,
-                    reasoning_effort: None,
-                    max_output_tokens: None,
-                    structured_output: None,
-                })
-                .await?;
+            let client = AnthropicClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                secret,
+                timeout,
+            )?;
+            let response = client.chat(provider_test_chat_request(provider)).await?;
             Ok(
                 json!({ "provider": response.provider, "model": response.model, "text": response.text }),
             )
         }
         AiProviderKind::Mineru => {
-            let client = MineruClient::new(
+            let client = MineruClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
-                provider_secret(state, provider).await?,
+                secret,
+                timeout,
             )?;
             client.test_connection().await
         }
     }
 }
 
-async fn chat_with_default_provider(
+async fn chat_with_api_provider(
     state: &AppState,
     provider: &ApiProvider,
     request: ChatRequest,
 ) -> Result<AiResponse> {
+    let timeout =
+        std::time::Duration::from_secs(u64::from(provider.tuning.request_timeout_seconds));
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client = OllamaClient::new(
+            let client = OllamaClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
                 provider_secret(state, provider).await?,
+                timeout,
             )?;
             client.chat(request).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
-            let client = OpenAiCompatibleClient::new(
+            let client = OpenAiCompatibleClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
                 provider_secret(state, provider).await?,
+                timeout,
             )?;
             client.chat(request).await
         }
@@ -2761,7 +3229,12 @@ async fn chat_with_default_provider(
             let secret = provider_secret(state, provider).await?.ok_or_else(|| {
                 anyhow!("AI provider '{}' requires an API key secret", provider.name)
             })?;
-            let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
+            let client = AnthropicClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                secret,
+                timeout,
+            )?;
             client.chat(request).await
         }
         AiProviderKind::Mineru => Err(anyhow!(
@@ -2770,6 +3243,26 @@ async fn chat_with_default_provider(
             provider.name
         )),
     }
+}
+
+fn build_document_chat_request(
+    provider: &ApiProvider,
+    system_prompt: String,
+    user_prompt: String,
+) -> ChatRequest {
+    let mut request = ChatRequest {
+        model: provider.model.clone(),
+        system_prompt,
+        user_prompt,
+        temperature: 0.1,
+        num_ctx: None,
+        response_schema: None,
+        reasoning_effort: None,
+        max_output_tokens: None,
+        structured_output: None,
+    };
+    apply_api_provider_tuning(provider, &mut request);
+    request
 }
 
 async fn ensure_chat_visible(
@@ -4060,7 +4553,7 @@ impl MetadataField {
         ]
     }
 
-    /// Key under which `audit_events.document.patch_applied.after` carries
+    /// Key under which durable patch-intent audit events carry
     /// this field's value. `document_date` is keyed as `created` because the
     /// worker writes to Paperless's `created` field. `fields` is keyed as
     /// `custom_fields` (the Paperless API name).
@@ -4697,20 +5190,10 @@ async fn post_chat_message(
     )
     .await?;
     let prompt = build_document_chat_prompt(question, &sources);
-    let response = chat_with_default_provider(
+    let response = chat_with_api_provider(
         &state,
         &provider,
-        ChatRequest {
-            model: provider.model.clone(),
-            system_prompt: prompt.system_prompt,
-            user_prompt: prompt.user_prompt,
-            temperature: 0.1,
-            num_ctx: None,
-            response_schema: None,
-            reasoning_effort: None,
-            max_output_tokens: None,
-            structured_output: None,
-        },
+        build_document_chat_request(&provider, prompt.system_prompt, prompt.user_prompt),
     )
     .await?;
     let answer = response.text.clone();
@@ -5930,7 +6413,7 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     let pool = state.pool.clone();
     tokio::spawn(async move {
-        const HEADER: &str = "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash,source_ip,user_agent\n";
+        const HEADER: &str = "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash,hash_version,source_ip,user_agent\n";
         if tx
             .send(Ok(Bytes::from_static(HEADER.as_bytes())))
             .await
@@ -5942,7 +6425,7 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
             r#"
             select id, event_type, actor_type, actor_id, paperless_document_id,
                    outcome, error_message, created_at, metadata,
-                   prev_event_hash, event_hash, source_ip, user_agent
+                   prev_event_hash, event_hash, hash_version, source_ip, user_agent
               from audit_events
              order by created_at desc, id desc
             "#,
@@ -6003,6 +6486,7 @@ fn audit_csv_row(row: &sqlx::postgres::PgRow) -> Result<String, sqlx::Error> {
     let metadata: Option<Value> = row.try_get("metadata")?;
     let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
     let event_hash: Option<String> = row.try_get("event_hash")?;
+    let hash_version: Option<i16> = row.try_get("hash_version")?;
     let source_ip: Option<String> = row.try_get("source_ip")?;
     let user_agent: Option<String> = row.try_get("user_agent")?;
     let cells = [
@@ -6019,6 +6503,9 @@ fn audit_csv_row(row: &sqlx::postgres::PgRow) -> Result<String, sqlx::Error> {
         metadata.map(|value| value.to_string()).unwrap_or_default(),
         prev_event_hash.unwrap_or_default(),
         event_hash.unwrap_or_default(),
+        hash_version
+            .map(|version| version.to_string())
+            .unwrap_or_default(),
         source_ip.unwrap_or_default(),
         user_agent.unwrap_or_default(),
     ];
@@ -6272,15 +6759,45 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
     };
     // review.status holds the pre-claim status ('approved'/'edited'). The row
     // is now 'applying', which fences out a concurrent apply / autopilot
-    // drain. If any step below fails, restore that prior status so the
-    // operator can retry instead of the row being stuck in 'applying'.
+    // drain. Only failures that never produced a nonterminal durable intent
+    // may be reverted immediately; ambiguous HTTP outcomes stay fenced for
+    // the recovery worker instead of becoming blindly retryable.
     let prior_status = review.status.clone();
     let result = apply_claimed_review(state, &review, actor_id).await;
+    if let Err(error) = &result
+        && let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>()
+    {
+        archivist_db::mark_review_apply_conflict(
+            &state.pool,
+            review_id,
+            "pending",
+            conflict.fields(),
+            "user",
+            Some(actor_id.to_string()),
+        )
+        .await?;
+        return result;
+    }
     if result.is_err() {
-        // Best-effort release of our claim; a success path already moved the
-        // row to 'applied', so this no-ops there.
-        let _ =
-            archivist_db::revert_review_from_applying(&state.pool, review_id, &prior_status).await;
+        match archivist_db::review_has_nonterminal_apply_intent(&state.pool, review_id).await {
+            Ok(false) => {
+                let _ = archivist_db::revert_review_from_applying(
+                    &state.pool,
+                    review_id,
+                    &prior_status,
+                )
+                .await;
+            }
+            Ok(true) => warn!(
+                %review_id,
+                "review apply remains fenced while its Paperless intent is recovered"
+            ),
+            Err(error) => warn!(
+                %review_id,
+                error = %error,
+                "could not prove review apply safe to revert; leaving it fenced"
+            ),
+        }
     }
     result
 }
@@ -6299,7 +6816,7 @@ async fn apply_claimed_review(
         .edited_patch
         .clone()
         .unwrap_or_else(|| review.suggested_patch.clone());
-    let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
+    let patch: DocumentPatch = serde_json::from_value(patch_value)?;
     // run_id is None only for review items whose run was pruned by retention
     // (terminal runs only — a pending review keeps its run alive).
     let final_run_stage = if let (Some(run_id), Some(job_id)) = (review.run_id, review.job_id) {
@@ -6307,72 +6824,41 @@ async fn apply_claimed_review(
     } else {
         false
     };
-    add_completion_and_remove_trigger_tags(state, review, &mut patch, final_run_stage).await?;
-    let client = paperless_client(&state.pool, &state.config).await?;
-    let document = client.get_document(review.paperless_document_id).await?;
-    prune_unchanged_patch_fields(&mut patch, &document);
-    let before = audit_before_for_patch(&document, &patch);
-    let after = audit_patch_payload(&patch);
+    let settings = get_runtime_settings(&state.pool).await?;
+    let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
+    let tag_operations =
+        review_workflow_tag_operations(&client, &settings, review.stage, final_run_stage).await?;
     let apply_started = std::time::Instant::now();
-    if let Err(error) = client
-        .patch_document(review.paperless_document_id, &patch)
-        .await
-    {
-        let duration_ms = apply_started.elapsed().as_millis() as u64;
-        append_audit(
-            &state.pool,
-            AuditEventInput {
-                event_type: "document.patch_apply_failed".to_owned(),
-                actor_type: "user".to_owned(),
-                actor_id: Some(actor_id.to_string()),
-                run_id: review.run_id,
-                job_id: review.job_id,
-                paperless_document_id: Some(review.paperless_document_id),
-                before: Some(before),
-                after: Some(after),
-                metadata: Some(json!({
-                    "stage": review.stage,
-                    "review_id": review.id,
-                    "duration_ms": duration_ms
-                })),
-                outcome: "failed".to_owned(),
-                error_message: Some(error.to_string()),
-                source_ip: None,
-                user_agent: None,
-            },
-        )
-        .await?;
-        increment_metric_counter(&state.pool, "apply_failure_total", 1).await?;
-        // The caller (`apply_review_patch`) releases the `applying` claim on
-        // any Err return, so the row reverts to its prior status for retry.
-        return Err(error);
-    }
-    let duration_ms = apply_started.elapsed().as_millis() as u64;
-    append_audit(
+    let execution = apply_document(
         &state.pool,
-        AuditEventInput {
-            event_type: "document.patch_applied".to_owned(),
-            actor_type: "user".to_owned(),
-            actor_id: Some(actor_id.to_string()),
+        &client,
+        ApplyRequest {
+            source: "human_review".to_owned(),
+            source_key: format!("review:{review_id}"),
+            owner_type: "user".to_owned(),
+            owner_id: actor_id.to_string(),
+            paperless_document_id: review.paperless_document_id,
             run_id: review.run_id,
             job_id: review.job_id,
-            paperless_document_id: Some(review.paperless_document_id),
-            before: Some(before),
-            after: Some(after),
-            metadata: Some(json!({
+            review_id: Some(review.id),
+            patch,
+            before: None,
+            metadata: json!({
                 "stage": review.stage,
-                "review_id": review.id,
-                "duration_ms": duration_ms
-            })),
-            outcome: "success".to_owned(),
-            error_message: None,
-            source_ip: None,
-            user_agent: None,
+                "review_id": review.id
+            }),
+            review_revert_status: Some(review.status.clone()),
+            review_precondition: Some(ReviewApplyPrecondition {
+                baseline: review.baseline.clone(),
+                tag_operations,
+            }),
+            allow_custom_fields_fallback: false,
         },
     )
     .await?;
-    increment_metric_counter(&state.pool, "apply_success_total", 1).await?;
+    let duration_ms = apply_started.elapsed().as_millis() as u64;
     archivist_db::mark_review_applied(&state.pool, review_id, actor_id).await?;
+    archivist_db::finalize_apply_intent(&state.pool, execution.attempt_id()).await?;
     info!(
         %review_id,
         run_id = ?review.run_id,
@@ -6383,167 +6869,33 @@ async fn apply_claimed_review(
     Ok(())
 }
 
-fn prune_unchanged_patch_fields(patch: &mut DocumentPatch, document: &PaperlessDocumentDetail) {
-    if patch.content.as_deref() == document.content.as_deref() {
-        patch.content = None;
-    }
-    if patch.title == document.title {
-        patch.title = None;
-    }
-    if patch
-        .tags
-        .as_ref()
-        .is_some_and(|tags| same_i32_set(tags, &document.tags))
-    {
-        patch.tags = None;
-    }
-    if patch
-        .correspondent
-        .as_ref()
-        .is_some_and(|value| *value == document.correspondent)
-    {
-        patch.correspondent = None;
-    }
-    if patch
-        .document_type
-        .as_ref()
-        .is_some_and(|value| *value == document.document_type)
-    {
-        patch.document_type = None;
-    }
-    if patch
-        .created
-        .as_deref()
-        .is_some_and(|value| document_date_equals(document.created.as_deref(), value))
-    {
-        patch.created = None;
-    }
-}
-
-fn same_i32_set(left: &[i32], right: &[i32]) -> bool {
-    let mut left = left.to_vec();
-    let mut right = right.to_vec();
-    left.sort_unstable();
-    left.dedup();
-    right.sort_unstable();
-    right.dedup();
-    left == right
-}
-
-fn document_date_equals(current: Option<&str>, requested: &str) -> bool {
-    current
-        .map(|value| value.get(..10).unwrap_or(value) == requested)
-        .unwrap_or(false)
-}
-
-fn audit_before_for_patch(
-    document: &PaperlessDocumentDetail,
-    patch: &DocumentPatch,
-) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    if patch.content.is_some() {
-        object.insert(
-            "content".to_owned(),
-            audit_text_metadata(document.content.as_deref().unwrap_or_default()),
-        );
-    }
-    if patch.title.is_some() {
-        object.insert("title".to_owned(), json!(document.title));
-    }
-    if patch.tags.is_some() {
-        object.insert("tags".to_owned(), json!(document.tags));
-    }
-    if patch.correspondent.is_some() {
-        object.insert("correspondent".to_owned(), json!(document.correspondent));
-    }
-    if patch.document_type.is_some() {
-        object.insert("document_type".to_owned(), json!(document.document_type));
-    }
-    if patch.created.is_some() {
-        object.insert("created".to_owned(), json!(document.created));
-    }
-    if patch.custom_fields.is_some() {
-        object.insert("custom_fields".to_owned(), json!({ "present": "redacted" }));
-    }
-    serde_json::Value::Object(object)
-}
-
-fn audit_patch_payload(patch: &DocumentPatch) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    if let Some(content) = &patch.content {
-        object.insert("content".to_owned(), audit_text_metadata(content));
-    }
-    if let Some(title) = &patch.title {
-        object.insert("title".to_owned(), json!(title));
-    }
-    if let Some(tags) = &patch.tags {
-        object.insert("tags".to_owned(), json!(tags));
-    }
-    if let Some(correspondent) = &patch.correspondent {
-        object.insert("correspondent".to_owned(), json!(correspondent));
-    }
-    if let Some(document_type) = &patch.document_type {
-        object.insert("document_type".to_owned(), json!(document_type));
-    }
-    if let Some(created) = &patch.created {
-        object.insert("created".to_owned(), json!(created));
-    }
-    if let Some(custom_fields) = &patch.custom_fields {
-        object.insert(
-            "custom_fields".to_owned(),
-            json!({
-                "sha256": hex::encode(Sha256::digest(custom_fields.to_string().as_bytes())),
-                "redacted": true
-            }),
-        );
-    }
-    serde_json::Value::Object(object)
-}
-
-fn audit_text_metadata(value: &str) -> serde_json::Value {
-    json!({
-        "sha256": hex::encode(Sha256::digest(value.as_bytes())),
-        "chars": value.chars().count(),
-        "redacted": true
-    })
-}
-
-async fn add_completion_and_remove_trigger_tags(
-    state: &AppState,
-    review: &ReviewItemRecord,
-    patch: &mut DocumentPatch,
+async fn review_workflow_tag_operations(
+    client: &PaperlessClient,
+    settings: &RuntimeSettings,
+    stage: Stage,
     final_run_stage: bool,
-) -> Result<()> {
-    let settings = get_runtime_settings(&state.pool).await?;
-    let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
-    let document = client.get_document(review.paperless_document_id).await?;
+) -> Result<ReviewTagOperations> {
     let all_tags = client.list_tags().await?;
-    let completion = settings
-        .workflow
-        .tags
-        .completion_tag_for_stage(review.stage);
-    let trigger = settings.workflow.tags.trigger_tag_for_stage(review.stage);
-    let mut ids = patch.tags.clone().unwrap_or(document.tags);
+    let completion = settings.workflow.tags.completion_tag_for_stage(stage);
+    let trigger = settings.workflow.tags.trigger_tag_for_stage(stage);
+    let mut additions = Vec::new();
+    let mut removals = Vec::new();
     if let Some(completion_name) = completion {
         let tag = client.ensure_tag(completion_name).await?;
-        if !ids.contains(&tag.id) {
-            ids.push(tag.id);
-        }
+        additions.push(tag.id);
     }
     if final_run_stage {
         let tag = client
             .ensure_tag(&settings.workflow.tags.completion_processed)
             .await?;
-        if !ids.contains(&tag.id) {
-            ids.push(tag.id);
-        }
+        additions.push(tag.id);
     }
     if let Some(trigger_name) = trigger
         && let Some(tag) = all_tags
             .iter()
             .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
     {
-        ids.retain(|id| *id != tag.id);
+        removals.push(tag.id);
     }
     if final_run_stage
         && let Some(tag) = all_tags.iter().find(|tag| {
@@ -6551,12 +6903,16 @@ async fn add_completion_and_remove_trigger_tags(
                 .eq_ignore_ascii_case(&settings.workflow.tags.trigger_process)
         })
     {
-        ids.retain(|id| *id != tag.id);
+        removals.push(tag.id);
     }
-    ids.sort_unstable();
-    ids.dedup();
-    patch.tags = Some(ids);
-    Ok(())
+    additions.sort_unstable();
+    additions.dedup();
+    removals.sort_unstable();
+    removals.dedup();
+    Ok(ReviewTagOperations {
+        additions,
+        removals,
+    })
 }
 
 async fn sync_paperless_inventory(
@@ -6695,11 +7051,6 @@ fn parse_paperless_datetime(value: Option<&str>) -> Option<DateTime<Utc>> {
     value
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.with_timezone(&Utc))
-}
-
-async fn paperless_client(pool: &DbPool, config: &AppConfig) -> Result<PaperlessClient> {
-    let settings = get_runtime_settings(pool).await?;
-    paperless_client_from_settings(pool, config, &settings).await
 }
 
 async fn paperless_client_from_settings(
@@ -7548,6 +7899,220 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_secret_names_are_canonicalized_before_persistence() {
+        let settings = RuntimeSettings::default();
+        let secrets = HashMap::from([(" OLLAMA ".to_owned(), "secret".to_owned())]);
+
+        let canonical = canonicalize_provider_secrets(&settings, secrets)
+            .expect("known provider name should canonicalize");
+
+        assert_eq!(canonical.get("ollama").map(String::as_str), Some("secret"));
+        assert_eq!(canonical.len(), 1);
+    }
+
+    #[test]
+    fn provider_secret_names_reject_unknown_and_duplicate_targets() {
+        let settings = RuntimeSettings::default();
+        let unknown = canonicalize_provider_secrets(
+            &settings,
+            HashMap::from([("missing".to_owned(), "secret".to_owned())]),
+        )
+        .expect_err("unknown secret target must fail before any write");
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+        assert!(unknown.message.contains("missing"));
+
+        let duplicate = canonicalize_provider_secrets(
+            &settings,
+            HashMap::from([
+                ("ollama".to_owned(), "first".to_owned()),
+                (" OLLAMA ".to_owned(), "second".to_owned()),
+            ]),
+        )
+        .expect_err("two inputs resolving to one provider must fail atomically");
+        assert_eq!(duplicate.status, StatusCode::BAD_REQUEST);
+        assert!(duplicate.message.contains("ollama"));
+    }
+
+    #[test]
+    fn settings_update_preflight_rejects_before_secret_mapping_changes() {
+        let mut settings = RuntimeSettings::default();
+        let mut duplicate = settings.ai.providers[0].clone();
+        duplicate.name = format!(" {} ", duplicate.name.to_uppercase());
+        duplicate.secret_id = Some(Uuid::new_v4());
+        settings.ai.providers.push(duplicate);
+        let original_secret_ids = settings
+            .ai
+            .providers
+            .iter()
+            .map(|provider| provider.secret_id)
+            .collect::<Vec<_>>();
+        let submitted_secrets = HashMap::from([("ollama".to_owned(), "new-secret".to_owned())]);
+        let mut request = UpdateSettingsRequest {
+            settings,
+            paperless_token: Some("paperless-secret".to_owned()),
+            notification_webhook_url: Some("https://hooks.example.test".to_owned()),
+            provider_secrets: Some(submitted_secrets.clone()),
+        };
+
+        let error = prepare_settings_update(&mut request)
+            .expect_err("duplicate provider names must stop the save preflight");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(request.provider_secrets.as_ref(), Some(&submitted_secrets));
+        assert_eq!(
+            request
+                .settings
+                .ai
+                .providers
+                .iter()
+                .map(|provider| provider.secret_id)
+                .collect::<Vec<_>>(),
+            original_secret_ids
+        );
+    }
+
+    #[test]
+    fn settings_update_preflight_validates_defaults_added_by_normalization() {
+        let mut settings = RuntimeSettings::default();
+        let custom = AiProviderSettings {
+            name: "custom".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: "https://custom.example.test/v1".to_owned(),
+            default_text_model: Some("custom-model".to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled: true,
+            tuning: ProviderTuning::default(),
+        };
+        settings.ai.providers = vec![custom];
+        settings.ai.default_provider = "custom".to_owned();
+        settings.ai.ollama_base_url = "   ".to_owned();
+        let mut request = UpdateSettingsRequest {
+            settings,
+            paperless_token: None,
+            notification_webhook_url: None,
+            provider_secrets: None,
+        };
+
+        let error = prepare_settings_update(&mut request)
+            .expect_err("newly appended enabled defaults must be part of save validation");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("ollama"));
+        assert!(error.message.contains("base URL"));
+    }
+
+    #[test]
+    fn default_provider_rejects_empty_legacy_base_url() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.ollama_base_url = "  ".to_owned();
+
+        let error = provider_for_default_text(&settings)
+            .expect_err("corrupt legacy settings must not fall back to localhost");
+
+        assert!(error.to_string().contains("empty base URL"));
+        assert!(error.to_string().contains("ollama"));
+    }
+
+    #[test]
+    fn tls_mode_marks_session_and_csrf_cookies_secure() {
+        let session = build_cookie(SESSION_COOKIE, "session", true, true, 12).to_string();
+        let csrf = build_cookie(CSRF_COOKIE, "csrf", false, true, 12).to_string();
+        let local_session = build_cookie(SESSION_COOKIE, "session", true, false, 12).to_string();
+
+        assert!(session.contains("; Secure"));
+        assert!(session.contains("; HttpOnly"));
+        assert!(csrf.contains("; Secure"));
+        assert!(!csrf.contains("; HttpOnly"));
+        assert!(!local_session.contains("; Secure"));
+    }
+
+    fn auth_context_for_session_listing(
+        cookie_auth: bool,
+        user_id: Uuid,
+        roles: Vec<Role>,
+        scopes: Vec<&str>,
+    ) -> AuthContext {
+        AuthContext {
+            actor_type: if cookie_auth { "user" } else { "api_token" }.to_owned(),
+            actor_id: Some(user_id.to_string()),
+            user_id: Some(user_id),
+            username: cookie_auth.then(|| "session-user".to_owned()),
+            roles,
+            scopes: scopes.into_iter().map(str::to_owned).collect(),
+            session_id: cookie_auth.then(Uuid::new_v4),
+            csrf_secret_hash: cookie_auth.then(|| "csrf-hash".to_owned()),
+            cookie_auth,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_listing_rejects_every_api_token_scope_without_metadata() {
+        let user_id = Uuid::new_v4();
+        for scopes in [
+            vec!["runs:read"],
+            vec!["users:manage"],
+            vec!["users:manage", "audit:read", "settings:read"],
+        ] {
+            let auth = auth_context_for_session_listing(false, user_id, Vec::new(), scopes);
+            let error = session_listing_user_filter(&auth)
+                .expect_err("an API token must never list browser sessions");
+            assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read error response");
+            let body: Value = serde_json::from_slice(&body).expect("parse error response");
+            assert_eq!(
+                body,
+                json!({ "error": "session listing requires a user session" })
+            );
+        }
+    }
+
+    #[test]
+    fn session_listing_preserves_cookie_user_and_admin_visibility() {
+        let user_id = Uuid::new_v4();
+        let user = auth_context_for_session_listing(true, user_id, vec![Role::Viewer], Vec::new());
+        assert_eq!(session_listing_user_filter(&user).unwrap(), Some(user_id));
+
+        let admin = auth_context_for_session_listing(true, user_id, vec![Role::Admin], Vec::new());
+        assert_eq!(session_listing_user_filter(&admin).unwrap(), None);
+    }
+
+    #[test]
+    fn last_enabled_admin_error_maps_to_stable_conflict() {
+        let error = ApiError::from(anyhow::Error::new(LastEnabledAdminError));
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(
+            error.message,
+            "at least one enabled administrator is required"
+        );
+    }
+
+    #[test]
+    fn user_identity_errors_map_to_stable_safe_responses() {
+        let conflict = ApiError::from(anyhow::Error::new(UserIdentityConflictError));
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(conflict.message, "username or email is already assigned");
+
+        let ambiguous = ApiError::from(anyhow::Error::new(AmbiguousUserIdentityLinkError));
+        assert_eq!(ambiguous.status, StatusCode::CONFLICT);
+        assert_eq!(
+            ambiguous.message,
+            "OIDC identity matches multiple local accounts"
+        );
+
+        let invalid = ApiError::from(anyhow::Error::new(InvalidUserIdentityError));
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.message, "username must not be blank");
+    }
+
+    #[test]
     fn ollama_cloud_detection_matches_hosted_endpoint() {
         assert!(is_ollama_cloud("https://ollama.com"));
         assert!(is_ollama_cloud("https://OLLAMA.com/"));
@@ -7784,6 +8349,43 @@ mod tests {
         ] {
             assert!(!openai_id_is_chat_capable(drop), "should drop {drop}");
         }
+    }
+
+    #[tokio::test]
+    async fn sglang_minimax_m3_is_confirmed_through_openai_compatible_models_endpoint() {
+        use axum::Json as AxumJson;
+
+        const MODEL: &str = "ressl/MiniMax-M3-uncensored-NVFP4";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/v1/models",
+            get(|| async { AxumJson(json!({ "data": [{ "id": MODEL }] })) }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        let provider = ApiProvider {
+            name: "sglang-minimax-m3".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: format!("http://{address}/v1"),
+            model: MODEL.to_owned(),
+            secret_id: None,
+            tuning: RuntimeSettings::default().effective_tuning(),
+        };
+
+        let models = discover_provider_models(&provider, None)
+            .await
+            .expect("SGLang model discovery succeeds");
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![MODEL]
+        );
+        server.abort();
     }
 
     #[test]
@@ -8421,6 +9023,214 @@ mod tests {
     }
 
     #[test]
+    fn paperless_bridge_subject_scopes_user_id_to_instance() {
+        let instance_a = Url::parse("https://paperless-a.example/api/").unwrap();
+        let instance_b = Url::parse("https://paperless-b.example/api/").unwrap();
+        assert_eq!(
+            paperless_user_subject(&instance_a, 42),
+            paperless_user_subject(&instance_a, 42)
+        );
+        assert_ne!(
+            paperless_user_subject(&instance_a, 42),
+            paperless_user_subject(&instance_a, 43)
+        );
+        assert_ne!(
+            paperless_user_subject(&instance_a, 42),
+            paperless_user_subject(&instance_b, 42)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn paperless_bridge_requires_origin_mapping_and_is_concurrency_safe() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = connect(&database_url, 10)
+            .await
+            .expect("connect identity test database");
+        migrate(&pool).await.expect("apply identity migration");
+        sqlx::query("delete from users")
+            .execute(&pool)
+            .await
+            .expect("delete identity fixtures");
+        sqlx::query("truncate audit_events restart identity")
+            .execute(&pool)
+            .await
+            .expect("truncate audit fixtures");
+
+        let local_id = create_user_with_roles(
+            &pool,
+            "paperless-alice",
+            Some("local@example.com"),
+            "local-hash",
+            &[Role::Admin],
+            None,
+        )
+        .await
+        .expect("create prefixed local account");
+        let paperless_instance = Url::parse("https://paperless-a.example/api/").unwrap();
+        let alice_subject = paperless_user_subject(&paperless_instance, 101);
+        let bridge = find_or_create_paperless_bridge_user(
+            &pool,
+            "paperless-alice",
+            &alice_subject,
+            "disabled-hash",
+        )
+        .await
+        .expect("allocate a distinct bridge-owned account");
+        assert_ne!(bridge.id, local_id);
+        assert_ne!(bridge.username, "paperless-alice");
+        assert_eq!(
+            find_user_for_login(&pool, "paperless-alice")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            local_id,
+            "generic local login still resolves the unrelated local owner"
+        );
+        assert!(
+            find_paperless_bridge_user(&pool, &alice_subject)
+                .await
+                .expect("lookup bridge mapping")
+                .is_some_and(|user| user.id == bridge.id),
+            "only the verified Paperless subject may resolve the bridge account"
+        );
+        sqlx::query("update users set enabled = false where id = $1")
+            .bind(bridge.id)
+            .execute(&pool)
+            .await
+            .expect("disable bridge account");
+        let after_token_rotation = find_or_create_paperless_bridge_user(
+            &pool,
+            "paperless-renamed-alice",
+            &alice_subject,
+            "different-disabled-hash",
+        )
+        .await
+        .expect("stable Paperless user ID resolves after token rotation");
+        assert_eq!(after_token_rotation.id, bridge.id);
+        assert!(!after_token_rotation.enabled);
+        let alice_accounts: i64 = sqlx::query_scalar(
+            "select count(*)::bigint from users where external_auth_provider = 'paperless_bridge' and external_subject = $1",
+        )
+        .bind(&alice_subject)
+        .fetch_one(&pool)
+        .await
+        .expect("count stable bridge mapping");
+        assert_eq!(alice_accounts, 1);
+
+        sqlx::query("delete from users")
+            .execute(&pool)
+            .await
+            .expect("reset identity fixtures");
+        sqlx::query("truncate audit_events restart identity")
+            .execute(&pool)
+            .await
+            .expect("reset audit fixtures");
+        let pool_a = connect(&database_url, 2).await.expect("connect writer A");
+        let pool_b = connect(&database_url, 2).await.expect("connect writer B");
+        let concurrent_subject = paperless_user_subject(&paperless_instance, 202);
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let writer_a = {
+            let barrier = Arc::clone(&barrier);
+            let concurrent_subject = concurrent_subject.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                find_or_create_paperless_bridge_user(
+                    &pool_a,
+                    "paperless-concurrent",
+                    &concurrent_subject,
+                    "disabled-hash-a",
+                )
+                .await
+            })
+        };
+        let writer_b = {
+            let barrier = Arc::clone(&barrier);
+            let concurrent_subject = concurrent_subject.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                find_or_create_paperless_bridge_user(
+                    &pool_b,
+                    " PAPERLESS-CONCURRENT ",
+                    &concurrent_subject,
+                    "disabled-hash-b",
+                )
+                .await
+            })
+        };
+        barrier.wait().await;
+
+        let user_a = writer_a.await.unwrap().expect("writer A resolves user");
+        let user_b = writer_b.await.unwrap().expect("writer B resolves user");
+        assert_eq!(user_a.id, user_b.id);
+        let users: i64 = sqlx::query_scalar("select count(*)::bigint from users")
+            .fetch_one(&pool)
+            .await
+            .expect("count bridge users");
+        assert_eq!(users, 1);
+        let mapping =
+            sqlx::query("select external_auth_provider, external_subject from users where id = $1")
+                .bind(user_a.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read bridge origin mapping");
+        assert_eq!(
+            mapping
+                .try_get::<Option<String>, _>("external_auth_provider")
+                .unwrap()
+                .as_deref(),
+            Some("paperless_bridge")
+        );
+        assert_eq!(
+            mapping
+                .try_get::<Option<String>, _>("external_subject")
+                .unwrap()
+                .as_deref(),
+            Some(concurrent_subject.as_str())
+        );
+
+        let plus_subject = paperless_user_subject(&paperless_instance, 303);
+        let first = find_or_create_paperless_bridge_user(
+            &pool,
+            "paperless-alice-ops",
+            &plus_subject,
+            "disabled-hash-c",
+        )
+        .await
+        .expect("create first lossy-name bridge account");
+        let dash_subject = paperless_user_subject(&paperless_instance, 304);
+        let second = find_or_create_paperless_bridge_user(
+            &pool,
+            "paperless-alice-ops",
+            &dash_subject,
+            "disabled-hash-d",
+        )
+        .await
+        .expect("create second lossy-name bridge account");
+        assert_ne!(first.id, second.id);
+        assert_ne!(first.username, second.username);
+        assert_eq!(
+            find_paperless_bridge_user(&pool, &plus_subject)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+        assert_eq!(
+            find_paperless_bridge_user(&pool, &dash_subject)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            second.id
+        );
+    }
+
+    #[test]
     fn csv_export_escapes_special_characters() {
         assert_eq!(csv_escape("plain"), "plain");
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
@@ -8475,7 +9285,362 @@ mod tests {
             base_url: "http://example.invalid".to_owned(),
             model: "test-model".to_owned(),
             secret_id: None,
+            tuning: RuntimeSettings::default().effective_tuning(),
         }
+    }
+
+    fn api_provider_profile_settings(first_url: &str, second_url: &str) -> RuntimeSettings {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.default_provider = "first".to_owned();
+        settings.ai.default_text_model = "gpt-5-first".to_owned();
+        settings.ai.providers = vec![
+            AiProviderSettings {
+                name: "first".to_owned(),
+                kind: AiProviderKind::OpenaiCompatible,
+                base_url: first_url.to_owned(),
+                default_text_model: Some("gpt-5-first".to_owned()),
+                default_vision_model: None,
+                cost_per_1m_input_tokens_usd: None,
+                cost_per_1m_output_tokens_usd: None,
+                secret_id: None,
+                enabled: true,
+                tuning: ProviderTuning {
+                    text_num_ctx: Some(11_111),
+                    reasoning_effort: Some(archivist_core::ReasoningEffort::Low),
+                    max_output_tokens: Some(111),
+                    structured_output: Some(archivist_core::StructuredOutputMode::Off),
+                    request_timeout_seconds: Some(11),
+                    ..ProviderTuning::default()
+                },
+            },
+            AiProviderSettings {
+                name: "second".to_owned(),
+                kind: AiProviderKind::OpenaiCompatible,
+                base_url: second_url.to_owned(),
+                default_text_model: Some("gpt-5-second".to_owned()),
+                default_vision_model: None,
+                cost_per_1m_input_tokens_usd: None,
+                cost_per_1m_output_tokens_usd: None,
+                secret_id: None,
+                enabled: true,
+                tuning: ProviderTuning {
+                    text_num_ctx: Some(22_222),
+                    reasoning_effort: Some(archivist_core::ReasoningEffort::High),
+                    max_output_tokens: Some(222),
+                    structured_output: Some(archivist_core::StructuredOutputMode::JsonObject),
+                    request_timeout_seconds: Some(22),
+                    ..ProviderTuning::default()
+                },
+            },
+        ];
+        settings
+    }
+
+    fn api_test_chat_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            model: model.to_owned(),
+            system_prompt: "system".to_owned(),
+            user_prompt: "user".to_owned(),
+            temperature: 0.1,
+            num_ctx: None,
+            response_schema: Some(json!({ "type": "object" })),
+            reasoning_effort: None,
+            max_output_tokens: None,
+            structured_output: None,
+        }
+    }
+
+    fn metadata_prompt_test_settings() -> RuntimeSettings {
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.enabled_stages = vec![Stage::Metadata];
+        settings.tagging.tag_output_language = "de".to_owned();
+        settings.fields.max_fields = 1;
+        settings.fields.mappings = vec![archivist_core::CustomFieldMapping {
+            field_name: "HiddenField".to_owned(),
+            enabled: false,
+            aliases: Vec::new(),
+            instructions: None,
+        }];
+        settings.ai.providers[0].tuning.allowed_list_max = Some(2);
+        settings.ai.providers[0].tuning.max_tags = Some(3);
+        settings
+    }
+
+    fn metadata_prompt_test_catalog() -> MetadataPromptTestCatalog {
+        MetadataPromptTestCatalog {
+            correspondents: vec![
+                "Acme AG".to_owned(),
+                "Beta GmbH".to_owned(),
+                "Gamma AG".to_owned(),
+            ],
+            document_types: vec![
+                "Invoice".to_owned(),
+                "Letter".to_owned(),
+                "Receipt".to_owned(),
+            ],
+            tags: vec!["Finance".to_owned(), "Tax".to_owned(), "Urgent".to_owned()],
+            fields: vec![
+                ("InvoiceNumber".to_owned(), Some("string".to_owned())),
+                ("HiddenField".to_owned(), Some("integer".to_owned())),
+            ],
+        }
+    }
+
+    #[test]
+    fn metadata_prompt_test_request_matches_worker_prompt_schema_and_runtime_catalog() {
+        let settings = metadata_prompt_test_settings();
+        let tuning = settings.effective_tuning();
+        let request = build_metadata_prompt_test_chat_request(
+            &settings,
+            &tuning,
+            "Rechnung für Beratung und Entwicklung von Acme AG. Der Betrag ist mit Datum fällig. Invoice Tax Urgent Rechnungsnummer 41",
+            metadata_prompt_test_catalog(),
+        )
+        .expect("metadata prompt request");
+
+        assert!(
+            request
+                .user_prompt
+                .contains("Detected document language: de")
+        );
+        assert!(
+            request
+                .user_prompt
+                .contains("Desired language for newly generated business tags: de")
+        );
+        assert!(request.user_prompt.contains("Acme AG"));
+        assert!(!request.user_prompt.contains("Beta GmbH"));
+        assert!(!request.user_prompt.contains("Gamma AG"));
+        assert!(request.user_prompt.contains("Invoice"));
+        assert!(!request.user_prompt.contains("Receipt"));
+        assert!(request.user_prompt.contains("Tax"));
+        assert!(request.user_prompt.contains("Urgent"));
+        assert!(!request.user_prompt.contains("Finance"));
+        assert!(request.user_prompt.contains("\"InvoiceNumber\" (text)"));
+        assert!(!request.user_prompt.contains("HiddenField"));
+        assert!(request.user_prompt.contains("at most 3 tags"));
+        assert!(request.user_prompt.contains("at most 1 entries"));
+
+        let schema = request.response_schema.expect("metadata response schema");
+        assert_eq!(
+            schema["properties"]["correspondent"]["properties"]["name"]["enum"],
+            json!(["Acme AG"])
+        );
+        assert_eq!(
+            schema["properties"]["tags"]["properties"]["tags"]["items"]["enum"],
+            json!(["Tax", "Urgent"])
+        );
+        assert_eq!(
+            schema["properties"]["fields"]["properties"]["fields"]["items"]["properties"]["name"]["enum"],
+            json!(["InvoiceNumber"])
+        );
+        assert_eq!(
+            schema["properties"]["tags"]["properties"]["tags"]["maxItems"],
+            3
+        );
+        assert_eq!(
+            schema["properties"]["fields"]["properties"]["fields"]["maxItems"],
+            1
+        );
+    }
+
+    #[test]
+    fn metadata_prompt_test_editor_content_replaces_only_system_prompt() {
+        let settings = metadata_prompt_test_settings();
+        let mut request = build_metadata_prompt_test_chat_request(
+            &settings,
+            &settings.effective_tuning(),
+            "Acme AG Invoice",
+            metadata_prompt_test_catalog(),
+        )
+        .unwrap();
+        let original_user = request.user_prompt.clone();
+        let original_schema = request.response_schema.clone();
+
+        apply_prompt_test_system_prompt(&mut request, "  operator system prompt  ");
+
+        assert_eq!(request.system_prompt, "operator system prompt");
+        assert_eq!(request.user_prompt, original_user);
+        assert_eq!(request.response_schema, original_schema);
+    }
+
+    #[test]
+    fn metadata_prompt_test_parser_returns_typed_valid_and_partial_results() {
+        let valid = parse_prompt_test_output(
+            Stage::Metadata,
+            r#"{"title":{"title":"Invoice 41","confidence":0.98},"document_date":{"date":"2026-07-17","confidence":0.9,"warnings":["date inferred"]}}"#,
+        );
+        assert!(valid.validation_errors.is_empty());
+        assert_eq!(valid.parsed["suggestion"]["title"]["title"], "Invoice 41");
+        assert_eq!(valid.parsed["diagnostics"]["status"], "valid");
+        assert_eq!(valid.warnings, vec!["date inferred"]);
+
+        let partial = parse_prompt_test_output(
+            Stage::Metadata,
+            r#"{"title":{"title":"Retained","confidence":0.8},"tags":"wrong","extra":"redacted"}"#,
+        );
+        assert_eq!(partial.parsed["suggestion"]["title"]["title"], "Retained");
+        assert!(partial.parsed["suggestion"].get("tags").is_none());
+        assert_eq!(
+            partial.parsed["diagnostics"]["status"],
+            "contract_violation"
+        );
+        assert_eq!(
+            partial.validation_errors,
+            vec![
+                "metadata field(s) have wrong types or unknown nested properties: tags",
+                "metadata response contains 1 unknown field(s)",
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_prompt_test_parser_rejects_malformed_non_object_and_omitted_outputs() {
+        let malformed = parse_prompt_test_output(Stage::Metadata, "not json");
+        assert_eq!(
+            malformed.validation_errors,
+            vec!["metadata response envelope is not valid JSON"]
+        );
+        assert_eq!(malformed.parsed["diagnostics"]["envelope_error"], "no_json");
+
+        let non_object = parse_prompt_test_output(Stage::Metadata, "[1, 2]");
+        assert_eq!(
+            non_object.validation_errors,
+            vec!["metadata response must be a JSON object"]
+        );
+        assert_eq!(
+            non_object.parsed["diagnostics"]["envelope_error"],
+            "non_object"
+        );
+
+        let omitted = parse_prompt_test_output(Stage::Metadata, "{}");
+        assert!(omitted.validation_errors.is_empty());
+        assert_eq!(
+            omitted.warnings,
+            vec!["metadata response omitted every requested field"]
+        );
+        assert_eq!(omitted.parsed["diagnostics"]["status"], "omitted");
+    }
+
+    #[test]
+    fn api_provider_tuning_follows_selected_provider_without_cross_profile_leakage() {
+        let settings = api_provider_profile_settings(
+            "https://first.example.test/v1",
+            "https://second.example.test/v1",
+        );
+        let first = provider_by_name(&settings, "first").unwrap();
+        let mut second = provider_by_name(&settings, "second").unwrap();
+        second.model = "gpt-5-second-override".to_owned();
+
+        let mut first_request = api_test_chat_request(&first.model);
+        apply_api_provider_tuning(&first, &mut first_request);
+        let mut second_request = api_test_chat_request(&second.model);
+        apply_api_provider_tuning(&second, &mut second_request);
+
+        assert_eq!(first_request.model, "gpt-5-first");
+        assert_eq!(first_request.num_ctx, Some(11_111));
+        assert_eq!(
+            first_request.reasoning_effort,
+            Some(archivist_core::ReasoningEffort::Low)
+        );
+        assert_eq!(first_request.max_output_tokens, Some(111));
+        assert_eq!(
+            first_request.structured_output,
+            Some(archivist_core::StructuredOutputMode::Off)
+        );
+        assert_eq!(first.tuning.request_timeout_seconds, 11);
+
+        assert_eq!(second_request.model, "gpt-5-second-override");
+        assert_eq!(second_request.num_ctx, Some(22_222));
+        assert_eq!(
+            second_request.reasoning_effort,
+            Some(archivist_core::ReasoningEffort::High)
+        );
+        assert_eq!(second_request.max_output_tokens, Some(222));
+        assert_eq!(
+            second_request.structured_output,
+            Some(archivist_core::StructuredOutputMode::JsonObject)
+        );
+        assert_eq!(second.tuning.request_timeout_seconds, 22);
+    }
+
+    #[test]
+    fn prompt_tester_defaults_to_metadata_stage_provider_but_keeps_explicit_overrides() {
+        let mut settings = api_provider_profile_settings(
+            "https://first.example.test/v1",
+            "https://second.example.test/v1",
+        );
+        settings.ai.stage_models = vec![archivist_core::StageModelOverride {
+            stage: Stage::Metadata,
+            provider: "second".to_owned(),
+            model: "ressl/MiniMax-M3-uncensored-NVFP4".to_owned(),
+        }];
+        let mut request = TestPromptRequest {
+            stage: Stage::Metadata,
+            content: "metadata system".to_owned(),
+            sample_text: Some("sample".to_owned()),
+            paperless_document_id: None,
+            provider_name: None,
+            model: None,
+        };
+
+        let stage_provider = prompt_test_provider(&settings, &request).unwrap();
+        assert_eq!(stage_provider.name, "second");
+        assert_eq!(stage_provider.model, "ressl/MiniMax-M3-uncensored-NVFP4");
+        assert_eq!(stage_provider.tuning.text_num_ctx, Some(22_222));
+        assert_eq!(stage_provider.tuning.max_output_tokens, Some(222));
+
+        request.provider_name = Some("first".to_owned());
+        request.model = Some("explicit-model".to_owned());
+        let explicit_provider = prompt_test_provider(&settings, &request).unwrap();
+        assert_eq!(explicit_provider.name, "first");
+        assert_eq!(explicit_provider.model, "explicit-model");
+        assert_eq!(explicit_provider.tuning.text_num_ctx, Some(11_111));
+        assert_eq!(explicit_provider.tuning.max_output_tokens, Some(111));
+
+        settings.ai.providers[1].kind = AiProviderKind::Mineru;
+        settings
+            .ai
+            .stage_models
+            .push(archivist_core::StageModelOverride {
+                stage: Stage::Ocr,
+                provider: "second".to_owned(),
+                model: "mineru".to_owned(),
+            });
+        request.stage = Stage::Ocr;
+        request.provider_name = None;
+        request.model = None;
+        let ocr_text_provider = prompt_test_provider(&settings, &request).unwrap();
+        assert_eq!(ocr_text_provider.name, "first");
+        assert_eq!(ocr_text_provider.kind, AiProviderKind::OpenaiCompatible);
+        assert_eq!(ocr_text_provider.model, "gpt-5-first");
+    }
+
+    #[test]
+    fn document_chat_request_uses_default_text_provider_tuning() {
+        let settings = api_provider_profile_settings(
+            "https://first.example.test/v1",
+            "https://second.example.test/v1",
+        );
+        let provider = provider_for_default_text(&settings).unwrap();
+        let request = build_document_chat_request(
+            &provider,
+            "chat system".to_owned(),
+            "chat user".to_owned(),
+        );
+
+        assert_eq!(request.model, "gpt-5-first");
+        assert_eq!(request.temperature, 0.1);
+        assert_eq!(request.num_ctx, Some(11_111));
+        assert_eq!(
+            request.reasoning_effort,
+            Some(archivist_core::ReasoningEffort::Low)
+        );
+        assert_eq!(request.max_output_tokens, Some(111));
+        assert_eq!(
+            request.structured_output,
+            Some(archivist_core::StructuredOutputMode::Off)
+        );
     }
 
     #[test]
@@ -8649,6 +9814,340 @@ mod tests {
         assert_eq!(response.model, "glm-5.1");
         handle.abort();
     }
+
+    #[derive(Clone, Default)]
+    struct ProviderProbeCapture {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        authorization: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        body: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+    }
+
+    async fn spawn_mock_openai_probe(
+        capture: ProviderProbeCapture,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::Json as AxumJson;
+        use axum::extract::State as AxumState;
+        use axum::http::HeaderMap;
+        use std::sync::atomic::Ordering;
+
+        async fn probe(
+            AxumState(capture): AxumState<ProviderProbeCapture>,
+            headers: HeaderMap,
+            AxumJson(body): AxumJson<Value>,
+        ) -> AxumJson<Value> {
+            capture.calls.fetch_add(1, Ordering::SeqCst);
+            *capture.authorization.lock().unwrap() = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            *capture.body.lock().unwrap() = Some(body);
+            AxumJson(json!({
+                "id": "draft-probe",
+                "model": "gpt-5-draft",
+                "choices": [{ "message": { "content": "{\"status\":\"ok\"}" } }]
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/chat/completions", post(probe))
+            .with_state(capture);
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn api_text_test_state() -> AppState {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://archivist:archivist@127.0.0.1/archivist")
+            .expect("lazy test pool");
+        AppState {
+            pool,
+            config: Arc::new(test_config()),
+            auth_rate_limiter: Arc::new(AuthRateLimiter::new(10, 60)),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_tester_and_document_chat_send_selected_provider_tuning_on_wire() {
+        let prompt_capture = ProviderProbeCapture::default();
+        let document_capture = ProviderProbeCapture::default();
+        let (prompt_url, prompt_handle) = spawn_mock_openai_probe(prompt_capture.clone()).await;
+        let (document_url, document_handle) =
+            spawn_mock_openai_probe(document_capture.clone()).await;
+        let state = api_text_test_state();
+
+        let settings = api_provider_profile_settings(&document_url, &prompt_url);
+        let mut prompt_provider = provider_by_name(&settings, "second").unwrap();
+        prompt_provider.model = "gpt-5-prompt-override".to_owned();
+        let prompt_input = TestPromptRequest {
+            stage: Stage::Ocr,
+            content: "prompt system".to_owned(),
+            sample_text: Some("sample".to_owned()),
+            paperless_document_id: None,
+            provider_name: Some("second".to_owned()),
+            model: Some(prompt_provider.model.clone()),
+        };
+        let mut prompt_request = build_ocr_prompt_test_chat_request("sample");
+        apply_prompt_test_system_prompt(&mut prompt_request, &prompt_input.content);
+        prompt_request.model = prompt_provider.model.clone();
+        apply_api_provider_tuning(&prompt_provider, &mut prompt_request);
+        chat_with_api_provider(&state, &prompt_provider, prompt_request)
+            .await
+            .expect("prompt tester wire call");
+
+        let prompt_body = prompt_capture.body.lock().unwrap().clone().unwrap();
+        assert_eq!(prompt_body["model"], "gpt-5-prompt-override");
+        assert_eq!(prompt_body["reasoning_effort"], "high");
+        assert_eq!(prompt_body["max_tokens"], 222);
+
+        let document_provider = provider_for_default_text(&settings).unwrap();
+        let document_request = build_document_chat_request(
+            &document_provider,
+            "document system".to_owned(),
+            "document user".to_owned(),
+        );
+        chat_with_api_provider(&state, &document_provider, document_request)
+            .await
+            .expect("document chat wire call");
+
+        let document_body = document_capture.body.lock().unwrap().clone().unwrap();
+        assert_eq!(document_body["model"], "gpt-5-first");
+        assert_eq!(document_body["reasoning_effort"], "low");
+        assert_eq!(document_body["max_tokens"], 111);
+
+        prompt_handle.abort();
+        document_handle.abort();
+    }
+
+    #[derive(Default)]
+    struct MixedM3Capture {
+        active: std::sync::atomic::AtomicUsize,
+        max_active: std::sync::atomic::AtomicUsize,
+        bodies: Mutex<Vec<Value>>,
+    }
+
+    async fn mixed_m3_handler(
+        State(capture): State<Arc<MixedM3Capture>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        use std::sync::atomic::Ordering;
+
+        let active = capture.active.fetch_add(1, Ordering::AcqRel) + 1;
+        capture.max_active.fetch_max(active, Ordering::AcqRel);
+        capture.bodies.lock().unwrap().push(body.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        capture.active.fetch_sub(1, Ordering::AcqRel);
+        let content = if body.get("response_format").is_some() {
+            r#"{"title":{"title":"Synthetic capacity document","confidence":1.0}}"#
+        } else {
+            "ARCHIVIST_CAPACITY_CHAT_OK"
+        };
+        Json(json!({ "choices": [{ "message": { "content": content } }] }))
+    }
+
+    #[tokio::test]
+    async fn worker_metadata_and_document_chat_m3_paths_share_endpoint_concurrently() {
+        use std::sync::atomic::Ordering;
+
+        let capture = Arc::new(MixedM3Capture::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/chat/completions", post(mixed_m3_handler))
+            .with_state(capture.clone());
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.enabled_stages = vec![Stage::Metadata];
+        settings.ai.default_provider = archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME.to_owned();
+        settings.ai.default_text_model = archivist_core::MINIMAX_M3_MODEL.to_owned();
+        for provider in &mut settings.ai.providers {
+            provider.enabled = false;
+        }
+        let m3 = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME)
+            .expect("built-in MiniMax M3 provider");
+        m3.enabled = true;
+        m3.base_url = format!("http://{address}");
+
+        let state = api_text_test_state();
+        let provider = provider_for_default_text(&settings).expect("M3 API provider");
+        let mut metadata_request = build_metadata_prompt_test_chat_request(
+            &settings,
+            &provider.tuning,
+            "SYNTHETIC-ONLY capacity document dated 2026-01-02.",
+            MetadataPromptTestCatalog {
+                correspondents: Vec::new(),
+                document_types: Vec::new(),
+                tags: Vec::new(),
+                fields: Vec::new(),
+            },
+        )
+        .expect("Worker-equivalent Metadata request");
+        metadata_request.model = provider.model.clone();
+        apply_api_provider_tuning(&provider, &mut metadata_request);
+        let document_request = build_document_chat_request(
+            &provider,
+            "Answer only from the SYNTHETIC-ONLY document.".to_owned(),
+            "Reply with exactly ARCHIVIST_CAPACITY_CHAT_OK.".to_owned(),
+        );
+
+        let (metadata_result, document_result) = tokio::join!(
+            chat_with_api_provider(&state, &provider, metadata_request),
+            chat_with_api_provider(&state, &provider, document_request)
+        );
+        assert!(metadata_result.is_ok());
+        assert_eq!(
+            document_result.expect("Document Chat call").text,
+            "ARCHIVIST_CAPACITY_CHAT_OK"
+        );
+        assert_eq!(capture.max_active.load(Ordering::Acquire), 2);
+
+        let bodies = capture.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert!(
+            bodies
+                .iter()
+                .all(|body| body["model"] == archivist_core::MINIMAX_M3_MODEL)
+        );
+        assert!(bodies.iter().all(|body| body["max_tokens"] == 4096));
+        assert!(
+            bodies
+                .iter()
+                .all(|body| { body["chat_template_kwargs"]["thinking_mode"] == "disabled" })
+        );
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|body| body.get("response_format").is_some())
+                .count(),
+            1
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn api_text_chat_honors_selected_provider_request_timeout() {
+        use axum::Json as AxumJson;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                AxumJson(json!({ "choices": [{ "message": { "content": "late" } }] }))
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        let base_url = format!("http://{address}");
+        let mut settings = api_provider_profile_settings(&base_url, "https://unused.example/v1");
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(1);
+        let provider = provider_for_default_text(&settings).unwrap();
+        let request = build_document_chat_request(
+            &provider,
+            "document system".to_owned(),
+            "document user".to_owned(),
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(1500),
+            chat_with_api_provider(&api_text_test_state(), &provider, request),
+        )
+        .await
+        .expect("configured one-second timeout must return before outer guard");
+        assert!(result.is_err(), "slow provider must hit configured timeout");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_draft_probe_uses_draft_endpoint_tuning_and_transient_secret() {
+        use archivist_core::{
+            AiProviderSettings, ProviderTuning, ReasoningEffort, StructuredOutputMode,
+        };
+        use std::sync::atomic::Ordering;
+
+        let saved_capture = ProviderProbeCapture::default();
+        let draft_capture = ProviderProbeCapture::default();
+        let (saved_url, saved_handle) = spawn_mock_openai_probe(saved_capture.clone()).await;
+        let (draft_url, draft_handle) = spawn_mock_openai_probe(draft_capture.clone()).await;
+
+        let mut saved = RuntimeSettings::default();
+        saved.ai.default_provider = "draft-provider".to_owned();
+        saved.ai.providers = vec![AiProviderSettings {
+            name: "draft-provider".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: saved_url,
+            default_text_model: Some("saved-model".to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled: true,
+            tuning: ProviderTuning::default(),
+        }];
+        let request = TestProviderRequest {
+            name: "draft-provider".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: draft_url,
+            model: "gpt-5-draft".to_owned(),
+            tuning: ProviderTuning {
+                reasoning_effort: Some(ReasoningEffort::High),
+                max_output_tokens: Some(777),
+                structured_output: Some(StructuredOutputMode::JsonObject),
+                request_timeout_seconds: Some(2),
+                ..ProviderTuning::default()
+            },
+            secret_id: None,
+            secret: Some("draft-super-secret".to_owned()),
+        };
+
+        let provider = provider_test_target(&saved, &request).unwrap();
+        let transient_secret = SecretString::from(request.secret.clone().unwrap());
+        let result = test_ai_provider(&provider, Some(transient_secret.clone())).await;
+        let response = provider_test_response(&provider, result, Some(&transient_secret));
+
+        assert_eq!(saved_capture.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(draft_capture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            draft_capture.authorization.lock().unwrap().as_deref(),
+            Some("Bearer draft-super-secret")
+        );
+        let body = draft_capture.body.lock().unwrap().clone().unwrap();
+        assert_eq!(body["model"], "gpt-5-draft");
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["max_tokens"], 777);
+        assert_eq!(body["response_format"], json!({ "type": "json_object" }));
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["provider"], "draft-provider");
+        assert_eq!(response["model"], "gpt-5-draft");
+        assert!(!response.to_string().contains("draft-super-secret"));
+
+        let echoed_error = provider_test_response(
+            &provider,
+            Err(anyhow!("upstream echoed draft-super-secret")),
+            Some(&transient_secret),
+        );
+        assert_eq!(echoed_error["ok"], false);
+        assert_eq!(echoed_error["provider"], "draft-provider");
+        assert_eq!(echoed_error["model"], "gpt-5-draft");
+        assert!(!echoed_error.to_string().contains("draft-super-secret"));
+
+        saved_handle.abort();
+        draft_handle.abort();
+    }
 }
 
 fn random_token() -> String {
@@ -8767,6 +10266,43 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        if error.downcast_ref::<LastEnabledAdminError>().is_some() {
+            warn!("user mutation rejected to preserve the enabled administrator invariant");
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: error.to_string(),
+            };
+        }
+        if error.downcast_ref::<UserIdentityConflictError>().is_some() {
+            warn!("user mutation rejected due to a normalized identity conflict");
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: "username or email is already assigned".to_owned(),
+            };
+        }
+        if error.downcast_ref::<InvalidUserIdentityError>().is_some() {
+            return Self::bad_request(error.to_string());
+        }
+        if error
+            .downcast_ref::<AmbiguousUserIdentityLinkError>()
+            .is_some()
+        {
+            warn!("OIDC linking rejected because claims identify multiple local accounts");
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: "OIDC identity matches multiple local accounts".to_owned(),
+            };
+        }
+        if let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>() {
+            warn!(
+                fields = ?conflict.fields(),
+                "review apply rejected due to newer Paperless changes"
+            );
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: conflict.to_string(),
+            };
+        }
         // Log the full cause chain server-side, but never return internal
         // error text (SQL fragments, column/constraint names, pool/reqwest
         // URLs) to the client — some 5xx paths are unauthenticated.

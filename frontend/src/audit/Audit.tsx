@@ -56,6 +56,10 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
           </header>
           <p>
             {t('audit.checked_events', { count: formatNumber(integrity.checked_events) })}
+            {` ${t('audit.hash_coverage', {
+              v1: formatNumber(integrity.v1_events),
+              v2: formatNumber(integrity.v2_events)
+            })}`}
             {integrity.legacy_events > 0 ? ` ${t('audit.legacy_events', { count: formatNumber(integrity.legacy_events) })}` : ''}
             {integrity.broken_reason ? ` ${integrity.broken_reason}` : ''}
           </p>
@@ -86,7 +90,7 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
                 <td>{item.actor_type}</td>
                 <td>{item.paperless_document_id || '-'}</td>
                 <td><Status value={item.outcome} /></td>
-                <td>{item.event_hash ? `${item.event_hash.slice(0, 12)}...` : t('audit.hash_legacy')}</td>
+                <td>{item.event_hash ? `v${item.hash_version ?? 1}:${item.event_hash.slice(0, 12)}...` : t('audit.hash_legacy')}</td>
               </tr>
             ))}
           </tbody>

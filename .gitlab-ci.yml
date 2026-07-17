@@ -72,11 +72,85 @@ public:rust:test:
   script:
     - cargo test --workspace --locked
 
+public:rust:db-integration:
+  stage: test
+  extends: .rust_public_base
+  services:
+    - name: postgres:18
+      alias: postgres
+  variables:
+    POSTGRES_DB: archivist_ci
+    POSTGRES_USER: archivist_ci
+    POSTGRES_HOST_AUTH_METHOD: trust
+    DATABASE_URL: "postgres://archivist_ci@postgres:5432/archivist_ci"
+  script:
+    - bash scripts/verify/migration_smoke.sh
+
 public:rust:clippy:
   stage: test
   extends: .rust_public_base
   script:
     - cargo clippy --workspace --all-targets -- -D warnings
+
+# Offline contract matrix for the opt-in live SGLang/MiniMax M3 probe. The
+# mock server exercises success, failure, timeout, response bounds and
+# redaction; ordinary pipelines never contact an LLM endpoint.
+public:sglang:minimax-m3:contract-mock:
+  stage: test
+  image: "$NODE_IMAGE"
+  extends: .default_retry
+  script:
+    - node --test scripts/verify/sglang_minimax_m3_contract.test.mjs
+
+# Offline capacity harness contract. This uses a local mock only; real load
+# remains an explicit operator command and never runs in ordinary pipelines.
+public:sglang:minimax-m3:capacity-mock:
+  stage: test
+  image: "$NODE_IMAGE"
+  extends: .default_retry
+  script:
+    - node --test scripts/verify/sglang_minimax_m3_capacity.test.mjs
+
+# Prove that the restrictive base and the opt-in custom-AI component both
+# render with a pinned public kubectl, and that only the opt-in render adds a
+# second NetworkPolicy. Detailed selector/port assertions run in pnpm test.
+public:kubernetes:custom-ai-egress:render:
+  stage: test
+  image:
+    name: alpine/k8s:1.36.2@sha256:44ef4942e171939b9c665a4a84beb80e2dcdb9a24330d4651cfdfd2e9deecc47
+    entrypoint: [""]
+  extends: .default_retry
+  script:
+    - kubectl kustomize deploy/kubernetes/base > /tmp/base.yaml
+    - kubectl kustomize deploy/kubernetes/examples/custom-ai-egress > /tmp/custom-ai.yaml
+    - |
+      test "$(grep -c '^kind: NetworkPolicy$' /tmp/base.yaml)" -eq 1
+      test "$(grep -c '^kind: NetworkPolicy$' /tmp/custom-ai.yaml)" -eq 2
+      grep -q 'name: paperless-archivist-custom-ai-egress' /tmp/custom-ai.yaml
+
+# Available only when a protected ref receives the protected endpoint
+# variable. Authentication is an optional GitLab file variable, so no secret
+# appears in the command line, logs, report, artifacts, or repository.
+sglang:minimax-m3:live-contract:
+  stage: test
+  image: "$NODE_IMAGE"
+  interruptible: false
+  timeout: 30m
+  resource_group: sglang-minimax-m3-live-contract
+  variables:
+    SGLANG_CONTRACT_REPORT_FILE: sglang-minimax-m3-contract-report.json
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $SGLANG_CONTRACT_BASE_URL'
+      when: manual
+      allow_failure: false
+    - when: never
+  script:
+    - node scripts/verify/sglang_minimax_m3_contract.mjs
+  artifacts:
+    when: always
+    paths:
+      - sglang-minimax-m3-contract-report.json
+    expire_in: 30 days
 
 public:rust:audit:
   stage: scan
@@ -116,6 +190,8 @@ frontend:openapi-client:
     - .frontend_base
     - .default_retry
   script:
+    - pnpm contract:routes
+    - pnpm contract:settings
     - pnpm generate:client
     - git diff --exit-code -- src/api/schema.ts
 
@@ -127,7 +203,8 @@ frontend:typecheck:
   script:
     - pnpm typecheck
 
-# i18n_translation_parity.mjs is wired up but was never run in CI. (#276)
+# Explicit gate for the public/exported pipeline. The authoritative internal
+# shared blueprint also executes it through the frontend `pnpm lint` script.
 frontend:i18n:
   stage: test
   extends:

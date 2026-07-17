@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { axe, toHaveNoViolations } from 'jest-axe';
 import { I18nProvider } from '../i18n/I18nProvider';
 import type { ReviewItem } from '../api/client';
@@ -15,6 +15,8 @@ const reviewFixtures: ReviewItem[] = [
     suggested_patch: { correspondent: 17, standard_metadata: { confidence: 0.92 } },
     edited_patch: null,
     validation_warnings: [],
+    conflict_fields: ['title', 'tags'],
+    conflicted_at: '2026-05-15T09:01:00Z',
     debug_context: null,
     created_at: '2026-05-15T09:00:00Z'
   },
@@ -82,5 +84,17 @@ describe('<Reviews> a11y shell', () => {
       }
     });
     expect(results).toHaveNoViolations();
+  });
+
+  it('shows field names for an optimistic-concurrency conflict', async () => {
+    const { Reviews } = await import('./Reviews');
+    render(
+      <I18nProvider>
+        <Reviews setError={() => undefined} setSuccess={() => undefined} />
+      </I18nProvider>
+    );
+    expect(
+      await screen.findByText(/newer Paperless changes.*title, tags/i)
+    ).toBeInTheDocument();
   });
 });

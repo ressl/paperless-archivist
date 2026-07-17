@@ -1,14 +1,16 @@
 import { useId } from 'react';
+import { Trash2 } from 'lucide-react';
 import { AiProviderKind, ModelCatalogEntry, ProviderTuning, RuntimeSettings } from '../../api/client';
-import { recommendedModel } from '../../modelCatalog';
+import { isSglangMinimaxM3Provider, recommendedModel } from '../../modelCatalog';
 import { useI18n } from '../../i18n/I18nProvider';
-import { FormField } from '../../lib/ui';
+import { Button, FormField } from '../../lib/ui';
 import { ProviderModelSelect } from './ProviderModelSelect';
 import { TuningDisclosure, type TuningField } from './tuning';
 import { optionalNumber } from './helpers';
 import type { OllamaModelLoadState } from './types';
 
 type Provider = RuntimeSettings['ai']['providers'][number];
+export type ProviderFieldErrors = { name?: string; baseUrl?: string };
 
 export function ProviderCard({
   provider,
@@ -20,7 +22,11 @@ export function ProviderCard({
   onChangeProvider,
   onChangeTuning,
   onResetTuningBlock,
-  onRefreshModels
+  onRefreshModels,
+  errors = {},
+  builtIn,
+  removalError,
+  onRemove
 }: {
   provider: Provider;
   catalog: ModelCatalogEntry[];
@@ -32,6 +38,10 @@ export function ProviderCard({
   onChangeTuning: (patch: Partial<ProviderTuning>) => void;
   onResetTuningBlock: (fields: readonly TuningField[]) => void;
   onRefreshModels: () => void;
+  errors?: ProviderFieldErrors;
+  builtIn: boolean;
+  removalError?: string;
+  onRemove: () => void;
 }) {
   const { t } = useI18n();
   const ids = {
@@ -42,16 +52,27 @@ export function ProviderCard({
     outputCost: useId(),
     apiKey: useId()
   };
+  const nameErrorId = `${ids.name}-error`;
+  const baseUrlErrorId = `${ids.baseUrl}-error`;
   return (
     <fieldset className="card">
-      <legend>{provider.name || t('settings.provider.provider')}</legend>
-      <FormField label={t('settings.provider.name')} htmlFor={ids.name}>
-        <input id={ids.name} value={provider.name} onChange={(event) => onChangeProvider({ name: event.target.value })} />
+      <legend>{provider.name.trim() || t('settings.provider.provider')}</legend>
+      <FormField label={t('settings.provider.name')} htmlFor={ids.name} error={errors.name} errorId={nameErrorId}>
+        <input
+          id={ids.name}
+          value={provider.name}
+          disabled={builtIn}
+          aria-label={t('settings.provider.name')}
+          aria-invalid={Boolean(errors.name)}
+          aria-describedby={errors.name ? nameErrorId : undefined}
+          onChange={(event) => onChangeProvider({ name: event.target.value })}
+        />
       </FormField>
       <FormField label={t('settings.provider.kind')} htmlFor={ids.kind}>
         <select
           id={ids.kind}
           value={provider.kind}
+          disabled={builtIn}
           onChange={(event) => {
             const kind = event.target.value as AiProviderKind;
             const nextProvider = { ...provider, kind };
@@ -73,10 +94,15 @@ export function ProviderCard({
         label={t('settings.provider.base_url')}
         htmlFor={ids.baseUrl}
         help={provider.kind === 'mineru' ? t('settings.provider.mineru_base_url_hint') : undefined}
+        error={errors.baseUrl}
+        errorId={baseUrlErrorId}
       >
         <input
           id={ids.baseUrl}
           value={provider.base_url}
+          aria-label={t('settings.provider.base_url')}
+          aria-invalid={Boolean(errors.baseUrl)}
+          aria-describedby={errors.baseUrl ? baseUrlErrorId : undefined}
           onChange={(event) => onChangeProvider({ base_url: event.target.value })}
         />
       </FormField>
@@ -116,8 +142,12 @@ export function ProviderCard({
       )}
       <div className="settings-field">
         {t('settings.provider.vision_model')}
-        {provider.kind === 'mineru' ? (
-          <input value="mineru" disabled aria-label={t('settings.provider.vision_model')} />
+        {provider.kind === 'mineru' || isSglangMinimaxM3Provider(provider) ? (
+          <input
+            value={provider.kind === 'mineru' ? 'mineru' : (provider.default_vision_model ?? '')}
+            disabled
+            aria-label={t('settings.provider.vision_model')}
+          />
         ) : (
           <ProviderModelSelect
             capability="vision"
@@ -147,6 +177,23 @@ export function ProviderCard({
         />
         {t('settings.provider.enabled')}
       </label>
+      {builtIn ? (
+        <p className="field-hint">{t('settings.provider.builtin_disable_only')}</p>
+      ) : (
+        <Button
+          type="button"
+          variant="secondary"
+          icon={<Trash2 size={16} aria-hidden="true" />}
+          onClick={onRemove}
+        >
+          {t('settings.provider.remove')}
+        </Button>
+      )}
+      {removalError && (
+        <p className="field-hint error" role="alert">
+          {removalError}
+        </p>
+      )}
       <TuningDisclosure
         provider={provider}
         globals={globals}

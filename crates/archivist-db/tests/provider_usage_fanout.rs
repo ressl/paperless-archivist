@@ -70,8 +70,13 @@ async fn provider_usage_does_not_fan_out_on_feedback() {
     for event_type in ["review.approved", "review.approved", "review.rejected"] {
         sqlx::query(
             r#"
-            insert into audit_events (id, job_id, event_type, actor_type, outcome, created_at, chain_position)
-            values ($1, $2, $3, 'worker', 'success', now(), nextval('audit_events_chain_position_seq'))
+            insert into audit_events (
+              id, job_id, event_type, actor_type, outcome, created_at, chain_position, hash_version
+            )
+            values (
+              $1, $2, $3, 'worker', 'success', now(),
+              nextval('audit_events_chain_position_seq'), null
+            )
             "#,
         )
         .bind(Uuid::now_v7())

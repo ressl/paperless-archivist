@@ -47,6 +47,15 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
   const [notice, setNotice] = useState<string | null>(null);
   const languages = useMemo(() => languageOptions(locale), [locale]);
 
+  const visibleDocumentIds = useMemo(
+    () => new Set(items.map((item) => item.paperless_document_id)),
+    [items]
+  );
+  const visibleSelected = useMemo(
+    () => new Set(Array.from(selected).filter((documentId) => visibleDocumentIds.has(documentId))),
+    [selected, visibleDocumentIds]
+  );
+
   // Sync filters → URL whenever filters change.
   const urlSyncRef = useRef(true);
   useEffect(() => {
@@ -64,6 +73,12 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
 
   const loadFirst = useCallback(() => {
     const requestId = ++requestIdRef.current;
+    // A first-page load replaces the query result. Remove the old snapshot
+    // immediately so it cannot be selected or paginated while refresh is in
+    // flight.
+    setSelected(new Set());
+    setItems([]);
+    setTotal(0);
     setLoading(true);
     return api
       .inventory({ ...filtersToParams(filters), offset: 0, limit: PAGE_SIZE })
@@ -71,6 +86,9 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
         if (requestId !== requestIdRef.current) return;
         setItems(data.items);
         setTotal(data.total);
+        // The operator may have selected an old row while the refresh was in
+        // flight. The replacing response defines a new selection context.
+        setSelected(new Set());
       })
       .catch((err) => {
         if (requestId !== requestIdRef.current) return;
@@ -99,6 +117,14 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
   }, [filters, items.length, setError, t]);
 
   useEffect(() => {
+    // Query changes are result boundaries. Invalidate requests and remove the
+    // old snapshot before the debounced first-page request starts; otherwise
+    // an old load-more response could overtake it and append across contexts.
+    ++requestIdRef.current;
+    setSelected(new Set());
+    setItems([]);
+    setTotal(0);
+    setLoading(true);
     // Debounce filter-driven reloads so rapid changes (date pickers, toggles)
     // collapse into one 500-row query instead of firing per change. The
     // request-id guard in loadFirst still protects against out-of-order
@@ -107,7 +133,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
       void loadFirst();
     }, 300);
     return () => window.clearTimeout(handle);
-  }, [loadFirst]);
+  }, [filters, loadFirst]);
 
   const commitSearch = useCallback(() => {
     const trimmed = searchText.trim();
@@ -161,7 +187,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
     });
   }, []);
 
-  const allOnPageSelected = items.length > 0 && items.every((item) => selected.has(item.paperless_document_id));
+  const allOnPageSelected = items.length > 0 && items.every((item) => visibleSelected.has(item.paperless_document_id));
 
   const toggleSelectAll = useCallback(() => {
     setSelected((prev) => {
@@ -178,7 +204,9 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
   }, [items]);
 
   const rerunSelected = useCallback(() => {
-    const ids = Array.from(selected);
+    // Only IDs in the rendered result may reach the bulk endpoint, even if a
+    // future state-management regression leaves a hidden ID in `selected`.
+    const ids = Array.from(visibleSelected);
     if (ids.length === 0) return Promise.resolve();
     setNotice(null);
     return api
@@ -189,7 +217,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
         return loadFirst();
       })
       .catch((err) => setError(localizedErrorMessage(err, t)));
-  }, [selected, loadFirst, setError, t]);
+  }, [visibleSelected, loadFirst, setError, t]);
 
   const openDiagnose = useCallback(
     async (documentId: number) => {
@@ -262,13 +290,13 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
       <div className="toolbar inventory-selection-bar">
         <button
           className="primary-button"
-          disabled={busy || selected.size === 0}
+          disabled={busy || visibleSelected.size === 0}
           onClick={() => run(setBusy, setError, rerunSelected, t)}
         >
           <RotateCcw size={16} /> {t('inventory.rerun_selected')}
         </button>
-        <small className="field-hint">{t('inventory.selected_count', { count: selected.size })}</small>
-        {selected.size > 0 && (
+        <small className="field-hint">{t('inventory.selected_count', { count: visibleSelected.size })}</small>
+        {visibleSelected.size > 0 && (
           <button className="chip-button" onClick={() => setSelected(new Set())}>
             <X size={14} /> {t('inventory.clear_selection')}
           </button>
@@ -279,7 +307,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
       <InventoryTable
         items={items}
         loading={loading}
-        selected={selected}
+        selected={visibleSelected}
         allOnPageSelected={allOnPageSelected}
         onToggleSelect={toggleSelect}
         onToggleSelectAll={toggleSelectAll}

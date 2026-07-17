@@ -165,6 +165,102 @@ contains API and worker Deployments, probes, resources, Service, Ingress,
 NetworkPolicy, and secret references. Patch it with Kustomize or your GitOps
 tooling; do not commit real secrets.
 
+Custom in-cluster AI ports remain denied by the generic base. The public
+package includes an
+[`opt-in custom-AI egress component`](../deploy/kubernetes/README.md#opt-in-egress-to-custom-ai-providers)
+for explicitly labelled SGLang and MinerU example targets. Adapt namespace,
+pod labels, and Service target ports in a private overlay; never solve a policy
+drop with an unrestricted namespace selector or private-network CIDR.
+
+## SGLang/MiniMax M3 Operations
+
+The supported application contract is the disabled `sglang-minimax-m3`
+preset, provider kind `openai_compatible`, and exact text model
+`ressl/MiniMax-M3-uncensored-NVFP4`. Archivist does not deploy SGLang. Pin the
+model revision, SGLang revision, and immutable image digest recorded in
+[ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider),
+and revalidate before changing any of them.
+
+| Reviewed identity | Required pin |
+| --- | --- |
+| Model | `ressl/MiniMax-M3-uncensored-NVFP4` |
+| Model revision | `6863c5c62a892e2d1e886a69e134b3b866e0963e` |
+| SGLang runtime | `0.0.0.dev1+g56e290315` |
+| Container | `lmsysorg/sglang@sha256:8cc6e6f90bf803e9817800b679173d0b526f2b42b2c61b7ecafecdadb610eb55` |
+
+The SGLang runtime must:
+
+- expose an OpenAI-compatible URL ending in `/v1` and return the exact model ID
+  from `GET /v1/models`;
+- use `--reasoning-parser auto` so `<mm:think>` content becomes separated
+  `reasoning_content`, and `--tool-call-parser auto` so the native M3 format
+  becomes standard OpenAI `tool_calls`, as required by the
+  [official SGLang M3 cookbook](https://docs.sglang.io/cookbook/autoregressive/MiniMax/MiniMax-M3);
+- use the reviewed chat template/runtime combination. Rejecting
+  `chat_template_kwargs.thinking_mode` is a contract failure; Archivist does
+  not silently remove it on retry;
+- keep credentials outside the URL. Enter the API key in Settings or supply it
+  through the deployment secret workflow so API and worker resolve the same
+  encrypted secret reference.
+
+Follow the [Settings procedure](USER_GUIDE.md#sglang-with-minimax-m3-text-only)
+and leave the measured `1` worker / `180` seconds / `4096` tokens / `auto`
+profile unchanged for the reviewed two-slot runtime. Reasoning unset/off maps
+to `thinking_mode=disabled`, low to `adaptive`, and medium/high to `enabled`.
+Reasoning tokens consume the same output cap as the final answer.
+
+### Validation sequence
+
+1. In Settings, refresh model discovery, verify the exact model ID, save, and
+   run the provider test.
+2. Run the text-first live contract from a trusted operator shell. The endpoint
+   variable must contain no credentials; authentication uses a readable secret
+   file:
+
+   ```bash
+   mkdir -p target
+   SGLANG_CONTRACT_BASE_URL=https://sglang.example.invalid/v1 \
+   SGLANG_CONTRACT_API_KEY_FILE=/run/secrets/sglang-key \
+   SGLANG_CONTRACTS=models,text,schema,reasoning-disabled,reasoning-enabled,reasoning-adaptive,tool \
+   SGLANG_CONTRACT_REPORT_FILE=target/sglang-contract.json \
+   node scripts/verify/sglang_minimax_m3_contract.mjs
+   ```
+
+   Omit `SGLANG_CONTRACT_API_KEY_FILE` for an unauthenticated endpoint. Exit 0
+   means every selected contract passed. A successful report contains no URL,
+   credential, prompt, response, reasoning trace, or tool arguments. On
+   failure, `diagnostic` may contain up to 512 redacted characters derived
+   from the provider error or response body. Treat a failed report as
+   operator-sensitive and inspect it before sharing.
+3. Exercise one Prompt Tester call, one Document Chat request, and one worker
+   metadata job. These cover API and worker callers; do not use OCR as an M3
+   validation path.
+4. After changing runtime pins, scheduler slots, context, or hardware, rerun
+   the [capacity harness and record a new report](performance/2026-07-17-sglang-minimax-m3-capacity.md#revalidation)
+   before changing worker concurrency or timeout.
+
+For Kubernetes, adapt and render the
+[`custom-ai-egress` component](../deploy/kubernetes/README.md#opt-in-egress-to-custom-ai-providers).
+Both API and worker must match its source selector, and the SGLang namespace,
+pod labels, protocol, and Service `targetPort` must match its destination.
+
+### Troubleshooting
+
+| Symptom | Diagnosis and action |
+| --- | --- |
+| Refresh or live `models` says the model is missing | Confirm the Base URL ends in `/v1`, `GET /v1/models` is reachable, and the served ID is exactly `ressl/MiniMax-M3-uncensored-NVFP4`. Do not work around identity failure with a substring or alias; fix the SGLang served-model configuration. |
+| Response contains reasoning but no final answer | Run the three reasoning live contracts. Confirm `--reasoning-parser auto`, the reviewed chat template, and that SGLang accepts the explicit `thinking_mode`. Increase `max_output_tokens` only if logs/metrics show the final answer was truncated, not as a parser workaround. |
+| Users see `<mm:think>` or `<think>` tags | Treat this as a runtime parser regression and verify `--reasoning-parser auto`. Archivist strips both tag families as defense in depth, but tags in final UI output mean the response shape or parser changed and the live reasoning contracts must be rerun. |
+| Strict schema returns HTTP 400 | Keep `structured_output=auto` first: Archivist retries one schema-related 400 without `response_format`. If the retry also fails, run the `schema` contract and inspect the pinned runtime grammar backend. Use `json_object` or `off` only as an explicit compatibility choice; Rust validation still rejects invalid model output. |
+| Requests reach the provider but time out | Compare provider latency, oldest queue age, model error/retry counters, and SGLang scheduler pressure with the capacity report. Keep the 180-second baseline and worker concurrency 1 until a new bounded capacity run justifies a change. A schema fallback can consume two provider timeouts; the worker lease budget accounts for this. |
+| DNS resolves but in-cluster calls time out | Inspect the custom NetworkPolicy, EndpointSlice, actual namespace/pod labels, and Service `targetPort` in the Kubernetes guide. Confirm CNI flow logs show whether API or worker traffic was dropped. Never fix this with unrestricted namespace or RFC1918 egress. |
+| Provider returns 401 or 403 | Re-enter/rotate the key through Settings, confirm the provider card still has a secret reference, and verify both API and worker can resolve it. Check provider-side scope/expiry without printing the key or putting it in the Base URL, process arguments, logs, or issue comments. |
+
+MiniMax M3 remains text-only in Archivist. OCR and page-image stages stay on
+MinerU or Ollama until ADR-014 is revised and the image/OCR gates in #322
+through #338 pass; a successful informational image contract alone does not
+enable M3 OCR.
+
 GA support, upgrade, rollback, and large-archive sizing are documented in:
 
 - [`docs/STABILITY.md`](STABILITY.md)
@@ -593,6 +689,17 @@ the failed-attempt counter and lock.
 Autopilot never trusts model output directly. Full autopilot applies only a
 validated Rust `DocumentPatch`.
 
+Review-backed applies use field-level optimistic concurrency. A review records
+fingerprints/IDs for every patchable Paperless field when it is created. Human
+approval and the autopilot review drain read the document again immediately
+before PATCH. A newer edit to a requested scalar field returns HTTP `409`,
+moves the review back to `pending`, and records `review.apply_conflict` with
+field names only; the shared job and run stay in `waiting_review`. Refresh the
+review, compare the named fields with Paperless, then edit/approve again. Tag
+changes are merged as a three-way set delta, so tags added directly in
+Paperless after review creation are retained unless they are workflow trigger
+tags scheduled for removal.
+
 Production rollout should keep automatic selection bounded:
 
 1. Start in `manual_review` and process a representative sample.
@@ -672,6 +779,37 @@ The first migration fails on PostgreSQL versions below 18. The schema uses:
 - JSONB artifacts and review patches
 - `FOR UPDATE SKIP LOCKED` for job leasing
 - `pg_trgm` for future fuzzy matching and diagnostics
+
+Migration `0049_user_identity_namespace.sql` creates one normalized login
+namespace across usernames and non-empty emails. Normalization trims surrounding
+whitespace and applies PostgreSQL `lower`; empty email strings become `NULL`.
+The migration aborts before changing the schema when legacy accounts normalize
+to the same identity. Its error `DETAIL` lists every account id, field kind, and
+raw value, and its `HINT` asks the operator to rename the listed usernames or
+emails. Resolve those values explicitly and restart the API; the migration never
+selects or merges an account automatically.
+
+The migration holds an exclusive lock on `users` until its preflight, backfill,
+and synchronization trigger are installed. This deliberately pauses logins and
+user administration from an older rolling-deployment pod instead of allowing a
+case-only collision to commit between the diagnostic scan and enforcement.
+
+Paperless login-bridge accounts are identified by an explicit
+`paperless_bridge` provider/subject mapping, not by the `paperless-` username
+prefix. After credential verification, Archivist uses the issued token once to
+read the stable Paperless user ID from `/api/ui_settings/`; the token is never
+persisted. That ID is scoped by a SHA-256 hash of the validated canonical API
+root and stored separately from the sanitized local name, so token regeneration
+and username changes keep the same disabled state and roles. Changing the
+Paperless base URL to another installation intentionally creates a new trust
+domain; migrate roles only after explicitly verifying the new instance.
+Different principals that sanitize to the same name receive distinct suffixed
+local accounts. Paperless versions that do not return an authenticated user ID
+fail the bridge login closed. Accounts created by older versions without the
+provider marker are not claimed automatically because no safe stable mapping
+can be reconstructed. Let the next verified bridge login create a new,
+non-conflicting account and transfer roles only after an operator verifies
+ownership. Never mark an unrelated local account.
 
 Use SCRAM authentication and a dedicated non-superuser role in production.
 

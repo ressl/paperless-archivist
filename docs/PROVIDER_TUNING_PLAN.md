@@ -103,6 +103,25 @@ These presets live as `AiProviderSettings::ollama_default()` /
 `openai_default()` / etc. — the existing constructors. We just extend
 them with the `tuning:` field.
 
+### Measured SGLang/MiniMax M3 preset
+
+The exact built-in `sglang-minimax-m3` identity has a dedicated preset rather
+than inheriting the generic OpenAI-compatible values:
+
+| Field | Value |
+| --- | --- |
+| `worker_concurrency` | `Some(1)` |
+| `reasoning_effort` | `None` |
+| `max_output_tokens` | `Some(4096)` |
+| `structured_output` | `Some(Auto)` |
+| `request_timeout_seconds` | `Some(180)` |
+| all other tuning fields | `None` |
+
+Core construction, frontend suggestion, and Reset-to-defaults all share these
+values. The generic `openai_compatible` preset remains unchanged. The measured
+rationale and load results are in
+[`docs/performance/2026-07-17-sglang-minimax-m3-capacity.md`](performance/2026-07-17-sglang-minimax-m3-capacity.md).
+
 ## Resolution rule
 
 A new helper on `RuntimeSettings`:

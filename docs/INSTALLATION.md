@@ -10,6 +10,10 @@ production-like Docker Compose, generic Kubernetes, and local development.
 - Docker with Compose support for the recommended quick start.
 - Optional Ollama for local AI.
 - Optional OpenAI, Anthropic, Ollama Cloud, or OpenAI-compatible API key.
+- Optional SGLang for the exact text-only MiniMax M3 integration. Use the
+  model/runtime pins and parser requirements in the
+  [operations runbook](OPERATIONS.md#sglangminimax-m3-operations); Archivist
+  does not install or manage the inference runtime.
 
 Paperless Archivist does not require direct access to the Paperless database.
 It only uses the Paperless REST API.
@@ -85,6 +89,21 @@ docker compose \
 Replace example hostnames in your private runtime configuration, not in public
 documentation.
 
+This overlay is the public HTTPS profile: it forces
+`ARCHIVIST_COOKIE_SECURE=true`, redirects port 80 to HTTPS, and returns
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`. The value of
+`ARCHIVIST_COOKIE_SECURE` in `.env` remains `false` for the separate base-only
+localhost profile and is intentionally overridden when the proxy file is used.
+Do not publish the base profile directly.
+
+After upgrading an existing proxy deployment, restart the API and sign out and
+back in (or revoke existing browser sessions) so cookies issued before the
+upgrade are replaced with `Secure` cookies. Only use the HSTS profile when the
+hostname and all of its subdomains will remain HTTPS-capable: a browser can
+retain the policy for one year, so removing the overlay does not immediately
+undo HSTS. A rollback to direct local HTTP may also require clearing the secure
+site cookies before logging in at `http://127.0.0.1:8080`.
+
 ## Generic Kubernetes
 
 Start with:
@@ -104,6 +123,11 @@ Then patch:
 - NetworkPolicy according to your cluster
 
 See [`deploy/kubernetes/README.md`](../deploy/kubernetes/README.md).
+In-cluster SGLang or MinerU endpoints require the public-safe
+[`custom-ai-egress` component](../deploy/kubernetes/README.md#opt-in-egress-to-custom-ai-providers)
+adapted to the real namespace labels, pod labels, and Service target ports in
+your private overlay. Do not replace it with unrestricted namespace or private
+CIDR egress.
 
 ## Local Development
 
@@ -153,6 +177,10 @@ npm --prefix frontend run generate:client
 8. Run Dashboard Sync.
 9. Queue one OCR job and one tagging job.
 10. Review results before enabling autopilot.
+
+For SGLang/MiniMax M3, follow the dedicated
+[Settings procedure](USER_GUIDE.md#sglang-with-minimax-m3-text-only), then run
+the opt-in live contract before production use.
 
 ## Commercial Providers
 

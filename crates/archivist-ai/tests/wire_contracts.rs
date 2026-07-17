@@ -9,10 +9,10 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use archivist_ai::{
-    ChatRequest, ImageInput, MineruClient, OpenAiCompatibleClient, TextProvider, VisionProvider,
-    VisionRequest,
+    ChatRequest, ImageInput, MINIMAX_M3_MODEL, MineruClient, OpenAiCompatibleClient, TextProvider,
+    VisionProvider, VisionRequest,
 };
-use archivist_core::StructuredOutputMode;
+use archivist_core::{ReasoningEffort, StructuredOutputMode};
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
@@ -185,7 +185,50 @@ async fn schema_400_retry_not_armed_when_mode_not_auto_or_error_unrelated() {
     assert_eq!(hits_c, 1, "unrelated error body must not retry");
 }
 
-// --- Test 3: MinerU vision multipart roundtrip --------------------------
+// --- Test 3: MiniMax reasoning stays auditable but never becomes result text
+
+async fn minimax_reasoning_handler(
+    State(body): State<Arc<Mutex<Option<Value>>>>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    *body.lock().unwrap() = Some(request);
+    Json(json!({
+        "choices": [{
+            "message": {
+                "content": "<mm:think>inline fallback</mm:think>  final answer  ",
+                "reasoning_content": "parser-separated reasoning"
+            }
+        }]
+    }))
+}
+
+#[tokio::test]
+async fn minimax_reasoning_is_preserved_raw_but_removed_from_result_text() {
+    let body = Arc::new(Mutex::new(None));
+    let router = Router::new()
+        .route("/chat/completions", post(minimax_reasoning_handler))
+        .with_state(body.clone());
+    let addr = spawn(router).await;
+    let client = OpenAiCompatibleClient::new("sglang", &format!("http://{addr}"), None)
+        .expect("client construction");
+
+    let mut request = chat_request();
+    request.model = MINIMAX_M3_MODEL.to_owned();
+    request.reasoning_effort = Some(ReasoningEffort::Off);
+    let response = client.chat(request).await.expect("valid M3 response");
+
+    assert_eq!(response.text, "final answer");
+    assert_eq!(
+        response.raw_response["choices"][0]["message"]["reasoning_content"],
+        "parser-separated reasoning"
+    );
+    assert_eq!(
+        body.lock().unwrap().as_ref().unwrap()["chat_template_kwargs"]["thinking_mode"],
+        "disabled"
+    );
+}
+
+// --- Test 4: MinerU vision multipart roundtrip --------------------------
 
 #[derive(Default)]
 struct CapturedRequest {

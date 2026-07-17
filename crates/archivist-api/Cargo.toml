@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 archivist-ai = { path = "../archivist-ai" }
+archivist-apply = { path = "../archivist-apply" }
 archivist-config = { path = "../archivist-config" }
 archivist-core = { path = "../archivist-core" }
 archivist-db = { path = "../archivist-db" }

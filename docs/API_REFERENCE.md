@@ -61,8 +61,8 @@ Common status codes:
 | `GET` | `/api/auth/me` | Return the current user, roles, and CSRF token. |
 | `POST` | `/api/auth/logout` | Revoke the current browser session. |
 | `POST` | `/api/auth/change-password` | Change own password and revoke other sessions. |
-| `GET` | `/api/auth/sessions` | List own active sessions. |
-| `POST` | `/api/auth/sessions/{id}/revoke` | Revoke a session. |
+| `GET` | `/api/auth/sessions` | List own browser sessions, or all sessions as an administrator. Requires an interactive cookie session; API tokens are rejected regardless of scope. |
+| `POST` | `/api/auth/sessions/{id}/revoke` | Revoke a browser session as an administrator. Requires an interactive cookie session; API tokens are rejected regardless of scope. |
 
 ## Runtime Settings
 
@@ -82,6 +82,11 @@ Common status codes:
 payloads: `paperless_token`, `provider_secrets`, and
 `notification_webhook_url`. Secret values are encrypted into secret references
 and are not returned to the frontend after saving.
+
+Settings updates require an interactive administrator cookie session and the
+matching `X-CSRF-Token` value. Bearer/API-token authentication is rejected
+regardless of token scope. A session-aware client must first read the current
+settings, preserve unrelated fields, and send the complete update document.
 
 Default provider records are created for:
 
@@ -382,7 +387,7 @@ Batch review returns per-item failures for partial failures and writes a
 | `GET` | `/api/audit/integrity` | Verify the audit hash chain. |
 | `POST` | `/api/audit/retention/apply` | Apply configured audit and AI-artifact retention. |
 | `GET` | `/api/users` | List local users. |
-| `POST` | `/api/users` | Create a user. |
+| `POST` | `/api/users` | Create a user. Username and non-empty email share a trimmed, case-insensitive identity namespace; conflicts return `409`. |
 | `POST` | `/api/users/{id}/enable` | Enable a user. |
 | `POST` | `/api/users/{id}/disable` | Disable a user and revoke sessions. |
 | `POST` | `/api/users/{id}/roles` | Replace user roles. |

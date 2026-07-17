@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+pub use archivist_core::MINIMAX_M3_MODEL;
 use archivist_core::{
     LanguageDetection, MetadataFieldFlags, MetadataSuggestion, ReasoningEffort,
     StructuredOutputMode, normalize_model_json,
@@ -8,11 +9,22 @@ use archivist_core::{
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+
+/// Maximum number of bytes accepted from any buffered AI-provider response.
+/// This single limit covers OpenAI-compatible model listings, chat/vision JSON,
+/// structured-output retries, and provider error bodies. Content-Length is
+/// checked before reading; streaming/chunked bodies are stopped at the same cap.
+pub const AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Provider diagnostics may be persisted or logged through an anyhow chain, so
+/// they receive a much smaller cap after sensitive JSON fields are redacted.
+const AI_PROVIDER_ERROR_SNIPPET_LIMIT_BYTES: usize = 1024;
 
 /// Typed surface for AI provider failures. The worker uses `is_transient()`
 /// to decide whether to retry — see `archivist-worker::classify_processing_failure`.
@@ -131,29 +143,191 @@ fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64>
         .map(|seconds| seconds.max(0) as u64)
 }
 
+#[derive(Debug)]
+struct BoundedResponseBody {
+    bytes: Vec<u8>,
+    truncated: bool,
+    declared_length: Option<u64>,
+}
+
+#[derive(Debug, Error)]
+#[error("{source}")]
+struct ResponseBodyReadError {
+    #[source]
+    source: AiProviderError,
+    partial: BoundedResponseBody,
+}
+
+async fn take_bounded_response_body(
+    mut response: reqwest::Response,
+) -> std::result::Result<BoundedResponseBody, ResponseBodyReadError> {
+    let declared_length = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared_length.is_some_and(|length| length > AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES as u64) {
+        return Ok(BoundedResponseBody {
+            bytes: Vec::new(),
+            truncated: true,
+            declared_length,
+        });
+    }
+
+    let mut bytes = Vec::with_capacity(
+        declared_length
+            .unwrap_or_default()
+            .min(AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES as u64) as usize,
+    );
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                return Err(ResponseBodyReadError {
+                    source: AiProviderError::from(error),
+                    partial: BoundedResponseBody {
+                        bytes,
+                        truncated: false,
+                        declared_length,
+                    },
+                });
+            }
+        };
+        let remaining = AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES.saturating_sub(bytes.len());
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            return Ok(BoundedResponseBody {
+                bytes,
+                truncated: true,
+                declared_length,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(BoundedResponseBody {
+        bytes,
+        truncated: false,
+        declared_length,
+    })
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
+    if value.len() <= max_bytes {
+        return (value, false);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&value[..end], true)
+}
+
+fn safe_body_diagnostic(body: &BoundedResponseBody) -> String {
+    // Configured provider endpoints are untrusted and may echo a credential as
+    // an arbitrary JSON string, object key, or nested message. Key-name based
+    // redaction is therefore insufficient: diagnostics expose no provider body
+    // content at all, while retaining bounded transport metadata below.
+    let serialized = if body.bytes.is_empty() {
+        "<response body omitted>".to_owned()
+    } else {
+        "<provider response body redacted>".to_owned()
+    };
+    let (snippet, snippet_truncated) =
+        truncate_utf8(&serialized, AI_PROVIDER_ERROR_SNIPPET_LIMIT_BYTES);
+    let mut diagnostic = snippet.to_owned();
+    if snippet_truncated {
+        diagnostic.push_str(" [diagnostic snippet truncated]");
+    }
+    if body.truncated {
+        diagnostic.push_str(&format!(
+            " [response body truncated at {} bytes",
+            AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES
+        ));
+        if let Some(length) = body.declared_length {
+            diagnostic.push_str(&format!("; declared Content-Length={length}"));
+        }
+        diagnostic.push(']');
+    }
+    diagnostic
+}
+
+/// Detect only the well-known local-runner crash signatures needed for the
+/// Ollama vision fallback. The raw bounded body is inspected in memory, while
+/// the typed error retains only the redacted diagnostic.
+fn is_ollama_vision_runner_crash_body(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("ggml_assert")
+        || body.contains("runner process no longer running")
+        || body.contains("signal arrived during cgo execution")
+}
+
+fn body_limit_error(operation: &str, body: &BoundedResponseBody) -> anyhow::Error {
+    anyhow::Error::new(AiProviderError::InvalidResponse(format!(
+        "{operation} response body exceeded {}-byte limit: {}",
+        AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES,
+        safe_body_diagnostic(body)
+    )))
+}
+
+async fn decode_bounded_json(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<Value> {
+    let body = take_bounded_response_body(response)
+        .await
+        .with_context(|| format!("read {operation} response"))?;
+    if body.truncated {
+        return Err(body_limit_error(operation, &body));
+    }
+    serde_json::from_slice(&body.bytes).with_context(|| format!("decode {operation} response"))
+}
+
+#[derive(Debug)]
+struct ProviderErrorBody {
+    status: reqwest::StatusCode,
+    raw_body: String,
+    safe_body: String,
+    truncated: bool,
+}
+
 /// Inspect a non-success HTTP response: if it looks like a provider quota
 /// signal (429 + "usage limit" / "quota" in the body), surface
 /// `AiProviderError::QuotaExhausted` so the worker can pause the
 /// provider instead of burning per-job retries. Otherwise return
-/// `(status, body)` so the caller can keep producing its previous
-/// `anyhow!`-formatted error and downstream substring classification
-/// continues to work.
+/// status, a bounded raw body for compatibility decisions, and a redacted,
+/// snippet-capped body for diagnostics.
 async fn check_quota_then_take_body(
     provider: &str,
     response: reqwest::Response,
-) -> Result<(reqwest::StatusCode, String)> {
+) -> Result<ProviderErrorBody> {
     let status = response.status();
     let retry_after = parse_retry_after_header(response.headers());
-    let body = response.text().await.unwrap_or_default();
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS && AiProviderError::is_quota_signal(&body) {
+    let (body, read_failed) = match take_bounded_response_body(response).await {
+        Ok(body) => (body, false),
+        Err(ResponseBodyReadError { partial, .. }) => (partial, true),
+    };
+    let raw_body = String::from_utf8_lossy(&body.bytes).into_owned();
+    let mut safe_body = safe_body_diagnostic(&body);
+    if read_failed {
+        safe_body.push_str(" [response body read failed before completion]");
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        && AiProviderError::is_quota_signal(&raw_body)
+    {
         return Err(AiProviderError::QuotaExhausted {
             provider: provider.to_owned(),
-            message: body,
+            message: safe_body,
             retry_after,
         }
         .into());
     }
-    Ok((status, body))
+    Ok(ProviderErrorBody {
+        status,
+        raw_body,
+        safe_body,
+        truncated: body.truncated || read_failed,
+    })
 }
 
 impl From<reqwest::Error> for AiProviderError {
@@ -217,11 +391,13 @@ pub struct ChatRequest {
     #[serde(default)]
     pub response_schema: Option<Value>,
     /// Reasoning / thinking effort for capable models. The worker populates it
-    /// from the resolved provider's tuning. `None`/`Off` leaves the request
-    /// unchanged. Applied per provider in the payload builders: OpenAI
-    /// `reasoning_effort`, Anthropic extended thinking (which also drops the
-    /// forced `tool_choice`), Ollama `think`. Non-capable models are left
-    /// untouched. Added v1.6.3.
+    /// from the resolved provider's tuning. `None` leaves ordinary providers
+    /// unchanged, while the exact MiniMax M3 integration rejects it because
+    /// every configured M3 request must carry a resolved mode. `Off` maps to
+    /// M3's explicit `thinking_mode=disabled`. Applied per provider in the
+    /// payload builders: OpenAI `reasoning_effort`, MiniMax M3
+    /// `chat_template_kwargs.thinking_mode`, Anthropic extended thinking, and
+    /// Ollama `think`. Non-capable models are left untouched. Added v1.6.3.
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Output-token cap forwarded as `max_tokens` by the OpenAI-compatible
@@ -572,8 +748,9 @@ pub fn build_ollama_chat_payload(request: &ChatRequest) -> Value {
 /// Outputs feature guarantees the response will match the schema (no
 /// out-of-vocabulary enum values, no missing required fields). Extracted
 /// as a free function so the wire shape is unit-testable without
-/// spinning up the HTTP client.
-pub fn build_openai_chat_payload(request: &ChatRequest) -> Value {
+/// spinning up the HTTP client. MiniMax M3 additionally requires a resolved
+/// reasoning effort and maps it to `chat_template_kwargs.thinking_mode`.
+pub fn build_openai_chat_payload(request: &ChatRequest) -> Result<Value> {
     let messages = if openai_model_rejects_system_role(&request.model) {
         // These snapshots 400 on a `system` message; prepend the system
         // prompt to the user turn instead so the steering survives.
@@ -594,6 +771,26 @@ pub fn build_openai_chat_payload(request: &ChatRequest) -> Value {
         "temperature": request.temperature,
         "messages": messages,
     });
+    if request.model == MINIMAX_M3_MODEL {
+        let effort = request.reasoning_effort.ok_or_else(|| {
+            anyhow!(
+                "MiniMax M3 request has no resolved reasoning effort; resolve provider tuning \
+                 before building the request so chat_template_kwargs.thinking_mode is explicit"
+            )
+        })?;
+        let thinking_mode = match effort {
+            ReasoningEffort::Off => "disabled",
+            ReasoningEffort::Low => "adaptive",
+            ReasoningEffort::Medium | ReasoningEffort::High => "enabled",
+        };
+        payload
+            .as_object_mut()
+            .expect("payload is an object literal")
+            .insert(
+                "chat_template_kwargs".to_owned(),
+                json!({ "thinking_mode": thinking_mode }),
+            );
+    }
     if let Some(effort) = request.reasoning_effort.filter(|effort| effort.is_on()) {
         // Only the reasoning-capable families (o-series, gpt-5+) accept the
         // `reasoning_effort` parameter; plain chat models reject it. Those
@@ -655,7 +852,7 @@ pub fn build_openai_chat_payload(request: &ChatRequest) -> Value {
             StructuredOutputMode::Off => {}
         }
     }
-    payload
+    Ok(payload)
 }
 
 /// OpenAI `reasoning_effort` string for an on-level. `Off` should be filtered
@@ -729,11 +926,12 @@ impl TextProvider for OllamaClient {
             .context("call Ollama chat")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("Ollama chat call"),
-            );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("Ollama chat call"));
         }
         let raw: Value = response
             .json()
@@ -775,11 +973,18 @@ impl VisionProvider for OllamaClient {
             .context("call Ollama vision")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("Ollama vision call"),
-            );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            if is_ollama_vision_runner_crash_body(&error.raw_body) {
+                return Err(anyhow::Error::new(AiProviderError::RunnerUnavailable(
+                    error.safe_body,
+                ))
+                .context("Ollama vision call"));
+            }
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("Ollama vision call"));
         }
         let raw: Value = response
             .json()
@@ -852,13 +1057,14 @@ impl OpenAiCompatibleClient {
             .context("call OpenAI-compatible models listing")?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("models listing returned {status}: {body}"));
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("OpenAI-compatible models listing"));
         }
-        let raw: Value = response
-            .json()
-            .await
-            .context("decode OpenAI-compatible models listing")?;
+        let raw = decode_bounded_json(response, "OpenAI-compatible models listing").await?;
         Ok(extract_model_ids(&raw))
     }
 }
@@ -867,7 +1073,7 @@ impl OpenAiCompatibleClient {
 impl TextProvider for OpenAiCompatibleClient {
     async fn chat(&self, request: ChatRequest) -> Result<AiResponse> {
         let started = Instant::now();
-        let mut payload = build_openai_chat_payload(&request);
+        let mut payload = build_openai_chat_payload(&request)?;
         // Self-healing is only armed in Auto mode: JsonObject/Off are already
         // the operator's explicit compatibility choice.
         let retryable = payload.get("response_format").is_some()
@@ -882,17 +1088,17 @@ impl TextProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible chat")?;
         let status = response.status();
         let raw: Value = if status.is_success() {
-            response
-                .json()
-                .await
-                .context("decode OpenAI-compatible response")?
+            decode_bounded_json(response, "OpenAI-compatible chat").await?
         } else {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            if !should_retry_without_schema(status.as_u16(), &body, retryable) {
-                return Err(
-                    anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                        .context("OpenAI-compatible chat call"),
-                );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            if error.truncated
+                || !should_retry_without_schema(error.status.as_u16(), &error.raw_body, retryable)
+            {
+                return Err(anyhow::Error::new(AiProviderError::from_http(
+                    error.status.as_u16(),
+                    error.safe_body,
+                ))
+                .context("OpenAI-compatible chat call"));
             }
             tracing::warn!(
                 provider = %self.provider_name,
@@ -911,18 +1117,14 @@ impl TextProvider for OpenAiCompatibleClient {
                 .context("call OpenAI-compatible chat (schema retry)")?;
             let retry_status = retry.status();
             if !retry_status.is_success() {
-                let (retry_status, retry_body) =
-                    check_quota_then_take_body(&self.provider_name, retry).await?;
+                let error = check_quota_then_take_body(&self.provider_name, retry).await?;
                 return Err(anyhow::Error::new(AiProviderError::from_http(
-                    retry_status.as_u16(),
-                    retry_body,
+                    error.status.as_u16(),
+                    error.safe_body,
                 ))
                 .context("OpenAI-compatible chat call (schema retry)"));
             }
-            retry
-                .json()
-                .await
-                .context("decode OpenAI-compatible response (schema retry)")?
+            decode_bounded_json(retry, "OpenAI-compatible chat schema retry").await?
         };
         let text = extract_openai_message_text(&raw)?;
         Ok(AiResponse {
@@ -981,16 +1183,14 @@ impl VisionProvider for OpenAiCompatibleClient {
             .context("call OpenAI-compatible vision")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("OpenAI-compatible vision call"),
-            );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("OpenAI-compatible vision call"));
         }
-        let raw: Value = response
-            .json()
-            .await
-            .context("decode OpenAI-compatible vision response")?;
+        let raw = decode_bounded_json(response, "OpenAI-compatible vision").await?;
         let text = extract_openai_message_text(&raw)?;
         Ok(AiResponse {
             provider: self.provider_name.clone(),
@@ -1133,26 +1333,48 @@ impl VisionProvider for MineruClient {
     }
 }
 
-/// Removes `<think>...</think>` reasoning blocks that thinking models
-/// (MiniMax-M2, DeepSeek-R1, QwQ) emit inline when the serving layer does
-/// not split them into `reasoning_content`. An unterminated `<think>`
-/// drops everything from the tag to the end — the model never surfaced a
-/// final answer after it.
+/// Removes inline reasoning blocks emitted as either `<think>...</think>` or
+/// MiniMax's `<mm:think>...</mm:think>`. Family-specific depth counters keep a
+/// wrong closing tag from releasing the other family's reasoning block. Mixed
+/// or nested malformed output stays hidden until every observed opener is
+/// closed by its own family; an unterminated block drops the entire tail.
 fn strip_think_blocks(text: &str) -> String {
+    const TAGS: [(&str, usize, bool); 4] = [
+        ("<think>", 0, true),
+        ("<mm:think>", 1, true),
+        ("</think>", 0, false),
+        ("</mm:think>", 1, false),
+    ];
+
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = rest.find("<think>") {
-        output.push_str(&rest[..start]);
-        match rest[start..].find("</think>") {
-            Some(end_rel) => rest = &rest[start + end_rel + "</think>".len()..],
-            None => {
-                rest = "";
-                break;
-            }
+    let mut depths = [0_u32; 2];
+    while let Some((offset, tag, family, is_open)) = TAGS
+        .iter()
+        .filter_map(|(tag, family, is_open)| {
+            rest.find(tag)
+                .map(|offset| (offset, *tag, *family, *is_open))
+        })
+        .min_by_key(|(offset, _, _, _)| *offset)
+    {
+        if depths == [0, 0] {
+            output.push_str(&rest[..offset]);
         }
+        if is_open {
+            depths[family] = depths[family].saturating_add(1);
+        } else {
+            depths[family] = depths[family].saturating_sub(1);
+        }
+        rest = &rest[offset + tag.len()..];
     }
-    output.push_str(rest);
+    if depths == [0, 0] {
+        output.push_str(rest);
+    }
     output
+}
+
+fn contains_reasoning_open_tag(text: &str) -> bool {
+    text.contains("<think>") || text.contains("<mm:think>")
 }
 
 /// Extracts the assistant text from an OpenAI-style chat/vision response,
@@ -1173,15 +1395,15 @@ fn extract_openai_message_text(raw: &Value) -> Result<String> {
     let stripped = strip_think_blocks(content);
     let trimmed = stripped.trim();
     if trimmed.is_empty() {
-        let had_think = content.contains("<think>");
+        let had_think = contains_reasoning_open_tag(content);
         let reasoning_only = message
             .and_then(|message| message.get("reasoning_content"))
             .and_then(Value::as_str)
             .is_some_and(|reasoning| !reasoning.trim().is_empty());
         if had_think || reasoning_only {
             return Err(anyhow!(
-                "model returned only reasoning content and no final answer — \
-                 check the server's reasoning-parser configuration"
+                "model returned only reasoning content and no final answer; check the server's \
+                 reasoning-parser configuration and the request's thinking_mode contract"
             ));
         }
         return Ok(String::new());
@@ -1315,11 +1537,12 @@ impl AnthropicClient {
             .context("call Anthropic messages API")?;
         let status = response.status();
         if !status.is_success() {
-            let (status, body) = check_quota_then_take_body(&self.provider_name, response).await?;
-            return Err(
-                anyhow::Error::new(AiProviderError::from_http(status.as_u16(), body))
-                    .context("Anthropic messages call"),
-            );
+            let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            return Err(anyhow::Error::new(AiProviderError::from_http(
+                error.status.as_u16(),
+                error.safe_body,
+            ))
+            .context("Anthropic messages call"));
         }
         let raw: Value = response.json().await.context("decode Anthropic response")?;
         let text = if structured {
@@ -1515,70 +1738,308 @@ impl VisionProvider for AnthropicClient {
     }
 }
 
-/// Parses the consolidated metadata response (a JSON object with optional
-/// `title`/`document_type`/`correspondent`/`document_date`/`tags`/`fields` keys)
-/// into a [`MetadataSuggestion`]. Each subfield is decoded independently — a
-/// malformed shape in one subfield should not strip the others, so we walk the
-/// object key-by-key and silently drop subfields that fail to decode.
-///
-/// Behavior contract:
-/// - If the response contains no recognizable JSON object, returns
-///   `Err(anyhow!("model response did not contain JSON"))`.
-/// - If the JSON exists but no recognised key decodes, returns
-///   `Ok(MetadataSuggestion::default())` — the worker will translate that into
-///   "no review items" rather than failing the run.
-pub fn parse_metadata_suggestion(text: &str) -> Result<MetadataSuggestion> {
-    let value =
-        normalize_model_json(text).ok_or_else(|| anyhow!("model response did not contain JSON"))?;
-    let mut object = match value {
-        Value::Object(map) => map,
-        other => {
-            return Err(anyhow!(
-                "metadata response must be a JSON object, got {}",
-                other
-            ));
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataParseStatus {
+    Valid,
+    Omitted,
+    ContractViolation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataEnvelopeError {
+    NoJson,
+    NonObject,
+}
+
+impl std::fmt::Display for MetadataEnvelopeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NoJson => "no_json",
+            Self::NonObject => "non_object",
+        })
+    }
+}
+
+/// Value-free diagnostics for one consolidated metadata response. Unknown key
+/// names are deliberately reduced to a count because model-controlled JSON
+/// keys can contain arbitrary document content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetadataParseDiagnostics {
+    pub status: MetadataParseStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_error: Option<MetadataEnvelopeError>,
+    pub decoded_fields: Vec<String>,
+    pub null_fields: Vec<String>,
+    pub invalid_fields: Vec<String>,
+    pub unknown_field_count: usize,
+}
+
+impl MetadataParseDiagnostics {
+    pub fn has_contract_violation(&self) -> bool {
+        self.status == MetadataParseStatus::ContractViolation
+    }
+
+    pub fn contract_error(&self) -> Option<MetadataContractError> {
+        self.has_contract_violation()
+            .then(|| MetadataContractError {
+                diagnostics: self.clone(),
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetadataContractError {
+    diagnostics: MetadataParseDiagnostics,
+}
+
+impl MetadataContractError {
+    pub fn diagnostics(&self) -> &MetadataParseDiagnostics {
+        &self.diagnostics
+    }
+
+    pub fn invalid_fields(&self) -> &[String] {
+        &self.diagnostics.invalid_fields
+    }
+}
+
+impl std::fmt::Display for MetadataContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "metadata model contract violation")?;
+        if let Some(envelope) = self.diagnostics.envelope_error {
+            write!(formatter, ": envelope={envelope}")?;
         }
+        if !self.diagnostics.invalid_fields.is_empty() {
+            write!(
+                formatter,
+                "; invalid_fields={}",
+                self.diagnostics.invalid_fields.join(",")
+            )?;
+        }
+        if self.diagnostics.unknown_field_count > 0 {
+            write!(
+                formatter,
+                "; unknown_field_count={}",
+                self.diagnostics.unknown_field_count
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for MetadataContractError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedMetadataSuggestion {
+    pub suggestion: MetadataSuggestion,
+    pub diagnostics: MetadataParseDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MetadataFieldShape {
+    Scalar,
+    Object(&'static [&'static str]),
+    ObjectWithArrayItems {
+        object_fields: &'static [&'static str],
+        array_field: &'static str,
+        item_fields: &'static [&'static str],
+    },
+}
+
+/// Parse a consolidated metadata response while retaining every successfully
+/// decoded known field and recording contract violations without their values.
+pub fn parse_metadata_suggestion(text: &str) -> ParsedMetadataSuggestion {
+    let Some(value) = normalize_model_json(text) else {
+        return metadata_envelope_violation(MetadataEnvelopeError::NoJson);
+    };
+    let Value::Object(mut object) = value else {
+        return metadata_envelope_violation(MetadataEnvelopeError::NonObject);
     };
     let mut out = MetadataSuggestion::default();
-    if let Some(field) = object.remove("title")
-        && !field.is_null()
+    let mut decoded_fields = Vec::new();
+    let mut null_fields = Vec::new();
+    let mut invalid_fields = Vec::new();
+    let mut unknown_field_count = 0;
+    out.title = decode_metadata_field(
+        &mut object,
+        "title",
+        MetadataFieldShape::Object(&["title", "confidence"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.document_type = decode_metadata_field(
+        &mut object,
+        "document_type",
+        MetadataFieldShape::Object(&["name", "confidence", "evidence"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.correspondent = decode_metadata_field(
+        &mut object,
+        "correspondent",
+        MetadataFieldShape::Object(&["name", "confidence", "evidence"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.new_correspondent = decode_metadata_field::<String>(
+        &mut object,
+        "new_correspondent",
+        MetadataFieldShape::Scalar,
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    )
+    .map(|name| name.trim().to_owned())
+    .filter(|name| !name.is_empty());
+    if out.new_correspondent.is_none()
+        && decoded_fields
+            .last()
+            .is_some_and(|field| field == "new_correspondent")
     {
-        out.title = serde_json::from_value(field).ok();
+        decoded_fields.pop();
+        null_fields.push("new_correspondent".to_owned());
     }
-    if let Some(field) = object.remove("document_type")
-        && !field.is_null()
+    out.document_date = decode_metadata_field(
+        &mut object,
+        "document_date",
+        MetadataFieldShape::Object(&["date", "confidence", "evidence", "warnings"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.tags = decode_metadata_field(
+        &mut object,
+        "tags",
+        MetadataFieldShape::Object(&["tags", "new_tags", "confidence"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.fields = decode_metadata_field(
+        &mut object,
+        "fields",
+        MetadataFieldShape::ObjectWithArrayItems {
+            object_fields: &["fields", "confidence"],
+            array_field: "fields",
+            item_fields: &["name", "value", "confidence"],
+        },
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+
+    unknown_field_count += object.len();
+    let status = if !invalid_fields.is_empty() || unknown_field_count > 0 {
+        MetadataParseStatus::ContractViolation
+    } else if decoded_fields.is_empty() {
+        MetadataParseStatus::Omitted
+    } else {
+        MetadataParseStatus::Valid
+    };
+    ParsedMetadataSuggestion {
+        suggestion: out,
+        diagnostics: MetadataParseDiagnostics {
+            status,
+            envelope_error: None,
+            decoded_fields,
+            null_fields,
+            invalid_fields,
+            unknown_field_count,
+        },
+    }
+}
+
+fn decode_metadata_field<T: DeserializeOwned>(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+    shape: MetadataFieldShape,
+    decoded_fields: &mut Vec<String>,
+    null_fields: &mut Vec<String>,
+    invalid_fields: &mut Vec<String>,
+    unknown_field_count: &mut usize,
+) -> Option<T> {
+    let value = object.remove(field)?;
+    if value.is_null() {
+        null_fields.push(field.to_owned());
+        return None;
+    }
+    let nested_unknown_count = metadata_unknown_property_count(&value, shape);
+    if nested_unknown_count > 0 {
+        invalid_fields.push(field.to_owned());
+        *unknown_field_count += nested_unknown_count;
+        return None;
+    }
+    match serde_json::from_value(value) {
+        Ok(value) => {
+            decoded_fields.push(field.to_owned());
+            Some(value)
+        }
+        Err(_) => {
+            invalid_fields.push(field.to_owned());
+            None
+        }
+    }
+}
+
+fn metadata_unknown_property_count(value: &Value, shape: MetadataFieldShape) -> usize {
+    let (MetadataFieldShape::Object(allowed_fields)
+    | MetadataFieldShape::ObjectWithArrayItems {
+        object_fields: allowed_fields,
+        ..
+    }) = shape
+    else {
+        return 0;
+    };
+    let Some(object) = value.as_object() else {
+        return 0;
+    };
+    let mut count = object
+        .keys()
+        .filter(|key| !allowed_fields.contains(&key.as_str()))
+        .count();
+    if let MetadataFieldShape::ObjectWithArrayItems {
+        array_field,
+        item_fields,
+        ..
+    } = shape
+        && let Some(items) = object.get(array_field).and_then(Value::as_array)
     {
-        out.document_type = serde_json::from_value(field).ok();
+        count += items
+            .iter()
+            .filter_map(Value::as_object)
+            .map(|item| {
+                item.keys()
+                    .filter(|key| !item_fields.contains(&key.as_str()))
+                    .count()
+            })
+            .sum::<usize>();
     }
-    if let Some(field) = object.remove("correspondent")
-        && !field.is_null()
-    {
-        out.correspondent = serde_json::from_value(field).ok();
+    count
+}
+
+fn metadata_envelope_violation(error: MetadataEnvelopeError) -> ParsedMetadataSuggestion {
+    ParsedMetadataSuggestion {
+        suggestion: MetadataSuggestion::default(),
+        diagnostics: MetadataParseDiagnostics {
+            status: MetadataParseStatus::ContractViolation,
+            envelope_error: Some(error),
+            decoded_fields: Vec::new(),
+            null_fields: Vec::new(),
+            invalid_fields: Vec::new(),
+            unknown_field_count: 0,
+        },
     }
-    if let Some(field) = object.remove("new_correspondent")
-        && !field.is_null()
-    {
-        out.new_correspondent = serde_json::from_value::<String>(field)
-            .ok()
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty());
-    }
-    if let Some(field) = object.remove("document_date")
-        && !field.is_null()
-    {
-        out.document_date = serde_json::from_value(field).ok();
-    }
-    if let Some(field) = object.remove("tags")
-        && !field.is_null()
-    {
-        out.tags = serde_json::from_value(field).ok();
-    }
-    if let Some(field) = object.remove("fields")
-        && !field.is_null()
-    {
-        out.fields = serde_json::from_value(field).ok();
-    }
-    Ok(out)
 }
 
 pub const DEFAULT_OCR_SYSTEM_PROMPT: &str = r#"You transcribe scanned document pages exactly.
@@ -2978,7 +3439,7 @@ mod tests {
             max_output_tokens: None,
             structured_output: None,
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         let response_format = payload.get("response_format").expect("response_format set");
         assert_eq!(response_format["type"], "json_schema");
         assert_eq!(response_format["json_schema"]["strict"], true);
@@ -3002,7 +3463,7 @@ mod tests {
             max_output_tokens: None,
             structured_output: None,
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert!(payload.get("response_format").is_none());
     }
 
@@ -3099,16 +3560,91 @@ mod tests {
             max_output_tokens: None,
             structured_output: None,
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert_eq!(payload.get("reasoning_effort"), Some(&json!("high")));
         // Reasoning models reject a custom sampling temperature, so it is dropped.
         assert!(payload.get("temperature").is_none());
 
         // A plain chat model ignores the effort and keeps its temperature.
         request.model = "gpt-4o-mini".to_owned();
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert!(payload.get("reasoning_effort").is_none());
         assert_eq!(payload.get("temperature"), Some(&json!(0.0)));
+    }
+
+    #[test]
+    fn minimax_m3_chat_payload_maps_every_reasoning_effort_to_thinking_mode() {
+        let mut request = ChatRequest {
+            model: "ressl/MiniMax-M3-uncensored-NVFP4".to_owned(),
+            system_prompt: String::new(),
+            user_prompt: "hi".to_owned(),
+            temperature: 0.2,
+            num_ctx: None,
+            response_schema: None,
+            reasoning_effort: Some(ReasoningEffort::Off),
+            max_output_tokens: None,
+            structured_output: None,
+        };
+
+        for (effort, expected) in [
+            (ReasoningEffort::Off, "disabled"),
+            (ReasoningEffort::Low, "adaptive"),
+            (ReasoningEffort::Medium, "enabled"),
+            (ReasoningEffort::High, "enabled"),
+        ] {
+            request.reasoning_effort = Some(effort);
+            let payload = build_openai_chat_payload(&request).expect("valid M3 payload");
+            assert_eq!(
+                payload["chat_template_kwargs"]["thinking_mode"], expected,
+                "wrong thinking_mode for {effort:?}"
+            );
+            assert!(payload.get("reasoning_effort").is_none());
+        }
+    }
+
+    #[test]
+    fn minimax_m3_chat_payload_rejects_unresolved_reasoning_effort() {
+        let request = ChatRequest {
+            model: MINIMAX_M3_MODEL.to_owned(),
+            system_prompt: String::new(),
+            user_prompt: "hi".to_owned(),
+            temperature: 0.2,
+            num_ctx: None,
+            response_schema: None,
+            reasoning_effort: None,
+            max_output_tokens: None,
+            structured_output: None,
+        };
+        let error = build_openai_chat_payload(&request).unwrap_err().to_string();
+        assert!(error.contains("resolved reasoning effort"), "got: {error}");
+        assert!(error.contains("thinking_mode"), "got: {error}");
+    }
+
+    #[test]
+    fn minimax_m3_fields_are_not_sent_to_lookalikes_or_other_models() {
+        for model in [
+            "other/MiniMax-M3-uncensored-NVFP4",
+            "ressl/MiniMax-M3-uncensored-NVFP4-copy",
+            "nvidia/MiniMax-M2.7-NVFP4",
+            "gpt-4o-mini",
+        ] {
+            let request = ChatRequest {
+                model: model.to_owned(),
+                system_prompt: String::new(),
+                user_prompt: "hi".to_owned(),
+                temperature: 0.2,
+                num_ctx: None,
+                response_schema: None,
+                reasoning_effort: Some(ReasoningEffort::High),
+                max_output_tokens: None,
+                structured_output: None,
+            };
+            let payload = build_openai_chat_payload(&request).expect("valid non-M3 payload");
+            assert!(
+                payload.get("chat_template_kwargs").is_none(),
+                "unexpected M3 fields for {model}"
+            );
+        }
     }
 
     #[test]
@@ -3477,37 +4013,51 @@ mod tests {
             "new_correspondent": "  Brack AG  ",
             "document_type": {"name": "Rechnung", "confidence": 0.98}
         }"#;
-        let parsed = parse_metadata_suggestion(response).expect("parse ok");
-        assert!(parsed.correspondent.is_none(), "no closed-vocab match");
+        let parsed = parse_metadata_suggestion(response);
+        assert_eq!(parsed.diagnostics.status, MetadataParseStatus::Valid);
+        assert!(
+            parsed.suggestion.correspondent.is_none(),
+            "no closed-vocab match"
+        );
         assert_eq!(
-            parsed.new_correspondent.as_deref(),
+            parsed.suggestion.new_correspondent.as_deref(),
             Some("Brack AG"),
             "trimmed proposal is kept"
         );
-        let blank = parse_metadata_suggestion(r#"{"new_correspondent": "   "}"#).expect("parse ok");
+        let blank = parse_metadata_suggestion(r#"{"new_correspondent": "   "}"#);
+        assert_eq!(blank.diagnostics.status, MetadataParseStatus::Omitted);
         assert!(
-            blank.new_correspondent.is_none(),
+            blank.suggestion.new_correspondent.is_none(),
             "whitespace-only proposal is dropped"
         );
     }
 
     #[test]
     fn parse_metadata_decodes_present_subfields_independently() {
-        // Tags subfield is malformed (string instead of object) and must be silently
-        // dropped without erasing the title or document_date subfields.
+        // Tags is malformed (string instead of object). The parser retains the
+        // valid fields for diagnostics, but explicitly rejects the envelope so
+        // the worker cannot partially apply it.
         let response = r#"{
             "title": {"title": "Invoice Beispiel GmbH 2026", "confidence": 0.92},
             "tags": "not-a-json-object",
             "document_date": {"date": "2026-04-12", "confidence": 0.81, "evidence": "Rechnung vom 12. April 2026"}
         }"#;
-        let parsed = parse_metadata_suggestion(response).expect("parse ok");
+        let parsed = parse_metadata_suggestion(response);
         assert_eq!(
-            parsed.title.as_ref().unwrap().title,
+            parsed.diagnostics.status,
+            MetadataParseStatus::ContractViolation
+        );
+        assert_eq!(parsed.diagnostics.invalid_fields, vec!["tags"]);
+        assert_eq!(
+            parsed.suggestion.title.as_ref().unwrap().title,
             "Invoice Beispiel GmbH 2026"
         );
-        assert!(parsed.tags.is_none());
-        assert_eq!(parsed.document_date.as_ref().unwrap().date, "2026-04-12");
-        assert!(parsed.correspondent.is_none());
+        assert!(parsed.suggestion.tags.is_none());
+        assert_eq!(
+            parsed.suggestion.document_date.as_ref().unwrap().date,
+            "2026-04-12"
+        );
+        assert!(parsed.suggestion.correspondent.is_none());
     }
 
     #[test]
@@ -3515,19 +4065,218 @@ mod tests {
         // Models occasionally wrap JSON in markdown fences or prose. normalize_model_json
         // already strips those, so the parser inherits that behavior.
         let response = "Here is the metadata:\n```json\n{\"title\":{\"title\":\"Letter\",\"confidence\":0.7}}\n```";
-        let parsed = parse_metadata_suggestion(response).expect("parse ok");
-        assert_eq!(parsed.title.as_ref().unwrap().title, "Letter");
+        let parsed = parse_metadata_suggestion(response);
+        assert_eq!(parsed.diagnostics.status, MetadataParseStatus::Valid);
+        assert_eq!(parsed.suggestion.title.as_ref().unwrap().title, "Letter");
     }
 
     #[test]
     fn parse_metadata_rejects_non_object_responses() {
-        // A bare array or string is a contract violation — the caller should not get
-        // a silent default. The error keeps the worker from creating empty review items.
-        let err = parse_metadata_suggestion("[1, 2, 3]").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("metadata response must be a JSON object")
+        // A bare array is an explicit, value-free contract violation. It is
+        // returned alongside the empty suggestion so the artifact can retain
+        // safe diagnostics before the worker routes the typed failure.
+        let parsed = parse_metadata_suggestion("[1, 2, 3]");
+        assert_eq!(
+            parsed.diagnostics.status,
+            MetadataParseStatus::ContractViolation
         );
+        assert_eq!(
+            parsed.diagnostics.envelope_error,
+            Some(MetadataEnvelopeError::NonObject)
+        );
+        assert!(parsed.diagnostics.contract_error().is_some());
+        assert_eq!(
+            parsed.diagnostics.contract_error().unwrap().to_string(),
+            "metadata model contract violation: envelope=non_object"
+        );
+    }
+
+    #[test]
+    fn metadata_parser_distinguishes_omissions_from_contract_violations() {
+        struct Case {
+            name: &'static str,
+            response: &'static str,
+            status: MetadataParseStatus,
+            envelope_error: Option<MetadataEnvelopeError>,
+            invalid_fields: &'static [&'static str],
+            unknown_field_count: usize,
+        }
+        let cases = [
+            Case {
+                name: "no json",
+                response: "model returned prose only",
+                status: MetadataParseStatus::ContractViolation,
+                envelope_error: Some(MetadataEnvelopeError::NoJson),
+                invalid_fields: &[],
+                unknown_field_count: 0,
+            },
+            Case {
+                name: "array",
+                response: "[1, 2, 3]",
+                status: MetadataParseStatus::ContractViolation,
+                envelope_error: Some(MetadataEnvelopeError::NonObject),
+                invalid_fields: &[],
+                unknown_field_count: 0,
+            },
+            Case {
+                name: "unknown key",
+                response: r#"{"invented_secret_key":"must-not-be-persisted"}"#,
+                status: MetadataParseStatus::ContractViolation,
+                envelope_error: None,
+                invalid_fields: &[],
+                unknown_field_count: 1,
+            },
+            Case {
+                name: "known field wrong type",
+                response: r#"{"tags":"raw-invalid-secret"}"#,
+                status: MetadataParseStatus::ContractViolation,
+                envelope_error: None,
+                invalid_fields: &["tags"],
+                unknown_field_count: 0,
+            },
+            Case {
+                name: "empty object",
+                response: "{}",
+                status: MetadataParseStatus::Omitted,
+                envelope_error: None,
+                invalid_fields: &[],
+                unknown_field_count: 0,
+            },
+            Case {
+                name: "known nulls",
+                response: r#"{"title":null,"tags":null}"#,
+                status: MetadataParseStatus::Omitted,
+                envelope_error: None,
+                invalid_fields: &[],
+                unknown_field_count: 0,
+            },
+        ];
+
+        for case in cases {
+            let parsed = parse_metadata_suggestion(case.response);
+            assert_eq!(parsed.diagnostics.status, case.status, "{}", case.name);
+            assert_eq!(
+                parsed.diagnostics.envelope_error, case.envelope_error,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                parsed.diagnostics.invalid_fields,
+                case.invalid_fields
+                    .iter()
+                    .map(|field| (*field).to_owned())
+                    .collect::<Vec<_>>(),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                parsed.diagnostics.unknown_field_count, case.unknown_field_count,
+                "{}",
+                case.name
+            );
+            let diagnostics = serde_json::to_string(&parsed.diagnostics).unwrap();
+            assert!(!diagnostics.contains("raw-invalid-secret"));
+            assert!(!diagnostics.contains("invented_secret_key"));
+            assert!(!diagnostics.contains("must-not-be-persisted"));
+        }
+    }
+
+    #[test]
+    fn metadata_parser_preserves_valid_fields_in_a_mixed_contract_violation() {
+        let parsed = parse_metadata_suggestion(
+            r#"{
+                "title":{"title":"Valid invoice","confidence":0.91},
+                "tags":"invalid tags value",
+                "document_date":{"date":"2026-07-17","confidence":0.83}
+            }"#,
+        );
+        assert_eq!(
+            parsed.diagnostics.status,
+            MetadataParseStatus::ContractViolation
+        );
+        assert_eq!(parsed.diagnostics.invalid_fields, vec!["tags"]);
+        assert_eq!(
+            parsed
+                .suggestion
+                .title
+                .as_ref()
+                .map(|title| title.title.as_str()),
+            Some("Valid invoice")
+        );
+        assert_eq!(
+            parsed
+                .suggestion
+                .document_date
+                .as_ref()
+                .map(|date| date.date.as_str()),
+            Some("2026-07-17")
+        );
+        assert!(parsed.suggestion.tags.is_none());
+        let error = parsed
+            .diagnostics
+            .contract_error()
+            .expect("mixed response must produce typed contract error");
+        assert_eq!(error.invalid_fields(), &["tags".to_owned()]);
+    }
+
+    #[test]
+    fn metadata_parser_rejects_unknown_nested_properties_without_persisting_them() {
+        let parsed = parse_metadata_suggestion(
+            r#"{
+                "title":{
+                    "title":"Must not be applied",
+                    "confidence":0.91,
+                    "injected_private_key":"must-not-be-persisted"
+                },
+                "document_date":{"date":"2026-07-17","confidence":0.83}
+            }"#,
+        );
+        assert_eq!(
+            parsed.diagnostics.status,
+            MetadataParseStatus::ContractViolation
+        );
+        assert_eq!(parsed.diagnostics.invalid_fields, vec!["title"]);
+        assert_eq!(parsed.diagnostics.unknown_field_count, 1);
+        assert!(parsed.suggestion.title.is_none());
+        assert_eq!(
+            parsed
+                .suggestion
+                .document_date
+                .as_ref()
+                .map(|date| date.date.as_str()),
+            Some("2026-07-17")
+        );
+        let persisted = json!({
+            "suggestion": parsed.suggestion,
+            "diagnostics": parsed.diagnostics,
+        })
+        .to_string();
+        assert!(!persisted.contains("injected_private_key"));
+        assert!(!persisted.contains("must-not-be-persisted"));
+
+        let nested_array = parse_metadata_suggestion(
+            r#"{
+                "fields":{
+                    "fields":[{
+                        "name":"Invoice Number",
+                        "value":"private-value",
+                        "confidence":0.9,
+                        "unexpected":"must-not-be-persisted"
+                    }],
+                    "confidence":0.9
+                }
+            }"#,
+        );
+        assert_eq!(
+            nested_array.diagnostics.status,
+            MetadataParseStatus::ContractViolation
+        );
+        assert_eq!(nested_array.diagnostics.invalid_fields, vec!["fields"]);
+        assert_eq!(nested_array.diagnostics.unknown_field_count, 1);
+        assert!(nested_array.suggestion.fields.is_none());
+        let persisted = serde_json::to_string(&nested_array.diagnostics).unwrap();
+        assert!(!persisted.contains("unexpected"));
+        assert!(!persisted.contains("must-not-be-persisted"));
     }
 
     #[test]
@@ -3694,7 +4443,7 @@ mod tests {
             max_output_tokens: Some(8192),
             structured_output: None,
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert_eq!(payload["max_tokens"], 8192);
     }
 
@@ -3713,6 +4462,7 @@ mod tests {
         };
         assert!(
             build_openai_chat_payload(&request)
+                .expect("valid payload")
                 .get("max_tokens")
                 .is_none()
         );
@@ -3732,7 +4482,7 @@ mod tests {
             max_output_tokens: None,
             structured_output: Some(StructuredOutputMode::JsonObject),
         };
-        let payload = build_openai_chat_payload(&request);
+        let payload = build_openai_chat_payload(&request).expect("valid payload");
         assert_eq!(payload["response_format"], json!({ "type": "json_object" }));
     }
 
@@ -3752,6 +4502,7 @@ mod tests {
         };
         assert!(
             build_openai_chat_payload(&request)
+                .expect("valid payload")
                 .get("response_format")
                 .is_none()
         );
@@ -3775,6 +4526,31 @@ mod tests {
     }
 
     #[test]
+    fn strip_think_blocks_handles_minimax_and_mixed_reasoning_blocks() {
+        assert_eq!(
+            strip_think_blocks("<mm:think>plan</mm:think>answer"),
+            "answer"
+        );
+        assert_eq!(
+            strip_think_blocks("a<mm:think>x</mm:think>b<think>y</think>c<mm:think>z</mm:think>d"),
+            "abcd"
+        );
+        assert_eq!(strip_think_blocks("answer<mm:think>never closed"), "answer");
+        assert_eq!(
+            strip_think_blocks("a<think>x<mm:think>y</think>z</mm:think>b"),
+            "ab"
+        );
+        assert_eq!(
+            strip_think_blocks("prefix<mm:think>secret</think>must not leak"),
+            "prefix"
+        );
+        assert_eq!(
+            strip_think_blocks("prefix<think>secret</mm:think>must not leak"),
+            "prefix"
+        );
+    }
+
+    #[test]
     fn extract_openai_message_text_strips_think_and_trims() {
         let raw = json!({ "choices": [{ "message": {
             "content": "<think>reasoning...</think>\n  final answer  " } }] });
@@ -3794,6 +4570,12 @@ mod tests {
         let raw =
             json!({ "choices": [{ "message": { "content": "<think>only thoughts</think>" } }] });
         assert!(extract_openai_message_text(&raw).is_err());
+
+        let raw = json!({ "choices": [{ "message": {
+            "content": "<mm:think>only MiniMax thoughts</mm:think>" } }] });
+        let error = extract_openai_message_text(&raw).unwrap_err().to_string();
+        assert!(error.contains("reasoning-parser"), "got: {error}");
+        assert!(error.contains("thinking_mode"), "got: {error}");
     }
 
     #[test]

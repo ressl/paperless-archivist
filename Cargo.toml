@@ -3,11 +3,13 @@ resolver = "2"
 members = [
   "crates/archivist-api",
   "crates/archivist-ai",
+  "crates/archivist-apply",
   "crates/archivist-config",
   "crates/archivist-core",
   "crates/archivist-db",
   "crates/archivist-ocr",
   "crates/archivist-paperless",
+  "crates/archivist-sqlx",
   "crates/archivist-worker",
 ]
 
@@ -22,10 +24,10 @@ repository = "https://github.com/rressl/paperless-archivist"
 
 [workspace.dependencies]
 aes-gcm = "0.10"
-anyhow = "1"
+anyhow = "1.0.103"
 argon2 = "0.5"
 async-trait = "0.1"
-axum = { version = "0.8", features = ["macros", "multipart"] }
+axum = { version = "0.8", features = ["macros"] }
 base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -44,7 +46,9 @@ secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "chrono", "uuid", "json", "migrate"] }
+# PostgreSQL-only facade. The upstream multi-driver facade records dormant
+# SQLite/MySQL packages (including yanked transitive crates) in Cargo.lock.
+sqlx = { package = "archivist-sqlx", path = "crates/archivist-sqlx" }
 subtle = "2"
 tempfile = "3"
 thiserror = "2"

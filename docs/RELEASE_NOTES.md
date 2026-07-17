@@ -6,6 +6,42 @@
 > `openapi/openapi.yaml` `info.version`, and `frontend/package.json`. See
 > `docs/RELEASE_CHECKLIST.md`.
 
+## Unreleased
+
+- **SGLang/MiniMax M3 operator runbook (#374):** the disabled text-only
+  `sglang-minimax-m3` preset now has one public-safe setup and troubleshooting
+  path covering the exact model identity, immutable runtime pins, required
+  reasoning/tool parsers, Thinking mapping, output/schema/timeout behavior,
+  encrypted secret references, `/models` discovery, live contract, measured
+  capacity, and opt-in Kubernetes egress. The old M2.7 example is explicitly
+  historical; M3 vision/OCR remains gated behind ADR-014 and #322 through #338.
+- **Document Chat request ownership (#286):** initial message loads and the
+  slow post-send refresh now share one session-plus-generation commit guard.
+  Switching A -> B (including A -> B -> A) invalidates stale responses and
+  errors synchronously, so a late LLM answer can no longer overwrite the
+  visible session or raise its error banner in a different chat.
+- **Vision fallback lease fencing (#376):** OCR now renews the owner-scoped job
+  lease before each primary vision, Ollama model-discovery, and fallback vision
+  call. A lost lease stops before the next provider future is polled and before
+  cache, fallback-success audit, completion, review, or apply writes, preventing
+  two Worker replicas from processing the same page in parallel.
+- Ollama model discovery now uses the resolved provider
+  `request_timeout_seconds` instead of the constructor's fixed default. Worker
+  logs expose the stopped `vision_phase` when lease ownership is lost. Known
+  Ollama runner-crash signatures are converted from the bounded in-memory body
+  to a typed `RunnerUnavailable` error while persisted/logged diagnostics stay
+  redacted; this keeps the fallback reachable after response-body hardening.
+- **Secure Caddy profile (#355):** the reverse-proxy Compose overlay now forces
+  `ARCHIVIST_COOKIE_SECURE=true`; session and CSRF cookies issued through the
+  public HTTPS profile therefore carry `Secure`. Direct base-only localhost
+  HTTP remains available with the explicit `false` default. Caddy redirects
+  HTTP to HTTPS, emits one authoritative one-year HSTS policy with
+  `includeSubDomains`, and suppresses the duplicate upstream HSTS value.
+- **Upgrade note:** restart the API and replace pre-upgrade browser sessions so
+  their existing cookies are reissued with `Secure`. HSTS can remain cached for
+  one year, including after rollback; do not enable this profile unless the
+  selected hostname and its subdomains will remain HTTPS-capable.
+
 ## v1.16.0 — Dashboard hierarchy tiers, nav a11y, dead-CSS cleanup
 
 The redesign's deeper polish, now that the layout is solid. Verified by rendering

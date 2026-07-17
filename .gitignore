@@ -10,6 +10,7 @@
 .idea/
 .vscode/
 .claude/
+.worktrees/
 
 # Dev-local stack: real secrets and sample documents pulled from prod must never
 # be committed. The `.example` variants are committed (the global ignore

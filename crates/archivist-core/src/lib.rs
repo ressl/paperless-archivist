@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -791,6 +791,7 @@ pub struct UiSettings {
 impl RuntimeSettings {
     pub fn normalized(mut self) -> Self {
         self.ai.ensure_default_providers();
+        self.ai.ensure_minimax_m3_catalog_entry();
         self.security = self.security.normalized();
         self.notifications = self.notifications.normalized();
         self.workflow.rules.include_tags =
@@ -830,6 +831,15 @@ impl RuntimeSettings {
     /// values fall through to the existing global location.
     pub fn effective_tuning(&self) -> EffectiveTuning {
         self.resolve_tuning(self.active_tuning_provider())
+    }
+
+    /// Resolve effective tuning for a concrete provider while retaining this
+    /// settings object's global fallback values. API-side consumers use this
+    /// when an operator selects a provider other than `ai.default_provider`;
+    /// resolving through [`RuntimeSettings::effective_tuning`] would otherwise
+    /// leak the default provider's profile into that request.
+    pub fn effective_tuning_for_provider(&self, provider: &AiProviderSettings) -> EffectiveTuning {
+        self.resolve_tuning(Some(provider))
     }
 
     /// Resolve effective tuning for a specific stage. The OCR-stage
@@ -1280,6 +1290,22 @@ impl Default for AiSettings {
     }
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ProviderConfigurationError {
+    #[error("AI provider at index {index} has a blank name")]
+    BlankName { index: usize },
+    #[error("AI provider name '{name}' duplicates provider '{existing}' (case-insensitive)")]
+    DuplicateName { name: String, existing: String },
+    #[error("AI provider '{name}' is enabled but has no explicit base URL")]
+    MissingBaseUrl { name: String },
+    #[error("AI default provider '{name}' must reference exactly one enabled provider")]
+    InvalidDefaultProvider { name: String },
+    #[error("AI stage '{stage}' provider '{name}' must reference exactly one enabled provider")]
+    InvalidStageProvider { stage: Stage, name: String },
+    #[error("AI settings contain multiple overrides for stage '{stage}'")]
+    DuplicateStageOverride { stage: Stage },
+}
+
 /// Capability a catalog entry applies to. Mirrors the per-provider
 /// `default_text_model` / `default_vision_model` split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1321,6 +1347,11 @@ pub struct ModelCatalogEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_for: Option<String>,
 }
+
+/// Exact public model identity for the supported MiniMax M3 deployment.
+pub const MINIMAX_M3_MODEL: &str = "ressl/MiniMax-M3-uncensored-NVFP4";
+/// Stable built-in provider name for the disabled SGLang preset.
+pub const SGLANG_MINIMAX_M3_PROVIDER_NAME: &str = "sglang-minimax-m3";
 
 /// Seed catalog. Ollama Cloud entries come from the 2026-05-25 model matrix
 /// (`docs/LLM_PROVIDER_SETTINGS_PLAN.md`); the remote providers carry their
@@ -1576,6 +1607,16 @@ fn default_model_catalog() -> Vec<ModelCatalogEntry> {
         entry(
             OpenaiCompatible,
             Text,
+            MINIMAX_M3_MODEL,
+            false,
+            None,
+            None,
+            Some("text"),
+            Some("MiniMax M3 served by SGLang"),
+        ),
+        entry(
+            OpenaiCompatible,
+            Text,
             "gpt-oss:120b",
             false,
             None,
@@ -1607,8 +1648,109 @@ fn default_model_catalog() -> Vec<ModelCatalogEntry> {
 }
 
 impl AiSettings {
+    /// Canonicalize provider identity fields and enforce the invariants relied
+    /// on by name-based default, stage, and secret resolution.
+    pub fn normalize_and_validate_providers(&mut self) -> Result<(), ProviderConfigurationError> {
+        self.default_provider = self.default_provider.trim().to_owned();
+        self.ollama_base_url = self.ollama_base_url.trim().to_owned();
+        for provider in &mut self.providers {
+            provider.name = provider.name.trim().to_owned();
+            provider.base_url = provider.base_url.trim().to_owned();
+        }
+        for stage_model in &mut self.stage_models {
+            stage_model.provider = stage_model.provider.trim().to_owned();
+            stage_model.model = stage_model.model.trim().to_owned();
+        }
+
+        let mut names = HashMap::<String, String>::new();
+        for (index, provider) in self.providers.iter().enumerate() {
+            if provider.name.is_empty() {
+                return Err(ProviderConfigurationError::BlankName { index });
+            }
+            let normalized = provider.name.to_lowercase();
+            if let Some(existing) = names.insert(normalized, provider.name.clone()) {
+                return Err(ProviderConfigurationError::DuplicateName {
+                    name: provider.name.clone(),
+                    existing,
+                });
+            }
+
+            let configured_base_url = if provider.name.eq_ignore_ascii_case("ollama") {
+                &self.ollama_base_url
+            } else {
+                &provider.base_url
+            };
+            if provider.enabled && configured_base_url.is_empty() {
+                return Err(ProviderConfigurationError::MissingBaseUrl {
+                    name: provider.name.clone(),
+                });
+            }
+        }
+
+        let enabled_names = self
+            .providers
+            .iter()
+            .filter(|provider| provider.enabled)
+            .map(|provider| provider.name.clone())
+            .collect::<Vec<_>>();
+        let canonical_name = |reference: &str| {
+            let normalized_reference = reference.to_lowercase();
+            enabled_names
+                .iter()
+                .find(|name| name.to_lowercase() == normalized_reference)
+                .cloned()
+        };
+
+        self.default_provider = canonical_name(&self.default_provider).ok_or_else(|| {
+            ProviderConfigurationError::InvalidDefaultProvider {
+                name: self.default_provider.clone(),
+            }
+        })?;
+
+        let mut stages = HashSet::new();
+        for stage_model in &self.stage_models {
+            if !stages.insert(stage_model.stage) {
+                return Err(ProviderConfigurationError::DuplicateStageOverride {
+                    stage: stage_model.stage,
+                });
+            }
+        }
+        for stage_model in &mut self.stage_models {
+            stage_model.provider = canonical_name(&stage_model.provider).ok_or_else(|| {
+                ProviderConfigurationError::InvalidStageProvider {
+                    stage: stage_model.stage,
+                    name: stage_model.provider.clone(),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn ensure_default_providers(&mut self) {
         AiProviderSettings::append_missing_defaults(&mut self.providers);
+    }
+
+    /// Appends the MiniMax M3 picker entry to settings persisted before the
+    /// model was part of the seed catalog. Existing operator-authored catalog
+    /// metadata wins unchanged.
+    pub fn ensure_minimax_m3_catalog_entry(&mut self) {
+        let already_present = self.model_catalog.iter().any(|entry| {
+            entry.provider_kind == AiProviderKind::OpenaiCompatible
+                && entry.capability == ModelCapability::Text
+                && entry.model_id == MINIMAX_M3_MODEL
+        });
+        if already_present {
+            return;
+        }
+        let entry = default_model_catalog()
+            .into_iter()
+            .find(|entry| {
+                entry.provider_kind == AiProviderKind::OpenaiCompatible
+                    && entry.capability == ModelCapability::Text
+                    && entry.model_id == MINIMAX_M3_MODEL
+            })
+            .expect("MiniMax M3 is part of the default catalog");
+        self.model_catalog.push(entry);
     }
 
     pub fn default_model_for_provider(
@@ -1825,7 +1967,8 @@ pub struct ProviderTuning {
 }
 
 /// Resolved tuning: every field collapsed to a concrete value the worker /
-/// API can use directly. Produced by [`RuntimeSettings::effective_tuning`].
+/// API can use directly. Produced by the `RuntimeSettings` effective-tuning
+/// resolution methods.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveTuning {
     pub worker_concurrency: u32,
@@ -1859,6 +2002,7 @@ impl AiProviderSettings {
             Self::openai_default(),
             Self::anthropic_default(),
             Self::openai_compatible_default(),
+            Self::sglang_minimax_m3_default(),
             Self::mineru_default(),
         ]
     }
@@ -2001,6 +2145,30 @@ impl AiProviderSettings {
         }
     }
 
+    pub fn sglang_minimax_m3_default() -> Self {
+        Self {
+            name: SGLANG_MINIMAX_M3_PROVIDER_NAME.to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: String::new(),
+            default_text_model: Some(MINIMAX_M3_MODEL.to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled: false,
+            // Capacity profile validated against the pinned SGLang runtime:
+            // one worker request leaves the second runtime slot available
+            // for Prompt Tester, Provider Test, and Document Chat bursts.
+            tuning: ProviderTuning {
+                worker_concurrency: Some(1),
+                max_output_tokens: Some(4096),
+                structured_output: Some(StructuredOutputMode::Auto),
+                request_timeout_seconds: Some(DEFAULT_AI_REQUEST_TIMEOUT_SECS),
+                ..ProviderTuning::default()
+            },
+        }
+    }
+
     pub fn mineru_default() -> Self {
         // MinerU API server (FastAPI in front of vLLM). Vision-only: the
         // pipeline may select it exclusively for the OCR stage. Disabled by
@@ -2022,10 +2190,12 @@ impl AiProviderSettings {
 
     pub fn append_missing_defaults(providers: &mut Vec<Self>) {
         for default_provider in Self::default_providers() {
-            if !providers
-                .iter()
-                .any(|provider| provider.name == default_provider.name)
-            {
+            if !providers.iter().any(|provider| {
+                provider
+                    .name
+                    .trim()
+                    .eq_ignore_ascii_case(&default_provider.name)
+            }) {
                 providers.push(default_provider);
             }
         }
@@ -3947,12 +4117,12 @@ pub struct AuditEventInput {
     pub metadata: Option<Value>,
     pub outcome: String,
     pub error_message: Option<String>,
-    /// Optional IP that initiated the action. Persisted only — not folded
-    /// into the audit hash chain so legacy events stay verifiable.
+    /// Optional IP that initiated the action. Audit hash v2 binds the value,
+    /// including null; the v1 verifier intentionally ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ip: Option<String>,
-    /// Optional User-Agent. Persisted only — not folded into the audit hash
-    /// chain so legacy events stay verifiable.
+    /// Optional User-Agent. Audit hash v2 binds the value, including null;
+    /// the v1 verifier intentionally ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
 }
@@ -5037,6 +5207,189 @@ mod tests {
         settings
     }
 
+    fn provider_fixture(name: &str, base_url: &str, enabled: bool) -> AiProviderSettings {
+        AiProviderSettings {
+            name: name.to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: base_url.to_owned(),
+            default_text_model: Some("test-model".to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled,
+            tuning: ProviderTuning::default(),
+        }
+    }
+
+    #[test]
+    fn provider_configuration_rejects_blank_and_case_insensitive_duplicate_names() {
+        let mut blank = RuntimeSettings::default();
+        blank.ai.providers = vec![provider_fixture("   ", "https://one.example/v1", true)];
+        blank.ai.default_provider = "   ".to_owned();
+        let error = blank
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("blank provider name must fail");
+        assert!(error.to_string().contains("blank name"));
+
+        let mut duplicate = RuntimeSettings::default();
+        duplicate.ai.providers = vec![
+            provider_fixture("Primary", "https://one.example/v1", true),
+            provider_fixture(" primary ", "https://two.example/v1", true),
+        ];
+        duplicate.ai.default_provider = "Primary".to_owned();
+        let error = duplicate
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("case-insensitive duplicate must fail");
+        assert!(error.to_string().contains("duplicates provider"));
+        assert!(error.to_string().contains("Primary"));
+    }
+
+    #[test]
+    fn provider_configuration_requires_explicit_url_only_for_enabled_providers() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![
+            provider_fixture("active", "   ", true),
+            provider_fixture("disabled-placeholder", "", false),
+        ];
+        settings.ai.default_provider = "active".to_owned();
+        let error = settings
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("enabled provider without URL must fail");
+        assert!(error.to_string().contains("active"));
+        assert!(error.to_string().contains("base URL"));
+
+        settings.ai.providers[0].base_url = " https://active.example/v1/ ".to_owned();
+        settings
+            .ai
+            .normalize_and_validate_providers()
+            .expect("disabled empty placeholder is allowed");
+        assert_eq!(
+            settings.ai.providers[0].base_url,
+            "https://active.example/v1/"
+        );
+        assert_eq!(settings.ai.providers[1].base_url, "");
+    }
+
+    #[test]
+    fn provider_configuration_canonicalizes_trimmed_default_and_stage_references() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![provider_fixture(
+            " Primary ",
+            " https://primary.example/v1 ",
+            true,
+        )];
+        settings.ai.default_provider = " primary ".to_owned();
+        settings.ai.stage_models = vec![StageModelOverride {
+            stage: Stage::Metadata,
+            provider: " PRIMARY ".to_owned(),
+            model: "model".to_owned(),
+        }];
+
+        settings
+            .ai
+            .normalize_and_validate_providers()
+            .expect("single enabled case-insensitive reference resolves");
+
+        assert_eq!(settings.ai.providers[0].name, "Primary");
+        assert_eq!(
+            settings.ai.providers[0].base_url,
+            "https://primary.example/v1"
+        );
+        assert_eq!(settings.ai.default_provider, "Primary");
+        assert_eq!(settings.ai.stage_models[0].provider, "Primary");
+    }
+
+    #[test]
+    fn provider_configuration_rejects_disabled_or_missing_references_and_duplicate_stages() {
+        let mut disabled_default = RuntimeSettings::default();
+        disabled_default.ai.providers = vec![provider_fixture(
+            "disabled",
+            "https://disabled.example/v1",
+            false,
+        )];
+        disabled_default.ai.default_provider = "disabled".to_owned();
+        let error = disabled_default
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("disabled default provider must fail");
+        assert!(error.to_string().contains("default provider 'disabled'"));
+
+        let mut invalid_stage = RuntimeSettings::default();
+        invalid_stage.ai.providers = vec![provider_fixture(
+            "primary",
+            "https://primary.example/v1",
+            true,
+        )];
+        invalid_stage.ai.default_provider = "primary".to_owned();
+        invalid_stage.ai.stage_models = vec![StageModelOverride {
+            stage: Stage::Ocr,
+            provider: "missing".to_owned(),
+            model: "model".to_owned(),
+        }];
+        let error = invalid_stage
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("missing stage provider must fail");
+        assert!(error.to_string().contains("stage 'ocr' provider 'missing'"));
+
+        invalid_stage.ai.stage_models = vec![
+            StageModelOverride {
+                stage: Stage::Ocr,
+                provider: "primary".to_owned(),
+                model: "one".to_owned(),
+            },
+            StageModelOverride {
+                stage: Stage::Ocr,
+                provider: "primary".to_owned(),
+                model: "two".to_owned(),
+            },
+        ];
+        let error = invalid_stage
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("duplicate stage overrides must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("multiple overrides for stage 'ocr'")
+        );
+    }
+
+    #[test]
+    fn normalized_settings_do_not_duplicate_case_renamed_provider_presets() {
+        let mut settings = RuntimeSettings::default();
+        let ollama = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "ollama")
+            .expect("ollama preset exists");
+        ollama.name = "OLLAMA".to_owned();
+        settings.ai.default_provider = " OLLAMA ".to_owned();
+        settings
+            .ai
+            .normalize_and_validate_providers()
+            .expect("case-only rename remains a unique valid provider");
+
+        let normalized = settings.normalized();
+
+        assert_eq!(normalized.ai.default_provider, "OLLAMA");
+        assert_eq!(
+            normalized
+                .ai
+                .providers
+                .iter()
+                .filter(|provider| provider.name.eq_ignore_ascii_case("ollama"))
+                .count(),
+            1,
+            "default normalization must not append a lowercase duplicate"
+        );
+    }
+
     #[test]
     fn effective_tuning_uses_active_provider_tuning_when_present() {
         // State 1: tuning.<field>.is_some() → use it.
@@ -5049,6 +5402,36 @@ mod tests {
         assert_eq!(tuning.vision_num_ctx, Some(4096));
         assert_eq!(tuning.hourly_document_limit, Some(200));
         assert_eq!(tuning.daily_document_limit, Some(2000));
+    }
+
+    #[test]
+    fn effective_tuning_for_explicit_provider_does_not_leak_default_profile() {
+        let mut settings = settings_with_two_providers();
+        settings.ai.default_provider = "ollama".to_owned();
+        settings.ai.providers[0].tuning.reasoning_effort = Some(ReasoningEffort::Low);
+        settings.ai.providers[0].tuning.max_output_tokens = Some(111);
+        settings.ai.providers[0].tuning.structured_output = Some(StructuredOutputMode::Off);
+        settings.ai.providers[0].tuning.text_num_ctx = Some(11_111);
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(11);
+        settings.ai.providers[1].tuning.reasoning_effort = Some(ReasoningEffort::High);
+        settings.ai.providers[1].tuning.max_output_tokens = Some(222);
+        settings.ai.providers[1].tuning.structured_output = Some(StructuredOutputMode::JsonObject);
+        settings.ai.providers[1].tuning.text_num_ctx = Some(22_222);
+        settings.ai.providers[1].tuning.request_timeout_seconds = Some(22);
+
+        let first = settings.effective_tuning_for_provider(&settings.ai.providers[0]);
+        let second = settings.effective_tuning_for_provider(&settings.ai.providers[1]);
+
+        assert_eq!(first.reasoning_effort, ReasoningEffort::Low);
+        assert_eq!(first.max_output_tokens, Some(111));
+        assert_eq!(first.structured_output, StructuredOutputMode::Off);
+        assert_eq!(first.text_num_ctx, Some(11_111));
+        assert_eq!(first.request_timeout_seconds, 11);
+        assert_eq!(second.reasoning_effort, ReasoningEffort::High);
+        assert_eq!(second.max_output_tokens, Some(222));
+        assert_eq!(second.structured_output, StructuredOutputMode::JsonObject);
+        assert_eq!(second.text_num_ctx, Some(22_222));
+        assert_eq!(second.request_timeout_seconds, 22);
     }
 
     #[test]
@@ -5300,6 +5683,167 @@ mod tests {
     fn openai_compatible_default_constructor_ships_blank_tuning() {
         let provider = AiProviderSettings::openai_compatible_default();
         assert_eq!(provider.tuning, ProviderTuning::default());
+    }
+
+    #[test]
+    fn sglang_minimax_m3_preset_is_disabled_text_only_and_openai_compatible() {
+        let presets = AiProviderSettings::default_providers();
+        let matching = presets
+            .iter()
+            .filter(|provider| provider.name == "sglang-minimax-m3")
+            .collect::<Vec<_>>();
+
+        assert_eq!(matching.len(), 1);
+        let provider = matching[0];
+        assert_eq!(provider.kind, AiProviderKind::OpenaiCompatible);
+        assert_eq!(
+            serde_json::to_string(&provider.kind).unwrap(),
+            "\"openai_compatible\""
+        );
+        assert_eq!(provider.base_url, "");
+        assert_eq!(
+            provider.default_text_model.as_deref(),
+            Some("ressl/MiniMax-M3-uncensored-NVFP4")
+        );
+        assert_eq!(provider.default_vision_model, None);
+        assert_eq!(provider.secret_id, None);
+        assert!(!provider.enabled);
+        assert_eq!(provider.tuning.worker_concurrency, Some(1));
+        assert_eq!(provider.tuning.reasoning_effort, None);
+        assert_eq!(provider.tuning.max_output_tokens, Some(4096));
+        assert_eq!(
+            provider.tuning.structured_output,
+            Some(StructuredOutputMode::Auto)
+        );
+        assert_eq!(
+            provider.tuning.request_timeout_seconds,
+            Some(DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+        );
+
+        let mut settings = RuntimeSettings::default();
+        settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "sglang-minimax-m3")
+            .expect("SGLang preset exists")
+            .enabled = true;
+        assert_eq!(
+            settings.ai.normalize_and_validate_providers(),
+            Err(ProviderConfigurationError::MissingBaseUrl {
+                name: "sglang-minimax-m3".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn minimax_m3_upgrade_normalization_is_idempotent_and_preserves_operator_provider() {
+        let mut settings = RuntimeSettings::default();
+        settings
+            .ai
+            .providers
+            .retain(|provider| provider.name != "sglang-minimax-m3");
+
+        let upgraded_once = settings.normalized();
+        let upgraded_twice = upgraded_once.clone().normalized();
+        for upgraded in [&upgraded_once, &upgraded_twice] {
+            assert_eq!(
+                upgraded
+                    .ai
+                    .providers
+                    .iter()
+                    .filter(|provider| provider.name == "sglang-minimax-m3")
+                    .count(),
+                1
+            );
+        }
+
+        let mut customized = AiProviderSettings::openai_compatible_default();
+        customized.name = " SGLANG-MINIMAX-M3 ".to_owned();
+        customized.base_url = "https://operator.example.test/v1".to_owned();
+        customized.default_text_model = Some("operator/custom-model".to_owned());
+        customized.secret_id = Some(Uuid::new_v4());
+        customized.enabled = true;
+        customized.tuning.max_output_tokens = Some(4242);
+        let expected = serde_json::to_value(&customized).unwrap();
+
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![customized];
+        let normalized = settings.normalized();
+        assert_eq!(normalized.ai.providers.len(), 7);
+        let preserved = normalized
+            .ai
+            .providers
+            .iter()
+            .find(|provider| {
+                provider
+                    .name
+                    .trim()
+                    .eq_ignore_ascii_case("sglang-minimax-m3")
+            })
+            .expect("customized provider remains present");
+        assert_eq!(serde_json::to_value(preserved).unwrap(), expected);
+    }
+
+    #[test]
+    fn minimax_m3_catalog_upgrade_is_idempotent_and_preserves_custom_entry() {
+        const MODEL: &str = "ressl/MiniMax-M3-uncensored-NVFP4";
+        let mut settings = RuntimeSettings::default();
+        settings
+            .ai
+            .model_catalog
+            .retain(|entry| entry.model_id != MODEL);
+
+        let upgraded = settings.normalized().normalized();
+        let m3_entries = upgraded
+            .ai
+            .model_catalog
+            .iter()
+            .filter(|entry| entry.model_id == MODEL)
+            .collect::<Vec<_>>();
+        assert_eq!(m3_entries.len(), 1);
+        assert_eq!(
+            m3_entries[0].provider_kind,
+            AiProviderKind::OpenaiCompatible
+        );
+        assert_eq!(m3_entries[0].capability, ModelCapability::Text);
+        assert!(!m3_entries[0].recommended);
+        assert!(!upgraded.ai.model_catalog.iter().any(|entry| {
+            entry.model_id == MODEL && entry.capability == ModelCapability::Vision
+        }));
+        assert_eq!(
+            upgraded
+                .ai
+                .model_catalog
+                .iter()
+                .filter(|entry| {
+                    entry.provider_kind == AiProviderKind::OpenaiCompatible
+                        && entry.capability == ModelCapability::Text
+                        && entry.recommended
+                })
+                .map(|entry| entry.model_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["qwen3:8b"]
+        );
+
+        let mut customized = m3_entries[0].clone();
+        customized.label = Some("Operator label".to_owned());
+        customized.context = Some("custom context".to_owned());
+        let expected = customized.clone();
+        let mut settings = RuntimeSettings::default();
+        settings
+            .ai
+            .model_catalog
+            .retain(|entry| entry.model_id != MODEL);
+        settings.ai.model_catalog.push(customized);
+        let normalized = settings.normalized();
+        let preserved = normalized
+            .ai
+            .model_catalog
+            .iter()
+            .filter(|entry| entry.model_id == MODEL)
+            .collect::<Vec<_>>();
+        assert_eq!(preserved, vec![&expected]);
     }
 
     #[test]

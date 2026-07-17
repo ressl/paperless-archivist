@@ -49,15 +49,33 @@ servers such as SGLang) add two tuning fields:
   looks like a rejected schema triggers one automatic retry without
   `response_format`.
 
-Reasoning models served through an OpenAI-compatible endpoint (for
-example MiniMax-M2 or DeepSeek-R1) may emit inline `<think>...</think>`
-blocks; Archivist strips them before parsing the response. A response
-that contains only reasoning content and no final answer fails with a
-parser-configuration hint instead of returning empty text. Known
-limitation: the document-chat path and other API-side helper calls
-(prompt tester, provider connection test) do not apply
-`max_output_tokens`; worker stage calls (OCR, metadata, tagging,
-consensus) do.
+Reasoning models served through an OpenAI-compatible endpoint may emit inline
+`<think>...</think>` or MiniMax `<mm:think>...</mm:think>` blocks; Archivist
+strips them before parsing the response. A response that contains only
+reasoning content and no final answer fails with a parser-configuration hint
+instead of returning empty text. Worker stages and all API-side text consumers
+(Prompt Tester, provider connection test, and Document Chat) resolve the
+profile of the provider they actually selected. They share its reasoning
+effort, output-token cap, structured-output mode where a schema is present,
+text context, and per-request timeout; a prompt model override does not switch
+or discard that provider profile.
+
+[ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider)
+defines the accepted MiniMax M3 integration contract. The exact target is
+`ressl/MiniMax-M3-uncensored-NVFP4` under the existing
+`openai_compatible` protocol. Its product scope is text-only:
+metadata/classification, consensus, the current text-wrapper OCR prompt test,
+the consolidated metadata prompt tester, provider testing, and Document Chat.
+The OCR prompt test does not invoke OCR or send an image. OCR itself remains on
+MinerU/Ollama; M3 image input is informational until the linked OCR and
+live-contract gates pass. `thinking_mode` and `<mm:think>` response support are
+applied on every selected M3 request, while worker stages, Prompt Tester,
+provider test, and Document Chat share the selected provider's effective
+tuning and timeout. The disabled M3 preset, live contract, and measured
+capacity profile are complete; operators should use the
+[Settings guide](USER_GUIDE.md#sglang-with-minimax-m3-text-only) and
+[operations runbook](OPERATIONS.md#sglangminimax-m3-operations). M3 vision/OCR
+still requires a separate ADR update plus the #322 through #338 gates.
 
 ## OCR Pipeline
 

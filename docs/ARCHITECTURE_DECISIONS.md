@@ -500,3 +500,180 @@ Implications:
   matches, so subsequent worker restarts cannot re-requeue the same job.
   Combined with the v1.5.1 num_ctx fix, the previously-dead OCR jobs
   succeed on first retry without going through the fallback path.
+
+## ADR-014: SGLang MiniMax M3 Is a Text-First OpenAI-Compatible Provider
+
+Status: Accepted on 2026-07-17 by issue #366.
+
+### Context and pinned evidence
+
+MiniMax M3 is a native multimodal, reasoning-capable MoE model. Native
+multimodality does not by itself decide whether Archivist should replace its
+OCR path. Mixing that product decision with protocol support would make the
+provider, OCR, and release contracts depend on different assumptions.
+
+The integration target is exactly
+[`ressl/MiniMax-M3-uncensored-NVFP4`](https://huggingface.co/ressl/MiniMax-M3-uncensored-NVFP4),
+not a product-name substring or an arbitrary model from another namespace. The
+reference checkpoint revision reviewed for this decision is
+`6863c5c62a892e2d1e886a69e134b3b866e0963e`. Its `chat_template.jinja` has
+SHA-256 `11421244f67553498e5c8112dae02802025bcc4305ec45ad380af95c96f9fe64`,
+which is byte-identical to the official
+[MiniMax M3 template at revision `5094273`](https://huggingface.co/MiniMaxAI/MiniMax-M3/blob/50942730318c7943fe83db7ec8e9f9177ecb1cf8/chat_template.jinja).
+
+The reviewed runtime is SGLang `0.0.0.dev1+g56e290315`, pinned by container
+digest
+`lmsysorg/sglang@sha256:8cc6e6f90bf803e9817800b679173d0b526f2b42b2c61b7ecafecdadb610eb55`.
+MiniMax M3 support is newer than the latest tagged SGLang release at decision
+time, so a mutable `latest` or development tag is not an acceptable production
+pin. The model revision, image digest, and runtime revision must be emitted by
+the opt-in live contract report in #371.
+
+A read-only smoke against that exact model/runtime pair accepted all three
+template values. `disabled` returned final content without
+`reasoning_content`; `adaptive` and `enabled` returned the same final content
+with a separately parsed reasoning trace, and none leaked `<mm:think>` into
+`message.content`.
+
+The base architecture advertises a 1,048,576-token context. That number is not
+an Archivist capacity promise. Supported context, timeout, and concurrency are
+the values proven on the target deployment by #373.
+
+### Decision
+
+#### Protocol and identity
+
+SGLang remains `kind = openai_compatible`. Provider kinds describe wire
+protocols, not server products. The M3-specific behavior is selected by an
+explicit capability for the exact target model identity; broad checks such as
+`contains("MiniMax-M3")` are not allowed. Other OpenAI-compatible models must
+not receive M3-only request fields.
+
+The target is text-first. M3 is supported for the following consumers:
+
+| Consumer | Contract | Scope |
+| --- | --- | --- |
+| Consolidated metadata and enabled legacy text stages | Chat completion, optionally strict structured JSON | Included |
+| Document-type preclassification | Text chat completion | Included |
+| Consensus/review checks | Text chat completion | Included |
+| Current OCR prompt tester | Text-only chat wrapper over sample text; it does not invoke OCR or send an image | Included |
+| Consolidated metadata prompt tester | Structured text chat planned by #369; no such consumer exists yet | Included when implemented |
+| Document Chat | Text chat completion with the default text-provider tuning | Included |
+| Provider connection test | Small text chat completion using the draft/saved provider tuning | Included |
+| Model discovery | `GET /v1/models` must expose the exact served ID | Included control plane |
+| OCR and other page-image stages | MinerU or Ollama vision contract | Excluded |
+| Generic OpenAI-compatible vision request to M3 | Informational live probe only | Not a release gate |
+
+Provider tuning must resolve identically for worker and API consumers. #368
+owns that shared wiring; this ADR defines the behavior it must preserve.
+
+#### Thinking semantics
+
+The official template accepts `thinking_mode` with exactly `disabled`,
+`adaptive`, or `enabled`. Archivist resolves provider tuning first and sends
+the resulting mode on every M3 request inside
+`chat_template_kwargs`; it does not send the model-card shorthand `thinking`
+and does not repurpose OpenAI's top-level `reasoning_effort` field.
+
+| Provider/effective Archivist value | M3 request behavior |
+| --- | --- |
+| Provider tuning absent (`None`, inherits effective `off`) | `chat_template_kwargs.thinking_mode = "disabled"` |
+| Explicit `off` | `chat_template_kwargs.thinking_mode = "disabled"` |
+| `low` | `chat_template_kwargs.thinking_mode = "adaptive"` |
+| `medium` | `chat_template_kwargs.thinking_mode = "enabled"` |
+| `high` | `chat_template_kwargs.thinking_mode = "enabled"` |
+
+The existing `ProviderTuning` contract defines `None` as inherit-Off and the
+effective-tuning resolver collapses it to concrete `off`. The M3 production
+path must preserve that resolution through worker and API consumers; it must
+not reinterpret a missing provider value as the template's adaptive default.
+An unresolved library-level `ChatRequest` with no reasoning value is not a
+valid fully configured M3 application request.
+
+M3 has no separate medium/high reasoning budget in this contract. Those two
+Archivist values are intentional aliases. `max_output_tokens` remains an
+independent total output cap and must leave enough room for reasoning plus the
+final answer.
+
+Rejecting `chat_template_kwargs` is a runtime-contract failure. Archivist must
+return an actionable provider error and must not silently retry without the
+field, because that would turn an explicit `off` into the template's adaptive
+default.
+
+With the pinned `minimax-m3` reasoning parser, the canonical response contains
+the final answer in `message.content` and the trace in
+`message.reasoning_content`. The trace may remain in the existing redacted raw
+artifact but never becomes the application result. As defense in depth for a
+missing or regressed server parser, response extraction removes both
+`<think>...</think>` and `<mm:think>...</mm:think>` blocks from content,
+including multiple blocks. An opening tag without a close discards the tail.
+A response with reasoning but no final answer is a typed contract error with a
+reasoning-parser hint, not a successful empty result.
+
+#### Vision and OCR gate
+
+The target checkpoint contains a vision tower, but the M3 preset must not set a
+default vision model and must not route the OCR stage to M3. Under this
+text-first decision, #371 records the synthetic image contract as
+informational only.
+
+Promoting M3 vision/OCR to release scope requires all of the following:
+
+1. a separate decision updating this ADR and the consumer matrix;
+2. a pinned SGLang image/model live contract for the exact image payload used
+   by Archivist;
+3. successful representative OCR/vision quality and capacity evaluation;
+4. completion of OCR epic #322 through #338, with at least the data-loss and
+   table-integrity blockers #323, #324, #326, and #327 closed.
+
+This links the OCR work rather than duplicating it. MinerU/Ollama remains the
+OCR architecture until the gate is explicitly passed.
+
+### Migration and compatibility
+
+- Existing SGLang/MiniMax M2.7 providers remain valid generic
+  `openai_compatible` configurations. They are not renamed or migrated
+  automatically.
+- #370 adds M3 as a disabled preset/catalog choice. Operators opt in and keep
+  control of provider URL and secret references; no private endpoint belongs
+  in source defaults.
+- No database migration or new provider kind is needed.
+- The 2026-07-07 M2.7/MinerU design remains authoritative for the
+  one-kind-per-protocol rule, MinerU OCR, structured-output fallback, and
+  output limits. This ADR replaces its target-model identity, M2-only thinking
+  syntax, and the statement that no SGLang chat-template kwargs are needed.
+
+### Rejected alternatives
+
+- **A new `sglang` provider kind:** rejected because it duplicates the existing
+  OpenAI-compatible client and confuses protocol with product.
+- **Enable M3 vision/OCR immediately:** rejected because model capability is
+  not an OCR quality/reliability proof and the linked OCR data-loss issues are
+  still open.
+- **Send OpenAI `reasoning_effort`:** rejected because the reviewed M3 template
+  consumes `thinking_mode`, not OpenAI's field.
+- **Use the template's adaptive default for absent tuning:** rejected because
+  Archivist already defines absent provider tuning as inherit-Off; changing it
+  only for M3 would make provider behavior depend on the call path.
+- **Trust the server parser only:** rejected because parser misconfiguration
+  would otherwise leak `<mm:think>` content into metadata or Document Chat.
+
+### Risks and release gates
+
+- Engine support is preview/image-specific. Digest pinning and the six-part
+  live contract in #371 are mandatory until an equivalent tagged SGLang
+  release is adopted deliberately.
+- Thinking plus strict JSON grammar and tool parsing can regress independently;
+  #371 tests each contract separately and #367 supplies offline wire/parser
+  tests.
+- Context and concurrency can exhaust KV/activation memory long before the
+  architecture maximum; #373 owns measured limits.
+- The model is uncensored. Existing authorization, audit, prompt, and document
+  access controls remain mandatory; no separate bypass is introduced.
+
+Authoritative public references:
+
+- [MiniMax M3 model card](https://huggingface.co/MiniMaxAI/MiniMax-M3)
+- [MiniMax M3 official chat template](https://huggingface.co/MiniMaxAI/MiniMax-M3/blob/main/chat_template.jinja)
+- [SGLang MiniMax M3 cookbook](https://docs.sglang.io/cookbook/autoregressive/MiniMax/MiniMax-M3)
+- [Target NVFP4 model card](https://huggingface.co/ressl/MiniMax-M3-uncensored-NVFP4)

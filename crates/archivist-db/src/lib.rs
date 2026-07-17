@@ -24,9 +24,28 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use thiserror::Error;
 use uuid::Uuid;
 
 pub type DbPool = PgPool;
+
+const LAST_ENABLED_ADMIN_REJECTION: &str = "last enabled administrator mutation rejected";
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("at least one enabled administrator is required")]
+pub struct LastEnabledAdminError;
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("username or email is already assigned to another account")]
+pub struct UserIdentityConflictError;
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("username must not be blank")]
+pub struct InvalidUserIdentityError;
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("OIDC identity matches multiple local accounts")]
+pub struct AmbiguousUserIdentityLinkError;
 
 pub async fn connect(database_url: &str, max_connections: u32) -> Result<DbPool> {
     PgPoolOptions::new()
@@ -183,11 +202,58 @@ pub struct ReviewItemRecord {
     pub status: String,
     pub suggested_patch: Value,
     pub edited_patch: Option<Value>,
+    #[serde(skip_serializing)]
+    pub baseline: Value,
+    pub conflict_fields: Value,
+    pub conflicted_at: Option<DateTime<Utc>>,
     pub validation_warnings: Value,
     pub debug_context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paperless_title: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyIntentInput {
+    pub source: String,
+    pub source_key: String,
+    pub owner_type: String,
+    pub owner_id: String,
+    pub paperless_document_id: i32,
+    pub run_id: Option<Uuid>,
+    pub job_id: Option<Uuid>,
+    pub review_id: Option<Uuid>,
+    pub patch_hash: String,
+    pub patch: Value,
+    pub before: Option<Value>,
+    pub metadata: Value,
+    pub review_revert_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyIntentRecord {
+    pub attempt_id: Uuid,
+    pub source: String,
+    pub source_key: String,
+    pub owner_type: String,
+    pub owner_id: String,
+    pub paperless_document_id: i32,
+    pub run_id: Option<Uuid>,
+    pub job_id: Option<Uuid>,
+    pub review_id: Option<Uuid>,
+    pub patch_hash: String,
+    pub patch: Value,
+    pub before: Option<Value>,
+    pub response: Option<Value>,
+    pub metadata: Value,
+    pub review_revert_status: Option<String>,
+    pub state: String,
+    pub last_error: Option<String>,
+    pub request_started_at: Option<DateTime<Utc>>,
+    pub confirmed_at: Option<DateTime<Utc>>,
+    pub finalized_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +269,7 @@ pub struct AuditEventRecord {
     pub metadata: Option<Value>,
     pub prev_event_hash: Option<String>,
     pub event_hash: Option<String>,
+    pub hash_version: Option<i16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +277,8 @@ pub struct AuditIntegrityReport {
     pub ok: bool,
     pub checked_events: i64,
     pub legacy_events: i64,
+    pub v1_events: i64,
+    pub v2_events: i64,
     pub latest_event_hash: Option<String>,
     pub broken_event_id: Option<Uuid>,
     pub broken_reason: Option<String>,
@@ -361,6 +430,11 @@ pub async fn create_user_with_roles(
     roles: &[Role],
     actor: Option<Uuid>,
 ) -> Result<Uuid> {
+    let username = username.trim();
+    if username.is_empty() {
+        return Err(InvalidUserIdentityError.into());
+    }
+    let email = email.map(str::trim).filter(|value| !value.is_empty());
     let mut tx = pool.begin().await?;
     let id: Uuid = sqlx::query(
         r#"
@@ -373,7 +447,8 @@ pub async fn create_user_with_roles(
     .bind(email)
     .bind(password_hash)
     .fetch_one(&mut *tx)
-    .await?
+    .await
+    .map_err(map_user_identity_write_error)?
     .try_get("id")?;
 
     for role in roles {
@@ -450,10 +525,10 @@ pub async fn find_user_for_login(
         select u.id, u.username, u.email, u.password_hash, u.enabled, u.failed_login_count,
                u.locked_until,
                coalesce(array_agg(ur.role order by ur.role) filter (where ur.role is not null), '{}') as roles
-          from users u
+          from users_identity_namespace identity
+          join users u on u.id = identity.user_id
           left join user_roles ur on ur.user_id = u.id
-         where lower(u.username) = lower($1)
-            or lower(coalesce(u.email, '')) = lower($1)
+         where identity.normalized_identity = normalize_user_identity($1)
          group by u.id
         "#,
     )
@@ -462,6 +537,162 @@ pub async fn find_user_for_login(
     .await?;
 
     row.map(auth_user_from_row).transpose()
+}
+
+const PAPERLESS_BRIDGE_AUTH_PROVIDER: &str = "paperless_bridge";
+
+/// Resolve a Paperless login bridge account by its DB-backed origin mapping,
+/// never by a coincidentally equal local username/email.
+pub async fn find_paperless_bridge_user(
+    pool: &DbPool,
+    bridge_identity: &str,
+) -> Result<Option<AuthUser>> {
+    let row = sqlx::query(
+        r#"
+        select u.id, u.username, u.email, u.password_hash, u.enabled, u.failed_login_count,
+               u.locked_until,
+               coalesce(array_agg(ur.role order by ur.role) filter (where ur.role is not null), '{}') as roles
+          from users u
+          left join user_roles ur on ur.user_id = u.id
+         where u.external_auth_provider = $1
+           and u.external_subject = $2
+         group by u.id
+        "#,
+    )
+    .bind(PAPERLESS_BRIDGE_AUTH_PROVIDER)
+    .bind(bridge_identity)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(auth_user_from_row).transpose()
+}
+
+/// Create the bridge-owned viewer on first successful Paperless login, or
+/// return the same bridge mapping after a concurrent create. A local account
+/// with the same username deliberately remains a conflict: only the external
+/// provider/subject mapping proves that a bridge login owns an Archivist user.
+pub async fn find_or_create_paperless_bridge_user(
+    pool: &DbPool,
+    preferred_username: &str,
+    external_subject: &str,
+    disabled_password_hash: &str,
+) -> Result<AuthUser> {
+    let username: Option<String> = sqlx::query_scalar("select normalize_user_identity($1)")
+        .bind(preferred_username)
+        .fetch_one(pool)
+        .await?;
+    let base_username = username.ok_or(InvalidUserIdentityError)?;
+    let external_subject = external_subject.trim();
+    if external_subject.is_empty() {
+        return Err(InvalidUserIdentityError.into());
+    }
+    if let Some(user) = find_paperless_bridge_user(pool, external_subject).await? {
+        return Ok(user);
+    }
+
+    let mut tx = pool.begin().await?;
+    // Serialize retries for one verified Paperless principal before taking any
+    // user row lock. The namespace trigger remains the invariant for two
+    // different principals whose preferred local usernames collide.
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended('paperless_bridge:' || $1, 0))")
+        .bind(external_subject)
+        .execute(&mut *tx)
+        .await?;
+
+    let existing_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        select id
+          from users
+         where external_auth_provider = $1
+           and external_subject = $2
+        "#,
+    )
+    .bind(PAPERLESS_BRIDGE_AUTH_PROVIDER)
+    .bind(external_subject)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(user_id) = existing_id {
+        tx.commit().await?;
+        return find_auth_user_by_id(pool, user_id)
+            .await?
+            .ok_or_else(|| anyhow!("Paperless bridge user disappeared after lookup"));
+    }
+
+    let suffix = short_hash(external_subject);
+    let mut inserted = None;
+    for candidate_index in 0..100 {
+        let username = match candidate_index {
+            0 => base_username.clone(),
+            1 => format!("{}-{}", base_username, &suffix[..8]),
+            _ => format!("{}-{}{}", base_username, &suffix[..8], candidate_index - 1),
+        };
+        let mut savepoint: Transaction<'_, Postgres> = Transaction::begin(&mut *tx, None).await?;
+        let result = sqlx::query(
+            r#"
+            insert into users (
+              username, email, password_hash, external_auth_provider, external_subject
+            )
+            values ($1, null, $2, $3, $4)
+            returning id
+            "#,
+        )
+        .bind(&username)
+        .bind(disabled_password_hash)
+        .bind(PAPERLESS_BRIDGE_AUTH_PROVIDER)
+        .bind(external_subject)
+        .fetch_one(&mut *savepoint)
+        .await;
+        match result {
+            Ok(row) => {
+                let user_id: Uuid = row.try_get("id")?;
+                savepoint.commit().await?;
+                inserted = Some((user_id, username));
+                break;
+            }
+            Err(error) if is_user_identity_write_error(&error) => {
+                savepoint.rollback().await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let (user_id, username) =
+        inserted.ok_or_else(|| anyhow!("could not allocate a unique Paperless bridge username"))?;
+    sqlx::query("insert into user_roles (user_id, role) values ($1, $2)")
+        .bind(user_id)
+        .bind(Role::Viewer.to_string())
+        .execute(&mut *tx)
+        .await?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "user.paperless_bridge_created".to_owned(),
+            actor_type: "system".to_owned(),
+            actor_id: None,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({
+                "user_id": user_id,
+                "username": username,
+                "roles": [Role::Viewer]
+            })),
+            metadata: Some(json!({
+                "auth_provider": PAPERLESS_BRIDGE_AUTH_PROVIDER,
+                "external_subject_hash": short_hash(external_subject)
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+
+    find_auth_user_by_id(pool, user_id)
+        .await?
+        .ok_or_else(|| anyhow!("Paperless bridge user disappeared after creation"))
 }
 
 pub async fn find_auth_user_by_id(pool: &DbPool, user_id: Uuid) -> Result<Option<AuthUser>> {
@@ -640,79 +871,123 @@ pub async fn consume_oidc_login_state(
 
 pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result<AuthUser> {
     let mut tx = pool.begin().await?;
+    let email = input.email.map(str::trim).filter(|value| !value.is_empty());
+    // Keep the lock order identical to manual role/enabled mutations: the
+    // invariant lock always comes before any users/user_roles row lock.
+    lock_enabled_admin_invariant_tx(&mut tx).await?;
     let mut linked_existing = false;
     let mut created = false;
 
-    let user_id = if let Some(row) = sqlx::query(
+    let existing_external = sqlx::query(
         r#"
         select id
           from users
          where external_auth_provider = $1
            and external_subject = $2
+         for update
         "#,
     )
     .bind(input.provider)
     .bind(input.subject)
     .fetch_optional(&mut *tx)
-    .await?
-    {
+    .await?;
+
+    let user_id = if let Some(row) = existing_external {
         row.try_get("id")?
-    } else if let Some(row) = sqlx::query(
-        r#"
-        select id
-          from users
-         where external_auth_provider is null
-           and external_subject is null
-           and (
-             ($3::boolean and lower(username) = lower($1))
-             or ($4::boolean and $2::text is not null and lower(coalesce(email, '')) = lower($2::text))
-           )
-         order by created_at
-         limit 1
-        "#,
-    )
-    .bind(input.username)
-    .bind(input.email)
-    .bind(input.allow_username_link)
-    .bind(input.allow_email_link)
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        let id = row.try_get("id")?;
-        sqlx::query(
+    } else {
+        let link_candidates = sqlx::query(
             r#"
-            update users
-               set external_auth_provider = $2,
-                   external_subject = $3,
-                   updated_at = now()
-             where id = $1
+            select u.id
+              from users u
+              join users_identity_namespace identity on identity.user_id = u.id
+             where u.external_auth_provider is null
+               and u.external_subject is null
+               and (
+                 ($3::boolean
+                   and identity.username_claim
+                   and identity.normalized_identity = normalize_user_identity($1))
+                 or
+                 ($4::boolean
+                   and $2::text is not null
+                   and identity.email_claim
+                   and identity.normalized_identity = normalize_user_identity($2::text))
+               )
+             order by u.id
+             for update of u
             "#,
         )
-        .bind(id)
-        .bind(input.provider)
-        .bind(input.subject)
-        .execute(&mut *tx)
+        .bind(input.username)
+        .bind(email)
+        .bind(input.allow_username_link)
+        .bind(input.allow_email_link)
+        .fetch_all(&mut *tx)
         .await?;
-        linked_existing = true;
-        id
-    } else {
-        created = true;
-        insert_oidc_user(&mut tx, &input).await?
+
+        let mut candidate_ids = link_candidates
+            .iter()
+            .map(|row| row.try_get::<Uuid, _>("id"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        candidate_ids.dedup();
+        if candidate_ids.len() > 1 {
+            return Err(AmbiguousUserIdentityLinkError.into());
+        }
+
+        if let Some(id) = candidate_ids.first().copied() {
+            sqlx::query(
+                r#"
+                update users
+                   set external_auth_provider = $2,
+                       external_subject = $3,
+                       updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(input.provider)
+            .bind(input.subject)
+            .execute(&mut *tx)
+            .await?;
+            linked_existing = true;
+            id
+        } else {
+            created = true;
+            insert_oidc_user(&mut tx, &input).await?
+        }
     };
 
-    if let Some(email) = input.email {
-        let owner = sqlx::query("select id from users where lower(email) = lower($1) limit 1")
-            .bind(email)
-            .fetch_optional(&mut *tx)
-            .await?
-            .map(|row| row.try_get::<Uuid, _>("id"))
-            .transpose()?;
+    if let Some(email) = email {
+        let owner = sqlx::query(
+            r#"
+            select user_id
+              from users_identity_namespace
+             where normalized_identity = normalize_user_identity($1)
+            "#,
+        )
+        .bind(email)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|row| row.try_get::<Uuid, _>("user_id"))
+        .transpose()?;
         if owner.is_none_or(|owner_id| owner_id == user_id) {
-            sqlx::query("update users set email = $2, updated_at = now() where id = $1")
-                .bind(user_id)
-                .bind(email)
-                .execute(&mut *tx)
-                .await?;
+            let mut savepoint: Transaction<'_, Postgres> =
+                Transaction::begin(&mut *tx, None).await?;
+            let updated =
+                sqlx::query("update users set email = $2, updated_at = now() where id = $1")
+                    .bind(user_id)
+                    .bind(email.trim())
+                    .execute(&mut *savepoint)
+                    .await;
+            match updated {
+                Ok(_) => savepoint.commit().await?,
+                Err(error) if is_user_identity_write_error(&error) => {
+                    savepoint.rollback().await?;
+                    tracing::warn!(
+                        user_id = %user_id,
+                        "skipping OIDC email update because a concurrent identity writer won the claim"
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 
@@ -753,6 +1028,7 @@ pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result
     let mut last_admin_protected = false;
     if previous_roles.contains(&Role::Admin)
         && !roles.contains(&Role::Admin)
+        && user_is_enabled_admin_tx(&mut tx, user_id).await?
         && !other_enabled_admin_exists_tx(&mut tx, user_id).await?
     {
         tracing::warn!(
@@ -838,28 +1114,73 @@ async fn insert_oidc_user(
     tx: &mut Transaction<'_, Postgres>,
     input: &OidcUserInput<'_>,
 ) -> Result<Uuid> {
-    let mut username = input.username.to_owned();
+    let base_username = input.username.trim();
     let suffix = short_hash(input.subject);
-    let mut email = input.email;
+    let mut email = input.email.map(str::trim).filter(|value| !value.is_empty());
     if let Some(email_value) = email {
-        let email_taken = sqlx::query("select 1 from users where lower(email) = lower($1) limit 1")
-            .bind(email_value)
-            .fetch_optional(&mut **tx)
-            .await?
-            .is_some();
+        let email_taken = sqlx::query(
+            r#"
+            select 1
+              from users_identity_namespace
+             where normalized_identity = normalize_user_identity($1)
+            "#,
+        )
+        .bind(email_value)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some();
         if email_taken {
             email = None;
         }
     }
 
-    for attempt in 0..3 {
-        let row = sqlx::query(
+    let mut candidate_index = 0;
+    for _ in 0..6 {
+        let username = match candidate_index {
+            0 => base_username.to_owned(),
+            1 => format!("{}-{}", base_username, &suffix[..8]),
+            _ => format!("{}-{}{}", base_username, &suffix[..8], candidate_index - 1),
+        };
+        let username_taken = sqlx::query(
+            r#"
+            select 1
+              from users_identity_namespace
+             where normalized_identity = normalize_user_identity($1)
+            "#,
+        )
+        .bind(&username)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some();
+        if username_taken {
+            candidate_index += 1;
+            continue;
+        }
+
+        if let Some(email_value) = email {
+            let email_taken = sqlx::query(
+                r#"
+                select 1
+                  from users_identity_namespace
+                 where normalized_identity = normalize_user_identity($1)
+                "#,
+            )
+            .bind(email_value)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some();
+            if email_taken {
+                email = None;
+            }
+        }
+
+        let mut savepoint: Transaction<'_, Postgres> = Transaction::begin(&mut **tx, None).await?;
+        let inserted = sqlx::query(
             r#"
             insert into users (
               username, email, password_hash, external_auth_provider, external_subject
             )
             values ($1, $2, $3, $4, $5)
-            on conflict (username) do nothing
             returning id
             "#,
         )
@@ -868,17 +1189,24 @@ async fn insert_oidc_user(
         .bind(input.disabled_password_hash)
         .bind(input.provider)
         .bind(input.subject)
-        .fetch_optional(&mut **tx)
-        .await?;
-        if let Some(row) = row {
-            return row.try_get("id").context("read inserted OIDC user id");
-        }
+        .fetch_one(&mut *savepoint)
+        .await;
 
-        username = if attempt == 0 {
-            format!("{}-{}", input.username, &suffix[..8])
-        } else {
-            format!("{}-{}{}", input.username, &suffix[..8], attempt)
-        };
+        match inserted {
+            Ok(row) => {
+                savepoint.commit().await?;
+                return row.try_get("id").context("read inserted OIDC user id");
+            }
+            Err(error) if is_user_identity_write_error(&error) => {
+                savepoint.rollback().await?;
+                // A local/Paperless writer may have committed between the
+                // namespace lookup and this insert. Re-read both claims and
+                // either drop the now-taken optional email or advance to the
+                // deterministic username suffix.
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 
     Err(anyhow!("could not allocate unique username for OIDC user"))
@@ -899,6 +1227,57 @@ async fn load_user_roles_tx(
                 .map_err(Into::into)
         })
         .collect()
+}
+
+async fn lock_enabled_admin_invariant_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query(
+        "select pg_advisory_xact_lock(hashtext('paperless_archivist_enabled_admin_invariant'))",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn map_user_identity_write_error(error: sqlx::Error) -> anyhow::Error {
+    if is_user_identity_write_error(&error) {
+        UserIdentityConflictError.into()
+    } else {
+        error.into()
+    }
+}
+
+fn is_user_identity_write_error(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database_error| database_error.constraint())
+        .is_some_and(|constraint| {
+            matches!(
+                constraint,
+                "users_identity_namespace_pkey" | "users_username_key" | "users_email_key"
+            )
+        })
+}
+
+async fn user_is_enabled_admin_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<bool> {
+    let row = sqlx::query(
+        r#"
+        select 1
+          from users u
+          join user_roles ur on ur.user_id = u.id
+         where u.id = $1
+           and u.enabled
+           and ur.role = $2
+         limit 1
+        "#,
+    )
+    .bind(user_id)
+    .bind(Role::Admin.to_string())
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.is_some())
 }
 
 /// Whether any ENABLED user other than `user_id` holds the admin role — the
@@ -924,6 +1303,38 @@ async fn other_enabled_admin_exists_tx(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.is_some())
+}
+
+async fn append_last_enabled_admin_rejection_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    event_type: &str,
+    actor_id: Uuid,
+    user_id: Uuid,
+    before: Value,
+    after: Value,
+) -> Result<()> {
+    append_audit_tx(
+        tx,
+        AuditEventInput {
+            event_type: event_type.to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: Some(before),
+            after: Some(after),
+            metadata: Some(json!({
+                "target_user_id": user_id,
+                "reason": "last_enabled_administrator"
+            })),
+            outcome: "failed".to_owned(),
+            error_message: Some(LAST_ENABLED_ADMIN_REJECTION.to_owned()),
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await
 }
 
 /// Order-insensitive role-set fingerprint for change detection.
@@ -1152,12 +1563,31 @@ pub async fn set_user_enabled(
     actor_id: Uuid,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    lock_enabled_admin_invariant_tx(&mut tx).await?;
     let before = sqlx::query("select enabled from users where id = $1")
         .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow!("user does not exist"))?
         .try_get::<bool, _>("enabled")?;
+
+    if before
+        && !enabled
+        && user_is_enabled_admin_tx(&mut tx, user_id).await?
+        && !other_enabled_admin_exists_tx(&mut tx, user_id).await?
+    {
+        append_last_enabled_admin_rejection_tx(
+            &mut tx,
+            "user.enabled_changed",
+            actor_id,
+            user_id,
+            json!({ "user_id": user_id, "enabled": before }),
+            json!({ "user_id": user_id, "enabled": enabled }),
+        )
+        .await?;
+        tx.commit().await?;
+        return Err(LastEnabledAdminError.into());
+    }
 
     sqlx::query("update users set enabled = $2, updated_at = now() where id = $1")
         .bind(user_id)
@@ -1202,26 +1632,28 @@ pub async fn set_user_roles(
     actor_id: Uuid,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let before_rows = sqlx::query("select role from user_roles where user_id = $1 order by role")
-        .bind(user_id)
-        .fetch_all(&mut *tx)
-        .await?;
-    let before = before_rows
-        .into_iter()
-        .map(|row| row.try_get::<String, _>("role"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    lock_enabled_admin_invariant_tx(&mut tx).await?;
+    let before = load_user_roles_tx(&mut tx, user_id).await?;
 
-    sqlx::query("delete from user_roles where user_id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
+    if before.contains(&Role::Admin)
+        && !roles.contains(&Role::Admin)
+        && user_is_enabled_admin_tx(&mut tx, user_id).await?
+        && !other_enabled_admin_exists_tx(&mut tx, user_id).await?
+    {
+        append_last_enabled_admin_rejection_tx(
+            &mut tx,
+            "user.roles_changed",
+            actor_id,
+            user_id,
+            json!({ "user_id": user_id, "roles": before }),
+            json!({ "user_id": user_id, "roles": roles }),
+        )
         .await?;
-    for role in roles {
-        sqlx::query("insert into user_roles (user_id, role) values ($1, $2)")
-            .bind(user_id)
-            .bind(role.to_string())
-            .execute(&mut *tx)
-            .await?;
+        tx.commit().await?;
+        return Err(LastEnabledAdminError.into());
     }
+
+    replace_user_roles_tx(&mut tx, user_id, roles).await?;
     append_audit_tx(
         &mut tx,
         AuditEventInput {
@@ -4707,9 +5139,9 @@ pub async fn create_run_with_jobs_with_priority(
 ///
 /// Used by the `/api/batches/rerun` endpoint so operators can re-trigger a hand-picked set of
 /// "succeeded-but-wrong" documents in one shot instead of one trigger at a time. The active-run
-/// guard inside [`create_run_with_jobs_on_tx`] still applies per document, so ids that already
+/// guard inside [`prepare_run_with_jobs_on_tx`] still applies per document, so ids that already
 /// have an in-flight run are silently reused (no duplicate run). Returns the number of documents
-/// processed (the size of the input set; each contributes exactly one run, new or reused).
+/// processed (the de-duplicated input set; each contributes exactly one run, new or reused).
 pub async fn create_runs_for_documents(
     pool: &DbPool,
     document_ids: &[i32],
@@ -4722,11 +5154,20 @@ pub async fn create_runs_for_documents(
     if document_ids.is_empty() {
         return Ok(0);
     }
+    let mut document_ids = document_ids.to_vec();
+    document_ids.sort_unstable();
+    document_ids.dedup();
+
     // Amortise one transaction across the whole batch instead of a begin+commit per document.
     let mut tx = pool.begin().await?;
+    // Acquire every document lock before the first audit append. Audit chaining
+    // also uses a transaction-scoped advisory lock, so taking all document
+    // locks first gives every batch the same deadlock-free lock order.
+    lock_active_run_documents_tx(&mut tx, &document_ids).await?;
     let mut queued: i64 = 0;
-    for &document_id in document_ids {
-        create_run_with_jobs_on_tx(
+    let mut audit_events = Vec::new();
+    for document_id in document_ids {
+        let prepared = prepare_run_with_jobs_on_tx(
             &mut tx,
             document_id,
             stages,
@@ -4736,7 +5177,13 @@ pub async fn create_runs_for_documents(
             priority,
         )
         .await?;
+        if let Some(event) = prepared.audit_event {
+            audit_events.push(event);
+        }
         queued += 1;
+    }
+    for event in audit_events {
+        append_audit_tx(&mut tx, event).await?;
     }
     tx.commit().await?;
     Ok(queued)
@@ -4766,10 +5213,16 @@ pub async fn failed_document_ids(pool: &DbPool) -> Result<Vec<i32>> {
         .map_err(Into::into)
 }
 
-/// Per-document run/job creation against an existing transaction. Callers own the begin/commit so
-/// batch backfills can amortise one transaction across many documents instead of paying a full
-/// begin+commit per doc. The active-run guard and idempotent inventory upsert are unchanged.
-async fn create_run_with_jobs_on_tx(
+struct PreparedRunCreation {
+    run_id: Uuid,
+    audit_event: Option<AuditEventInput>,
+}
+
+/// Resolve or create one active run and materialise its jobs/inventory state,
+/// but leave the `run.created` audit append to the caller. Batch callers first
+/// prepare every document, then take the global audit-chain lock; this keeps
+/// all unique-index conflict waits ahead of audit serialization.
+async fn prepare_run_with_jobs_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     paperless_document_id: i32,
     stages: &[Stage],
@@ -4777,45 +5230,61 @@ async fn create_run_with_jobs_on_tx(
     trigger_tag: &str,
     actor: &str,
     priority: Option<i64>,
-) -> Result<Uuid> {
+) -> Result<PreparedRunCreation> {
     if stages.is_empty() {
         return Err(anyhow!("cannot create a run without stages"));
     }
 
-    if let Some(row) = sqlx::query(
-        r#"
-        select id from pipeline_runs
-         where paperless_document_id = $1
-           and status in ('queued', 'running', 'waiting_review', 'applying')
-         order by created_at desc
-         limit 1
-        "#,
-    )
-    .bind(paperless_document_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    {
-        return Ok(row.try_get("id")?);
-    }
+    lock_active_run_document_tx(tx, paperless_document_id).await?;
 
     let cross_run_priority =
         priority.unwrap_or_else(|| age_derived_priority(paperless_document_id));
-
     let stages_json = serde_json::to_value(stages)?;
-    let run_id: Uuid = sqlx::query(
-        r#"
-        insert into pipeline_runs (paperless_document_id, mode, trigger_tag, status, stages)
-        values ($1, $2, $3, 'queued', $4)
-        returning id
-        "#,
-    )
-    .bind(paperless_document_id)
-    .bind(mode.to_string())
-    .bind(trigger_tag)
-    .bind(stages_json)
-    .fetch_one(&mut **tx)
-    .await?
-    .try_get("id")?;
+    let mode_text = mode.to_string();
+    let run_id = loop {
+        let inserted = sqlx::query(
+            r#"
+            insert into pipeline_runs (paperless_document_id, mode, trigger_tag, status, stages)
+            values ($1, $2, $3, 'queued', $4)
+            on conflict (paperless_document_id)
+              where status in ('queued', 'running', 'waiting_review', 'applying')
+            do nothing
+            returning id
+            "#,
+        )
+        .bind(paperless_document_id)
+        .bind(&mode_text)
+        .bind(trigger_tag)
+        .bind(&stages_json)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(row) = inserted {
+            break row.try_get("id")?;
+        }
+
+        // `ON CONFLICT DO NOTHING` waits for an in-flight conflicting
+        // transaction. A concurrent active-to-terminal transition can remove
+        // that conflict before this follow-up snapshot; retry in that narrow
+        // window instead of surfacing a missing-row error.
+        if let Some(row) = sqlx::query(
+            r#"
+            select id from pipeline_runs
+             where paperless_document_id = $1
+               and status in ('queued', 'running', 'waiting_review', 'applying')
+             order by created_at desc
+             limit 1
+            "#,
+        )
+        .bind(paperless_document_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        {
+            return Ok(PreparedRunCreation {
+                run_id: row.try_get("id")?,
+                audit_event: None,
+            });
+        }
+    };
 
     for (index, stage) in stages.iter().enumerate() {
         sqlx::query(
@@ -4850,9 +5319,9 @@ async fn create_run_with_jobs_on_tx(
     .execute(&mut **tx)
     .await?;
 
-    append_audit_tx(
-        tx,
-        AuditEventInput {
+    Ok(PreparedRunCreation {
+        run_id,
+        audit_event: Some(AuditEventInput {
             event_type: "run.created".to_owned(),
             actor_type: actor.to_owned(),
             actor_id: None,
@@ -4866,11 +5335,74 @@ async fn create_run_with_jobs_on_tx(
             error_message: None,
             source_ip: None,
             user_agent: None,
-        },
+        }),
+    })
+}
+
+/// Per-document convenience wrapper for single-run callers. Multi-document
+/// callers use `prepare_run_with_jobs_on_tx` directly and defer all audits
+/// until every get-or-create decision has completed.
+async fn create_run_with_jobs_on_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    paperless_document_id: i32,
+    stages: &[Stage],
+    mode: ProcessingMode,
+    trigger_tag: &str,
+    actor: &str,
+    priority: Option<i64>,
+) -> Result<Uuid> {
+    let prepared = prepare_run_with_jobs_on_tx(
+        tx,
+        paperless_document_id,
+        stages,
+        mode,
+        trigger_tag,
+        actor,
+        priority,
     )
     .await?;
+    if let Some(event) = prepared.audit_event {
+        append_audit_tx(tx, event).await?;
+    }
+    Ok(prepared.run_id)
+}
 
-    Ok(run_id)
+/// Serialize the active-run lookup and creation only for one Paperless
+/// document. The unique partial index remains the final database invariant;
+/// this lock turns its expected concurrency conflict into get-or-create
+/// behavior for every caller sharing this transaction helper.
+async fn lock_active_run_document_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    paperless_document_id: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        select pg_advisory_xact_lock(
+          hashtext('paperless_archivist_active_run_document'),
+          $1
+        )
+        "#,
+    )
+    .bind(paperless_document_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Acquire a batch's document locks in canonical order before any run-created
+/// audit event takes the global audit-chain lock. Re-acquiring a lock later in
+/// `prepare_run_with_jobs_on_tx` is transaction-local and re-entrant.
+async fn lock_active_run_documents_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    document_ids: &[i32],
+) -> Result<()> {
+    let mut document_ids = document_ids.to_vec();
+    document_ids.sort_unstable();
+    document_ids.dedup();
+    for &document_id in &document_ids {
+        lock_active_run_document_tx(tx, document_id).await?;
+    }
+    Ok(())
 }
 
 pub async fn queue_missing_stage(
@@ -4911,16 +5443,23 @@ pub async fn queue_missing_stage(
         builder = builder.bind(limit);
     }
     let rows = builder.fetch_all(pool).await?;
+    let document_ids = rows
+        .into_iter()
+        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     // Amortise one transaction across the whole batch instead of a begin+commit per document.
     let mut tx = pool.begin().await?;
+    // Lock the complete ordered candidate set before the first run-created
+    // audit takes the audit-chain lock.
+    lock_active_run_documents_tx(&mut tx, &document_ids).await?;
     let mut created = 0;
-    for row in rows {
-        let document_id: i32 = row.try_get("paperless_document_id")?;
+    let mut audit_events = Vec::new();
+    for document_id in document_ids {
         // Age-derived priority — newer documents jump ahead of older ones in claim_jobs.
         // "manual-batch" is the operator-initiated bulk path, but we still rank by age so
         // a fresh scan doesn't get blocked behind a backfill triggered minutes earlier.
-        create_run_with_jobs_on_tx(
+        let prepared = prepare_run_with_jobs_on_tx(
             &mut tx,
             document_id,
             &[stage],
@@ -4930,7 +5469,13 @@ pub async fn queue_missing_stage(
             Some(age_derived_priority(document_id)),
         )
         .await?;
+        if let Some(event) = prepared.audit_event {
+            audit_events.push(event);
+        }
         created += 1;
+    }
+    for event in audit_events {
+        append_audit_tx(&mut tx, event).await?;
     }
     tx.commit().await?;
     Ok(created)
@@ -4952,14 +5497,14 @@ pub async fn queue_missing_pipeline(
     // a brittle predicate into SQL. When the budget is None, fetch everything in one shot.
     let chunk_size = max_documents.map(|limit| limit.saturating_mul(2).max(16));
 
-    // Amortise one transaction across every chunk + per-doc insert instead of a begin+commit per
-    // document. Pagination SELECTs run on the same tx so just-queued rows stay consistently
-    // excluded, mirroring the previous per-doc-commit behaviour.
+    // Amortise one transaction across every chunk + per-doc insert. Candidate
+    // discovery completes before document locks are taken so no transaction
+    // ever acquires a new document lock after taking the audit-chain lock.
     let mut tx = pool.begin().await?;
-    let mut created: i64 = 0;
+    let mut candidates: Vec<(i32, Vec<Stage>)> = Vec::new();
     let mut last_seen: i32 = i32::MIN;
     loop {
-        if max_documents.is_some_and(|limit| created >= limit) {
+        if max_documents.is_some_and(|limit| candidates.len() as i64 >= limit) {
             break;
         }
         let limit_clause = match chunk_size {
@@ -5000,7 +5545,7 @@ pub async fn queue_missing_pipeline(
         for row in rows {
             let document_id: i32 = row.try_get("paperless_document_id")?;
             last_seen = document_id.max(last_seen);
-            if max_documents.is_some_and(|limit| created >= limit) {
+            if max_documents.is_some_and(|limit| candidates.len() as i64 >= limit) {
                 break;
             }
             let stages = missing_pipeline_stages_for_inventory(
@@ -5017,19 +5562,7 @@ pub async fn queue_missing_pipeline(
                 continue;
             }
 
-            // Age-derived priority — newer Paperless documents drain through the full
-            // pipeline (OCR -> Metadata) before older queued documents.
-            create_run_with_jobs_on_tx(
-                &mut tx,
-                document_id,
-                &stages,
-                mode,
-                trigger_tag,
-                actor,
-                Some(age_derived_priority(document_id)),
-            )
-            .await?;
-            created += 1;
+            candidates.push((document_id, stages));
         }
         // No budget set means we already fetched everything once.
         if chunk_size.is_none() {
@@ -5040,8 +5573,35 @@ pub async fn queue_missing_pipeline(
             break;
         }
     }
+
+    let document_ids = candidates
+        .iter()
+        .map(|(document_id, _)| *document_id)
+        .collect::<Vec<_>>();
+    lock_active_run_documents_tx(&mut tx, &document_ids).await?;
+    let mut audit_events = Vec::new();
+    for (document_id, stages) in &candidates {
+        // Age-derived priority — newer documents drain through the full
+        // pipeline (OCR -> Metadata) before older queued documents.
+        let prepared = prepare_run_with_jobs_on_tx(
+            &mut tx,
+            *document_id,
+            stages,
+            mode,
+            trigger_tag,
+            actor,
+            Some(age_derived_priority(*document_id)),
+        )
+        .await?;
+        if let Some(event) = prepared.audit_event {
+            audit_events.push(event);
+        }
+    }
+    for event in audit_events {
+        append_audit_tx(&mut tx, event).await?;
+    }
     tx.commit().await?;
-    Ok(created)
+    Ok(candidates.len() as i64)
 }
 
 struct InventoryStageState {
@@ -5713,6 +6273,7 @@ pub async fn create_review_item(
     job: &JobRecord,
     suggested_patch: Value,
     validation_warnings: Value,
+    baseline: Value,
     lease_owner: &str,
 ) -> Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
@@ -5736,8 +6297,11 @@ pub async fn create_review_item(
 
     let id: Uuid = sqlx::query(
         r#"
-        insert into review_items (run_id, job_id, paperless_document_id, stage, status, suggested_patch, validation_warnings)
-        values ($1, $2, $3, $4, 'pending', $5, $6)
+        insert into review_items (
+          run_id, job_id, paperless_document_id, stage, status,
+          suggested_patch, validation_warnings, baseline
+        )
+        values ($1, $2, $3, $4, 'pending', $5, $6, $7)
         returning id
         "#,
     )
@@ -5747,6 +6311,7 @@ pub async fn create_review_item(
     .bind(job.stage.to_string())
     .bind(&suggested_patch)
     .bind(&validation_warnings)
+    .bind(&baseline)
     .fetch_one(&mut *tx)
     .await?
     .try_get("id")?;
@@ -5799,7 +6364,9 @@ pub async fn list_reviews(
         sqlx::query(
             r#"
             select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
-                   ri.suggested_patch, ri.edited_patch, ri.validation_warnings, ri.created_at,
+                   ri.suggested_patch, ri.edited_patch, ri.baseline,
+                   ri.conflict_fields, ri.conflicted_at,
+                   ri.validation_warnings, ri.created_at,
                    di.title as paperless_title,
                    jsonb_build_object(
                      'detected_language', di.detected_language,
@@ -5825,7 +6392,9 @@ pub async fn list_reviews(
         sqlx::query(
             r#"
             select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
-                   ri.suggested_patch, ri.edited_patch, ri.validation_warnings, ri.created_at,
+                   ri.suggested_patch, ri.edited_patch, ri.baseline,
+                   ri.conflict_fields, ri.conflicted_at,
+                   ri.validation_warnings, ri.created_at,
                    di.title as paperless_title,
                    jsonb_build_object(
                      'detected_language', di.detected_language,
@@ -5859,6 +6428,9 @@ pub async fn list_reviews(
                 status: row.try_get("status")?,
                 suggested_patch: row.try_get("suggested_patch")?,
                 edited_patch: row.try_get("edited_patch")?,
+                baseline: row.try_get("baseline")?,
+                conflict_fields: row.try_get("conflict_fields")?,
+                conflicted_at: row.try_get("conflicted_at")?,
                 validation_warnings: row.try_get("validation_warnings")?,
                 debug_context: row.try_get("debug_context")?,
                 paperless_title: row.try_get("paperless_title").ok(),
@@ -5901,7 +6473,9 @@ pub async fn review_decision(
            set status = $2,
                edited_patch = coalesce($3, edited_patch),
                reviewed_by = $4,
-               reviewed_at = now()
+               reviewed_at = now(),
+               conflict_fields = '[]'::jsonb,
+               conflicted_at = null
          where id = $1 and status = 'pending'
         returning run_id, job_id, paperless_document_id, stage, suggested_patch, edited_patch
         "#,
@@ -5921,53 +6495,8 @@ pub async fn review_decision(
     let job_id: Option<Uuid> = row.try_get("job_id")?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
     let stage_text: String = row.try_get("stage")?;
-    let stage: Stage = stage_text.parse()?;
     let suggested_patch: Value = row.try_get("suggested_patch")?;
     let stored_edited_patch: Option<Value> = row.try_get("edited_patch")?;
-
-    if status == "rejected" {
-        set_inventory_stage_status_tx(&mut tx, document_id, stage, "rejected", None, false, run_id)
-            .await?;
-        if let Some(run_id) = run_id {
-            sqlx::query(
-                r#"
-                update jobs
-                   set status = 'cancelled',
-                       lease_owner = null,
-                       lease_until = null,
-                       updated_at = now()
-                 where run_id = $1
-                   and status in ('queued', 'running', 'waiting_review')
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'rejected',
-                       finished_at = now(),
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'rejected',
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
 
     append_audit_tx(
         &mut tx,
@@ -5988,8 +6517,512 @@ pub async fn review_decision(
         },
     )
     .await?;
+    if status == "rejected"
+        && let Some(job_id) = job_id
+    {
+        finalize_review_aggregate_tx(
+            &mut tx,
+            job_id,
+            review_id,
+            "user",
+            Some(actor_id.to_string()),
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
+}
+
+fn apply_intent_from_row(row: PgRow) -> Result<ApplyIntentRecord> {
+    Ok(ApplyIntentRecord {
+        attempt_id: row.try_get("attempt_id")?,
+        source: row.try_get("source")?,
+        source_key: row.try_get("source_key")?,
+        owner_type: row.try_get("owner_type")?,
+        owner_id: row.try_get("owner_id")?,
+        paperless_document_id: row.try_get("paperless_document_id")?,
+        run_id: row.try_get("run_id")?,
+        job_id: row.try_get("job_id")?,
+        review_id: row.try_get("review_id")?,
+        patch_hash: row.try_get("patch_hash")?,
+        patch: row.try_get("patch")?,
+        before: row.try_get("before_state")?,
+        response: row.try_get("response_state")?,
+        metadata: row.try_get("metadata")?,
+        review_revert_status: row.try_get("review_revert_status")?,
+        state: row.try_get("state")?,
+        last_error: row.try_get("last_error")?,
+        request_started_at: row.try_get("request_started_at")?,
+        confirmed_at: row.try_get("confirmed_at")?,
+        finalized_at: row.try_get("finalized_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+const APPLY_INTENT_COLUMNS: &str = r#"
+    attempt_id, source, source_key, owner_type, owner_id,
+    paperless_document_id, run_id, job_id, review_id, patch_hash, patch,
+    before_state, response_state, metadata, review_revert_status, state,
+    last_error, request_started_at, confirmed_at, finalized_at,
+    created_at, updated_at
+"#;
+
+fn apply_audit_patch(patch: &Value) -> Value {
+    let Some(source) = patch.as_object() else {
+        return json!({ "redacted": true, "sha256": short_hash(&patch.to_string()) });
+    };
+    let mut audit = serde_json::Map::new();
+    for (key, value) in source {
+        match key.as_str() {
+            "content" => {
+                let text = value.as_str().unwrap_or_default();
+                audit.insert(
+                    key.clone(),
+                    json!({
+                        "redacted": true,
+                        "sha256": short_hash(text),
+                        "chars": text.chars().count()
+                    }),
+                );
+            }
+            "custom_fields" => {
+                audit.insert(
+                    key.clone(),
+                    json!({
+                        "redacted": true,
+                        "sha256": short_hash(&value.to_string())
+                    }),
+                );
+            }
+            _ => {
+                audit.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Value::Object(audit)
+}
+
+/// Persist the immutable intent for one logical Paperless PATCH. Repeating the
+/// same source-key/hash pair returns its original attempt ID and state.
+pub async fn prepare_apply_intent(
+    pool: &DbPool,
+    input: &ApplyIntentInput,
+) -> Result<ApplyIntentRecord> {
+    if input.source.trim().is_empty()
+        || input.source_key.trim().is_empty()
+        || input.owner_id.trim().is_empty()
+        || input.patch_hash.trim().is_empty()
+        || !matches!(input.owner_type.as_str(), "user" | "worker")
+        || input
+            .review_revert_status
+            .as_deref()
+            .is_some_and(|status| !matches!(status, "pending" | "approved" | "edited"))
+    {
+        return Err(anyhow!("invalid Paperless apply intent"));
+    }
+
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"
+        insert into paperless_apply_intents (
+          source, source_key, owner_type, owner_id, paperless_document_id,
+          run_id, job_id, review_id, patch_hash, patch, before_state,
+          metadata, review_revert_status
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        on conflict (source_key, patch_hash) do nothing
+        returning {APPLY_INTENT_COLUMNS}
+        "#
+    )))
+    .bind(&input.source)
+    .bind(&input.source_key)
+    .bind(&input.owner_type)
+    .bind(&input.owner_id)
+    .bind(input.paperless_document_id)
+    .bind(input.run_id)
+    .bind(input.job_id)
+    .bind(input.review_id)
+    .bind(&input.patch_hash)
+    .bind(&input.patch)
+    .bind(&input.before)
+    .bind(&input.metadata)
+    .bind(&input.review_revert_status)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let (record, was_inserted) = if let Some(row) = inserted {
+        (apply_intent_from_row(row)?, true)
+    } else {
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "select {APPLY_INTENT_COLUMNS} from paperless_apply_intents where source_key = $1 and patch_hash = $2"
+        )))
+        .bind(&input.source_key)
+        .bind(&input.patch_hash)
+        .fetch_one(&mut *tx)
+        .await?;
+        let record = apply_intent_from_row(row)?;
+        if record.paperless_document_id != input.paperless_document_id
+            || record.patch != input.patch
+        {
+            tx.rollback().await?;
+            return Err(anyhow!("Paperless apply intent hash collision"));
+        }
+        (record, false)
+    };
+
+    if was_inserted {
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "document.patch_intent".to_owned(),
+                actor_type: record.owner_type.clone(),
+                actor_id: Some(record.owner_id.clone()),
+                run_id: record.run_id,
+                job_id: record.job_id,
+                paperless_document_id: Some(record.paperless_document_id),
+                before: record.before.clone(),
+                after: Some(json!({
+                    "attempt_id": record.attempt_id,
+                    "patch_hash": record.patch_hash,
+                    "source": record.source,
+                    "state": "prepared"
+                })),
+                metadata: Some(json!({
+                    "source_key": record.source_key,
+                    "context": record.metadata
+                })),
+                outcome: "success".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(record)
+}
+
+pub async fn get_apply_intent(
+    pool: &DbPool,
+    attempt_id: Uuid,
+) -> Result<Option<ApplyIntentRecord>> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "select {APPLY_INTENT_COLUMNS} from paperless_apply_intents where attempt_id = $1"
+    )))
+    .bind(attempt_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(apply_intent_from_row).transpose()
+}
+
+/// Return the durable unfinished attempt for a logical caller. This lets a
+/// reacquired job lease resume the original body even when a fresh Paperless
+/// read would prune fields that were already applied.
+pub async fn get_recoverable_apply_intent_by_source_key(
+    pool: &DbPool,
+    source_key: &str,
+) -> Result<Option<ApplyIntentRecord>> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"
+        select {APPLY_INTENT_COLUMNS}
+          from paperless_apply_intents
+         where source_key = $1
+           and state in ('prepared', 'in_flight', 'confirmed', 'reconciled')
+           and finalized_at is null
+         order by created_at desc
+         limit 1
+        "#
+    )))
+    .bind(source_key)
+    .fetch_optional(pool)
+    .await?;
+    row.map(apply_intent_from_row).transpose()
+}
+
+/// Claim a prepared attempt immediately before HTTP. A recovery worker may
+/// take over a prepared intent because no request has started yet.
+pub async fn mark_apply_intent_in_flight(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    owner_id: &str,
+) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'in_flight', owner_id = $2,
+               request_started_at = now(), updated_at = now()
+         where attempt_id = $1 and state = 'prepared'
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+pub async fn mark_apply_intent_confirmed(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    owner_id: &str,
+    response: Option<Value>,
+    duration_ms: i64,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'confirmed', response_state = $3,
+               confirmed_at = now(), updated_at = now(), last_error = null
+         where attempt_id = $1 and owner_id = $2 and state = 'in_flight'
+        returning source, source_key, owner_type, owner_id, run_id, job_id,
+                  review_id, paperless_document_id, patch_hash, patch,
+                  before_state, metadata
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(owner_id)
+    .bind(&response)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let run_id: Option<Uuid> = row.try_get("run_id")?;
+    let job_id: Option<Uuid> = row.try_get("job_id")?;
+    let document_id: i32 = row.try_get("paperless_document_id")?;
+    let patch: Value = row.try_get("patch")?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "document.patch_confirmed".to_owned(),
+            actor_type: row.try_get("owner_type")?,
+            actor_id: Some(row.try_get("owner_id")?),
+            run_id,
+            job_id,
+            paperless_document_id: Some(document_id),
+            before: row.try_get("before_state")?,
+            after: Some(apply_audit_patch(&patch)),
+            metadata: Some(json!({
+                "attempt_id": attempt_id,
+                "patch_hash": row.try_get::<String, _>("patch_hash")?,
+                "source": row.try_get::<String, _>("source")?,
+                "source_key": row.try_get::<String, _>("source_key")?,
+                "duration_ms": duration_ms,
+                "context": row.try_get::<Value, _>("metadata")?
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    increment_metric_counter_tx(&mut tx, "apply_success_total", 1).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub async fn reconcile_apply_intent(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    reconciled_by: &str,
+    response: Option<Value>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'reconciled', owner_id = $2, response_state = $3,
+               confirmed_at = now(), updated_at = now(), last_error = null
+         where attempt_id = $1 and state = 'in_flight'
+        returning source, source_key, owner_type, owner_id, run_id, job_id,
+                  paperless_document_id, patch_hash, patch, before_state, metadata
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(reconciled_by)
+    .bind(&response)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "document.patch_reconciled".to_owned(),
+            actor_type: row.try_get("owner_type")?,
+            actor_id: Some(row.try_get("owner_id")?),
+            run_id: row.try_get("run_id")?,
+            job_id: row.try_get("job_id")?,
+            paperless_document_id: Some(row.try_get("paperless_document_id")?),
+            before: row.try_get("before_state")?,
+            after: Some(apply_audit_patch(&row.try_get("patch")?)),
+            metadata: Some(json!({
+                "attempt_id": attempt_id,
+                "patch_hash": row.try_get::<String, _>("patch_hash")?,
+                "source": row.try_get::<String, _>("source")?,
+                "source_key": row.try_get::<String, _>("source_key")?,
+                "context": row.try_get::<Value, _>("metadata")?
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    increment_metric_counter_tx(&mut tx, "apply_success_total", 1).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub async fn fail_apply_intent(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    failed_by: &str,
+    error: &str,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'failed', owner_id = $2, last_error = $3, updated_at = now()
+         where attempt_id = $1 and state in ('prepared', 'in_flight')
+        returning source, source_key, owner_type, owner_id, run_id, job_id,
+                  paperless_document_id, patch_hash, patch, before_state, metadata
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(failed_by)
+    .bind(error)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "document.patch_failed".to_owned(),
+            actor_type: row.try_get("owner_type")?,
+            actor_id: Some(row.try_get("owner_id")?),
+            run_id: row.try_get("run_id")?,
+            job_id: row.try_get("job_id")?,
+            paperless_document_id: Some(row.try_get("paperless_document_id")?),
+            before: row.try_get("before_state")?,
+            after: Some(apply_audit_patch(&row.try_get("patch")?)),
+            metadata: Some(json!({
+                "attempt_id": attempt_id,
+                "patch_hash": row.try_get::<String, _>("patch_hash")?,
+                "source": row.try_get::<String, _>("source")?,
+                "source_key": row.try_get::<String, _>("source_key")?,
+                "context": row.try_get::<Value, _>("metadata")?
+            })),
+            outcome: "failed".to_owned(),
+            error_message: Some(error.to_owned()),
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    increment_metric_counter_tx(&mut tx, "apply_failure_total", 1).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub async fn finalize_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'finalized', finalized_at = now(), updated_at = now()
+         where attempt_id = $1 and state in ('confirmed', 'reconciled')
+        "#,
+    )
+    .bind(attempt_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Mark a failed intent as locally settled without making it look successful.
+/// Keeping `state = 'failed'` ensures the same source key/hash cannot later be
+/// mistaken for an already-applied request.
+pub async fn finalize_failed_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set finalized_at = now(), updated_at = now()
+         where attempt_id = $1 and state = 'failed' and finalized_at is null
+        "#,
+    )
+    .bind(attempt_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Whether reverting an `applying` review would make an ambiguous Paperless
+/// side effect blindly retryable. On lookup errors callers should fail closed
+/// and leave the review in `applying` for the recovery worker.
+pub async fn review_has_nonterminal_apply_intent(pool: &DbPool, review_id: Uuid) -> Result<bool> {
+    sqlx::query_scalar(
+        r#"
+        select exists (
+          select 1
+            from paperless_apply_intents
+           where review_id = $1
+             and state in ('prepared', 'in_flight', 'confirmed', 'reconciled')
+             and finalized_at is null
+        )
+        "#,
+    )
+    .bind(review_id)
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
+pub async fn get_review_status(pool: &DbPool, review_id: Uuid) -> Result<Option<String>> {
+    sqlx::query_scalar("select status from review_items where id = $1")
+        .bind(review_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(Into::into)
+}
+
+pub async fn list_recoverable_review_apply_intents(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<ApplyIntentRecord>> {
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"
+        select {APPLY_INTENT_COLUMNS}
+          from paperless_apply_intents candidate
+         where candidate.review_id is not null
+           and candidate.state in ('prepared', 'in_flight', 'confirmed', 'reconciled', 'failed')
+           and candidate.finalized_at is null
+           and not exists (
+             select 1
+               from paperless_apply_intents newer
+              where newer.review_id = candidate.review_id
+                and newer.finalized_at is null
+                and newer.created_at > candidate.created_at
+           )
+         order by candidate.created_at asc
+         limit $1
+        "#
+    )))
+    .bind(limit.clamp(1, 1000))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(apply_intent_from_row).collect()
 }
 
 /// Atomically claim an approved/edited review item for application by moving
@@ -6016,7 +7049,8 @@ pub async fn claim_review_for_apply(
          where id = $1 and status in ('approved', 'edited')
         returning id, run_id, job_id, paperless_document_id, stage,
                   (select status from prev) as status,
-                  suggested_patch, edited_patch, validation_warnings, created_at
+                  suggested_patch, edited_patch, baseline,
+                  conflict_fields, conflicted_at, validation_warnings, created_at
         "#,
     )
     .bind(review_id)
@@ -6034,6 +7068,9 @@ pub async fn claim_review_for_apply(
             status: row.try_get("status")?,
             suggested_patch: row.try_get("suggested_patch")?,
             edited_patch: row.try_get("edited_patch")?,
+            baseline: row.try_get("baseline")?,
+            conflict_fields: row.try_get("conflict_fields")?,
+            conflicted_at: row.try_get("conflicted_at")?,
             validation_warnings: row.try_get("validation_warnings")?,
             debug_context: None,
             paperless_title: None,
@@ -6041,6 +7078,222 @@ pub async fn claim_review_for_apply(
         })
     })
     .transpose()
+}
+
+/// Finalize the shared job only after every sibling review is terminal.
+///
+/// The job row is the aggregate lock. Concurrent last decisions serialize on
+/// it; after the first transaction commits, the waiter observes the complete
+/// sibling set and performs the single conditional job transition.
+async fn finalize_review_aggregate_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    triggering_review_id: Uuid,
+    actor_type: &str,
+    actor_id: Option<String>,
+) -> Result<bool> {
+    let Some(job) = sqlx::query(
+        r#"
+        select run_id, paperless_document_id, stage, status
+          from jobs
+         where id = $1
+         for update
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
+        return Ok(false);
+    };
+    let job_status: String = job.try_get("status")?;
+    if job_status != "waiting_review" {
+        return Ok(false);
+    }
+
+    let counts = sqlx::query(
+        r#"
+        select count(*)::bigint as total,
+               count(*) filter (where status in ('applied', 'rejected'))::bigint as terminal,
+               count(*) filter (where status = 'applied')::bigint as applied,
+               count(*) filter (where status = 'rejected')::bigint as rejected
+          from review_items
+         where job_id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let total: i64 = counts.try_get("total")?;
+    let terminal: i64 = counts.try_get("terminal")?;
+    let applied: i64 = counts.try_get("applied")?;
+    let rejected: i64 = counts.try_get("rejected")?;
+    if total == 0 || terminal != total {
+        return Ok(false);
+    }
+
+    let run_id: Uuid = job.try_get("run_id")?;
+    let document_id: i32 = job.try_get("paperless_document_id")?;
+    let stage_text: String = job.try_get("stage")?;
+    let stage: Stage = stage_text.parse()?;
+    let aggregate_status = if applied > 0 {
+        "succeeded"
+    } else {
+        "cancelled"
+    };
+    let updated = sqlx::query(
+        r#"
+        update jobs
+           set status = $2,
+               lease_owner = null,
+               lease_until = null,
+               updated_at = now()
+         where id = $1 and status = 'waiting_review'
+        "#,
+    )
+    .bind(job_id)
+    .bind(aggregate_status)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    if applied == 0 {
+        set_inventory_stage_status_tx(
+            tx,
+            document_id,
+            stage,
+            "rejected",
+            None,
+            false,
+            Some(run_id),
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            update jobs
+               set status = 'cancelled',
+                   lease_owner = null,
+                   lease_until = null,
+                   updated_at = now()
+             where run_id = $1
+               and status in ('queued', 'running', 'waiting_review')
+            "#,
+        )
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update pipeline_runs
+               set status = 'rejected', finished_at = now(), updated_at = now()
+             where id = $1
+               and status not in ('succeeded', 'failed', 'cancelled', 'rejected')
+            "#,
+        )
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'rejected',
+                   complete = false,
+                   updated_at = now()
+             where paperless_document_id = $1
+            "#,
+        )
+        .bind(document_id)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        set_inventory_stage_status_tx(
+            tx,
+            document_id,
+            stage,
+            "succeeded",
+            None,
+            false,
+            Some(run_id),
+        )
+        .await?;
+        if no_remaining_jobs_tx(tx, run_id).await? {
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'succeeded', finished_at = now(), updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'succeeded',
+                       complete = true,
+                       updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut **tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'queued', updated_at = now()
+                 where id = $1
+                   and status not in ('succeeded', 'failed', 'cancelled', 'rejected')
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'queued', updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
+    append_audit_tx(
+        tx,
+        AuditEventInput {
+            event_type: "review.aggregate_finalized".to_owned(),
+            actor_type: actor_type.to_owned(),
+            actor_id,
+            run_id: Some(run_id),
+            job_id: Some(job_id),
+            paperless_document_id: Some(document_id),
+            before: Some(json!({ "status": "waiting_review" })),
+            after: Some(json!({
+                "status": aggregate_status,
+                "total": total,
+                "applied": applied,
+                "rejected": rejected
+            })),
+            metadata: Some(json!({
+                "stage": stage,
+                "triggering_review_id": triggering_review_id
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    Ok(true)
 }
 
 pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid) -> Result<()> {
@@ -6053,7 +7306,9 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
         update review_items
            set status = 'applied',
                reviewed_by = coalesce(reviewed_by, $2),
-               reviewed_at = coalesce(reviewed_at, now())
+               reviewed_at = coalesce(reviewed_at, now()),
+               conflict_fields = '[]'::jsonb,
+               conflicted_at = null
          where id = $1 and status = 'applying'
         returning run_id, job_id, paperless_document_id, stage
         "#,
@@ -6068,82 +7323,12 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
     };
 
     let job_id: Option<Uuid> = row.try_get("job_id")?;
-    if let Some(job_id) = job_id {
-        sqlx::query("update jobs set status = 'succeeded', updated_at = now() where id = $1")
-            .bind(job_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
     let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
     // None only when the originating run was pruned by retention (terminal
     // runs only) — decoded defensively since migration 0041 made the column
     // nullable; the run-progress block below is skipped without a run.
     let run_id: Option<Uuid> = row.try_get("run_id")?;
-    set_inventory_stage_status_tx(
-        &mut tx,
-        document_id,
-        stage,
-        "succeeded",
-        None,
-        false,
-        run_id,
-    )
-    .await?;
-
-    if let Some(run_id) = run_id {
-        if no_remaining_jobs_tx(&mut tx, run_id).await? {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'succeeded',
-                       finished_at = now(),
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'succeeded',
-                       complete = true,
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'queued',
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'queued',
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-
     append_audit_tx(
         &mut tx,
         AuditEventInput {
@@ -6163,6 +7348,16 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
         },
     )
     .await?;
+    if let Some(job_id) = job_id {
+        finalize_review_aggregate_tx(
+            &mut tx,
+            job_id,
+            review_id,
+            "user",
+            Some(actor_id.to_string()),
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -6180,7 +7375,8 @@ pub async fn list_pending_review_items_for_autopilot_drain(
     let rows = sqlx::query(
         r#"
         select id, run_id, job_id, paperless_document_id, stage, status,
-               suggested_patch, edited_patch, validation_warnings, created_at
+               suggested_patch, edited_patch, baseline,
+               conflict_fields, conflicted_at, validation_warnings, created_at
           from review_items
          where status = 'pending'
          order by created_at asc
@@ -6203,6 +7399,9 @@ pub async fn list_pending_review_items_for_autopilot_drain(
                 status: row.try_get("status")?,
                 suggested_patch: row.try_get("suggested_patch")?,
                 edited_patch: row.try_get("edited_patch")?,
+                baseline: row.try_get("baseline")?,
+                conflict_fields: row.try_get("conflict_fields")?,
+                conflicted_at: row.try_get("conflicted_at")?,
                 validation_warnings: row.try_get("validation_warnings")?,
                 debug_context: None,
                 paperless_title: None,
@@ -6235,7 +7434,8 @@ pub async fn claim_pending_review_for_autopilot_drain(
                reviewed_at = now()
          where id = $1 and status = 'pending'
         returning id, run_id, job_id, paperless_document_id, stage, status,
-                  suggested_patch, edited_patch, validation_warnings, created_at
+                  suggested_patch, edited_patch, baseline,
+                  conflict_fields, conflicted_at, validation_warnings, created_at
         "#,
     )
     .bind(review_id)
@@ -6257,6 +7457,9 @@ pub async fn claim_pending_review_for_autopilot_drain(
         status: row.try_get("status")?,
         suggested_patch: row.try_get("suggested_patch")?,
         edited_patch: row.try_get("edited_patch")?,
+        baseline: row.try_get("baseline")?,
+        conflict_fields: row.try_get("conflict_fields")?,
+        conflicted_at: row.try_get("conflicted_at")?,
         validation_warnings: row.try_get("validation_warnings")?,
         debug_context: None,
         paperless_title: None,
@@ -6304,7 +7507,9 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
         r#"
         update review_items
            set status = 'applied',
-               reviewed_at = coalesce(reviewed_at, now())
+               reviewed_at = coalesce(reviewed_at, now()),
+               conflict_fields = '[]'::jsonb,
+               conflicted_at = null
          where id = $1 and status = 'applying'
         returning run_id, job_id, paperless_document_id, stage
         "#,
@@ -6318,82 +7523,12 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
     };
 
     let job_id: Option<Uuid> = row.try_get("job_id")?;
-    if let Some(job_id) = job_id {
-        sqlx::query("update jobs set status = 'succeeded', updated_at = now() where id = $1")
-            .bind(job_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
     let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
     // None only when the originating run was pruned by retention (terminal
     // runs only) — decoded defensively since migration 0041 made the column
     // nullable; the run-progress block below is skipped without a run.
     let run_id: Option<Uuid> = row.try_get("run_id")?;
-    set_inventory_stage_status_tx(
-        &mut tx,
-        document_id,
-        stage,
-        "succeeded",
-        None,
-        false,
-        run_id,
-    )
-    .await?;
-
-    if let Some(run_id) = run_id {
-        if no_remaining_jobs_tx(&mut tx, run_id).await? {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'succeeded',
-                       finished_at = now(),
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'succeeded',
-                       complete = true,
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'queued',
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'queued',
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-
     append_audit_tx(
         &mut tx,
         AuditEventInput {
@@ -6416,6 +7551,9 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
         },
     )
     .await?;
+    if let Some(job_id) = job_id {
+        finalize_review_aggregate_tx(&mut tx, job_id, review_id, "worker", None).await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -6442,6 +7580,81 @@ pub async fn revert_review_to_pending_after_failed_drain(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Record a field-level optimistic-concurrency conflict without exposing the
+/// document values. The review returns to a retryable state while its shared
+/// job, run, and inventory deliberately remain `waiting_review`.
+pub async fn mark_review_apply_conflict(
+    pool: &DbPool,
+    review_id: Uuid,
+    to_status: &str,
+    fields: &[String],
+    actor_type: &str,
+    actor_id: Option<String>,
+) -> Result<bool> {
+    if !matches!(to_status, "pending" | "approved" | "edited") {
+        return Err(anyhow!("invalid review conflict revert status"));
+    }
+    let mut fields = fields.to_vec();
+    fields.sort();
+    fields.dedup();
+    let mut tx = pool.begin().await?;
+    let Some(row) = sqlx::query(
+        r#"
+        update review_items
+           set status = $2,
+               reviewed_at = case when $2 = 'pending' then null else reviewed_at end,
+               conflict_fields = $3,
+               conflicted_at = now()
+         where id = $1 and status = 'applying'
+        returning run_id, job_id, paperless_document_id, stage
+        "#,
+    )
+    .bind(review_id)
+    .bind(to_status)
+    .bind(json!(fields))
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+
+    let run_id: Option<Uuid> = row.try_get("run_id")?;
+    let job_id: Option<Uuid> = row.try_get("job_id")?;
+    let document_id: i32 = row.try_get("paperless_document_id")?;
+    let stage: String = row.try_get("stage")?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "review.apply_conflict".to_owned(),
+            actor_type: actor_type.to_owned(),
+            actor_id,
+            run_id,
+            job_id,
+            paperless_document_id: Some(document_id),
+            before: None,
+            after: None,
+            metadata: Some(json!({
+                "review_id": review_id,
+                "fields": fields
+            })),
+            outcome: "failed".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tracing::warn!(
+        %review_id,
+        paperless_document_id = document_id,
+        %stage,
+        "review apply stopped by optimistic-concurrency conflict"
+    );
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Release a human-apply claim after the Paperless PATCH failed: move the row
@@ -7413,16 +8626,18 @@ async fn append_audit_tx(
     .transpose()?;
     let id = Uuid::now_v7();
     let created_at = Utc::now();
-    let event_hash = audit_event_hash(id, created_at, &prev_event_hash, &event);
+    let hash_version = AUDIT_HASH_VERSION_V2;
+    let event_hash = audit_event_hash_v2(id, created_at, &prev_event_hash, &event);
 
     sqlx::query(
         r#"
         insert into audit_events (
           id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
           source_ip, user_agent,
-          before, after, metadata, outcome, error_message, prev_event_hash, event_hash, created_at
+          before, after, metadata, outcome, error_message, prev_event_hash, event_hash,
+          hash_version, created_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         "#,
     )
     .bind(id)
@@ -7441,13 +8656,17 @@ async fn append_audit_tx(
     .bind(&event.error_message)
     .bind(&prev_event_hash)
     .bind(&event_hash)
+    .bind(hash_version)
     .bind(created_at)
     .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-fn audit_event_hash(
+const AUDIT_HASH_VERSION_V1: i16 = 1;
+const AUDIT_HASH_VERSION_V2: i16 = 2;
+
+fn audit_event_hash_v1(
     id: Uuid,
     created_at: DateTime<Utc>,
     prev_event_hash: &Option<String>,
@@ -7472,11 +8691,54 @@ fn audit_event_hash(
     short_hash(&canonical.to_string())
 }
 
+fn audit_event_hash_v2(
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    prev_event_hash: &Option<String>,
+    event: &AuditEventInput,
+) -> String {
+    let canonical = json!({
+        "hash_version": AUDIT_HASH_VERSION_V2,
+        "id": id,
+        "created_at": created_at,
+        "prev_event_hash": prev_event_hash,
+        "run_id": event.run_id,
+        "job_id": event.job_id,
+        "paperless_document_id": event.paperless_document_id,
+        "event_type": &event.event_type,
+        "actor_type": &event.actor_type,
+        "actor_id": &event.actor_id,
+        "source_ip": &event.source_ip,
+        "user_agent": &event.user_agent,
+        "before": &event.before,
+        "after": &event.after,
+        "metadata": &event.metadata,
+        "outcome": &event.outcome,
+        "error_message": &event.error_message,
+    });
+    short_hash(&canonical.to_string())
+}
+
+fn audit_event_hash_for_version(
+    hash_version: i16,
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    prev_event_hash: &Option<String>,
+    event: &AuditEventInput,
+) -> Option<String> {
+    match hash_version {
+        AUDIT_HASH_VERSION_V1 => Some(audit_event_hash_v1(id, created_at, prev_event_hash, event)),
+        AUDIT_HASH_VERSION_V2 => Some(audit_event_hash_v2(id, created_at, prev_event_hash, event)),
+        _ => None,
+    }
+}
+
 pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEventRecord>> {
     let rows = sqlx::query(
         r#"
         select id, event_type, actor_type, actor_id, paperless_document_id,
-               outcome, error_message, created_at, metadata, prev_event_hash, event_hash
+               outcome, error_message, created_at, metadata, prev_event_hash, event_hash,
+               hash_version
           from audit_events
          order by created_at desc
          limit $1
@@ -7499,6 +8761,7 @@ pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEve
                 metadata: row.try_get("metadata")?,
                 prev_event_hash: row.try_get("prev_event_hash")?,
                 event_hash: row.try_get("event_hash")?,
+                hash_version: row.try_get("hash_version")?,
             })
         })
         .collect()
@@ -7507,11 +8770,19 @@ pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEve
 pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityReport> {
     use futures::TryStreamExt;
 
-    let legacy_events: i64 =
-        sqlx::query("select count(*)::bigint as count from audit_events where event_hash is null")
-            .fetch_one(pool)
-            .await?
-            .try_get("count")?;
+    let coverage = sqlx::query(
+        r#"
+        select count(*) filter (where event_hash is null)::bigint as legacy_events,
+               count(*) filter (where event_hash is not null and hash_version = 1)::bigint as v1_events,
+               count(*) filter (where event_hash is not null and hash_version = 2)::bigint as v2_events
+          from audit_events
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    let legacy_events: i64 = coverage.try_get("legacy_events")?;
+    let v1_events: i64 = coverage.try_get("v1_events")?;
+    let v2_events: i64 = coverage.try_get("v2_events")?;
 
     // Stream the audit chain instead of loading the entire table into memory.
     // Verification is intrinsically streamable: each row's prev_event_hash
@@ -7520,8 +8791,8 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
     let mut stream = sqlx::query(
         r#"
         select id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
-               before, after, metadata, outcome, error_message, created_at,
-               prev_event_hash, event_hash
+               source_ip, user_agent, before, after, metadata, outcome, error_message, created_at,
+               prev_event_hash, event_hash, hash_version
           from audit_events
          where event_hash is not null
          order by chain_position asc
@@ -7536,6 +8807,7 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
         let created_at: DateTime<Utc> = row.try_get("created_at")?;
         let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
         let event_hash: String = row.try_get("event_hash")?;
+        let hash_version: Option<i16> = row.try_get("hash_version")?;
         if let Some(expected_prev) = &latest_event_hash
             && prev_event_hash.as_ref() != Some(expected_prev)
         {
@@ -7543,6 +8815,8 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
                 ok: false,
                 checked_events,
                 legacy_events,
+                v1_events,
+                v2_events,
                 latest_event_hash,
                 broken_event_id: Some(id),
                 broken_reason: Some("previous event hash does not match chain".to_owned()),
@@ -7560,17 +8834,30 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
             metadata: row.try_get("metadata")?,
             outcome: row.try_get("outcome")?,
             error_message: row.try_get("error_message")?,
-            // source_ip / user_agent are persisted but not part of the
-            // audit hash chain; leave None when reconstructing for verify.
-            source_ip: None,
-            user_agent: None,
+            source_ip: row.try_get("source_ip")?,
+            user_agent: row.try_get("user_agent")?,
         };
-        let expected_hash = audit_event_hash(id, created_at, &prev_event_hash, &event);
+        let Some(expected_hash) = hash_version.and_then(|version| {
+            audit_event_hash_for_version(version, id, created_at, &prev_event_hash, &event)
+        }) else {
+            return Ok(AuditIntegrityReport {
+                ok: false,
+                checked_events,
+                legacy_events,
+                v1_events,
+                v2_events,
+                latest_event_hash,
+                broken_event_id: Some(id),
+                broken_reason: Some("unsupported or missing audit hash version".to_owned()),
+            });
+        };
         if expected_hash != event_hash {
             return Ok(AuditIntegrityReport {
                 ok: false,
                 checked_events,
                 legacy_events,
+                v1_events,
+                v2_events,
                 latest_event_hash,
                 broken_event_id: Some(id),
                 broken_reason: Some("event hash does not match event payload".to_owned()),
@@ -7584,6 +8871,8 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
         ok: true,
         checked_events,
         legacy_events,
+        v1_events,
+        v2_events,
         latest_event_hash,
         broken_event_id: None,
         broken_reason: None,
@@ -7864,23 +9153,81 @@ pub struct VisionCrashRequeueSummary {
 /// Also flips the matching `pipeline_runs` row back to `queued`, and resets the
 /// inventory stage status, so the dashboard reflects the second chance.
 ///
-/// All writes happen in a single transaction; either all matching rows are requeued or
-/// none of them are. Returns the number of jobs that were lifted.
+/// All writes happen in a single transaction; either the newest matching run per
+/// document is requeued or none are. Returns the number of jobs that were lifted.
 pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashRequeueSummary> {
     let mut tx = pool.begin().await?;
+    // A failed run becomes active again below. Discover candidate documents
+    // without locking rows, then take the same canonical document locks used
+    // by run creation before changing jobs or acquiring the audit-chain lock.
+    let candidate_document_ids = sqlx::query_scalar::<_, i32>(
+        r#"
+        select distinct j.paperless_document_id
+          from jobs j
+          join pipeline_runs pr on pr.id = j.run_id
+         where j.status = 'failed'
+           and j.stage = 'ocr'
+           and pr.status = 'failed'
+           and (
+                j.error_message ilike $1
+             or j.error_message ilike $2
+             or j.error_message ilike $3
+           )
+           and not exists (
+             select 1
+               from pipeline_runs active
+              where active.paperless_document_id = j.paperless_document_id
+                and active.id <> j.run_id
+                and active.status in ('queued', 'running', 'waiting_review', 'applying')
+           )
+         order by j.paperless_document_id
+        "#,
+    )
+    .bind(VISION_CRASH_SQL_PATTERNS[0])
+    .bind(VISION_CRASH_SQL_PATTERNS[1])
+    .bind(VISION_CRASH_SQL_PATTERNS[2])
+    .fetch_all(&mut *tx)
+    .await?;
+    lock_active_run_documents_tx(&mut tx, &candidate_document_ids).await?;
+
     let rows = sqlx::query(
         r#"
-        with crashed as (
-          select id, run_id, paperless_document_id, max_attempts
-            from jobs
-           where status = 'failed'
-             and stage = 'ocr'
+        with eligible_runs as (
+          select distinct on (j.paperless_document_id)
+                 j.run_id,
+                 j.paperless_document_id
+            from jobs j
+            join pipeline_runs pr on pr.id = j.run_id
+           where j.status = 'failed'
+             and j.stage = 'ocr'
+             and pr.status = 'failed'
+             and j.paperless_document_id = any($4)
              and (
-                  error_message ilike $1
-               or error_message ilike $2
-               or error_message ilike $3
+                  j.error_message ilike $1
+               or j.error_message ilike $2
+               or j.error_message ilike $3
              )
-           for update
+             and not exists (
+               select 1
+                 from pipeline_runs active
+                where active.paperless_document_id = j.paperless_document_id
+                  and active.id <> j.run_id
+                  and active.status in ('queued', 'running', 'waiting_review', 'applying')
+             )
+           order by j.paperless_document_id, pr.created_at desc, pr.id desc
+        ),
+        crashed as (
+          select j.id, j.run_id, j.paperless_document_id, j.max_attempts
+            from jobs j
+            join eligible_runs eligible on eligible.run_id = j.run_id
+           where j.status = 'failed'
+             and j.stage = 'ocr'
+             and (
+                  j.error_message ilike $1
+               or j.error_message ilike $2
+               or j.error_message ilike $3
+             )
+           for update of j
         )
         update jobs j
            set status = 'queued',
@@ -7898,6 +9245,7 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
     .bind(VISION_CRASH_SQL_PATTERNS[0])
     .bind(VISION_CRASH_SQL_PATTERNS[1])
     .bind(VISION_CRASH_SQL_PATTERNS[2])
+    .bind(&candidate_document_ids)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -7996,9 +9344,10 @@ pub struct MetadataStageBackfillSummary {
 /// review items that the operator cannot meaningfully act on.
 ///
 /// What this does, in one transaction:
-///   * Find every `pipeline_runs` whose `stages` jsonb array contains "ocr"
-///     but does NOT contain "metadata", AND does not already have a
-///     `metadata`-stage `jobs` row.
+///   * Find at most one relevant `pipeline_runs` row per document whose
+///     `stages` jsonb array contains "ocr" but does NOT contain "metadata",
+///     and which does not already have a `metadata`-stage `jobs` row. Prefer
+///     the active run, otherwise use the newest succeeded run.
 ///   * Append "metadata" to `pipeline_runs.stages`.
 ///   * Insert a queued `metadata` job for the run with `stage_priority=20`
 ///     so it sequences AFTER the OCR job (priority 10).
@@ -8018,23 +9367,84 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
 ) -> Result<MetadataStageBackfillSummary> {
     let mut tx = pool.begin().await?;
 
-    // Step 1: identify the target runs. Lock them for update so a parallel
-    // worker doesn't race us into queueing duplicate metadata jobs.
-    let target_rows = sqlx::query(
+    // Succeeded OCR-only runs are reactivated below. Coordinate that
+    // terminal-to-active transition with concurrent creates, and take every
+    // document lock before any row or audit-chain lock.
+    let candidate_document_ids = sqlx::query_scalar::<_, i32>(
         r#"
-        select pr.id as run_id,
-               pr.paperless_document_id,
-               pr.status as current_status
+        select distinct pr.paperless_document_id
           from pipeline_runs pr
          where pr.stages @> '["ocr"]'::jsonb
            and not (pr.stages @> '["metadata"]'::jsonb)
+           and pr.status in ('queued', 'running', 'waiting_review', 'applying', 'succeeded')
            and not exists (
              select 1 from jobs j
               where j.run_id = pr.id and j.stage = 'metadata'
            )
-         for update of pr skip locked
+           and (
+             pr.status <> 'succeeded'
+             or not exists (
+               select 1
+                 from pipeline_runs active
+                where active.paperless_document_id = pr.paperless_document_id
+                  and active.id <> pr.id
+                  and active.status in ('queued', 'running', 'waiting_review', 'applying')
+             )
+           )
+         order by pr.paperless_document_id
         "#,
     )
+    .fetch_all(&mut *tx)
+    .await?;
+    lock_active_run_documents_tx(&mut tx, &candidate_document_ids).await?;
+
+    // Step 1: identify the target runs. Lock them for update so a parallel
+    // worker doesn't race us into queueing duplicate metadata jobs.
+    let target_rows = sqlx::query(
+        r#"
+        with ranked_targets as (
+          select pr.id,
+                 row_number() over (
+                   partition by pr.paperless_document_id
+                   order by
+                     case
+                       when pr.status in ('queued', 'running', 'waiting_review', 'applying')
+                       then 0 else 1
+                     end,
+                     pr.created_at desc,
+                     pr.id desc
+                 ) as document_rank
+            from pipeline_runs pr
+           where pr.paperless_document_id = any($1)
+             and pr.stages @> '["ocr"]'::jsonb
+             and not (pr.stages @> '["metadata"]'::jsonb)
+             and pr.status in ('queued', 'running', 'waiting_review', 'applying', 'succeeded')
+             and not exists (
+               select 1 from jobs j
+                where j.run_id = pr.id and j.stage = 'metadata'
+             )
+             and (
+               pr.status <> 'succeeded'
+               or not exists (
+                 select 1
+                   from pipeline_runs active
+                  where active.paperless_document_id = pr.paperless_document_id
+                    and active.id <> pr.id
+                    and active.status in ('queued', 'running', 'waiting_review', 'applying')
+               )
+             )
+        )
+        select pr.id as run_id,
+               pr.paperless_document_id,
+               pr.status as current_status
+          from pipeline_runs pr
+          join ranked_targets target
+            on target.id = pr.id
+           and target.document_rank = 1
+        for update of pr skip locked
+        "#,
+    )
+    .bind(&candidate_document_ids)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -8362,10 +9772,11 @@ pub struct StuckRunStatusFixSummary {
 /// recording the terminal status leaves the row owned-but-never-finished, and
 /// neither the drain (lists `pending`) nor the operator (lists
 /// `approved`/`edited`) would ever pick it up again. A row in `applying`
-/// older than `older_than_seconds` is reverted to `pending` so the next drain
-/// tick (or a fresh operator apply after re-approval) retries it. The Paperless
-/// PATCH is idempotent on redo (it overwrites the same fields), so re-applying
-/// is safe. Returns the number of rows recovered. #253.
+/// older than `older_than_seconds` is reverted to `pending` only when it has no
+/// durable, non-terminal Paperless apply intent. Intent-backed rows must be
+/// reconciled/finalized by the apply recovery state machine; blindly requeuing
+/// them could repeat an externally successful PATCH. Returns the number of
+/// rows recovered. #253, #342.
 pub async fn reset_stale_applying_reviews(pool: &DbPool, older_than_seconds: i64) -> Result<i64> {
     let reset = sqlx::query(
         r#"
@@ -8374,6 +9785,12 @@ pub async fn reset_stale_applying_reviews(pool: &DbPool, older_than_seconds: i64
                reviewed_at = null
          where status = 'applying'
            and reviewed_at < now() - make_interval(secs => $1)
+           and not exists (
+             select 1
+               from paperless_apply_intents pai
+              where pai.review_id = review_items.id
+                and pai.state in ('prepared', 'in_flight', 'confirmed', 'reconciled')
+           )
         "#,
     )
     .bind(older_than_seconds as f64)
@@ -9179,6 +10596,77 @@ pub struct BlockedQueuedCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn audit_hash_fixture(source_ip: Option<&str>, user_agent: Option<&str>) -> AuditEventInput {
+        AuditEventInput {
+            event_type: "user.roles_changed".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some("actor-17".to_owned()),
+            run_id: Some(Uuid::parse_str("018f0000-0000-7000-8000-000000000001").unwrap()),
+            job_id: Some(Uuid::parse_str("018f0000-0000-7000-8000-000000000002").unwrap()),
+            paperless_document_id: Some(4904),
+            before: Some(json!({ "roles": ["admin"] })),
+            after: Some(json!({ "roles": ["viewer"] })),
+            metadata: Some(json!({ "reason": "fixture" })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: source_ip.map(str::to_owned),
+            user_agent: user_agent.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn audit_hash_v1_canonical_fixture_is_stable() {
+        let id = Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap();
+        let created_at = "2026-07-17T08:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let previous = Some("previous-event-hash".to_owned());
+        let event = audit_hash_fixture(Some("203.0.113.17"), Some("Archivist-Test/2"));
+
+        assert_eq!(
+            audit_event_hash_v1(id, created_at, &previous, &event),
+            "ffd758b87049d65f9446a44190021fe0f1886a6fbaecace90a28de3c3d9368ea"
+        );
+    }
+
+    #[test]
+    fn audit_hash_v1_ignores_origin_but_v2_binds_values_and_nulls() {
+        let id = Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap();
+        let created_at = "2026-07-17T08:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let previous = Some("previous-event-hash".to_owned());
+        let with_origin = audit_hash_fixture(Some("203.0.113.17"), Some("Archivist-Test/2"));
+        let other_origin = audit_hash_fixture(Some("203.0.113.18"), Some("Archivist-Test/3"));
+        let null_origin = audit_hash_fixture(None, None);
+
+        assert_eq!(
+            audit_event_hash_v1(id, created_at, &previous, &with_origin),
+            audit_event_hash_v1(id, created_at, &previous, &other_origin)
+        );
+        let v2 = audit_event_hash_v2(id, created_at, &previous, &with_origin);
+        assert_eq!(
+            v2,
+            "55f41a0611b9a83a4e7abdf657f9ffc463ecf49ffd575699a29c6c113d4073a7"
+        );
+        assert_ne!(
+            v2,
+            audit_event_hash_v2(id, created_at, &previous, &other_origin)
+        );
+        assert!(
+            audit_event_hash_for_version(99, id, created_at, &previous, &with_origin).is_none()
+        );
+        assert_ne!(
+            v2,
+            audit_event_hash_v2(id, created_at, &previous, &null_origin)
+        );
+        assert_ne!(
+            audit_event_hash_v2(id, created_at, &previous, &null_origin),
+            audit_event_hash_v2(
+                id,
+                created_at,
+                &previous,
+                &audit_hash_fixture(Some("203.0.113.17"), None)
+            )
+        );
+    }
 
     #[test]
     fn hashes_tokens_without_returning_raw_value() {

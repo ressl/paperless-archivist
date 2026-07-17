@@ -1,6 +1,6 @@
-import type { AiProvider, AiProviderKind, RuntimeSettings } from './api/client';
+import type { AiProvider, AiProviderKind, ModelCapability, RuntimeSettings } from './api/client';
 
-export type ModelCapability = 'text' | 'vision';
+export type { ModelCapability } from './api/client';
 
 type ModelOption = {
   value: string;
@@ -9,6 +9,45 @@ type ModelOption = {
 };
 
 type ProviderDescriptor = Pick<AiProvider, 'name' | 'kind' | 'base_url'>;
+
+export const MINIMAX_M3_MODEL = 'ressl/MiniMax-M3-uncensored-NVFP4';
+export const SGLANG_MINIMAX_M3_PROVIDER_NAME = 'sglang-minimax-m3';
+
+function blankProviderTuning(): AiProvider['tuning'] {
+  return {
+    worker_concurrency: null,
+    consensus_secondary_text_model: null,
+    consensus_date_tolerance_days: null,
+    text_num_ctx: null,
+    vision_num_ctx: null,
+    reasoning_effort: null,
+    max_output_tokens: null,
+    structured_output: null,
+    ocr_page_limit: null,
+    hourly_document_limit: null,
+    daily_document_limit: null,
+    metadata_confidence_threshold: null,
+    title_confidence_threshold: null,
+    correspondent_confidence_threshold: null,
+    document_type_confidence_threshold: null,
+    document_date_confidence_threshold: null,
+    tags_confidence_threshold: null,
+    fields_confidence_threshold: null,
+    max_tags: null,
+    allowed_list_max: null,
+    request_timeout_seconds: null
+  };
+}
+
+// Measured against the exact runtime pins in the MiniMax M3 capacity report.
+// A single worker request leaves one runtime slot for interactive consumers.
+export const SGLANG_MINIMAX_M3_TUNING: AiProvider['tuning'] = {
+  ...blankProviderTuning(),
+  worker_concurrency: 1,
+  max_output_tokens: 4096,
+  structured_output: 'auto',
+  request_timeout_seconds: 180
+};
 
 const localOllamaProvider: ProviderDescriptor = {
   name: 'ollama',
@@ -22,12 +61,75 @@ const ollamaCloudProvider: AiProvider = {
   base_url: 'https://ollama.com',
   default_text_model: 'glm-5.1',
   default_vision_model: 'qwen3-vl:235b-instruct',
+  cost_per_1m_input_tokens_usd: null,
+  cost_per_1m_output_tokens_usd: null,
   secret_id: null,
   // Injected as a UI suggestion only — must stay disabled so merely opening
   // Settings doesn't persist an enabled, unconfigured external provider on the
   // next save. The operator enables it explicitly after adding a key. (#272)
-  enabled: false
+  enabled: false,
+  tuning: {
+    worker_concurrency: null,
+    consensus_secondary_text_model: null,
+    consensus_date_tolerance_days: null,
+    text_num_ctx: null,
+    vision_num_ctx: null,
+    reasoning_effort: 'medium',
+    max_output_tokens: null,
+    structured_output: null,
+    ocr_page_limit: null,
+    hourly_document_limit: null,
+    daily_document_limit: null,
+    metadata_confidence_threshold: null,
+    title_confidence_threshold: null,
+    correspondent_confidence_threshold: null,
+    document_type_confidence_threshold: null,
+    document_date_confidence_threshold: null,
+    tags_confidence_threshold: null,
+    fields_confidence_threshold: null,
+    max_tags: null,
+    allowed_list_max: null,
+    request_timeout_seconds: null
+  }
 };
+
+const sglangMinimaxM3Provider: AiProvider = {
+  name: SGLANG_MINIMAX_M3_PROVIDER_NAME,
+  kind: 'openai_compatible',
+  base_url: '',
+  default_text_model: MINIMAX_M3_MODEL,
+  default_vision_model: null,
+  cost_per_1m_input_tokens_usd: null,
+  cost_per_1m_output_tokens_usd: null,
+  secret_id: null,
+  enabled: false,
+  tuning: SGLANG_MINIMAX_M3_TUNING
+};
+
+const builtInProviderNames = new Set([
+  'ollama',
+  'ollama-cloud',
+  'openai',
+  'anthropic',
+  'openai-compatible',
+  SGLANG_MINIMAX_M3_PROVIDER_NAME,
+  'mineru'
+]);
+
+function normalizedProviderName(name: string) {
+  return name.trim().toLowerCase();
+}
+
+export function isBuiltInProviderName(name: string) {
+  return builtInProviderNames.has(normalizedProviderName(name));
+}
+
+export function isSglangMinimaxM3Provider(provider: ProviderDescriptor) {
+  return (
+    provider.kind === 'openai_compatible' &&
+    normalizedProviderName(provider.name) === SGLANG_MINIMAX_M3_PROVIDER_NAME
+  );
+}
 
 const localOllamaTextModels: ModelOption[] = [
   { value: 'qwen3:8b', label: 'qwen3:8b', recommendation: true },
@@ -198,6 +300,7 @@ const anthropicModels: ModelOption[] = [
 
 const openAiCompatibleTextModels: ModelOption[] = [
   { value: 'qwen3:8b', label: 'qwen3:8b', recommendation: true },
+  { value: MINIMAX_M3_MODEL, label: MINIMAX_M3_MODEL },
   { value: 'qwen3:14b', label: 'qwen3:14b' },
   { value: 'qwen3:30b', label: 'qwen3:30b' },
   { value: 'qwen3:32b', label: 'qwen3:32b' },
@@ -305,15 +408,52 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
   const notifications = settings.notifications as Partial<RuntimeSettings['notifications']> | undefined;
   const paperless = settings.paperless as Partial<RuntimeSettings['paperless']>;
   const fields = settings.fields as Partial<RuntimeSettings['fields']>;
-  if (!knownProviders.some((provider) => provider.name === ollamaCloudProvider.name)) {
+  if (
+    !knownProviders.some(
+      (provider) => normalizedProviderName(provider.name) === ollamaCloudProvider.name
+    )
+  ) {
     knownProviders.push(ollamaCloudProvider);
+  }
+  if (
+    !knownProviders.some(
+      (provider) =>
+        normalizedProviderName(provider.name) === SGLANG_MINIMAX_M3_PROVIDER_NAME
+    )
+  ) {
+    knownProviders.push(sglangMinimaxM3Provider);
   }
   const providers = knownProviders.map((provider) => ({
     ...provider,
-    default_text_model: provider.default_text_model || recommendedModel(provider, 'text'),
-    default_vision_model: provider.default_vision_model || recommendedModel(provider, 'vision')
+    default_text_model: isSglangMinimaxM3Provider(provider)
+      ? provider.default_text_model
+      : provider.default_text_model || recommendedModel(provider, 'text'),
+    default_vision_model:
+      provider.default_vision_model ||
+      (isSglangMinimaxM3Provider(provider) ? null : recommendedModel(provider, 'vision'))
   }));
-  const selectedProvider = providers.find((provider) => provider.name === settings.ai.default_provider) ?? localOllamaProvider;
+  const modelCatalog = [...(settings.ai.model_catalog ?? [])];
+  if (
+    !modelCatalog.some(
+      (entry) =>
+        entry.provider_kind === 'openai_compatible' &&
+        entry.capability === 'text' &&
+        entry.model_id === MINIMAX_M3_MODEL
+    )
+  ) {
+    modelCatalog.push({
+      provider_kind: 'openai_compatible',
+      capability: 'text',
+      model_id: MINIMAX_M3_MODEL,
+      recommended: false,
+      modality: 'text',
+      best_for: 'MiniMax M3 served by SGLang'
+    });
+  }
+  const defaultProviderName = normalizedProviderName(settings.ai.default_provider);
+  const selectedProvider =
+    providers.find((provider) => normalizedProviderName(provider.name) === defaultProviderName) ??
+    localOllamaProvider;
   return {
     ...settings,
     paperless: {
@@ -355,7 +495,8 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
       ...settings.ai,
       default_text_model: settings.ai.default_text_model || recommendedModel(selectedProvider, 'text'),
       default_vision_model: settings.ai.default_vision_model || recommendedModel(selectedProvider, 'vision'),
-      providers
+      providers,
+      model_catalog: modelCatalog
     }
   };
 }

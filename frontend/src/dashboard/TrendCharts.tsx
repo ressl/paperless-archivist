@@ -58,7 +58,14 @@ export const TrendCharts = memo(function TrendCharts({
   }, [stats?.backlog_series]);
 
   return (
-    <div className={`dashboard-analytics${compactLayout && activeTab !== 'analytics' ? ' is-hidden' : ''}`} role={compactLayout ? 'tabpanel' : undefined}>
+    <div
+      id={compactLayout ? 'dashboard-panel-analytics' : undefined}
+      className={`dashboard-analytics${compactLayout && activeTab !== 'analytics' ? ' is-hidden' : ''}`}
+      role={compactLayout ? 'tabpanel' : undefined}
+      aria-labelledby={compactLayout ? 'dashboard-tab-analytics' : undefined}
+      hidden={compactLayout && activeTab !== 'analytics'}
+      tabIndex={compactLayout && activeTab === 'analytics' ? 0 : undefined}
+    >
       <ChartPanel title={t('dashboard.chart.throughput', { range })} wide>
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={throughputWithRate}>

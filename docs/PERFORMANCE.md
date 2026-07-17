@@ -69,6 +69,54 @@ chat, and modified-timestamp indexes.
 Model inference is usually the bottleneck. For local Ollama, size GPU/VRAM for
 the selected text and vision models before increasing worker concurrency.
 
+### SGLang/MiniMax M3 measured profile
+
+The built-in `sglang-minimax-m3` provider uses a measured conservative profile:
+
+- worker concurrency `1` (still clamped by the global
+  `ARCHIVIST_WORKER_CONCURRENCY` hard upper cap)
+- request timeout `180` seconds
+- maximum output `4096` tokens
+- structured output `auto` (strict JSON Schema where the consumer supplies it)
+- reasoning unset/disabled by default
+
+This reserves one of the reviewed runtime's two request slots for interactive
+Prompt Tester, Provider Test, or Document Chat traffic. With structured output
+`auto`, one high-level call may make a schema request and one bounded
+compatibility retry. The Worker lease is therefore at least 420 seconds
+(`2 × 180 + 60`), covering both per-request timeouts plus its safety margin.
+Do not raise Worker concurrency merely because a short parallel smoke
+succeeds: offering four Worker requests to the two-slot runtime reduced Worker
+throughput by about 13% versus two while increasing p50 latency from 1.01 to
+2.82 seconds. See the public-safe
+[capacity report](performance/2026-07-17-sglang-minimax-m3-capacity.md) for
+method, p50/p95, throughput, timeout/error rates, the mixed application-path
+E2E gate, retry bounds, and the revalidation command.
+
+This profile is evidence for the exact reviewed pins and two request slots,
+not a general SGLang capacity promise. Follow the
+[M3 operations runbook](OPERATIONS.md#sglangminimax-m3-operations) for the
+validation order and symptom-specific timeout, parser, schema, authentication,
+and NetworkPolicy diagnostics before changing the profile.
+
+### OCR vision fallback lease fencing
+
+One OCR page can involve three high-level provider calls when an Ollama vision
+runtime crashes: the primary vision request, local model discovery through
+`/api/tags`, and one fallback vision request. The Worker renews its
+owner-scoped database lease immediately before each call. It does not rely on
+one lease window to cover the whole chain. Model discovery uses the same
+resolved `request_timeout_seconds` as the primary and fallback clients, so each
+step is bounded by the timeout used to size the lease.
+
+If any renewal reports that another Worker owns the job, the protected network
+future is never polled. OCR exits without writing a page cache entry, fallback
+success audit, job completion, review, or Paperless apply result. Search Worker
+logs for `OCR lease lost` and the structured `vision_phase` value (`primary`,
+`model_discovery`, or `fallback`) to locate the boundary. Persistent lease loss
+usually means Worker replicas or database latency exceed the configured model
+capacity; inspect expired leases and queue age before raising concurrency.
+
 ## Operational Targets
 
 Use these as practical targets, not strict promises:

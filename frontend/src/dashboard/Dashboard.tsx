@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useDashboardLive, useDashboardStats, useMediaQuery } from './hooks';
 import { RefreshCw, Settings } from 'lucide-react';
 import {
@@ -28,6 +28,12 @@ import { ProviderTable } from './ProviderTable';
 // (Dashboard.helpers.test.ts) and any external importer keep `computeHealthScore`
 // available from this entry point.
 export { computeHealthScore } from './helpers';
+
+type DashboardTab = 'analytics' | 'live' | 'activity';
+
+const dashboardTabOrder: DashboardTab[] = ['analytics', 'live', 'activity'];
+const dashboardTabId = (tab: DashboardTab) => `dashboard-tab-${tab}`;
+const dashboardPanelId = (tab: DashboardTab) => `dashboard-panel-${tab}`;
 
 export function Dashboard({
   setError,
@@ -83,7 +89,33 @@ export function Dashboard({
   const { stats, counts, lastLoadedAt, reload: load } = useDashboardStats(range, setError);
   const { live, recovery, reload: loadLive, reloadRecovery: loadRecovery, setLive } = useDashboardLive(canReadRuns, setError);
   const compactLayout = useMediaQuery('(max-width: 1100px)');
-  const [activeTab, setActiveTab] = useState<'analytics' | 'live' | 'activity'>('analytics');
+  const [activeTab, setActiveTab] = useState<DashboardTab>('analytics');
+  const tabRefs = useRef<Record<DashboardTab, HTMLButtonElement | null>>({
+    analytics: null,
+    live: null,
+    activity: null
+  });
+
+  // This is the WAI-ARIA automatic-activation model: keyboard navigation moves
+  // focus and activates the corresponding panel in the same interaction.
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, currentTab: DashboardTab) => {
+    const currentIndex = dashboardTabOrder.indexOf(currentTab);
+    let nextTab: DashboardTab | null = null;
+    if (event.key === 'ArrowRight') {
+      nextTab = dashboardTabOrder[(currentIndex + 1) % dashboardTabOrder.length];
+    } else if (event.key === 'ArrowLeft') {
+      nextTab = dashboardTabOrder[(currentIndex - 1 + dashboardTabOrder.length) % dashboardTabOrder.length];
+    } else if (event.key === 'Home') {
+      nextTab = dashboardTabOrder[0];
+    } else if (event.key === 'End') {
+      nextTab = dashboardTabOrder[dashboardTabOrder.length - 1];
+    }
+    if (!nextTab) return;
+
+    event.preventDefault();
+    setActiveTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
+  };
 
   const updateDashboardWorkflowMode = async (nextMode: ProcessingMode) => {
     const settings = await api.updateWorkflowMode(nextMode);
@@ -342,33 +374,25 @@ export function Dashboard({
         <h3 className="dash-tier-label">{t('dashboard.tier.analytics')}</h3>
       {compactLayout && (
         <div className="dashboard-tabs" role="tablist" aria-label={t('dashboard.title')}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'analytics'}
-            className={activeTab === 'analytics' ? 'active' : ''}
-            onClick={() => setActiveTab('analytics')}
-          >
-            {t('dashboard.tab.analytics')}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'live'}
-            className={activeTab === 'live' ? 'active' : ''}
-            onClick={() => setActiveTab('live')}
-          >
-            {t('dashboard.tab.live')}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'activity'}
-            className={activeTab === 'activity' ? 'active' : ''}
-            onClick={() => setActiveTab('activity')}
-          >
-            {t('dashboard.tab.activity')}
-          </button>
+          {dashboardTabOrder.map((tab) => (
+            <button
+              key={tab}
+              id={dashboardTabId(tab)}
+              type="button"
+              role="tab"
+              aria-controls={dashboardPanelId(tab)}
+              aria-selected={activeTab === tab}
+              tabIndex={activeTab === tab ? 0 : -1}
+              className={activeTab === tab ? 'active' : ''}
+              ref={(element) => {
+                tabRefs.current[tab] = element;
+              }}
+              onClick={() => setActiveTab(tab)}
+              onKeyDown={(event) => handleTabKeyDown(event, tab)}
+            >
+              {t(`dashboard.tab.${tab}`)}
+            </button>
+          ))}
         </div>
       )}
 
@@ -381,13 +405,27 @@ export function Dashboard({
           activeTab={activeTab}
           onStageSelect={handleStageSelect}
         />
-        <div className={compactLayout && activeTab !== 'live' ? 'is-hidden' : ''} role={compactLayout ? 'tabpanel' : undefined}>
+        <div
+          id={compactLayout ? dashboardPanelId('live') : undefined}
+          className={compactLayout && activeTab !== 'live' ? 'is-hidden' : ''}
+          role={compactLayout ? 'tabpanel' : undefined}
+          aria-labelledby={compactLayout ? dashboardTabId('live') : undefined}
+          hidden={compactLayout && activeTab !== 'live'}
+          tabIndex={compactLayout && activeTab === 'live' ? 0 : undefined}
+        >
           <LiveProcessingPanel live={live} />
         </div>
       </div>
       </ErrorBoundary>
 
-      <div className={compactLayout && activeTab !== 'activity' ? 'is-hidden' : ''} role={compactLayout ? 'tabpanel' : undefined}>
+      <div
+        id={compactLayout ? dashboardPanelId('activity') : undefined}
+        className={compactLayout && activeTab !== 'activity' ? 'is-hidden' : ''}
+        role={compactLayout ? 'tabpanel' : undefined}
+        aria-labelledby={compactLayout ? dashboardTabId('activity') : undefined}
+        hidden={compactLayout && activeTab !== 'activity'}
+        tabIndex={compactLayout && activeTab === 'activity' ? 0 : undefined}
+      >
         <ActivityTimeline live={live} />
       </div>
 

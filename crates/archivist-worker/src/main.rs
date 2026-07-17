@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -6,8 +7,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
     AiProviderError, AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT,
-    ImageInput, MineruClient, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext,
-    TextProvider, VisionProvider, VisionRequest, parse_metadata_suggestion, prompt_for_metadata,
+    ImageInput, MetadataContractError, MetadataParseDiagnostics, MetadataParseStatus, MineruClient,
+    OllamaClient, OpenAiCompatibleClient, PromptLanguageContext, TextProvider, VisionProvider,
+    VisionRequest, parse_metadata_suggestion, prompt_for_metadata,
+};
+use archivist_apply::{
+    ApplyExecution, ApplyRequest, ReviewApplyConflict, ReviewApplyPrecondition,
+    ReviewTagOperations, apply_document, recover_review_apply_intents, resume_apply_source,
+    review_apply_baseline,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
@@ -26,14 +33,14 @@ use archivist_db::{
     get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
     get_workflow_safety_status, increment_metric_counter, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
-    list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
-    named_entity_id_for_name, paperless_sync_cursor, queue_missing_pipeline,
-    rebalance_backfilled_metadata_priorities, record_dashboard_snapshot, record_document_language,
-    release_job_lease_for_cooldown, requeue_vision_crashed_jobs, reset_stale_applying_reviews,
-    reset_stuck_running_pipeline_runs, resolve_secret, revert_review_to_pending_after_failed_drain,
-    selector_document_budget, tag_id_pairs_for_names, tag_ids_for_names,
-    update_paperless_sync_cursor, upsert_inventory_item, upsert_paperless_custom_field,
-    upsert_paperless_named_entity, upsert_paperless_tag,
+    list_pending_review_items_for_autopilot_drain, mark_review_apply_conflict,
+    mark_review_auto_applied, named_entity_id_for_name, paperless_sync_cursor,
+    queue_missing_pipeline, rebalance_backfilled_metadata_priorities, record_dashboard_snapshot,
+    record_document_language, release_job_lease_for_cooldown, requeue_vision_crashed_jobs,
+    reset_stale_applying_reviews, reset_stuck_running_pipeline_runs, resolve_secret,
+    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_id_pairs_for_names,
+    tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{
     normalize_ocr_pages, render_document_pages, strip_code_fences, validate_ocr_text,
@@ -224,9 +231,21 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         Err(error) => warn!(error = %error, "startup stuck-runs reset failed"),
     }
 
-    // Recover review items stranded in 'applying' by a crash between claim and
-    // apply (#253). 300s comfortably exceeds a healthy apply, so anything
-    // older was abandoned.
+    // Reconcile durable Paperless intents before the legacy stale-review
+    // sweep. Active/confirmed intents remain fenced; only rows with no active
+    // intent or a settled failure may return to a retryable review status.
+    if let Err(error) = timeout(
+        Duration::from_secs(30),
+        recover_review_apply_tick(&pool, &config),
+    )
+    .await
+    .unwrap_or_else(|_| Err(anyhow!("startup review-intent recovery timed out")))
+    {
+        warn!(error = %error, "startup review-intent recovery failed");
+    }
+
+    // Recover legacy review items stranded in 'applying' before durable
+    // intents existed. 300s comfortably exceeds a healthy apply.
     match reset_stale_applying_reviews(&pool, 300).await {
         Ok(count) if count > 0 => {
             info!(
@@ -313,6 +332,15 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 // mid-apply (#253), once per minute. 300s exceeds a healthy
                 // apply, so anything older was abandoned.
                 if tick % 12 == 9 {
+                    if let Err(error) = timeout(
+                        Duration::from_secs(20),
+                        recover_review_apply_tick(&pool, &config),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow!("review-intent recovery timed out")))
+                    {
+                        warn!(error = %error, "review-intent recovery sweep failed");
+                    }
                     match reset_stale_applying_reviews(&pool, 300).await {
                         Ok(count) if count > 0 => warn!(
                             count,
@@ -413,6 +441,22 @@ async fn record_dashboard_snapshot_tick(pool: &DbPool) -> Result<()> {
     record_dashboard_snapshot(pool, &counts).await
 }
 
+async fn recover_review_apply_tick(pool: &DbPool, config: &AppConfig) -> Result<()> {
+    let settings = get_runtime_settings(pool).await?;
+    let paperless = paperless_client(pool, config, &settings).await?;
+    let summary = recover_review_apply_intents(pool, &paperless, 100).await?;
+    if summary.examined > 0 {
+        info!(
+            examined = summary.examined,
+            applied = summary.applied,
+            failed_settled = summary.failed_settled,
+            deferred = summary.deferred,
+            "recovered durable Paperless review intents"
+        );
+    }
+    Ok(())
+}
+
 /// Tick wrapper for the autopilot review drain.
 ///
 /// Loads the latest runtime settings each invocation (the dashboard mode
@@ -486,14 +530,17 @@ async fn run_startup_vision_crash_requeue(pool: &DbPool) -> Result<()> {
 /// grant less than this.
 const BASE_JOB_LEASE_SECONDS: i64 = 300;
 
-/// Margin added on top of the slowest configured AI request timeout when the
-/// lease is derived from it: heartbeats run BETWEEN AI calls, so one lease
-/// window must also cover the non-AI work around a maximal-length call
+/// Margin added on top of the slowest configured AI high-level call budget
+/// when the lease is derived from it: heartbeats run BETWEEN AI calls, so one
+/// lease window must also cover the non-AI work around a maximal-length call
 /// (Paperless round-trips, page rendering, DB writes).
 const JOB_LEASE_TIMEOUT_MARGIN_SECONDS: i64 = 60;
 
 /// Lease window for `claim_jobs` / `bump_job_lease`, coupled to the AI
-/// request timeout: `max(300, slowest enabled provider timeout + margin)`.
+/// request timeout: `max(300, slowest enabled provider call budget + margin)`.
+/// OpenAI-compatible `structured_output=auto` may make two sequential HTTP
+/// requests (strict schema, then the bounded 400 compatibility fallback), so
+/// its high-level call budget is twice the per-request timeout.
 ///
 /// `request_timeout_seconds` is operator-configurable (prod runs 600s for
 /// slow local models) while the lease used to be a hard-coded 300s — a
@@ -504,22 +551,52 @@ const JOB_LEASE_TIMEOUT_MARGIN_SECONDS: i64 = 60;
 /// claimed before stage→provider resolution, so size the window for the
 /// slowest enabled provider rather than per-stage. #308
 fn job_lease_seconds(settings: &RuntimeSettings) -> i64 {
-    let slowest_timeout = settings
+    let slowest_call_budget = settings
         .ai
         .providers
         .iter()
         .filter(|provider| provider.enabled)
         .map(|provider| {
             // Mirror `provider_for_stage`: 0/unset inherits the built-in default.
-            provider
-                .tuning
-                .request_timeout_seconds
-                .filter(|secs| *secs > 0)
-                .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+            let request_timeout = i64::from(
+                provider
+                    .tuning
+                    .request_timeout_seconds
+                    .filter(|secs| *secs > 0)
+                    .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS),
+            );
+            let schema_retry_possible = matches!(
+                provider.kind,
+                AiProviderKind::Openai | AiProviderKind::OpenaiCompatible
+            ) && provider.tuning.structured_output.unwrap_or_default()
+                == StructuredOutputMode::Auto;
+            if schema_retry_possible {
+                request_timeout.saturating_mul(2)
+            } else {
+                request_timeout
+            }
         })
         .max()
-        .unwrap_or(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS);
-    BASE_JOB_LEASE_SECONDS.max(i64::from(slowest_timeout) + JOB_LEASE_TIMEOUT_MARGIN_SECONDS)
+        .unwrap_or(i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS));
+    BASE_JOB_LEASE_SECONDS.max(slowest_call_budget + JOB_LEASE_TIMEOUT_MARGIN_SECONDS)
+}
+
+/// Renew an owner-scoped job lease before polling a potentially slow network
+/// future. Keeping the call future unpolled until the renewal succeeds is the
+/// fencing guarantee: once another worker owns the job, this worker cannot
+/// start the next provider request and later reach cache/apply completion.
+async fn run_after_lease_renewal<T, Renewal, Call>(
+    renewal: Renewal,
+    call: Call,
+) -> Result<Option<T>>
+where
+    Renewal: Future<Output = Result<bool>>,
+    Call: Future<Output = T>,
+{
+    if !renewal.await? {
+        return Ok(None);
+    }
+    Ok(Some(call.await))
 }
 
 async fn process_available_jobs(
@@ -961,6 +1038,97 @@ impl ProcessingFailureClass {
 /// (unlike the provider-cooldown release, which is unbounded by design). #305.
 const PAPERLESS_INFRA_RETRY_CEILING: i32 = 20;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataWorkerParseRoute {
+    ProcessSuggestion,
+    CompleteOmission,
+    RetryContractViolation,
+}
+
+fn metadata_worker_parse_route(diagnostics: &MetadataParseDiagnostics) -> MetadataWorkerParseRoute {
+    match diagnostics.status {
+        MetadataParseStatus::Valid => MetadataWorkerParseRoute::ProcessSuggestion,
+        MetadataParseStatus::Omitted => MetadataWorkerParseRoute::CompleteOmission,
+        MetadataParseStatus::ContractViolation => MetadataWorkerParseRoute::RetryContractViolation,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_terminal_metadata_parse_route(
+    pool: &DbPool,
+    job: &JobRecord,
+    lease_owner: &str,
+    settings: &RuntimeSettings,
+    response: &AiResponse,
+    request: &ChatRequest,
+    prompt_id: Option<Uuid>,
+    content: &str,
+    suggestion: &MetadataSuggestion,
+    diagnostics: &MetadataParseDiagnostics,
+) -> Result<bool> {
+    let route = metadata_worker_parse_route(diagnostics);
+    if route == MetadataWorkerParseRoute::ProcessSuggestion {
+        return Ok(false);
+    }
+
+    let mut normalized = serde_json::to_value(suggestion)?;
+    if let Some(object) = normalized.as_object_mut() {
+        object.insert(
+            "parse_diagnostics".to_owned(),
+            serde_json::to_value(diagnostics)?,
+        );
+    }
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: Stage::Metadata,
+            provider: &response.provider,
+            model: &response.model,
+            prompt_id,
+            input_hash: &hash_text(content),
+            request: Some(serde_json::to_value(request)?),
+            response: Some(response.raw_response.clone()),
+            normalized_output: Some(normalized),
+            duration_ms: response.duration_ms,
+            storage_mode: settings.security.ai_artifact_storage,
+        },
+    )
+    .await?;
+
+    match route {
+        MetadataWorkerParseRoute::ProcessSuggestion => Ok(false),
+        MetadataWorkerParseRoute::CompleteOmission => {
+            if !complete_job(
+                pool,
+                job,
+                lease_owner,
+                json!({
+                    "skipped": "metadata model omitted all enabled fields",
+                    "skipped_fields": [],
+                    "parse_diagnostics": diagnostics,
+                }),
+            )
+            .await?
+            {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    "lease lost before metadata-omission completion; another worker owns this job"
+                );
+            }
+            Ok(true)
+        }
+        MetadataWorkerParseRoute::RetryContractViolation => {
+            let contract_error = diagnostics.contract_error().ok_or_else(|| {
+                anyhow!("metadata parser routing invariant violated: contract error missing")
+            })?;
+            Err(contract_error.into())
+        }
+    }
+}
+
 /// Decide whether `error` should be retried with backoff (Transient) or marked
 /// permanent. The function first walks the error chain looking for typed
 /// errors from `archivist-paperless` and `archivist-ai`; those carry an
@@ -987,6 +1155,12 @@ fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass 
                 e if e.is_transient() => ProcessingFailureClass::Transient,
                 _ => ProcessingFailureClass::Permanent,
             };
+        }
+        if cause.downcast_ref::<MetadataContractError>().is_some() {
+            // The provider responded, but violated the metadata schema. Retry
+            // because a fresh generation can recover; after the normal job
+            // budget is exhausted, fail_job makes the violation visible.
+            return ProcessingFailureClass::Transient;
         }
     }
 
@@ -1219,6 +1393,14 @@ async fn release_lease_for_cooldown(
 /// the signal in worker logs so operators can swap the configured vision model rather than
 /// burning attempts on a misconfigured runtime.
 fn is_vision_model_runtime_crash(error: &anyhow::Error) -> bool {
+    if error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<AiProviderError>(),
+            Some(AiProviderError::RunnerUnavailable(_))
+        )
+    }) {
+        return true;
+    }
     let message = error
         .chain()
         .map(|cause| cause.to_string().to_ascii_lowercase())
@@ -1340,7 +1522,12 @@ async fn installed_ollama_models_for_provider(
             return Vec::new();
         }
     };
-    let client = match OllamaClient::new(&provider.name, &provider.base_url, secret) {
+    let client = match OllamaClient::new_with_timeout(
+        &provider.name,
+        &provider.base_url,
+        secret,
+        ollama_discovery_timeout(provider),
+    ) {
         Ok(client) => client,
         Err(error) => {
             warn!(
@@ -1364,22 +1551,29 @@ async fn installed_ollama_models_for_provider(
     }
 }
 
+fn ollama_discovery_timeout(provider: &StageProvider) -> Duration {
+    Duration::from_secs(u64::from(provider.request_timeout_seconds))
+}
+
 /// Run a single vision request, transparently retrying on a vision-runtime-crash error
 /// against a configured or auto-discovered fallback model. The return value carries the
 /// model that actually produced the response so the caller can record the swap in
 /// per-page logs / audit metadata.
 ///
 /// Behaviour:
-/// 1. Call the primary provider/model.
+/// 1. Renew the owner-scoped job lease, then call the primary provider/model.
 /// 2. On success, return immediately.
-/// 3. On error: if `is_vision_model_runtime_crash` is true AND a fallback can be picked,
-///    log + emit a `worker.vision_model_fallback` audit event, then retry the exact same
-///    request against the fallback model once.
+/// 3. On a runtime-crash error, renew before Ollama model discovery, choose a fallback,
+///    renew again, emit the audit event, and retry the exact request once.
 /// 4. If the fallback also fails, or no fallback is available, return the original error.
+/// 5. If any renewal reports that ownership was lost, return `Ok(None)` before polling
+///    the following provider future. The OCR caller then exits without cache/apply writes.
 ///
 /// This function does NOT consume the job's attempt slot — both calls happen within the
-/// same worker tick. The orchestrator-driven retry budget only kicks in if the fallback
-/// also fails (transient classification keeps current retry+jitter behaviour intact).
+/// same worker tick. Each high-level network call is independently bounded by the provider
+/// timeout and covered by a fresh lease window. The orchestrator-driven retry budget only
+/// kicks in if the fallback also fails (transient classification keeps current
+/// retry+jitter behaviour intact).
 #[allow(clippy::too_many_arguments)]
 async fn run_vision_with_fallback(
     pool: &DbPool,
@@ -1388,33 +1582,110 @@ async fn run_vision_with_fallback(
     provider: &StageProvider,
     settings: &RuntimeSettings,
     job: &JobRecord,
+    lease_owner: &str,
     page_index: usize,
     request: VisionRequest,
-) -> Result<(AiResponse, String, bool)> {
+) -> Result<Option<(AiResponse, String, bool)>> {
+    let lease_seconds = job_lease_seconds(settings);
+    let mut renew_lease = || archivist_db::bump_job_lease(pool, job.id, lease_owner, lease_seconds);
+    run_vision_with_fallback_with_lease_renewal(
+        pool,
+        config,
+        client,
+        provider,
+        settings,
+        job,
+        page_index,
+        request,
+        &mut renew_lease,
+    )
+    .await
+}
+
+/// Orchestrates the production vision/fallback path with an injectable lease
+/// renewal operation. Production supplies the owner-scoped database bump;
+/// tests supply a scripted renewal while exercising the real HTTP clients.
+#[allow(clippy::too_many_arguments)]
+async fn run_vision_with_fallback_with_lease_renewal<RenewLease, RenewalFuture>(
+    pool: &DbPool,
+    config: &AppConfig,
+    client: &VisionClient,
+    provider: &StageProvider,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    page_index: usize,
+    request: VisionRequest,
+    renew_lease: &mut RenewLease,
+) -> Result<Option<(AiResponse, String, bool)>>
+where
+    RenewLease: FnMut() -> RenewalFuture,
+    RenewalFuture: Future<Output = Result<bool>>,
+{
     let primary_model = provider.model.clone();
     let mut request_with_primary = request.clone();
     request_with_primary.model = primary_model.clone();
-    match client.vision(request_with_primary).await {
-        Ok(response) => Ok((response, primary_model, false)),
+    let Some(primary_result) =
+        run_after_lease_renewal(renew_lease(), client.vision(request_with_primary)).await?
+    else {
+        warn!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            page_index,
+            vision_phase = "primary",
+            "OCR lease lost before vision call; stopping before provider request"
+        );
+        return Ok(None);
+    };
+    match primary_result {
+        Ok(response) => Ok(Some((response, primary_model, false))),
         Err(error) => {
             if !is_vision_model_runtime_crash(&error) {
                 return Err(error);
             }
-            let installed = installed_ollama_models_for_provider(pool, config, provider).await;
+            let Some(installed) = run_after_lease_renewal(
+                renew_lease(),
+                installed_ollama_models_for_provider(pool, config, provider),
+            )
+            .await?
+            else {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    page_index,
+                    vision_phase = "model_discovery",
+                    "OCR lease lost after primary failure; stopping before model discovery"
+                );
+                return Ok(None);
+            };
             let Some(choice) = pick_vision_fallback_model(settings, &primary_model, &installed)
             else {
                 return Err(error);
             };
+
             warn!(
                 primary_model = %primary_model,
                 fallback_model = %choice.model,
                 fallback_source = choice.source.as_str(),
                 page_index,
-                vision_model_fallback_used = true,
                 document_id = job.paperless_document_id,
                 stage = %job.stage,
-                "vision model crashed; retrying same page on fallback model"
+                "vision model crashed; selected fallback and renewing lease before retry"
             );
+            let mut fallback_request = request;
+            fallback_request.model = choice.model.clone();
+            let Some(fallback_result) =
+                run_after_lease_renewal(renew_lease(), client.vision(fallback_request)).await?
+            else {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    page_index,
+                    vision_phase = "fallback",
+                    "OCR lease lost after model discovery; stopping before vision fallback"
+                );
+                return Ok(None);
+            };
+            let response = fallback_result?;
             let auto_discovered = choice.source == VisionFallbackSource::AutoDiscovered;
             let audit_metadata = json!({
                 "primary": primary_model,
@@ -1448,9 +1719,6 @@ async fn run_vision_with_fallback(
             {
                 warn!(error = %audit_error, "failed to record worker.vision_model_fallback audit event");
             }
-            let mut fallback_request = request;
-            fallback_request.model = choice.model.clone();
-            let response = client.vision(fallback_request).await?;
             info!(
                 primary_model = %primary_model,
                 fallback_model = %choice.model,
@@ -1461,7 +1729,7 @@ async fn run_vision_with_fallback(
                 stage = %job.stage,
                 "vision fallback succeeded"
             );
-            Ok((response, choice.model, true))
+            Ok(Some((response, choice.model, true)))
         }
     }
 }
@@ -1679,17 +1947,21 @@ async fn process_ocr(
             }],
         };
         let page_started = std::time::Instant::now();
-        let (response, model_used, fallback_used) = run_vision_with_fallback(
+        let Some((response, model_used, fallback_used)) = run_vision_with_fallback(
             pool,
             config,
             &vision_client,
             &provider,
             settings,
             job,
+            lease_owner,
             index,
             request,
         )
-        .await?;
+        .await?
+        else {
+            return Ok(());
+        };
         // Progress breadcrumb for the slow per-page vision calls — without this
         // the worker went silent for the whole OCR duration (only cache hits
         // logged), so a document stuck mid-OCR was invisible.
@@ -2250,8 +2522,30 @@ async fn process_metadata(
         return Ok(());
     }
     let response = chat_for_stage(pool, config, settings, Stage::Metadata, request.clone()).await?;
-    let mut suggestion =
-        parse_metadata_suggestion(&response.text).unwrap_or_else(|_| MetadataSuggestion::default());
+    let parsed = parse_metadata_suggestion(&response.text);
+    let parse_diagnostics = parsed.diagnostics;
+    let mut suggestion = parsed.suggestion;
+
+    // Omission and contract errors are terminal before consensus/validation:
+    // both persist the safe parse artifact, omission completes immediately,
+    // and a violation returns the typed retryable error without applying any
+    // retained valid subfields.
+    if handle_terminal_metadata_parse_route(
+        pool,
+        job,
+        lease_owner,
+        settings,
+        &response,
+        &request,
+        prompt_id,
+        &content,
+        &suggestion,
+        &parse_diagnostics,
+    )
+    .await?
+    {
+        return Ok(());
+    }
 
     // v1.5.15 (#118): two-model consensus check. When
     // `ai.consensus_secondary_text_model` is set AND we're heading for an
@@ -2297,6 +2591,12 @@ async fn process_metadata(
     };
 
     let mut normalized = serde_json::to_value(&suggestion)?;
+    if let Some(object) = normalized.as_object_mut() {
+        object.insert(
+            "parse_diagnostics".to_owned(),
+            serde_json::to_value(&parse_diagnostics)?,
+        );
+    }
     if let Some(outcome) = consensus_outcome.as_ref()
         && let Some(object) = normalized.as_object_mut()
     {
@@ -2805,8 +3105,9 @@ async fn process_metadata(
             ));
         }
 
+        let baseline = review_apply_baseline(&document);
         for (patch, warnings) in review_items {
-            if create_review_item(pool, job, patch, warnings, lease_owner)
+            if create_review_item(pool, job, patch, warnings, baseline.clone(), lease_owner)
                 .await?
                 .is_none()
             {
@@ -2822,16 +3123,17 @@ async fn process_metadata(
     } else if !applied_fields.is_empty() {
         if auto_apply {
             let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
-            apply_patch_with_workflow_tags(
+            let execution = apply_patch_with_workflow_tags(
                 pool,
                 paperless,
                 settings,
                 job,
                 composite_patch,
                 final_run_stage,
+                lease_owner,
             )
             .await?;
-            if !complete_job(
+            if complete_job(
                 pool,
                 job,
                 lease_owner,
@@ -2840,10 +3142,13 @@ async fn process_metadata(
                     "fields": applied_fields,
                     "warnings": composite_warnings,
                     "dropped_field_count": review_warning_count,
+                    "parse_diagnostics": parse_diagnostics,
                 }),
             )
             .await?
             {
+                archivist_db::finalize_apply_intent(pool, execution.attempt_id()).await?;
+            } else {
                 warn!(
                     job_id = %job.id,
                     document_id = job.paperless_document_id,
@@ -2854,12 +3159,14 @@ async fn process_metadata(
         } else {
             // manual_review (or dry_run): a single composite review item with all validated
             // suggestions so the operator approves the whole set atomically.
+            let baseline = review_apply_baseline(&document);
             let composite_review_patch = serde_json::to_value(&composite_patch)?;
             if create_review_item(
                 pool,
                 job,
                 composite_review_patch,
                 json!(composite_warnings),
+                baseline,
                 lease_owner,
             )
             .await?
@@ -2886,6 +3193,7 @@ async fn process_metadata(
                 "skipped": "all metadata fields had validation warnings — no resolvable patch in full_auto",
                 "warnings": composite_warnings,
                 "dropped_field_count": review_warning_count,
+                "parse_diagnostics": parse_diagnostics,
             }),
         )
         .await?
@@ -2903,8 +3211,9 @@ async fn process_metadata(
             job,
             lease_owner,
             json!({
-                "skipped": "all metadata fields skipped (already-set or model omitted)",
+                "skipped": "all metadata fields skipped by model omission or overwrite policy",
                 "skipped_fields": skipped_fields,
+                "parse_diagnostics": parse_diagnostics,
             }),
         )
         .await?
@@ -3106,6 +3415,8 @@ async fn handle_patch_result(
     // recorded for audit/UX context. dry_run always forces review regardless of mode.
     let auto_apply = settings.workflow.mode.auto_apply_validated_suggestions();
     if !auto_apply || settings.workflow.dry_run {
+        let document = paperless.get_document(job.paperless_document_id).await?;
+        let baseline = review_apply_baseline(&document);
         let mut review_patch = serde_json::to_value(patch)?;
         if let Some(metadata) = review_metadata
             && let Some(object) = review_patch.as_object_mut()
@@ -3119,9 +3430,15 @@ async fn handle_patch_result(
                     .to_owned(),
             );
         }
-        let Some(review_id) =
-            create_review_item(pool, job, review_patch, json!(review_warnings), lease_owner)
-                .await?
+        let Some(review_id) = create_review_item(
+            pool,
+            job,
+            review_patch,
+            json!(review_warnings),
+            baseline,
+            lease_owner,
+        )
+        .await?
         else {
             warn!(
                 job_id = %job.id,
@@ -3154,8 +3471,17 @@ async fn handle_patch_result(
         return Ok(());
     }
     let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
-    apply_patch_with_workflow_tags(pool, paperless, settings, job, patch, final_run_stage).await?;
-    if !complete_job(
+    let execution = apply_patch_with_workflow_tags(
+        pool,
+        paperless,
+        settings,
+        job,
+        patch,
+        final_run_stage,
+        lease_owner,
+    )
+    .await?;
+    if complete_job(
         pool,
         job,
         lease_owner,
@@ -3163,6 +3489,8 @@ async fn handle_patch_result(
     )
     .await?
     {
+        archivist_db::finalize_apply_intent(pool, execution.attempt_id()).await?;
+    } else {
         warn!(
             job_id = %job.id,
             document_id = job.paperless_document_id,
@@ -3179,7 +3507,12 @@ async fn apply_patch_with_workflow_tags(
     job: &JobRecord,
     mut patch: DocumentPatch,
     final_run_stage: bool,
-) -> Result<()> {
+    lease_owner: &str,
+) -> Result<ApplyExecution> {
+    let source_key = format!("job:{}", job.id);
+    if let Some(execution) = resume_apply_source(pool, paperless, &source_key).await? {
+        return Ok(execution);
+    }
     let document = paperless.get_document(job.paperless_document_id).await?;
     let tags = paperless.list_tags().await?;
     let mut tag_ids = patch.tags.clone().unwrap_or_else(|| document.tags.clone());
@@ -3218,64 +3551,38 @@ async fn apply_patch_with_workflow_tags(
     patch.tags = Some(tag_ids);
     prune_unchanged_patch_fields(&mut patch, &document);
     let before_value = audit_before_for_patch(&document, &patch);
-    let patch_value = audit_patch_payload(&patch);
-    let apply_started = std::time::Instant::now();
-    if let Err(error) = patch_document_dropping_bad_custom_fields(
+    let execution = apply_document(
         pool,
         paperless,
-        job.paperless_document_id,
-        &patch,
-        Some(job.run_id),
-        Some(job.id),
-        json!({ "stage": job.stage }),
-    )
-    .await
-    {
-        let duration_ms = apply_started.elapsed().as_millis() as u64;
-        append_audit(
-            pool,
-            AuditEventInput {
-                event_type: "document.patch_apply_failed".to_owned(),
-                actor_type: "worker".to_owned(),
-                actor_id: None,
-                run_id: Some(job.run_id),
-                job_id: Some(job.id),
-                paperless_document_id: Some(job.paperless_document_id),
-                before: Some(before_value),
-                after: Some(patch_value),
-                metadata: Some(json!({ "stage": job.stage, "duration_ms": duration_ms })),
-                outcome: "failed".to_owned(),
-                error_message: Some(error.to_string()),
-                source_ip: None,
-                user_agent: None,
-            },
-        )
-        .await?;
-        increment_metric_counter(pool, "apply_failure_total", 1).await?;
-        return Err(error);
-    }
-    let duration_ms = apply_started.elapsed().as_millis() as u64;
-    append_audit(
-        pool,
-        AuditEventInput {
-            event_type: "document.patch_applied".to_owned(),
-            actor_type: "worker".to_owned(),
-            actor_id: None,
+        ApplyRequest {
+            source: "worker_auto".to_owned(),
+            source_key,
+            owner_type: "worker".to_owned(),
+            owner_id: lease_owner.to_owned(),
+            paperless_document_id: job.paperless_document_id,
             run_id: Some(job.run_id),
             job_id: Some(job.id),
-            paperless_document_id: Some(job.paperless_document_id),
+            review_id: None,
+            patch,
             before: Some(before_value),
-            after: Some(patch_value),
-            metadata: Some(json!({ "stage": job.stage, "duration_ms": duration_ms })),
-            outcome: "success".to_owned(),
-            error_message: None,
-            source_ip: None,
-            user_agent: None,
+            metadata: json!({ "stage": job.stage }),
+            review_revert_status: None,
+            review_precondition: None,
+            allow_custom_fields_fallback: true,
         },
     )
     .await?;
-    increment_metric_counter(pool, "apply_success_total", 1).await?;
-    Ok(())
+    if execution.custom_fields_dropped() {
+        audit_custom_fields_dropped(
+            pool,
+            job.paperless_document_id,
+            Some(job.run_id),
+            Some(job.id),
+            json!({ "stage": job.stage }),
+        )
+        .await?;
+    }
+    Ok(execution)
 }
 
 /// Decide whether the autopilot review drain should run on this tick.
@@ -3461,24 +3768,51 @@ async fn apply_one_autopilot_drain_review(
     )
     .await
     .unwrap_or_else(|_| Err(anyhow!("per-item drain patch timeout after 45s")));
-    if let Err(error) = patch_result {
-        // Roll the row back to pending so the next tick can retry. We
-        // deliberately don't audit a failure event here — Paperless errors
-        // already get an `document.patch_apply_failed` audit inside
-        // `apply_autopilot_drain_patch`; non-Paperless errors are rare and
-        // logged via the caller's `warn!`.
-        if let Err(revert_error) =
-            revert_review_to_pending_after_failed_drain(pool, claimed.id).await
-        {
-            warn!(
-                review_id = %claimed.id,
-                error = %revert_error,
-                "failed to revert review item to pending after drain failure"
-            );
+    let execution = match patch_result {
+        Ok(execution) => execution,
+        Err(error) => {
+            if let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>() {
+                mark_review_apply_conflict(
+                    pool,
+                    claimed.id,
+                    "pending",
+                    conflict.fields(),
+                    "worker",
+                    Some("autopilot-drain".to_owned()),
+                )
+                .await?;
+                return Err(error);
+            }
+            // Revert only when no prepared/in-flight/confirmed intent exists.
+            // An ambiguous timeout must remain fenced until recovery performs
+            // GET reconciliation; reverting it would permit a duplicate PATCH.
+            match archivist_db::review_has_nonterminal_apply_intent(pool, claimed.id).await {
+                Ok(false) => {
+                    if let Err(revert_error) =
+                        revert_review_to_pending_after_failed_drain(pool, claimed.id).await
+                    {
+                        warn!(
+                            review_id = %claimed.id,
+                            error = %revert_error,
+                            "failed to revert review item after terminal drain failure"
+                        );
+                    }
+                }
+                Ok(true) => warn!(
+                    review_id = %claimed.id,
+                    "autopilot review remains fenced while its apply intent is recovered"
+                ),
+                Err(lookup_error) => warn!(
+                    review_id = %claimed.id,
+                    error = %lookup_error,
+                    "could not prove autopilot review safe to revert; leaving it fenced"
+                ),
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     mark_review_auto_applied(pool, claimed.id).await?;
+    archivist_db::finalize_apply_intent(pool, execution.attempt_id()).await?;
     Ok(true)
 }
 
@@ -3489,12 +3823,12 @@ async fn apply_autopilot_drain_patch(
     review: &ReviewItemRecord,
     tag_cache: &mut Vec<archivist_paperless::PaperlessTag>,
     completion_full: &archivist_paperless::PaperlessTag,
-) -> Result<()> {
+) -> Result<ApplyExecution> {
     let patch_value = review
         .edited_patch
         .clone()
         .unwrap_or_else(|| review.suggested_patch.clone());
-    let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
+    let patch: DocumentPatch = serde_json::from_value(patch_value)?;
     // run_id is None only for review items whose run was pruned by retention;
     // those never reach the drain (retention deletes terminal runs only, and
     // a pending review keeps its run in 'waiting_review').
@@ -3503,27 +3837,25 @@ async fn apply_autopilot_drain_patch(
     } else {
         false
     };
-    let document = paperless.get_document(review.paperless_document_id).await?;
-    let mut tag_ids = patch.tags.clone().unwrap_or_else(|| document.tags.clone());
+    let mut additions = Vec::new();
+    let mut removals = Vec::new();
     if let Some(completion_name) = settings
         .workflow
         .tags
         .completion_tag_for_stage(review.stage)
     {
         let tag = ensure_tag_cached(paperless, tag_cache, completion_name).await?;
-        if !tag_ids.contains(&tag.id) {
-            tag_ids.push(tag.id);
-        }
+        additions.push(tag.id);
     }
-    if final_run_stage && !tag_ids.contains(&completion_full.id) {
-        tag_ids.push(completion_full.id);
+    if final_run_stage {
+        additions.push(completion_full.id);
     }
     if let Some(trigger_name) = settings.workflow.tags.trigger_tag_for_stage(review.stage)
         && let Some(tag) = tag_cache
             .iter()
             .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
     {
-        tag_ids.retain(|id| *id != tag.id);
+        removals.push(tag.id);
     }
     if final_run_stage
         && let Some(tag) = tag_cache.iter().find(|tag| {
@@ -3531,127 +3863,74 @@ async fn apply_autopilot_drain_patch(
                 .eq_ignore_ascii_case(&settings.workflow.tags.trigger_process)
         })
     {
-        tag_ids.retain(|id| *id != tag.id);
+        removals.push(tag.id);
     }
-    tag_ids.sort_unstable();
-    tag_ids.dedup();
-    patch.tags = Some(tag_ids);
-    prune_unchanged_patch_fields(&mut patch, &document);
-    let before = audit_before_for_patch(&document, &patch);
-    let after = audit_patch_payload(&patch);
-    let apply_started = std::time::Instant::now();
-    if let Err(error) = patch_document_dropping_bad_custom_fields(
+    additions.sort_unstable();
+    additions.dedup();
+    removals.sort_unstable();
+    removals.dedup();
+    let execution = apply_document(
         pool,
         paperless,
-        review.paperless_document_id,
-        &patch,
-        review.run_id,
-        review.job_id,
-        json!({
-            "stage": review.stage,
-            "review_id": review.id,
-            "trigger": "autopilot_drain"
-        }),
-    )
-    .await
-    {
-        let duration_ms = apply_started.elapsed().as_millis() as u64;
-        append_audit(
-            pool,
-            AuditEventInput {
-                event_type: "document.patch_apply_failed".to_owned(),
-                actor_type: "worker".to_owned(),
-                actor_id: None,
-                run_id: review.run_id,
-                job_id: review.job_id,
-                paperless_document_id: Some(review.paperless_document_id),
-                before: Some(before),
-                after: Some(after),
-                metadata: Some(json!({
-                    "stage": review.stage,
-                    "review_id": review.id,
-                    "duration_ms": duration_ms,
-                    "trigger": "autopilot_drain"
-                })),
-                outcome: "failed".to_owned(),
-                error_message: Some(error.to_string()),
-                source_ip: None,
-                user_agent: None,
-            },
-        )
-        .await?;
-        increment_metric_counter(pool, "apply_failure_total", 1).await?;
-        return Err(error);
-    }
-    let duration_ms = apply_started.elapsed().as_millis() as u64;
-    append_audit(
-        pool,
-        AuditEventInput {
-            event_type: "document.patch_applied".to_owned(),
-            actor_type: "worker".to_owned(),
-            actor_id: None,
+        ApplyRequest {
+            source: "autopilot_drain".to_owned(),
+            source_key: format!("review:{}", review.id),
+            owner_type: "worker".to_owned(),
+            owner_id: "autopilot-drain".to_owned(),
+            paperless_document_id: review.paperless_document_id,
             run_id: review.run_id,
             job_id: review.job_id,
-            paperless_document_id: Some(review.paperless_document_id),
-            before: Some(before),
-            after: Some(after),
-            metadata: Some(json!({
+            review_id: Some(review.id),
+            patch,
+            before: None,
+            metadata: json!({
                 "stage": review.stage,
                 "review_id": review.id,
-                "duration_ms": duration_ms,
                 "trigger": "autopilot_drain"
-            })),
-            outcome: "success".to_owned(),
-            error_message: None,
-            source_ip: None,
-            user_agent: None,
+            }),
+            review_revert_status: Some("pending".to_owned()),
+            review_precondition: Some(ReviewApplyPrecondition {
+                baseline: review.baseline.clone(),
+                tag_operations: ReviewTagOperations {
+                    additions,
+                    removals,
+                },
+            }),
+            // A review apply must have exactly one preconditioned PATCH body.
+            // Retrying a reduced body after a 400 would create a second write
+            // without another field-level concurrency decision.
+            allow_custom_fields_fallback: false,
         },
     )
     .await?;
-    increment_metric_counter(pool, "apply_success_total", 1).await?;
-    Ok(())
+    if execution.custom_fields_dropped() {
+        audit_custom_fields_dropped(
+            pool,
+            review.paperless_document_id,
+            review.run_id,
+            review.job_id,
+            json!({
+                "stage": review.stage,
+                "review_id": review.id,
+                "trigger": "autopilot_drain"
+            }),
+        )
+        .await?;
+    }
+    Ok(execution)
 }
 
-/// Whether a `patch_document` failure is a Paperless 400 that implicates
-/// `custom_fields`. The typed `PaperlessError::Client` Display embeds both
-/// `status=` and the response `body`, and a Paperless validation 400 names the
-/// offending field (`custom_fields`) in that body — so matching on the rendered
-/// error string is enough to recognise the "one bad custom field" case.
-fn is_custom_fields_400(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.contains("status=400") && message.contains("custom_fields")
-}
-
-/// Apply `patch` to a Paperless document, resilient to a single bad custom
-/// field sinking the whole patch. If the initial PATCH fails with a Paperless
-/// 400 that implicates `custom_fields`, retry ONCE with the same patch but
-/// `custom_fields = None`, so title/tags/correspondent/date still land. On a
-/// successful retry, append a `document.custom_fields_dropped` audit event
-/// recording that the custom fields were dropped due to a Paperless 400. If the
-/// retry also fails — or the failure was not a custom_fields 400 — the original
-/// error is propagated unchanged. A single retry only; never a loop.
-async fn patch_document_dropping_bad_custom_fields(
+/// Keep the existing operator-visible marker when the shared durable executor
+/// had to prepare a second, reduced intent after Paperless rejected custom
+/// fields. The failed and successful HTTP attempts themselves are audited by
+/// the intent state transitions.
+async fn audit_custom_fields_dropped(
     pool: &DbPool,
-    paperless: &PaperlessClient,
     document_id: i32,
-    patch: &DocumentPatch,
     run_id: Option<Uuid>,
     job_id: Option<Uuid>,
     extra_metadata: serde_json::Value,
 ) -> Result<()> {
-    let error = match paperless.patch_document(document_id, patch).await {
-        Ok(_) => return Ok(()),
-        Err(error) => error,
-    };
-    if patch.custom_fields.is_none() || !is_custom_fields_400(&error) {
-        return Err(error);
-    }
-    let mut retry = patch.clone();
-    retry.custom_fields = None;
-    if paperless.patch_document(document_id, &retry).await.is_err() {
-        // Dropping custom_fields didn't help — surface the original failure.
-        return Err(error);
-    }
     let mut metadata = extra_metadata;
     if let Some(object) = metadata.as_object_mut() {
         object.insert(
@@ -3679,7 +3958,7 @@ async fn patch_document_dropping_bad_custom_fields(
             after: None,
             metadata: Some(metadata),
             outcome: "success".to_owned(),
-            error_message: Some(error.to_string()),
+            error_message: None,
             source_ip: None,
             user_agent: None,
         },
@@ -3773,6 +4052,7 @@ fn audit_before_for_patch(
     serde_json::Value::Object(object)
 }
 
+#[cfg(test)]
 fn audit_patch_payload(patch: &DocumentPatch) -> serde_json::Value {
     let mut object = serde_json::Map::new();
     if let Some(content) = &patch.content {
@@ -4142,23 +4422,23 @@ fn provider_for_stage(
         .ai
         .providers
         .iter()
-        .find(|provider| provider.enabled && provider.name == provider_name)
+        .find(|provider| provider.enabled && provider.name.eq_ignore_ascii_case(provider_name))
         .cloned()
         .or_else(|| {
-            if provider_name == "ollama" {
+            if provider_name.eq_ignore_ascii_case("ollama") {
                 Some(archivist_core::AiProviderSettings::ollama_default())
             } else {
                 None
             }
         })
         .ok_or_else(|| anyhow!("AI provider '{provider_name}' is not configured or disabled"))?;
-    if provider.name == "ollama" {
+    if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
     let model = settings
         .ai
         .model_for_stage_provider(&provider, stage, vision);
-    let base_url = provider_base_url(&provider.kind, &provider.base_url);
+    let base_url = provider_base_url(&provider.name, &provider.base_url)?;
     let reasoning_effort = provider.tuning.reasoning_effort.unwrap_or_default();
     let max_output_tokens = provider
         .tuning
@@ -4184,18 +4464,14 @@ fn provider_for_stage(
     })
 }
 
-fn provider_base_url(kind: &AiProviderKind, configured: &str) -> String {
+fn provider_base_url(provider_name: &str, configured: &str) -> Result<String> {
     let trimmed = configured.trim();
-    if !trimmed.is_empty() {
-        return trimmed.trim_end_matches('/').to_owned();
+    if trimmed.is_empty() {
+        return Err(anyhow!(
+            "AI provider '{provider_name}' has an empty base URL; repair the runtime settings"
+        ));
     }
-    match kind {
-        AiProviderKind::Ollama => "http://ollama:11434".to_owned(),
-        AiProviderKind::Openai => "https://api.openai.com/v1".to_owned(),
-        AiProviderKind::Anthropic => "https://api.anthropic.com/v1".to_owned(),
-        AiProviderKind::OpenaiCompatible => "http://localhost:8000/v1".to_owned(),
-        AiProviderKind::Mineru => "http://localhost:8001".to_owned(),
-    }
+    Ok(trimmed.trim_end_matches('/').to_owned())
 }
 
 /// v1.5.15 (#119) experiment-aware active-prompt loader. Picks the A or B
@@ -4450,7 +4726,61 @@ fn hash_bytes(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
     use serde_json::Value;
+    use sqlx::Row;
+
+    #[derive(Clone)]
+    struct MockOllamaState {
+        chat_calls: Arc<AtomicU32>,
+        tag_calls: Arc<AtomicU32>,
+        tag_delay: Duration,
+    }
+
+    async fn mock_ollama_chat(State(state): State<MockOllamaState>) -> Response {
+        let call = state.chat_calls.fetch_add(1, Ordering::SeqCst);
+        sleep(Duration::from_millis(10)).await;
+        if call == 0 {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runner process no longer running",
+            )
+                .into_response();
+        }
+        Json(json!({"message": {"content": "fallback response"}})).into_response()
+    }
+
+    async fn mock_ollama_tags(State(state): State<MockOllamaState>) -> Response {
+        state.tag_calls.fetch_add(1, Ordering::SeqCst);
+        sleep(state.tag_delay).await;
+        Json(json!({"models": [{"name": "qwen2.5vl:7b"}]})).into_response()
+    }
+
+    async fn spawn_mock_ollama(
+        tag_delay: Duration,
+    ) -> (String, MockOllamaState, tokio::task::JoinHandle<()>) {
+        let state = MockOllamaState {
+            chat_calls: Arc::new(AtomicU32::new(0)),
+            tag_calls: Arc::new(AtomicU32::new(0)),
+            tag_delay,
+        };
+        let app = Router::new()
+            .route("/api/chat", post(mock_ollama_chat))
+            .route("/api/tags", get(mock_ollama_tags))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Ollama");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock Ollama");
+        });
+        (base_url, state, task)
+    }
 
     #[test]
     fn sum_vision_usage_handles_both_wire_shapes() {
@@ -4498,13 +4828,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_base_url_defaults_for_mineru() {
+    fn provider_base_url_rejects_empty_legacy_configuration() {
+        let error = provider_base_url("mineru", "")
+            .expect_err("corrupt settings must not silently target localhost");
+        assert!(error.to_string().contains("empty base URL"));
+        assert!(error.to_string().contains("mineru"));
         assert_eq!(
-            provider_base_url(&AiProviderKind::Mineru, ""),
-            "http://localhost:8001"
-        );
-        assert_eq!(
-            provider_base_url(&AiProviderKind::Mineru, "http://omega:8001/"),
+            provider_base_url("mineru", "http://omega:8001/").unwrap(),
             "http://omega:8001"
         );
     }
@@ -4571,11 +4901,16 @@ mod tests {
     }
 
     #[test]
-    fn job_lease_outlives_the_slowest_enabled_provider_timeout() {
-        // Default presets leave request_timeout_seconds unset → the 180s
-        // built-in default; the 300s baseline wins.
+    fn job_lease_outlives_the_slowest_enabled_provider_call_budget() {
+        // Default presets leave request_timeout_seconds unset → 180s. The
+        // enabled OpenAI preset can make the one-shot Auto schema fallback,
+        // so its high-level call budget is 2*180 plus the margin.
         let mut settings = RuntimeSettings::default();
-        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+                + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
 
         // The prod shape from the audit: a 600s timeout used to outlive the
         // hard-coded 300s lease mid-call. The lease must now cover the call
@@ -4601,16 +4936,74 @@ mod tests {
             600 + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
         );
 
-        // 0 means "inherit the default", not a zero-second timeout; and a
-        // timeout short enough to fit the baseline keeps today's 300s.
+        // 0 means "inherit the default", not a zero-second timeout. The
+        // enabled OpenAI provider still owns the larger 2*180 call budget.
         settings.ai.providers[0].tuning.request_timeout_seconds = Some(0);
-        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+                + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
         settings.ai.providers[0].tuning.request_timeout_seconds = Some(120);
-        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+                + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
 
         // No providers at all: fall back to the built-in default → baseline.
         settings.ai.providers.clear();
         assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+    }
+
+    #[test]
+    fn minimax_m3_capacity_preset_reserves_interactive_slot_and_has_lease_margin() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.default_provider = archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME.to_owned();
+        for provider in &mut settings.ai.providers {
+            provider.enabled = false;
+        }
+        let provider = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME)
+            .expect("built-in MiniMax M3 provider");
+        provider.enabled = true;
+
+        let effective = settings.effective_tuning();
+        assert_eq!(effective.worker_concurrency, 1);
+        assert_eq!(resolve_target_concurrency(8, &settings), 1);
+        assert_eq!(effective.request_timeout_seconds, 180);
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * i64::from(effective.request_timeout_seconds) + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
+
+        let provider = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == archivist_core::SGLANG_MINIMAX_M3_PROVIDER_NAME)
+            .expect("built-in MiniMax M3 provider");
+        provider.tuning.structured_output = Some(StructuredOutputMode::Off);
+        assert_eq!(job_lease_seconds(&settings), BASE_JOB_LEASE_SECONDS);
+    }
+
+    #[test]
+    fn openai_auto_schema_retry_also_doubles_the_lease_request_budget() {
+        let mut settings = RuntimeSettings::default();
+        for provider in &mut settings.ai.providers {
+            provider.enabled = provider.kind == AiProviderKind::Openai;
+            if provider.enabled {
+                provider.tuning.request_timeout_seconds = Some(180);
+                provider.tuning.structured_output = Some(StructuredOutputMode::Auto);
+            }
+        }
+        assert_eq!(
+            job_lease_seconds(&settings),
+            2 * 180 + JOB_LEASE_TIMEOUT_MARGIN_SECONDS
+        );
     }
 
     #[test]
@@ -4687,6 +5080,222 @@ mod tests {
     }
 
     #[test]
+    fn metadata_contract_violations_retry_but_omissions_take_the_explicit_success_route() {
+        let malformed = parse_metadata_suggestion(r#"{"title":42}"#);
+        assert_eq!(
+            metadata_worker_parse_route(&malformed.diagnostics),
+            MetadataWorkerParseRoute::RetryContractViolation
+        );
+        let contract_error = malformed
+            .diagnostics
+            .contract_error()
+            .expect("wrong known field type must violate the contract");
+        let error = anyhow::Error::new(contract_error);
+        assert_eq!(
+            classify_processing_failure(&error),
+            ProcessingFailureClass::Transient
+        );
+
+        let omitted = parse_metadata_suggestion(r#"{"title":null}"#);
+        assert_eq!(omitted.diagnostics.status, MetadataParseStatus::Omitted);
+        assert_eq!(
+            metadata_worker_parse_route(&omitted.diagnostics),
+            MetadataWorkerParseRoute::CompleteOmission
+        );
+        assert!(omitted.diagnostics.contract_error().is_none());
+
+        let valid = parse_metadata_suggestion(r#"{"title":{"title":"Invoice","confidence":0.9}}"#);
+        assert_eq!(
+            metadata_worker_parse_route(&valid.diagnostics),
+            MetadataWorkerParseRoute::ProcessSuggestion
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn metadata_terminal_parse_routes_persist_artifacts_before_completion_or_retry() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = connect(&database_url, 10)
+            .await
+            .expect("connect test database");
+        archivist_db::migrate(&pool)
+            .await
+            .expect("apply migrations");
+        sqlx::query(
+            r#"
+            truncate document_inventory, jobs, pipeline_runs, review_items,
+                     ai_artifacts, audit_events restart identity cascade
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("truncate test tables");
+
+        let request = ChatRequest {
+            model: "test-model".to_owned(),
+            system_prompt: "system".to_owned(),
+            user_prompt: "user".to_owned(),
+            temperature: 0.0,
+            num_ctx: None,
+            response_schema: None,
+            reasoning_effort: None,
+            max_output_tokens: None,
+            structured_output: None,
+        };
+        let settings = RuntimeSettings::default();
+
+        for document_id in [77, 78] {
+            sqlx::query(
+                "insert into document_inventory (paperless_document_id, current_tags) values ($1, '{}')",
+            )
+            .bind(document_id)
+            .execute(&pool)
+            .await
+            .expect("seed inventory");
+            create_run_with_jobs_with_priority(
+                &pool,
+                document_id,
+                &[Stage::Metadata],
+                ProcessingMode::ManualReview,
+                "test",
+                "test",
+                Some(0),
+            )
+            .await
+            .expect("create metadata run");
+        }
+        let jobs = claim_jobs(&pool, 2, "worker-a", 300)
+            .await
+            .expect("claim jobs");
+        let omitted_job = jobs
+            .iter()
+            .find(|job| job.paperless_document_id == 77)
+            .expect("omission job");
+        let contract_job = jobs
+            .iter()
+            .find(|job| job.paperless_document_id == 78)
+            .expect("contract job");
+
+        let omitted = parse_metadata_suggestion("{}");
+        let omitted_response = AiResponse {
+            provider: "test-provider".to_owned(),
+            model: "test-model".to_owned(),
+            text: "{}".to_owned(),
+            raw_response: json!({"message":{"content":"{}"}}),
+            duration_ms: 1,
+        };
+        let handled = handle_terminal_metadata_parse_route(
+            &pool,
+            omitted_job,
+            "worker-a",
+            &settings,
+            &omitted_response,
+            &request,
+            None,
+            "private document content",
+            &omitted.suggestion,
+            &omitted.diagnostics,
+        )
+        .await
+        .expect("complete omission");
+        assert!(handled, "omission is terminal before consensus/apply");
+        let row = sqlx::query("select status, result from jobs where id = $1")
+            .bind(omitted_job.id)
+            .fetch_one(&pool)
+            .await
+            .expect("omission job result");
+        let status: String = row.try_get("status").expect("omission status");
+        let result: serde_json::Value = row.try_get("result").expect("omission result");
+        assert_eq!(status, "succeeded");
+        assert_eq!(result["parse_diagnostics"]["status"], "omitted");
+
+        let malformed = parse_metadata_suggestion(r#"{"title":"raw-private-value"}"#);
+        let malformed_response = AiResponse {
+            provider: "test-provider".to_owned(),
+            model: "test-model".to_owned(),
+            text: r#"{"title":"raw-private-value"}"#.to_owned(),
+            raw_response: json!({"message":{"content":"raw-private-value"}}),
+            duration_ms: 1,
+        };
+        let error = handle_terminal_metadata_parse_route(
+            &pool,
+            contract_job,
+            "worker-a",
+            &settings,
+            &malformed_response,
+            &request,
+            None,
+            "private document content",
+            &malformed.suggestion,
+            &malformed.diagnostics,
+        )
+        .await
+        .expect_err("contract violation must retry");
+        assert_eq!(
+            classify_processing_failure(&error),
+            ProcessingFailureClass::Transient
+        );
+        let safe_error = format!("{error:#}");
+        assert!(safe_error.contains("metadata model contract violation"));
+        assert!(safe_error.contains("invalid_fields=title"));
+        assert!(!safe_error.contains("raw-private-value"));
+        let row = sqlx::query("select status, result from jobs where id = $1")
+            .bind(contract_job.id)
+            .fetch_one(&pool)
+            .await
+            .expect("contract job state");
+        let status: String = row.try_get("status").expect("contract status");
+        let result: Option<serde_json::Value> = row.try_get("result").expect("contract result");
+        assert_eq!(status, "running", "terminal helper never completes it");
+        assert!(result.is_none());
+        let normalized: serde_json::Value = sqlx::query_scalar(
+            "select normalized_output from ai_artifacts where job_id = $1 order by created_at desc limit 1",
+        )
+        .bind(contract_job.id)
+        .fetch_one(&pool)
+        .await
+        .expect("contract artifact");
+        assert_eq!(
+            normalized["parse_diagnostics"]["status"],
+            "contract_violation"
+        );
+        assert_eq!(
+            normalized["parse_diagnostics"]["invalid_fields"],
+            json!(["title"])
+        );
+        assert!(!normalized.to_string().contains("raw-private-value"));
+        let review_count: i64 = sqlx::query_scalar("select count(*) from review_items")
+            .fetch_one(&pool)
+            .await
+            .expect("review count");
+        assert_eq!(review_count, 0);
+
+        let updated = fail_job(
+            &pool,
+            contract_job,
+            "worker-a",
+            &safe_error,
+            classify_processing_failure(&error).is_retryable(),
+            None,
+        )
+        .await
+        .expect("route contract failure through normal retry budget");
+        assert!(updated);
+        let row = sqlx::query("select status, error_message from jobs where id = $1")
+            .bind(contract_job.id)
+            .fetch_one(&pool)
+            .await
+            .expect("retried contract job");
+        let status: String = row.try_get("status").expect("retry status");
+        let error_message: String = row.try_get("error_message").expect("safe job error");
+        assert_eq!(status, "queued");
+        assert_eq!(error_message, safe_error);
+        assert!(!error_message.contains("raw-private-value"));
+    }
+
+    #[test]
     fn fallback_substring_matching_still_classifies_untyped_errors() {
         let transient: anyhow::Error = anyhow!("pool timed out waiting for connection");
         assert!(matches!(
@@ -4710,6 +5319,7 @@ mod tests {
             tags: vec![1, 2],
             correspondent: Some(7),
             document_type: Some(9),
+            custom_fields: serde_json::Value::Null,
             original_file_name: Some("document.pdf".to_owned()),
         }
     }
@@ -4973,6 +5583,139 @@ mod tests {
         settings.ai.fallback_vision_model = Some("   ".to_owned());
         // Whitespace-only explicit is treated as unset.
         assert!(pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &[]).is_none());
+    }
+
+    fn vision_test_pool() -> DbPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(20))
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("build lazy test pool")
+    }
+
+    fn vision_test_job() -> JobRecord {
+        JobRecord {
+            id: Uuid::now_v7(),
+            run_id: Uuid::now_v7(),
+            paperless_document_id: 42,
+            stage: Stage::Ocr,
+            mode: ProcessingMode::ManualReview,
+            status: "running".to_owned(),
+            attempts: 1,
+            max_attempts: 3,
+            payload: json!({}),
+        }
+    }
+
+    async fn assert_production_vision_fencing(
+        lease_results: Vec<bool>,
+        expected_chat_calls: u32,
+        expected_tag_calls: u32,
+        expect_fallback_success: bool,
+    ) {
+        let (base_url, state, server) = spawn_mock_ollama(Duration::from_millis(10)).await;
+        let pool = vision_test_pool();
+        let config = test_app_config();
+        let mut provider = stage_provider(AiProviderKind::Ollama);
+        provider.name = "mock-ollama".to_owned();
+        provider.base_url = base_url;
+        provider.model = "primary-model".to_owned();
+        provider.request_timeout_seconds = 2;
+        let client = VisionClient::Ollama(
+            OllamaClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                None,
+                Duration::from_secs(2),
+            )
+            .unwrap(),
+        );
+        let settings = RuntimeSettings::default();
+        let job = vision_test_job();
+        let request = VisionRequest {
+            model: provider.model.clone(),
+            temperature: 0.0,
+            num_ctx: Some(OLLAMA_VISION_NUM_CTX_FLOOR),
+            max_output_tokens: None,
+            prompt: "synthetic page".to_owned(),
+            images: Vec::new(),
+        };
+        let lease_results = Arc::new(lease_results);
+        let lease_index = Arc::new(AtomicU32::new(0));
+        let results_for_renewal = Arc::clone(&lease_results);
+        let index_for_renewal = Arc::clone(&lease_index);
+        let mut renew_lease = move || {
+            let results = Arc::clone(&results_for_renewal);
+            let index = Arc::clone(&index_for_renewal);
+            async move {
+                let index = index.fetch_add(1, Ordering::SeqCst) as usize;
+                Ok::<bool, anyhow::Error>(results.get(index).copied().unwrap_or(false))
+            }
+        };
+
+        let outcome = run_vision_with_fallback_with_lease_renewal(
+            &pool,
+            &config,
+            &client,
+            &provider,
+            &settings,
+            &job,
+            0,
+            request,
+            &mut renew_lease,
+        )
+        .await
+        .unwrap();
+
+        if expect_fallback_success {
+            let (response, model, fallback_used) =
+                outcome.expect("three successful renewals must run the fallback");
+            assert_eq!(response.text, "fallback response");
+            assert_eq!(model, "qwen2.5vl:7b");
+            assert!(fallback_used);
+        } else {
+            assert!(outcome.is_none(), "lease loss must stop OCR cleanly");
+        }
+        assert_eq!(
+            lease_index.load(Ordering::SeqCst) as usize,
+            lease_results.len()
+        );
+        assert_eq!(state.chat_calls.load(Ordering::SeqCst), expected_chat_calls);
+        assert_eq!(state.tag_calls.load(Ordering::SeqCst), expected_tag_calls);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn production_vision_path_fences_primary_discovery_and_fallback_calls() {
+        // Lost before primary: no provider request at all.
+        assert_production_vision_fencing(vec![false], 0, 0, false).await;
+        // Slow primary crashes, then ownership is lost: discovery is never called.
+        assert_production_vision_fencing(vec![true, false], 1, 0, false).await;
+        // Primary crashes and slow discovery succeeds, then ownership is lost:
+        // the selected fallback is never called and no success audit can run.
+        assert_production_vision_fencing(vec![true, true, false], 1, 1, false).await;
+        // All three renewals succeed: the real second /api/chat request runs,
+        // its response/model are returned, and only then can the best-effort
+        // success audit be attempted.
+        assert_production_vision_fencing(vec![true, true, true], 2, 1, true).await;
+    }
+
+    #[tokio::test]
+    async fn ollama_discovery_client_enforces_resolved_provider_timeout_on_wire() {
+        let (base_url, state, server) = spawn_mock_ollama(Duration::from_millis(1_200)).await;
+        let pool = vision_test_pool();
+        let config = test_app_config();
+        let mut provider = stage_provider(AiProviderKind::Ollama);
+        provider.base_url = base_url;
+        provider.request_timeout_seconds = 1;
+
+        let models = installed_ollama_models_for_provider(&pool, &config, &provider).await;
+
+        assert!(
+            models.is_empty(),
+            "the 1s provider timeout must cancel a 1.2s /api/tags response"
+        );
+        assert_eq!(state.tag_calls.load(Ordering::SeqCst), 1);
+        server.abort();
     }
 
     // ---- v1.5.2 Bug 2 regression: name-to-id resolution for review_items ----

@@ -108,6 +108,16 @@
   color: var(--muted);
   font-size: var(--font-size-sm);
 }
+.form-field-error {
+  color: var(--danger);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+.settings-validation-summary {
+  color: var(--danger);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
 
 /* Metric tile tone accents (left border) for KpiCard. */
 .metric--success { border-left: 3px solid var(--success); }
@@ -2304,6 +2314,23 @@ th {
   font-weight: 700;
 }
 
+.review-conflict {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px 12px;
+  border: 1px solid #d97706;
+  border-radius: var(--radius-md);
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.review-conflict svg {
+  flex: 0 0 auto;
+}
+
 .debug-context {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -3248,6 +3275,64 @@ th {
 .test-result pre {
   overflow: auto;
   max-height: 340px;
+}
+
+.prompt-draft-dialog-root {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+}
+
+.prompt-draft-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(20 33 41 / 48%);
+  backdrop-filter: blur(2px);
+}
+
+.prompt-draft-dialog {
+  position: relative;
+  display: grid;
+  gap: var(--space-3);
+  width: min(460px, 100%);
+  padding: var(--space-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.prompt-draft-dialog header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--danger);
+}
+
+.prompt-draft-dialog h3,
+.prompt-draft-dialog p {
+  margin: 0;
+}
+
+.prompt-draft-dialog h3 {
+  color: var(--ink);
+  font-size: var(--font-size-lg);
+}
+
+.prompt-draft-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.prompt-draft-dialog .danger-button {
+  border-color: var(--danger);
+  background: var(--danger);
 }
 
 fieldset {

@@ -106,15 +106,19 @@ export function paperlessBaseUrlProblemFeedback(
   };
 }
 
-export function providerTestSuccess(provider: ModelProviderDescriptor, t: TFunction): ConnectionTestState {
+export function providerTestSuccess(
+  provider: ModelProviderDescriptor,
+  model: string,
+  t: TFunction
+): ConnectionTestState {
   const providerName = provider.name || provider.kind;
   const isOllama = provider.kind === 'ollama';
   return {
     status: 'success',
     title: t('settings.provider.success.title'),
     description: isOllama
-      ? t('settings.provider.success.ollama', { provider: providerName })
-      : t('settings.provider.success.generic', { provider: providerName }),
+      ? t('settings.provider.success.ollama', { provider: providerName, model })
+      : t('settings.provider.success.generic', { provider: providerName, model }),
     hints: isOllama
       ? [t('settings.provider.success.ollama_hint')]
       : [t('settings.provider.success.generic_hint')]
@@ -123,6 +127,7 @@ export function providerTestSuccess(provider: ModelProviderDescriptor, t: TFunct
 
 export function providerTestFailure(
   provider: ModelProviderDescriptor,
+  model: string,
   error: string | undefined,
   t: TFunction
 ): ConnectionTestState {
@@ -131,7 +136,10 @@ export function providerTestFailure(
     status: 'error',
     title: t('settings.provider.failure.title'),
     description: providerProblemDescription(provider, details, t),
-    hints: providerProblemHints(provider, details, t),
+    hints: [
+      t('settings.provider.failure.context', { provider: provider.name || provider.kind, model }),
+      ...providerProblemHints(provider, details, t)
+    ],
     details
   };
 }
