@@ -79,6 +79,73 @@ proportional to a separate epic. Until then, manual E2E is the
 honest answer — and every release-notes entry includes a "verify in
 prod" recipe.
 
+### Opt-in SGLang/MiniMax M3 live contract
+
+[`scripts/verify/sglang_minimax_m3_contract.mjs`](../scripts/verify/sglang_minimax_m3_contract.mjs)
+is the narrow exception to the otherwise manual LLM-runtime layer. It checks
+the exact public model `ressl/MiniMax-M3-uncensored-NVFP4` against an
+operator-supplied OpenAI-compatible `/v1` endpoint. It does not run in normal
+merge requests and does not process Paperless documents or personal data.
+
+The contracts are independently selectable:
+
+| Contract | Live assertion |
+| --- | --- |
+| `models` | `GET /v1/models` contains the exact configured ID. |
+| `text` | A deterministic text completion returns a sentinel final answer. |
+| `schema` | An adversarial prompt asks for a forbidden object; strict closed JSON Schema still returns its only allowed object. |
+| `reasoning-disabled` | `thinking_mode=disabled` returns final content and no separated reasoning. |
+| `reasoning-enabled` | `thinking_mode=enabled` returns final content plus separated reasoning. |
+| `reasoning-adaptive` | `thinking_mode=adaptive` returns final content plus separated reasoning. |
+| `tool` | A specifically forced OpenAI tool call returns the closed sentinel arguments. |
+| `image` | The answer identifies the dominant colour of an embedded, metadata-free synthetic PNG and therefore cannot be copied from the prompt. |
+
+Configuration is environment-only; there are no endpoint, model or secret
+command-line flags:
+
+| Variable | Required/default |
+| --- | --- |
+| `SGLANG_CONTRACT_BASE_URL` | Required credential-free URL ending in `/v1`. Never written to the report. |
+| `SGLANG_CONTRACT_API_KEY_FILE` | Optional path to a mounted secret file. The key is read in memory and redacted from every diagnostic. |
+| `SGLANG_CONTRACTS` | Optional comma-separated subset; defaults to all contracts. |
+| `SGLANG_CONTRACT_MODEL` | Optional assertion input; if set, it must equal the exact public M3 model above or configuration fails. |
+| `SGLANG_CONTRACT_MODEL_REVISION` | Defaults to the model revision accepted in ADR-014. |
+| `SGLANG_CONTRACT_RUNTIME_REVISION` | Defaults to the pinned SGLang revision accepted in ADR-014. |
+| `SGLANG_CONTRACT_IMAGE_DIGEST` | Defaults to the pinned public SGLang image digest accepted in ADR-014. |
+| `SGLANG_CONTRACT_TIMEOUT_MS` | Per-request timeout, default 180000. |
+| `SGLANG_CONTRACT_MAX_RESPONSE_BYTES` | Response ceiling, default 2 MiB and hard-capped at 16 MiB. |
+| `SGLANG_CONTRACT_MAX_TOKENS` | Per-completion output cap, default 1024. |
+| `SGLANG_CONTRACT_VISION_SCOPE` | `informational` by default; set `gate` only after the ADR vision gate is approved. |
+| `SGLANG_CONTRACT_REPORT_FILE` | Optional JSON report path, created mode 0600. |
+
+Run a single public-safe probe, for example:
+
+```bash
+SGLANG_CONTRACT_BASE_URL='https://sglang.example.invalid/v1' \
+SGLANG_CONTRACTS='models' \
+node scripts/verify/sglang_minimax_m3_contract.mjs
+```
+
+Run the entire text-first matrix by omitting `SGLANG_CONTRACTS`. Exit code `0`
+means every release-gating contract passed; an image-only failure is recorded
+as `passed_with_informational_failure`. Exit code `1` means a live contract
+failed, and `2` means configuration was invalid. Setting
+`SGLANG_CONTRACT_VISION_SCOPE=gate` makes image failure return `1`.
+
+The versioned report contains public model/runtime/image fingerprints,
+per-contract latency, status, and at most 512 characters of redacted failure
+diagnostics. It never contains the endpoint, authorization value, request
+prompt, provider response, reasoning trace, or tool arguments. The endpoint is
+represented only by SHA-256 so reports from the same deployment can be
+correlated without publishing its address.
+
+Ordinary CI runs the complete local mock and negative matrix through
+`public:sglang:minimax-m3:contract-mock`. The live job is exposed as
+`sglang:minimax-m3:live-contract` only on a protected ref when the protected
+endpoint variable is present; it remains a manual action and stores only the
+redacted JSON report. Use a protected GitLab file variable for the optional API
+key path.
+
 ## Worked example — the metadata-trace diagnostic (v1.5.21)
 
 The metadata-trace endpoint (`GET /api/inventory/{id}/metadata-trace`)

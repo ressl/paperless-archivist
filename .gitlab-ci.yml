@@ -92,6 +92,40 @@ public:rust:clippy:
   script:
     - cargo clippy --workspace --all-targets -- -D warnings
 
+# Offline contract matrix for the opt-in live SGLang/MiniMax M3 probe. The
+# mock server exercises success, failure, timeout, response bounds and
+# redaction; ordinary pipelines never contact an LLM endpoint.
+public:sglang:minimax-m3:contract-mock:
+  stage: test
+  image: "$NODE_IMAGE"
+  extends: .default_retry
+  script:
+    - node --test scripts/verify/sglang_minimax_m3_contract.test.mjs
+
+# Available only when a protected ref receives the protected endpoint
+# variable. Authentication is an optional GitLab file variable, so no secret
+# appears in the command line, logs, report, artifacts, or repository.
+sglang:minimax-m3:live-contract:
+  stage: test
+  image: "$NODE_IMAGE"
+  interruptible: false
+  timeout: 30m
+  resource_group: sglang-minimax-m3-live-contract
+  variables:
+    SGLANG_CONTRACT_REPORT_FILE: sglang-minimax-m3-contract-report.json
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $SGLANG_CONTRACT_BASE_URL'
+      when: manual
+      allow_failure: false
+    - when: never
+  script:
+    - node scripts/verify/sglang_minimax_m3_contract.mjs
+  artifacts:
+    when: always
+    paths:
+      - sglang-minimax-m3-contract-report.json
+    expire_in: 30 days
+
 public:rust:audit:
   stage: scan
   extends: .rust_public_base
