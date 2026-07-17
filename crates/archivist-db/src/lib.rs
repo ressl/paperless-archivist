@@ -24,9 +24,16 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use thiserror::Error;
 use uuid::Uuid;
 
 pub type DbPool = PgPool;
+
+const LAST_ENABLED_ADMIN_REJECTION: &str = "last enabled administrator mutation rejected";
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("at least one enabled administrator is required")]
+pub struct LastEnabledAdminError;
 
 pub async fn connect(database_url: &str, max_connections: u32) -> Result<DbPool> {
     PgPoolOptions::new()
@@ -687,6 +694,9 @@ pub async fn consume_oidc_login_state(
 
 pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result<AuthUser> {
     let mut tx = pool.begin().await?;
+    // Keep the lock order identical to manual role/enabled mutations: the
+    // invariant lock always comes before any users/user_roles row lock.
+    lock_enabled_admin_invariant_tx(&mut tx).await?;
     let mut linked_existing = false;
     let mut created = false;
 
@@ -800,6 +810,7 @@ pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result
     let mut last_admin_protected = false;
     if previous_roles.contains(&Role::Admin)
         && !roles.contains(&Role::Admin)
+        && user_is_enabled_admin_tx(&mut tx, user_id).await?
         && !other_enabled_admin_exists_tx(&mut tx, user_id).await?
     {
         tracing::warn!(
@@ -948,6 +959,37 @@ async fn load_user_roles_tx(
         .collect()
 }
 
+async fn lock_enabled_admin_invariant_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query(
+        "select pg_advisory_xact_lock(hashtext('paperless_archivist_enabled_admin_invariant'))",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn user_is_enabled_admin_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<bool> {
+    let row = sqlx::query(
+        r#"
+        select 1
+          from users u
+          join user_roles ur on ur.user_id = u.id
+         where u.id = $1
+           and u.enabled
+           and ur.role = $2
+         limit 1
+        "#,
+    )
+    .bind(user_id)
+    .bind(Role::Admin.to_string())
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// Whether any ENABLED user other than `user_id` holds the admin role — the
 /// guard for last-admin demotion (#299). Disabled admins don't count: they
 /// cannot log in to recover the system.
@@ -971,6 +1013,38 @@ async fn other_enabled_admin_exists_tx(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.is_some())
+}
+
+async fn append_last_enabled_admin_rejection_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    event_type: &str,
+    actor_id: Uuid,
+    user_id: Uuid,
+    before: Value,
+    after: Value,
+) -> Result<()> {
+    append_audit_tx(
+        tx,
+        AuditEventInput {
+            event_type: event_type.to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: Some(before),
+            after: Some(after),
+            metadata: Some(json!({
+                "target_user_id": user_id,
+                "reason": "last_enabled_administrator"
+            })),
+            outcome: "failed".to_owned(),
+            error_message: Some(LAST_ENABLED_ADMIN_REJECTION.to_owned()),
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await
 }
 
 /// Order-insensitive role-set fingerprint for change detection.
@@ -1199,12 +1273,31 @@ pub async fn set_user_enabled(
     actor_id: Uuid,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    lock_enabled_admin_invariant_tx(&mut tx).await?;
     let before = sqlx::query("select enabled from users where id = $1")
         .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow!("user does not exist"))?
         .try_get::<bool, _>("enabled")?;
+
+    if before
+        && !enabled
+        && user_is_enabled_admin_tx(&mut tx, user_id).await?
+        && !other_enabled_admin_exists_tx(&mut tx, user_id).await?
+    {
+        append_last_enabled_admin_rejection_tx(
+            &mut tx,
+            "user.enabled_changed",
+            actor_id,
+            user_id,
+            json!({ "user_id": user_id, "enabled": before }),
+            json!({ "user_id": user_id, "enabled": enabled }),
+        )
+        .await?;
+        tx.commit().await?;
+        return Err(LastEnabledAdminError.into());
+    }
 
     sqlx::query("update users set enabled = $2, updated_at = now() where id = $1")
         .bind(user_id)
@@ -1249,26 +1342,28 @@ pub async fn set_user_roles(
     actor_id: Uuid,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let before_rows = sqlx::query("select role from user_roles where user_id = $1 order by role")
-        .bind(user_id)
-        .fetch_all(&mut *tx)
-        .await?;
-    let before = before_rows
-        .into_iter()
-        .map(|row| row.try_get::<String, _>("role"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    lock_enabled_admin_invariant_tx(&mut tx).await?;
+    let before = load_user_roles_tx(&mut tx, user_id).await?;
 
-    sqlx::query("delete from user_roles where user_id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
+    if before.contains(&Role::Admin)
+        && !roles.contains(&Role::Admin)
+        && user_is_enabled_admin_tx(&mut tx, user_id).await?
+        && !other_enabled_admin_exists_tx(&mut tx, user_id).await?
+    {
+        append_last_enabled_admin_rejection_tx(
+            &mut tx,
+            "user.roles_changed",
+            actor_id,
+            user_id,
+            json!({ "user_id": user_id, "roles": before }),
+            json!({ "user_id": user_id, "roles": roles }),
+        )
         .await?;
-    for role in roles {
-        sqlx::query("insert into user_roles (user_id, role) values ($1, $2)")
-            .bind(user_id)
-            .bind(role.to_string())
-            .execute(&mut *tx)
-            .await?;
+        tx.commit().await?;
+        return Err(LastEnabledAdminError.into());
     }
+
+    replace_user_roles_tx(&mut tx, user_id, roles).await?;
     append_audit_tx(
         &mut tx,
         AuditEventInput {

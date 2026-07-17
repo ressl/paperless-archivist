@@ -20,28 +20,29 @@ use archivist_core::{
     document_chat_snippet, document_chat_terms, roles_have_permission, score_document_chat_source,
 };
 use archivist_db::{
-    AuthUser, DbPool, DocumentChatCandidate, MetadataApplyAudit, MetadataArtifact,
-    MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry, ReviewItemRecord,
-    append_audit, apply_security_retention, connect, consume_oidc_login_state, count_reviews,
-    create_document_chat_session, create_oidc_login_state, create_run_with_jobs_with_priority,
-    create_runs_for_documents, create_session, create_user_with_roles, dashboard_bucket_labels,
-    dashboard_range_start, document_chat_session_visible, failed_document_ids, find_api_token,
-    find_session, find_user_for_login, get_backlog_counts, get_dashboard_live_status,
-    get_dashboard_stats, get_runtime_settings, has_any_user, hash_token,
-    insert_document_chat_message, insert_document_chat_sources, latest_apply_audit_for_run,
-    latest_metadata_artifact_for_run, latest_metadata_run_for_document, list_audit_events,
-    list_document_chat_messages, list_document_chat_sessions, list_inventory,
-    list_prompt_experiments, list_prompt_usage, list_prompts, list_reviews, list_secret_references,
-    list_sessions, list_users, metadata_review_items_for_run,
-    metrics_snapshot as db_metrics_snapshot, migrate, paperless_sync_cursor,
-    provider_bucket_entries, queue_missing_pipeline, queue_missing_stage, read_metric_counters,
-    record_login_failure, record_login_success, recover_stale_leases, recover_stuck_runs,
-    recovery_candidates, resolve_secret, review_decision, revoke_session_by_admin,
-    rotate_api_token, search_document_chat_candidates, set_user_enabled, set_user_roles,
-    statistics_throughput_rows, statistics_usage_rows, update_paperless_sync_cursor,
-    update_runtime_settings, update_user_password_hash, upsert_encrypted_secret,
-    upsert_inventory_item, upsert_oidc_user, upsert_paperless_custom_field,
-    upsert_paperless_named_entity, upsert_paperless_tag, verify_audit_integrity,
+    AuthUser, DbPool, DocumentChatCandidate, LastEnabledAdminError, MetadataApplyAudit,
+    MetadataArtifact, MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry,
+    ReviewItemRecord, append_audit, apply_security_retention, connect, consume_oidc_login_state,
+    count_reviews, create_document_chat_session, create_oidc_login_state,
+    create_run_with_jobs_with_priority, create_runs_for_documents, create_session,
+    create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
+    document_chat_session_visible, failed_document_ids, find_api_token, find_session,
+    find_user_for_login, get_backlog_counts, get_dashboard_live_status, get_dashboard_stats,
+    get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
+    insert_document_chat_sources, latest_apply_audit_for_run, latest_metadata_artifact_for_run,
+    latest_metadata_run_for_document, list_audit_events, list_document_chat_messages,
+    list_document_chat_sessions, list_inventory, list_prompt_experiments, list_prompt_usage,
+    list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
+    metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
+    paperless_sync_cursor, provider_bucket_entries, queue_missing_pipeline, queue_missing_stage,
+    read_metric_counters, record_login_failure, record_login_success, recover_stale_leases,
+    recover_stuck_runs, recovery_candidates, resolve_secret, review_decision,
+    revoke_session_by_admin, rotate_api_token, search_document_chat_candidates, set_user_enabled,
+    set_user_roles, statistics_throughput_rows, statistics_usage_rows,
+    update_paperless_sync_cursor, update_runtime_settings, update_user_password_hash,
+    upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
+    verify_audit_integrity,
 };
 use archivist_paperless::{PaperlessClient, PaperlessTag};
 use argon2::password_hash::rand_core::OsRng;
@@ -7415,6 +7416,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn last_enabled_admin_error_maps_to_stable_conflict() {
+        let error = ApiError::from(anyhow::Error::new(LastEnabledAdminError));
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(
+            error.message,
+            "at least one enabled administrator is required"
+        );
+    }
+
+    #[test]
     fn ollama_cloud_detection_matches_hosted_endpoint() {
         assert!(is_ollama_cloud("https://ollama.com"));
         assert!(is_ollama_cloud("https://OLLAMA.com/"));
@@ -8634,6 +8645,13 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        if error.downcast_ref::<LastEnabledAdminError>().is_some() {
+            warn!("user mutation rejected to preserve the enabled administrator invariant");
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: error.to_string(),
+            };
+        }
         if let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>() {
             warn!(
                 fields = ?conflict.fields(),

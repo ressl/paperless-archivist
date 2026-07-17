@@ -1766,6 +1766,7 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200": { description: Disabled user and revoked sessions }
+        "409": { description: Rejected because this is the last enabled administrator }
   /api/users/{id}/roles:
     post:
       parameters:
@@ -1786,6 +1787,7 @@ paths:
                   items: { $ref: "#/components/schemas/Role" }
       responses:
         "200": { description: Updated user roles }
+        "409": { description: Rejected because this is the last enabled administrator }
   /api/users/{id}/reset-password:
     post:
       parameters:

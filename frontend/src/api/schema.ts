@@ -2138,6 +2138,13 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description Rejected because this is the last enabled administrator */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -2174,6 +2181,13 @@ export interface paths {
             responses: {
                 /** @description Updated user roles */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Rejected because this is the last enabled administrator */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
