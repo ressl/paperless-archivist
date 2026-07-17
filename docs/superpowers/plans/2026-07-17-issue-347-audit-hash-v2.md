@@ -31,4 +31,4 @@
 
 - [x] Run focused unit, PostgreSQL tamper, mixed-chain, API, and frontend tests.
 - [x] Run formatting, Clippy, workspace tests, audit, deny, frontend gates, and all PostgreSQL integration tests.
-- [ ] Obtain independent review, commit, push, inspect the MR pipeline, document evidence, and close #347 only after the remote gate is green.
+- [x] Obtain independent review, commit, push, inspect the MR pipeline, document evidence, and close #347 only after the remote gate is green.
