@@ -8631,7 +8631,7 @@ async fn append_audit_tx(
     .map(|row| row.try_get("event_hash"))
     .transpose()?;
     let id = Uuid::now_v7();
-    let created_at = Utc::now();
+    let created_at = postgres_timestamp_precision(Utc::now());
     let hash_version = AUDIT_HASH_VERSION_V2;
     let event_hash = audit_event_hash_v2(id, created_at, &prev_event_hash, &event);
 
@@ -8671,6 +8671,16 @@ async fn append_audit_tx(
 
 const AUDIT_HASH_VERSION_V1: i16 = 1;
 const AUDIT_HASH_VERSION_V2: i16 = 2;
+
+/// PostgreSQL `timestamp with time zone` stores microseconds. Canonicalize the
+/// application timestamp before hashing and binding it so the hash input is
+/// byte-for-byte reproducible after a database round trip on hosts whose clock
+/// exposes nanoseconds.
+fn postgres_timestamp_precision(timestamp: DateTime<Utc>) -> DateTime<Utc> {
+    timestamp
+        .with_nanosecond(timestamp.nanosecond() / 1_000 * 1_000)
+        .expect("a truncated nanosecond value is always valid")
+}
 
 fn audit_event_hash_v1(
     id: Uuid,
@@ -10671,6 +10681,32 @@ mod tests {
                 &previous,
                 &audit_hash_fixture(Some("203.0.113.17"), None)
             )
+        );
+    }
+
+    #[test]
+    fn audit_timestamp_is_canonicalized_to_postgres_precision_before_hashing() {
+        let id = Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap();
+        let source = "2026-07-17T08:00:00.123456789Z"
+            .parse::<DateTime<Utc>>()
+            .unwrap();
+        let stored = "2026-07-17T08:00:00.123456Z"
+            .parse::<DateTime<Utc>>()
+            .unwrap();
+        let previous = Some("previous-event-hash".to_owned());
+        let event = audit_hash_fixture(None, None);
+
+        let canonical = postgres_timestamp_precision(source);
+        assert_eq!(canonical, stored);
+        assert_ne!(
+            audit_event_hash_v2(id, source, &previous, &event),
+            audit_event_hash_v2(id, stored, &previous, &event),
+            "the regression requires a source timestamp PostgreSQL would truncate"
+        );
+        assert_eq!(
+            audit_event_hash_v2(id, canonical, &previous, &event),
+            audit_event_hash_v2(id, stored, &previous, &event),
+            "the hash input must exactly match the timestamp read back from PostgreSQL"
         );
     }
 

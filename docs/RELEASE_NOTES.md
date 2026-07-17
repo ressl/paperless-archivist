@@ -62,6 +62,9 @@ lease, provider, and HTTPS hardening fixes.
   Ollama runner-crash signatures are converted from the bounded in-memory body
   to a typed `RunnerUnavailable` error while persisted/logged diagnostics stay
   redacted; this keeps the fallback reachable after response-body hardening.
+- **Portable audit hashes:** audit timestamps are canonicalized to PostgreSQL's
+  microsecond precision before hashing and insertion. Integrity verification no
+  longer depends on whether the host clock exposes microseconds or nanoseconds.
 - **Secure Caddy profile (#355):** the reverse-proxy Compose overlay now forces
   `ARCHIVIST_COOKIE_SECURE=true`; session and CSRF cookies issued through the
   public HTTPS profile therefore carry `Secure`. Direct base-only localhost
