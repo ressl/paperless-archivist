@@ -25,4 +25,4 @@
 ### Task 3: Verify and deliver
 
 - [x] Run focused and full frontend tests, lint, i18n/accessibility checks, typecheck, and build.
-- [ ] Obtain independent review, commit, push, and close #357 only after the MR pipeline is green.
+- [x] Obtain independent review, commit, push, and close #357 only after the MR pipeline is green.
