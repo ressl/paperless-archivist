@@ -33,7 +33,7 @@ contains:
 - a ServiceMonitor selecting the API Service and reading the bearer credential
   from the existing application Secret;
 - a PrometheusRule with alerts for sustained queue depth, terminal-job failure
-  ratio, and any provider-quota counter increase;
+  rate, scrape loss, and any provider-quota counter increase;
 - no Secret object or credential value.
 
 The generic base continues to allow ingress from the documented monitoring
@@ -43,15 +43,21 @@ component in their private overlay.
 Initial rules use deliberately conservative thresholds:
 
 - queue depth greater than 100 for 30 minutes;
-- failed terminal jobs above 5 percent for 15 minutes, with a denominator
-  clamped to avoid division by zero;
+- more than five newly permanent job failures in 15 minutes;
 - `increase(paperless_archivist_provider_quota_total[1h]) > 0` for 5 minutes.
+
+The current failed-job metric is a mutable gauge and cannot safely be passed to
+`increase()`. Add a monotone `paperless_archivist_job_failures_total` counter,
+backed by `metrics_counters`, and increment it in the same transaction as each
+permanent `job.failed` transition. Retries and lost-lease no-ops do not
+increment it. This makes the recent failure-rate alert semantically correct.
 
 ## Production deployment
 
-The production API Deployment references a key in the existing SOPS-managed
-runtime Secret. The ServiceMonitor reads the same key, so the application and
-Prometheus cannot drift to different credentials. The production
+The production API Deployment references a dedicated SOPS-managed metrics
+Secret. The ServiceMonitor reads the same key, so the application and
+Prometheus cannot drift to different credentials and the worker receives no
+unneeded credential. The production
 CiliumNetworkPolicy admits only monitoring-stack pods to the API port in
 addition to the existing ingress path. The private Kustomization includes the
 ServiceMonitor and PrometheusRule.

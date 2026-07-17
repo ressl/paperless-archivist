@@ -29,10 +29,12 @@ Release documentation requires:
 
 ## Export credential lifecycle
 
-The GitLab.com export uses a dedicated Project Access Token with only the
-`write_repository` scope and the lowest role that permits repository pushes.
-The project owner is the operational owner. The token has a fixed annual
-expiration and is rotated before expiry.
+GitLab.com Free does not provide Project Access Tokens. The export therefore
+uses a project-scoped service account whose personal access token has only the
+`write_repository` scope. The service account is a member of this project only
+and receives the lowest role that can push its protected default branch. The
+project owner is the accountable human owner. The token has a fixed annual
+expiration and is rotated at least one month before expiry.
 
 The token value exists only in the internal source project's export variable.
 That variable is protected, masked, hidden, and scoped to the public-export
