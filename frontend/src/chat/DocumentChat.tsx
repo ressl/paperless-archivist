@@ -8,24 +8,47 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
   const { t, formatDateTime } = useI18n();
   const [sessions, setSessions] = useState<DocumentChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  // Mirror of activeSessionId so the slow post-send refresh can tell whether
-  // the user switched sessions during the LLM round-trip. (#286)
+  // Session identity plus a monotonically increasing request generation form
+  // the message-state ownership token. The ref is updated synchronously on a
+  // click, before React commits the state change, so even a response resolving
+  // in that gap is stale. The generation also covers A -> B -> A and two
+  // overlapping requests for the same session. (#272, #286)
   const activeSessionIdRef = useRef<string | null>(null);
-  activeSessionIdRef.current = activeSessionId;
+  const messageRequestGenerationRef = useRef(0);
   const [messages, setMessages] = useState<DocumentChatMessage[]>([]);
   const [sessionTitle, setSessionTitle] = useState(t('chat.default_session_title'));
   const [question, setQuestion] = useState('');
   const [documentIds, setDocumentIds] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const selectSession = (sessionId: string) => {
+    if (activeSessionIdRef.current === sessionId) return;
+    activeSessionIdRef.current = sessionId;
+    messageRequestGenerationRef.current += 1;
+    setActiveSessionId(sessionId);
+  };
+
   const loadSessions = () =>
     api.chatSessions().then((data) => {
       setSessions(data.items);
-      setActiveSessionId((current) => current ?? data.items[0]?.id ?? null);
+      if (activeSessionIdRef.current === null && data.items[0]) {
+        selectSession(data.items[0].id);
+      }
     }).catch((err) => setError(localizedErrorMessage(err, t)));
 
-  const loadMessages = (sessionId: string) =>
-    api.chatMessages(sessionId).then((data) => setMessages(data.items)).catch((err) => setError(localizedErrorMessage(err, t)));
+  const loadMessages = async (sessionId: string) => {
+    const generation = messageRequestGenerationRef.current + 1;
+    messageRequestGenerationRef.current = generation;
+    const ownsMessageState = () =>
+      activeSessionIdRef.current === sessionId &&
+      messageRequestGenerationRef.current === generation;
+    try {
+      const data = await api.chatMessages(sessionId);
+      if (ownsMessageState()) setMessages(data.items);
+    } catch (err) {
+      if (ownsMessageState()) setError(localizedErrorMessage(err, t));
+    }
+  };
 
   useEffect(() => {
     void loadSessions();
@@ -33,30 +56,20 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
 
   useEffect(() => {
     if (!activeSessionId) {
+      messageRequestGenerationRef.current += 1;
       setMessages([]);
       return;
     }
-    // Guard against out-of-order responses when switching sessions quickly:
-    // a slow fetch for a previously-selected session must not overwrite the
-    // now-active session's messages. (#272)
-    let active = true;
-    api
-      .chatMessages(activeSessionId)
-      .then((data) => {
-        if (active) setMessages(data.items);
-      })
-      .catch((err) => {
-        if (active) setError(localizedErrorMessage(err, t));
-      });
+    void loadMessages(activeSessionId);
     return () => {
-      active = false;
+      messageRequestGenerationRef.current += 1;
     };
   }, [activeSessionId, t]);
 
   const createSession = async () => {
     const created = await api.createChatSession(sessionTitle);
     setSessions((current) => [{ id: created.id, title: created.title, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }, ...current]);
-    setActiveSessionId(created.id);
+    selectSession(created.id);
     setMessages([]);
   };
 
@@ -71,7 +84,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
 
     const sessionId = activeSessionId ?? (await api.createChatSession(chatTitleFromQuestion(trimmed))).id;
     if (!activeSessionId) {
-      setActiveSessionId(sessionId);
+      selectSession(sessionId);
       await loadSessions();
     }
 
@@ -82,9 +95,9 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
     });
     setQuestion('');
     await loadSessions();
-    // Only refresh the message list if the user is still viewing the session
-    // we sent into — otherwise a slow answer would overwrite the session they
-    // switched to. (#286)
+    // Avoid an unnecessary request after a switch. `loadMessages` also checks
+    // session + generation when the response resolves, which closes the race
+    // when the switch happens during this request. (#286)
     if (activeSessionIdRef.current === sessionId) {
       await loadMessages(sessionId);
     }
@@ -111,7 +124,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
                 key={session.id}
                 className={session.id === activeSessionId ? 'active' : ''}
                 title={session.title}
-                onClick={() => setActiveSessionId(session.id)}
+                onClick={() => selectSession(session.id)}
               >
                 <span>{session.title}</span>
                 <small>{formatDateTime(session.updated_at)}</small>

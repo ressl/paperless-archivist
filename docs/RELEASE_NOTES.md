@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- **Document Chat request ownership (#286):** initial message loads and the
+  slow post-send refresh now share one session-plus-generation commit guard.
+  Switching A -> B (including A -> B -> A) invalidates stale responses and
+  errors synchronously, so a late LLM answer can no longer overwrite the
+  visible session or raise its error banner in a different chat.
 - **Vision fallback lease fencing (#376):** OCR now renews the owner-scoped job
   lease before each primary vision, Ollama model-discovery, and fallback vision
   call. A lost lease stops before the next provider future is polled and before
