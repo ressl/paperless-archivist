@@ -28,4 +28,4 @@
 
 - [x] Add the after state and a link/audit sample to the committed report without confidential bodies or infrastructure details.
 - [x] Run Markdown/repository checks and obtain an independent Critical/Important review.
-- [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #365 only when green.
+- [x] Commit/push, verify both GitLab pipelines, document evidence, and close #365 only when green.
