@@ -26,6 +26,19 @@ oidc:
   adminUsers: admin@example.com
   defaultRoles: viewer
 
+monitoring:
+  enabled: false
+  existingSecret: paperless-archivist-metrics
+  tokenKey: ARCHIVIST_METRICS_TOKEN
+  instanceLabel: paperless-archivist
+  prometheusNamespace: monitoring
+  scrapeInterval: 30s
+  alerts:
+    queueDepth: 100
+    queueFor: 30m
+    permanentFailuresPer15m: 5
+    providerQuotaWindow: 1h
+
 providers:
   ollama:
     baseUrl: http://ollama.example.svc.cluster.local:11434

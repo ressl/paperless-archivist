@@ -1,0 +1,39 @@
+groups:
+  - name: paperless-archivist.rules
+    rules:
+      - alert: PaperlessArchivistScrapeDown
+        expr: >-
+          (up{paperless_archivist_instance="paperless-archivist"} == 0)
+          or absent(up{paperless_archivist_instance="paperless-archivist"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Paperless Archivist metrics are unavailable
+          description: Prometheus cannot scrape the authenticated Paperless Archivist metrics endpoint.
+      - alert: PaperlessArchivistQueueBacklog
+        expr: >-
+          max by (namespace, paperless_archivist_instance)
+          (paperless_archivist_jobs_queued{paperless_archivist_instance="paperless-archivist"}) > 100
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Paperless Archivist queue depth is sustained above 100
+          description: The processing backlog has remained above the initial operational threshold for 30 minutes.
+      - alert: PaperlessArchivistJobFailureRateHigh
+        expr: increase(paperless_archivist_job_failures_total{paperless_archivist_instance="paperless-archivist"}[15m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Paperless Archivist permanent job failures are elevated
+          description: More than five jobs entered a permanent failed state within 15 minutes.
+      - alert: PaperlessArchivistProviderQuotaExhausted
+        expr: increase(paperless_archivist_provider_quota_total{paperless_archivist_instance="paperless-archivist"}[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A Paperless Archivist AI provider exhausted its quota
+          description: At least one provider quota-exhaustion event occurred during the last hour; processing may be parked until its cooldown expires.

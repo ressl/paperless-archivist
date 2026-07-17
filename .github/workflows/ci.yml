@@ -17,6 +17,23 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: archivist_ci
+          POSTGRES_USER: archivist_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U archivist_ci -d archivist_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://archivist_ci@127.0.0.1:5432/archivist_ci
+      ARCHIVIST_MIGRATIONS_DIR: ${{ github.workspace }}/migrations
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -30,6 +47,7 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace --locked
+      - run: bash scripts/verify/migration_smoke.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo install cargo-audit --locked
       - run: cargo install cargo-deny --locked
@@ -37,6 +55,23 @@ jobs:
       - run: cargo deny check
       - run: pnpm install --frozen-lockfile
         working-directory: frontend
+      - run: node --test scripts/verify/kubernetes_monitoring_contract.test.mjs
+      - run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            --entrypoint kubectl \
+            alpine/k8s:1.36.2@sha256:44ef4942e171939b9c665a4a84beb80e2dcdb9a24330d4651cfdfd2e9deecc47 \
+            kustomize deploy/kubernetes/examples/monitoring > /tmp/monitoring.yaml
+          test "$(grep -c '^kind: ServiceMonitor$' /tmp/monitoring.yaml)" -eq 1
+          test "$(grep -c '^kind: PrometheusRule$' /tmp/monitoring.yaml)" -eq 1
+      - run: |
+          docker run --rm -v "$PWD/scripts/verify:/workspace" -w /workspace \
+            --entrypoint /bin/promtool \
+            quay.io/prometheus/prometheus@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac \
+            check rules paperless_archivist_alert_rules.yaml
+          docker run --rm -v "$PWD/scripts/verify:/workspace" -w /workspace \
+            --entrypoint /bin/promtool \
+            quay.io/prometheus/prometheus@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac \
+            test rules paperless_archivist_alert_rules.test.yaml
       - run: pnpm generate:client
         working-directory: frontend
       # Fail if the committed client is out of date with the OpenAPI spec

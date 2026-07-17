@@ -6159,6 +6159,12 @@ pub async fn fail_job(
     .await?;
     if retry {
         increment_metric_counter_tx(&mut tx, "job_retries_scheduled_total", 1).await?;
+    } else {
+        // Keep this in the same transaction as the permanent job.failed audit
+        // event and state transition. Retries and lease-lost no-ops never reach
+        // this branch, so Prometheus rate()/increase() sees a true monotone
+        // count of newly permanent failures.
+        increment_metric_counter_tx(&mut tx, "job_failures_total", 1).await?;
     }
     tx.commit().await?;
     Ok(true)

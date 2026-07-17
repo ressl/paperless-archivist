@@ -81,6 +81,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Returns Prometheus exposition only when the dedicated metrics bearer token is configured and valid. */
         get: {
             parameters: {
                 query?: never;
@@ -99,6 +100,8 @@ export interface paths {
                         "text/plain": string;
                     };
                 };
+                401: components["responses"]["Unauthorized"];
+                503: components["responses"]["ServiceUnavailable"];
             };
         };
         put?: never;
