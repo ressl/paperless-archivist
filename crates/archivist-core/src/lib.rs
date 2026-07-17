@@ -832,6 +832,15 @@ impl RuntimeSettings {
         self.resolve_tuning(self.active_tuning_provider())
     }
 
+    /// Resolve effective tuning for a concrete provider while retaining this
+    /// settings object's global fallback values. API-side consumers use this
+    /// when an operator selects a provider other than `ai.default_provider`;
+    /// resolving through [`RuntimeSettings::effective_tuning`] would otherwise
+    /// leak the default provider's profile into that request.
+    pub fn effective_tuning_for_provider(&self, provider: &AiProviderSettings) -> EffectiveTuning {
+        self.resolve_tuning(Some(provider))
+    }
+
     /// Resolve effective tuning for a specific stage. The OCR-stage
     /// exception: `ocr_page_limit` is resolved against the provider that
     /// will actually execute the OCR stage (via `ai.stage_models[]`).
@@ -1919,7 +1928,8 @@ pub struct ProviderTuning {
 }
 
 /// Resolved tuning: every field collapsed to a concrete value the worker /
-/// API can use directly. Produced by [`RuntimeSettings::effective_tuning`].
+/// API can use directly. Produced by the `RuntimeSettings` effective-tuning
+/// resolution methods.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveTuning {
     pub worker_concurrency: u32,
@@ -5327,6 +5337,36 @@ mod tests {
         assert_eq!(tuning.vision_num_ctx, Some(4096));
         assert_eq!(tuning.hourly_document_limit, Some(200));
         assert_eq!(tuning.daily_document_limit, Some(2000));
+    }
+
+    #[test]
+    fn effective_tuning_for_explicit_provider_does_not_leak_default_profile() {
+        let mut settings = settings_with_two_providers();
+        settings.ai.default_provider = "ollama".to_owned();
+        settings.ai.providers[0].tuning.reasoning_effort = Some(ReasoningEffort::Low);
+        settings.ai.providers[0].tuning.max_output_tokens = Some(111);
+        settings.ai.providers[0].tuning.structured_output = Some(StructuredOutputMode::Off);
+        settings.ai.providers[0].tuning.text_num_ctx = Some(11_111);
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(11);
+        settings.ai.providers[1].tuning.reasoning_effort = Some(ReasoningEffort::High);
+        settings.ai.providers[1].tuning.max_output_tokens = Some(222);
+        settings.ai.providers[1].tuning.structured_output = Some(StructuredOutputMode::JsonObject);
+        settings.ai.providers[1].tuning.text_num_ctx = Some(22_222);
+        settings.ai.providers[1].tuning.request_timeout_seconds = Some(22);
+
+        let first = settings.effective_tuning_for_provider(&settings.ai.providers[0]);
+        let second = settings.effective_tuning_for_provider(&settings.ai.providers[1]);
+
+        assert_eq!(first.reasoning_effort, ReasoningEffort::Low);
+        assert_eq!(first.max_output_tokens, Some(111));
+        assert_eq!(first.structured_output, StructuredOutputMode::Off);
+        assert_eq!(first.text_num_ctx, Some(11_111));
+        assert_eq!(first.request_timeout_seconds, 11);
+        assert_eq!(second.reasoning_effort, ReasoningEffort::High);
+        assert_eq!(second.max_output_tokens, Some(222));
+        assert_eq!(second.structured_output, StructuredOutputMode::JsonObject);
+        assert_eq!(second.text_num_ctx, Some(22_222));
+        assert_eq!(second.request_timeout_seconds, 22);
     }
 
     #[test]

@@ -1935,8 +1935,9 @@ async fn test_prompt_endpoint(
         provider.model = model.trim().to_owned();
     }
     chat_request.model = provider.model.clone();
+    apply_api_provider_tuning(&provider, &mut chat_request);
 
-    let response = chat_with_default_provider(&state, &provider, chat_request.clone()).await?;
+    let response = chat_with_api_provider(&state, &provider, chat_request.clone()).await?;
     let parsed = parse_prompt_test_output(request.stage, &response.text);
     append_audit(
         &state.pool,
@@ -2119,7 +2120,7 @@ async fn test_provider(
     require(&auth.0, Permission::WriteSettings)?;
     require_user_session(&auth.0, "provider tests require a user session")?;
     let settings = get_runtime_settings(&state.pool).await?;
-    let (provider, tuning) = provider_test_target(&settings, &request)?;
+    let provider = provider_test_target(&settings, &request)?;
     let secret = provider_test_secret(&state, &settings, &provider, request.secret).await;
     let response_secret = secret.as_ref().ok().and_then(|secret| secret.clone());
     let result = async {
@@ -2127,7 +2128,7 @@ async fn test_provider(
             return Err(anyhow!("AI provider base URL rejected: {}", error.message));
         }
         let secret = secret?;
-        test_ai_provider(&provider, &tuning, secret.clone()).await
+        test_ai_provider(&provider, secret.clone()).await
     }
     .await;
     Ok(Json(provider_test_response(
@@ -2712,12 +2713,13 @@ struct ApiProvider {
     base_url: String,
     model: String,
     secret_id: Option<Uuid>,
+    tuning: EffectiveTuning,
 }
 
 fn provider_test_target(
     settings: &RuntimeSettings,
     request: &TestProviderRequest,
-) -> Result<(ApiProvider, EffectiveTuning), ApiError> {
+) -> Result<ApiProvider, ApiError> {
     let name = request.name.trim();
     if name.is_empty() {
         return Err(ApiError::bad_request("provider name must not be blank"));
@@ -2754,17 +2756,15 @@ fn provider_test_target(
     } else {
         effective_settings.ai.providers.push(draft.clone());
     }
-    let tuning = effective_settings.effective_tuning();
-    Ok((
-        ApiProvider {
-            name: draft.name,
-            kind: draft.kind,
-            base_url,
-            model: model.to_owned(),
-            secret_id: draft.secret_id,
-        },
+    let tuning = effective_settings.effective_tuning_for_provider(&draft);
+    Ok(ApiProvider {
+        name: draft.name,
+        kind: draft.kind,
+        base_url,
+        model: model.to_owned(),
+        secret_id: draft.secret_id,
         tuning,
-    ))
+    })
 }
 
 async fn provider_test_secret(
@@ -2839,12 +2839,14 @@ fn provider_by_name(settings: &RuntimeSettings, name: &str) -> Result<ApiProvide
     }
     let model = settings.ai.default_model_for_provider(&provider, false);
     let base_url = provider_base_url(&provider.name, &provider.base_url)?;
+    let tuning = settings.effective_tuning_for_provider(&provider);
     Ok(ApiProvider {
         name: provider.name,
         kind: provider.kind,
         base_url,
         model,
         secret_id: provider.secret_id,
+        tuning,
     })
 }
 
@@ -2878,12 +2880,14 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
     }
     let model = settings.ai.default_model_for_provider(&provider, false);
     let base_url = provider_base_url(&provider.name, &provider.base_url)?;
+    let tuning = settings.effective_tuning_for_provider(&provider);
     Ok(ApiProvider {
         name: provider.name,
         kind: provider.kind,
         base_url,
         model,
         secret_id: provider.secret_id,
+        tuning,
     })
 }
 
@@ -2904,31 +2908,37 @@ async fn provider_secret(state: &AppState, provider: &ApiProvider) -> Result<Opt
     resolve_secret(&state.pool, &state.config.secret_key, secret_id).await
 }
 
-fn provider_test_chat_request(provider: &ApiProvider, tuning: &EffectiveTuning) -> ChatRequest {
-    ChatRequest {
+fn apply_api_provider_tuning(provider: &ApiProvider, request: &mut ChatRequest) {
+    request.num_ctx = provider.tuning.text_num_ctx;
+    request.reasoning_effort = Some(provider.tuning.reasoning_effort);
+    request.max_output_tokens = provider.tuning.max_output_tokens;
+    request.structured_output = Some(provider.tuning.structured_output);
+}
+
+fn provider_test_chat_request(provider: &ApiProvider) -> ChatRequest {
+    let mut request = ChatRequest {
         model: provider.model.clone(),
         system_prompt: "Return only a short JSON provider health result.".to_owned(),
         user_prompt: "Return {\"status\":\"ok\"}.".to_owned(),
         temperature: 0.0,
-        num_ctx: tuning.text_num_ctx,
+        num_ctx: None,
         response_schema: Some(json!({
             "type": "object",
             "properties": { "status": { "type": "string" } },
             "required": ["status"],
             "additionalProperties": false
         })),
-        reasoning_effort: Some(tuning.reasoning_effort),
-        max_output_tokens: tuning.max_output_tokens,
-        structured_output: Some(tuning.structured_output),
-    }
+        reasoning_effort: None,
+        max_output_tokens: None,
+        structured_output: None,
+    };
+    apply_api_provider_tuning(provider, &mut request);
+    request
 }
 
-async fn test_ai_provider(
-    provider: &ApiProvider,
-    tuning: &EffectiveTuning,
-    secret: Option<SecretString>,
-) -> Result<Value> {
-    let timeout = std::time::Duration::from_secs(u64::from(tuning.request_timeout_seconds));
+async fn test_ai_provider(provider: &ApiProvider, secret: Option<SecretString>) -> Result<Value> {
+    let timeout =
+        std::time::Duration::from_secs(u64::from(provider.tuning.request_timeout_seconds));
     match provider.kind {
         AiProviderKind::Ollama => {
             let client = OllamaClient::new_with_timeout(
@@ -2937,9 +2947,7 @@ async fn test_ai_provider(
                 secret,
                 timeout,
             )?;
-            let response = client
-                .chat(provider_test_chat_request(provider, tuning))
-                .await?;
+            let response = client.chat(provider_test_chat_request(provider)).await?;
             Ok(json!({
                 "provider": response.provider,
                 "model": response.model,
@@ -2953,9 +2961,7 @@ async fn test_ai_provider(
                 secret,
                 timeout,
             )?;
-            let response = client
-                .chat(provider_test_chat_request(provider, tuning))
-                .await?;
+            let response = client.chat(provider_test_chat_request(provider)).await?;
             Ok(
                 json!({ "provider": response.provider, "model": response.model, "text": response.text }),
             )
@@ -2970,9 +2976,7 @@ async fn test_ai_provider(
                 secret,
                 timeout,
             )?;
-            let response = client
-                .chat(provider_test_chat_request(provider, tuning))
-                .await?;
+            let response = client.chat(provider_test_chat_request(provider)).await?;
             Ok(
                 json!({ "provider": response.provider, "model": response.model, "text": response.text }),
             )
@@ -2989,25 +2993,29 @@ async fn test_ai_provider(
     }
 }
 
-async fn chat_with_default_provider(
+async fn chat_with_api_provider(
     state: &AppState,
     provider: &ApiProvider,
     request: ChatRequest,
 ) -> Result<AiResponse> {
+    let timeout =
+        std::time::Duration::from_secs(u64::from(provider.tuning.request_timeout_seconds));
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client = OllamaClient::new(
+            let client = OllamaClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
                 provider_secret(state, provider).await?,
+                timeout,
             )?;
             client.chat(request).await
         }
         AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
-            let client = OpenAiCompatibleClient::new(
+            let client = OpenAiCompatibleClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
                 provider_secret(state, provider).await?,
+                timeout,
             )?;
             client.chat(request).await
         }
@@ -3015,7 +3023,12 @@ async fn chat_with_default_provider(
             let secret = provider_secret(state, provider).await?.ok_or_else(|| {
                 anyhow!("AI provider '{}' requires an API key secret", provider.name)
             })?;
-            let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
+            let client = AnthropicClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                secret,
+                timeout,
+            )?;
             client.chat(request).await
         }
         AiProviderKind::Mineru => Err(anyhow!(
@@ -3024,6 +3037,26 @@ async fn chat_with_default_provider(
             provider.name
         )),
     }
+}
+
+fn build_document_chat_request(
+    provider: &ApiProvider,
+    system_prompt: String,
+    user_prompt: String,
+) -> ChatRequest {
+    let mut request = ChatRequest {
+        model: provider.model.clone(),
+        system_prompt,
+        user_prompt,
+        temperature: 0.1,
+        num_ctx: None,
+        response_schema: None,
+        reasoning_effort: None,
+        max_output_tokens: None,
+        structured_output: None,
+    };
+    apply_api_provider_tuning(provider, &mut request);
+    request
 }
 
 async fn ensure_chat_visible(
@@ -4951,20 +4984,10 @@ async fn post_chat_message(
     )
     .await?;
     let prompt = build_document_chat_prompt(question, &sources);
-    let response = chat_with_default_provider(
+    let response = chat_with_api_provider(
         &state,
         &provider,
-        ChatRequest {
-            model: provider.model.clone(),
-            system_prompt: prompt.system_prompt,
-            user_prompt: prompt.user_prompt,
-            temperature: 0.1,
-            num_ctx: None,
-            response_schema: None,
-            reasoning_effort: None,
-            max_output_tokens: None,
-            structured_output: None,
-        },
+        build_document_chat_request(&provider, prompt.system_prompt, prompt.user_prompt),
     )
     .await?;
     let answer = response.text.clone();
@@ -9019,7 +9042,138 @@ mod tests {
             base_url: "http://example.invalid".to_owned(),
             model: "test-model".to_owned(),
             secret_id: None,
+            tuning: RuntimeSettings::default().effective_tuning(),
         }
+    }
+
+    fn api_provider_profile_settings(first_url: &str, second_url: &str) -> RuntimeSettings {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.default_provider = "first".to_owned();
+        settings.ai.default_text_model = "gpt-5-first".to_owned();
+        settings.ai.providers = vec![
+            AiProviderSettings {
+                name: "first".to_owned(),
+                kind: AiProviderKind::OpenaiCompatible,
+                base_url: first_url.to_owned(),
+                default_text_model: Some("gpt-5-first".to_owned()),
+                default_vision_model: None,
+                cost_per_1m_input_tokens_usd: None,
+                cost_per_1m_output_tokens_usd: None,
+                secret_id: None,
+                enabled: true,
+                tuning: ProviderTuning {
+                    text_num_ctx: Some(11_111),
+                    reasoning_effort: Some(archivist_core::ReasoningEffort::Low),
+                    max_output_tokens: Some(111),
+                    structured_output: Some(archivist_core::StructuredOutputMode::Off),
+                    request_timeout_seconds: Some(11),
+                    ..ProviderTuning::default()
+                },
+            },
+            AiProviderSettings {
+                name: "second".to_owned(),
+                kind: AiProviderKind::OpenaiCompatible,
+                base_url: second_url.to_owned(),
+                default_text_model: Some("gpt-5-second".to_owned()),
+                default_vision_model: None,
+                cost_per_1m_input_tokens_usd: None,
+                cost_per_1m_output_tokens_usd: None,
+                secret_id: None,
+                enabled: true,
+                tuning: ProviderTuning {
+                    text_num_ctx: Some(22_222),
+                    reasoning_effort: Some(archivist_core::ReasoningEffort::High),
+                    max_output_tokens: Some(222),
+                    structured_output: Some(archivist_core::StructuredOutputMode::JsonObject),
+                    request_timeout_seconds: Some(22),
+                    ..ProviderTuning::default()
+                },
+            },
+        ];
+        settings
+    }
+
+    fn api_test_chat_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            model: model.to_owned(),
+            system_prompt: "system".to_owned(),
+            user_prompt: "user".to_owned(),
+            temperature: 0.1,
+            num_ctx: None,
+            response_schema: Some(json!({ "type": "object" })),
+            reasoning_effort: None,
+            max_output_tokens: None,
+            structured_output: None,
+        }
+    }
+
+    #[test]
+    fn api_provider_tuning_follows_selected_provider_without_cross_profile_leakage() {
+        let settings = api_provider_profile_settings(
+            "https://first.example.test/v1",
+            "https://second.example.test/v1",
+        );
+        let first = provider_by_name(&settings, "first").unwrap();
+        let mut second = provider_by_name(&settings, "second").unwrap();
+        second.model = "gpt-5-second-override".to_owned();
+
+        let mut first_request = api_test_chat_request(&first.model);
+        apply_api_provider_tuning(&first, &mut first_request);
+        let mut second_request = api_test_chat_request(&second.model);
+        apply_api_provider_tuning(&second, &mut second_request);
+
+        assert_eq!(first_request.model, "gpt-5-first");
+        assert_eq!(first_request.num_ctx, Some(11_111));
+        assert_eq!(
+            first_request.reasoning_effort,
+            Some(archivist_core::ReasoningEffort::Low)
+        );
+        assert_eq!(first_request.max_output_tokens, Some(111));
+        assert_eq!(
+            first_request.structured_output,
+            Some(archivist_core::StructuredOutputMode::Off)
+        );
+        assert_eq!(first.tuning.request_timeout_seconds, 11);
+
+        assert_eq!(second_request.model, "gpt-5-second-override");
+        assert_eq!(second_request.num_ctx, Some(22_222));
+        assert_eq!(
+            second_request.reasoning_effort,
+            Some(archivist_core::ReasoningEffort::High)
+        );
+        assert_eq!(second_request.max_output_tokens, Some(222));
+        assert_eq!(
+            second_request.structured_output,
+            Some(archivist_core::StructuredOutputMode::JsonObject)
+        );
+        assert_eq!(second.tuning.request_timeout_seconds, 22);
+    }
+
+    #[test]
+    fn document_chat_request_uses_default_text_provider_tuning() {
+        let settings = api_provider_profile_settings(
+            "https://first.example.test/v1",
+            "https://second.example.test/v1",
+        );
+        let provider = provider_for_default_text(&settings).unwrap();
+        let request = build_document_chat_request(
+            &provider,
+            "chat system".to_owned(),
+            "chat user".to_owned(),
+        );
+
+        assert_eq!(request.model, "gpt-5-first");
+        assert_eq!(request.temperature, 0.1);
+        assert_eq!(request.num_ctx, Some(11_111));
+        assert_eq!(
+            request.reasoning_effort,
+            Some(archivist_core::ReasoningEffort::Low)
+        );
+        assert_eq!(request.max_output_tokens, Some(111));
+        assert_eq!(
+            request.structured_output,
+            Some(archivist_core::StructuredOutputMode::Off)
+        );
     }
 
     #[test]
@@ -9238,6 +9392,108 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
+    fn api_text_test_state() -> AppState {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://archivist:archivist@127.0.0.1/archivist")
+            .expect("lazy test pool");
+        AppState {
+            pool,
+            config: Arc::new(test_config()),
+            auth_rate_limiter: Arc::new(AuthRateLimiter::new(10, 60)),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_tester_and_document_chat_send_selected_provider_tuning_on_wire() {
+        let prompt_capture = ProviderProbeCapture::default();
+        let document_capture = ProviderProbeCapture::default();
+        let (prompt_url, prompt_handle) = spawn_mock_openai_probe(prompt_capture.clone()).await;
+        let (document_url, document_handle) =
+            spawn_mock_openai_probe(document_capture.clone()).await;
+        let state = api_text_test_state();
+
+        let settings = api_provider_profile_settings(&document_url, &prompt_url);
+        let mut prompt_provider = provider_by_name(&settings, "second").unwrap();
+        prompt_provider.model = "gpt-5-prompt-override".to_owned();
+        let prompt_input = TestPromptRequest {
+            stage: Stage::Ocr,
+            content: "prompt system".to_owned(),
+            sample_text: Some("sample".to_owned()),
+            paperless_document_id: None,
+            provider_name: Some("second".to_owned()),
+            model: Some(prompt_provider.model.clone()),
+        };
+        let mut prompt_request = build_prompt_test_chat_request(&prompt_input, "sample")
+            .await
+            .unwrap();
+        prompt_request.system_prompt = prompt_input.content;
+        prompt_request.model = prompt_provider.model.clone();
+        apply_api_provider_tuning(&prompt_provider, &mut prompt_request);
+        chat_with_api_provider(&state, &prompt_provider, prompt_request)
+            .await
+            .expect("prompt tester wire call");
+
+        let prompt_body = prompt_capture.body.lock().unwrap().clone().unwrap();
+        assert_eq!(prompt_body["model"], "gpt-5-prompt-override");
+        assert_eq!(prompt_body["reasoning_effort"], "high");
+        assert_eq!(prompt_body["max_tokens"], 222);
+
+        let document_provider = provider_for_default_text(&settings).unwrap();
+        let document_request = build_document_chat_request(
+            &document_provider,
+            "document system".to_owned(),
+            "document user".to_owned(),
+        );
+        chat_with_api_provider(&state, &document_provider, document_request)
+            .await
+            .expect("document chat wire call");
+
+        let document_body = document_capture.body.lock().unwrap().clone().unwrap();
+        assert_eq!(document_body["model"], "gpt-5-first");
+        assert_eq!(document_body["reasoning_effort"], "low");
+        assert_eq!(document_body["max_tokens"], 111);
+
+        prompt_handle.abort();
+        document_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn api_text_chat_honors_selected_provider_request_timeout() {
+        use axum::Json as AxumJson;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                AxumJson(json!({ "choices": [{ "message": { "content": "late" } }] }))
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        let base_url = format!("http://{address}");
+        let mut settings = api_provider_profile_settings(&base_url, "https://unused.example/v1");
+        settings.ai.providers[0].tuning.request_timeout_seconds = Some(1);
+        let provider = provider_for_default_text(&settings).unwrap();
+        let request = build_document_chat_request(
+            &provider,
+            "document system".to_owned(),
+            "document user".to_owned(),
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(1500),
+            chat_with_api_provider(&api_text_test_state(), &provider, request),
+        )
+        .await
+        .expect("configured one-second timeout must return before outer guard");
+        assert!(result.is_err(), "slow provider must hit configured timeout");
+
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn provider_draft_probe_uses_draft_endpoint_tuning_and_transient_secret() {
         use archivist_core::{
@@ -9280,9 +9536,9 @@ mod tests {
             secret: Some("draft-super-secret".to_owned()),
         };
 
-        let (provider, tuning) = provider_test_target(&saved, &request).unwrap();
+        let provider = provider_test_target(&saved, &request).unwrap();
         let transient_secret = SecretString::from(request.secret.clone().unwrap());
-        let result = test_ai_provider(&provider, &tuning, Some(transient_secret.clone())).await;
+        let result = test_ai_provider(&provider, Some(transient_secret.clone())).await;
         let response = provider_test_response(&provider, result, Some(&transient_secret));
 
         assert_eq!(saved_capture.calls.load(Ordering::SeqCst), 0);

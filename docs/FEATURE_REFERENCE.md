@@ -49,15 +49,16 @@ servers such as SGLang) add two tuning fields:
   looks like a rejected schema triggers one automatic retry without
   `response_format`.
 
-Reasoning models served through an OpenAI-compatible endpoint (for
-example MiniMax-M2 or DeepSeek-R1) may emit inline `<think>...</think>`
-blocks; Archivist strips them before parsing the response. A response
-that contains only reasoning content and no final answer fails with a
-parser-configuration hint instead of returning empty text. Known
-limitation: the document-chat path and other API-side helper calls
-(prompt tester, provider connection test) do not apply
-`max_output_tokens`; worker stage calls (OCR, metadata, tagging,
-consensus) do.
+Reasoning models served through an OpenAI-compatible endpoint may emit inline
+`<think>...</think>` or MiniMax `<mm:think>...</mm:think>` blocks; Archivist
+strips them before parsing the response. A response that contains only
+reasoning content and no final answer fails with a parser-configuration hint
+instead of returning empty text. Worker stages and all API-side text consumers
+(Prompt Tester, provider connection test, and Document Chat) resolve the
+profile of the provider they actually selected. They share its reasoning
+effort, output-token cap, structured-output mode where a schema is present,
+text context, and per-request timeout; a prompt model override does not switch
+or discard that provider profile.
 
 [ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider)
 defines the accepted MiniMax M3 integration contract. The exact target is
@@ -68,8 +69,9 @@ the planned consolidated metadata prompt tester (#369), provider testing, and
 Document Chat. The OCR prompt test does not invoke OCR or send an image. OCR
 itself remains on MinerU/Ollama; M3 image input is informational until the
 linked OCR and live-contract gates pass. M3 request and
-`<mm:think>` response support are delivered by the follow-up implementation
-and contract issues #367 through #371.
+`thinking_mode` and `<mm:think>` response support are implemented by #367;
+shared API-consumer tuning is implemented by #368. The remaining catalog,
+live-contract, and operations gates are tracked in #369 through #371.
 
 ## OCR Pipeline
 

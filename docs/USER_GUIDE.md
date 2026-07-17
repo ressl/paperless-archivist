@@ -169,16 +169,19 @@ server) expose two extra tuning fields per provider:
   response that looks like a rejected schema is retried once automatically
   without the schema.
 
-Reasoning models such as MiniMax-M2 or DeepSeek-R1 served through an
-OpenAI-compatible endpoint may return inline `<think>...</think>` reasoning
-blocks. Archivist removes them before using the response. If a response
-contains only reasoning text and no final answer, the job fails with a
-message pointing at the server's reasoning-parser configuration instead of
+Reasoning models served through an OpenAI-compatible endpoint may return inline
+`<think>...</think>` or MiniMax `<mm:think>...</mm:think>` reasoning blocks.
+Archivist removes them before using the response. If a response contains only
+reasoning text and no final answer, the request fails with a message pointing
+at the server's reasoning-parser and thinking-mode configuration instead of
 silently producing empty output.
 
-Known limitation: `Max output tokens` applies to worker stage calls (OCR,
-metadata, tagging, consensus) but not to the Document Chat API path or other
-API-side helper calls (prompt tester, provider connection test).
+The worker stages, Prompt Tester, provider connection test, and Document Chat
+all use the effective tuning of the provider selected for that request. This
+includes reasoning effort, maximum output tokens, structured-output mode when
+the request has a schema, text context, and request timeout. Choosing a
+different provider or overriding its model in Prompt Tester keeps that
+provider's own profile and does not inherit values from the default provider.
 
 ### MinerU (Vision-Only OCR)
 
