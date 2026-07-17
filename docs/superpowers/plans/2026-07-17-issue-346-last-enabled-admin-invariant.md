@@ -30,4 +30,4 @@
 
 - [x] Run focused DB/API/OIDC tests and the PostgreSQL concurrency test.
 - [x] Run formatting, Clippy, workspace tests, audit, deny, frontend gates, and all PostgreSQL integration tests.
-- [ ] Commit, push, inspect the MR pipeline, document evidence, and close #346 only after the remote gate is green.
+- [x] Commit, push, inspect the MR pipeline, document evidence, and close #346 only after the remote gate is green.
