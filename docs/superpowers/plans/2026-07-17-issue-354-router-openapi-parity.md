@@ -50,7 +50,7 @@
 - [x] Add compile-time assertions for every newly documented generated path/method.
 - [x] Regenerate `schema.ts` and prove a second generation is diff-free.
 - [x] Run route/settings contracts, TypeScript typecheck, frontend tests/build, Rust tests/format, and repository diff checks.
-- [ ] Obtain independent review, commit, push, and close #354 only after the MR pipeline is green.
+- [x] Obtain independent review, commit, push, and close #354 only after the MR pipeline is green.
 
 ### Task 4: Exercise the contract in the authoritative CI pipeline
 
@@ -60,4 +60,4 @@
 
 - [x] Expose conventional lint and test scripts so generic Node CI executes the route, settings, generated-client, and runtime test gates.
 - [x] Configure the nested frontend project directory outside the public source tree.
-- [ ] Verify the authoritative MR pipeline runs and passes the Node lint, typecheck, test, build, and audit jobs.
+- [x] Verify the authoritative MR pipeline runs and passes the Node lint, typecheck, test, build, and audit jobs.
