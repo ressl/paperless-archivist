@@ -6,8 +6,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
     AiProviderError, AiResponse, AnthropicClient, ChatRequest, DEFAULT_OCR_SYSTEM_PROMPT,
-    ImageInput, MineruClient, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext,
-    TextProvider, VisionProvider, VisionRequest, parse_metadata_suggestion, prompt_for_metadata,
+    ImageInput, MetadataContractError, MetadataParseDiagnostics, MetadataParseStatus, MineruClient,
+    OllamaClient, OpenAiCompatibleClient, PromptLanguageContext, TextProvider, VisionProvider,
+    VisionRequest, parse_metadata_suggestion, prompt_for_metadata,
 };
 use archivist_apply::{
     ApplyExecution, ApplyRequest, ReviewApplyConflict, ReviewApplyPrecondition,
@@ -1003,6 +1004,97 @@ impl ProcessingFailureClass {
 /// (unlike the provider-cooldown release, which is unbounded by design). #305.
 const PAPERLESS_INFRA_RETRY_CEILING: i32 = 20;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataWorkerParseRoute {
+    ProcessSuggestion,
+    CompleteOmission,
+    RetryContractViolation,
+}
+
+fn metadata_worker_parse_route(diagnostics: &MetadataParseDiagnostics) -> MetadataWorkerParseRoute {
+    match diagnostics.status {
+        MetadataParseStatus::Valid => MetadataWorkerParseRoute::ProcessSuggestion,
+        MetadataParseStatus::Omitted => MetadataWorkerParseRoute::CompleteOmission,
+        MetadataParseStatus::ContractViolation => MetadataWorkerParseRoute::RetryContractViolation,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_terminal_metadata_parse_route(
+    pool: &DbPool,
+    job: &JobRecord,
+    lease_owner: &str,
+    settings: &RuntimeSettings,
+    response: &AiResponse,
+    request: &ChatRequest,
+    prompt_id: Option<Uuid>,
+    content: &str,
+    suggestion: &MetadataSuggestion,
+    diagnostics: &MetadataParseDiagnostics,
+) -> Result<bool> {
+    let route = metadata_worker_parse_route(diagnostics);
+    if route == MetadataWorkerParseRoute::ProcessSuggestion {
+        return Ok(false);
+    }
+
+    let mut normalized = serde_json::to_value(suggestion)?;
+    if let Some(object) = normalized.as_object_mut() {
+        object.insert(
+            "parse_diagnostics".to_owned(),
+            serde_json::to_value(diagnostics)?,
+        );
+    }
+    insert_ai_artifact(
+        pool,
+        AiArtifactInput {
+            run_id: job.run_id,
+            job_id: job.id,
+            stage: Stage::Metadata,
+            provider: &response.provider,
+            model: &response.model,
+            prompt_id,
+            input_hash: &hash_text(content),
+            request: Some(serde_json::to_value(request)?),
+            response: Some(response.raw_response.clone()),
+            normalized_output: Some(normalized),
+            duration_ms: response.duration_ms,
+            storage_mode: settings.security.ai_artifact_storage,
+        },
+    )
+    .await?;
+
+    match route {
+        MetadataWorkerParseRoute::ProcessSuggestion => Ok(false),
+        MetadataWorkerParseRoute::CompleteOmission => {
+            if !complete_job(
+                pool,
+                job,
+                lease_owner,
+                json!({
+                    "skipped": "metadata model omitted all enabled fields",
+                    "skipped_fields": [],
+                    "parse_diagnostics": diagnostics,
+                }),
+            )
+            .await?
+            {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    "lease lost before metadata-omission completion; another worker owns this job"
+                );
+            }
+            Ok(true)
+        }
+        MetadataWorkerParseRoute::RetryContractViolation => {
+            let contract_error = diagnostics.contract_error().ok_or_else(|| {
+                anyhow!("metadata parser routing invariant violated: contract error missing")
+            })?;
+            Err(contract_error.into())
+        }
+    }
+}
+
 /// Decide whether `error` should be retried with backoff (Transient) or marked
 /// permanent. The function first walks the error chain looking for typed
 /// errors from `archivist-paperless` and `archivist-ai`; those carry an
@@ -1029,6 +1121,12 @@ fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass 
                 e if e.is_transient() => ProcessingFailureClass::Transient,
                 _ => ProcessingFailureClass::Permanent,
             };
+        }
+        if cause.downcast_ref::<MetadataContractError>().is_some() {
+            // The provider responded, but violated the metadata schema. Retry
+            // because a fresh generation can recover; after the normal job
+            // budget is exhausted, fail_job makes the violation visible.
+            return ProcessingFailureClass::Transient;
         }
     }
 
@@ -2292,8 +2390,30 @@ async fn process_metadata(
         return Ok(());
     }
     let response = chat_for_stage(pool, config, settings, Stage::Metadata, request.clone()).await?;
-    let mut suggestion =
-        parse_metadata_suggestion(&response.text).unwrap_or_else(|_| MetadataSuggestion::default());
+    let parsed = parse_metadata_suggestion(&response.text);
+    let parse_diagnostics = parsed.diagnostics;
+    let mut suggestion = parsed.suggestion;
+
+    // Omission and contract errors are terminal before consensus/validation:
+    // both persist the safe parse artifact, omission completes immediately,
+    // and a violation returns the typed retryable error without applying any
+    // retained valid subfields.
+    if handle_terminal_metadata_parse_route(
+        pool,
+        job,
+        lease_owner,
+        settings,
+        &response,
+        &request,
+        prompt_id,
+        &content,
+        &suggestion,
+        &parse_diagnostics,
+    )
+    .await?
+    {
+        return Ok(());
+    }
 
     // v1.5.15 (#118): two-model consensus check. When
     // `ai.consensus_secondary_text_model` is set AND we're heading for an
@@ -2339,6 +2459,12 @@ async fn process_metadata(
     };
 
     let mut normalized = serde_json::to_value(&suggestion)?;
+    if let Some(object) = normalized.as_object_mut() {
+        object.insert(
+            "parse_diagnostics".to_owned(),
+            serde_json::to_value(&parse_diagnostics)?,
+        );
+    }
     if let Some(outcome) = consensus_outcome.as_ref()
         && let Some(object) = normalized.as_object_mut()
     {
@@ -2884,6 +3010,7 @@ async fn process_metadata(
                     "fields": applied_fields,
                     "warnings": composite_warnings,
                     "dropped_field_count": review_warning_count,
+                    "parse_diagnostics": parse_diagnostics,
                 }),
             )
             .await?
@@ -2934,6 +3061,7 @@ async fn process_metadata(
                 "skipped": "all metadata fields had validation warnings — no resolvable patch in full_auto",
                 "warnings": composite_warnings,
                 "dropped_field_count": review_warning_count,
+                "parse_diagnostics": parse_diagnostics,
             }),
         )
         .await?
@@ -2951,8 +3079,9 @@ async fn process_metadata(
             job,
             lease_owner,
             json!({
-                "skipped": "all metadata fields skipped (already-set or model omitted)",
+                "skipped": "all metadata fields skipped by model omission or overwrite policy",
                 "skipped_fields": skipped_fields,
+                "parse_diagnostics": parse_diagnostics,
             }),
         )
         .await?
@@ -4470,6 +4599,7 @@ fn hash_bytes(value: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::Value;
+    use sqlx::Row;
 
     #[test]
     fn sum_vision_usage_handles_both_wire_shapes() {
@@ -4703,6 +4833,222 @@ mod tests {
             classify_processing_failure(&permanent),
             ProcessingFailureClass::Permanent
         ));
+    }
+
+    #[test]
+    fn metadata_contract_violations_retry_but_omissions_take_the_explicit_success_route() {
+        let malformed = parse_metadata_suggestion(r#"{"title":42}"#);
+        assert_eq!(
+            metadata_worker_parse_route(&malformed.diagnostics),
+            MetadataWorkerParseRoute::RetryContractViolation
+        );
+        let contract_error = malformed
+            .diagnostics
+            .contract_error()
+            .expect("wrong known field type must violate the contract");
+        let error = anyhow::Error::new(contract_error);
+        assert_eq!(
+            classify_processing_failure(&error),
+            ProcessingFailureClass::Transient
+        );
+
+        let omitted = parse_metadata_suggestion(r#"{"title":null}"#);
+        assert_eq!(omitted.diagnostics.status, MetadataParseStatus::Omitted);
+        assert_eq!(
+            metadata_worker_parse_route(&omitted.diagnostics),
+            MetadataWorkerParseRoute::CompleteOmission
+        );
+        assert!(omitted.diagnostics.contract_error().is_none());
+
+        let valid = parse_metadata_suggestion(r#"{"title":{"title":"Invoice","confidence":0.9}}"#);
+        assert_eq!(
+            metadata_worker_parse_route(&valid.diagnostics),
+            MetadataWorkerParseRoute::ProcessSuggestion
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn metadata_terminal_parse_routes_persist_artifacts_before_completion_or_retry() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = connect(&database_url, 10)
+            .await
+            .expect("connect test database");
+        archivist_db::migrate(&pool)
+            .await
+            .expect("apply migrations");
+        sqlx::query(
+            r#"
+            truncate document_inventory, jobs, pipeline_runs, review_items,
+                     ai_artifacts, audit_events restart identity cascade
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("truncate test tables");
+
+        let request = ChatRequest {
+            model: "test-model".to_owned(),
+            system_prompt: "system".to_owned(),
+            user_prompt: "user".to_owned(),
+            temperature: 0.0,
+            num_ctx: None,
+            response_schema: None,
+            reasoning_effort: None,
+            max_output_tokens: None,
+            structured_output: None,
+        };
+        let settings = RuntimeSettings::default();
+
+        for document_id in [77, 78] {
+            sqlx::query(
+                "insert into document_inventory (paperless_document_id, current_tags) values ($1, '{}')",
+            )
+            .bind(document_id)
+            .execute(&pool)
+            .await
+            .expect("seed inventory");
+            create_run_with_jobs_with_priority(
+                &pool,
+                document_id,
+                &[Stage::Metadata],
+                ProcessingMode::ManualReview,
+                "test",
+                "test",
+                Some(0),
+            )
+            .await
+            .expect("create metadata run");
+        }
+        let jobs = claim_jobs(&pool, 2, "worker-a", 300)
+            .await
+            .expect("claim jobs");
+        let omitted_job = jobs
+            .iter()
+            .find(|job| job.paperless_document_id == 77)
+            .expect("omission job");
+        let contract_job = jobs
+            .iter()
+            .find(|job| job.paperless_document_id == 78)
+            .expect("contract job");
+
+        let omitted = parse_metadata_suggestion("{}");
+        let omitted_response = AiResponse {
+            provider: "test-provider".to_owned(),
+            model: "test-model".to_owned(),
+            text: "{}".to_owned(),
+            raw_response: json!({"message":{"content":"{}"}}),
+            duration_ms: 1,
+        };
+        let handled = handle_terminal_metadata_parse_route(
+            &pool,
+            omitted_job,
+            "worker-a",
+            &settings,
+            &omitted_response,
+            &request,
+            None,
+            "private document content",
+            &omitted.suggestion,
+            &omitted.diagnostics,
+        )
+        .await
+        .expect("complete omission");
+        assert!(handled, "omission is terminal before consensus/apply");
+        let row = sqlx::query("select status, result from jobs where id = $1")
+            .bind(omitted_job.id)
+            .fetch_one(&pool)
+            .await
+            .expect("omission job result");
+        let status: String = row.try_get("status").expect("omission status");
+        let result: serde_json::Value = row.try_get("result").expect("omission result");
+        assert_eq!(status, "succeeded");
+        assert_eq!(result["parse_diagnostics"]["status"], "omitted");
+
+        let malformed = parse_metadata_suggestion(r#"{"title":"raw-private-value"}"#);
+        let malformed_response = AiResponse {
+            provider: "test-provider".to_owned(),
+            model: "test-model".to_owned(),
+            text: r#"{"title":"raw-private-value"}"#.to_owned(),
+            raw_response: json!({"message":{"content":"raw-private-value"}}),
+            duration_ms: 1,
+        };
+        let error = handle_terminal_metadata_parse_route(
+            &pool,
+            contract_job,
+            "worker-a",
+            &settings,
+            &malformed_response,
+            &request,
+            None,
+            "private document content",
+            &malformed.suggestion,
+            &malformed.diagnostics,
+        )
+        .await
+        .expect_err("contract violation must retry");
+        assert_eq!(
+            classify_processing_failure(&error),
+            ProcessingFailureClass::Transient
+        );
+        let safe_error = format!("{error:#}");
+        assert!(safe_error.contains("metadata model contract violation"));
+        assert!(safe_error.contains("invalid_fields=title"));
+        assert!(!safe_error.contains("raw-private-value"));
+        let row = sqlx::query("select status, result from jobs where id = $1")
+            .bind(contract_job.id)
+            .fetch_one(&pool)
+            .await
+            .expect("contract job state");
+        let status: String = row.try_get("status").expect("contract status");
+        let result: Option<serde_json::Value> = row.try_get("result").expect("contract result");
+        assert_eq!(status, "running", "terminal helper never completes it");
+        assert!(result.is_none());
+        let normalized: serde_json::Value = sqlx::query_scalar(
+            "select normalized_output from ai_artifacts where job_id = $1 order by created_at desc limit 1",
+        )
+        .bind(contract_job.id)
+        .fetch_one(&pool)
+        .await
+        .expect("contract artifact");
+        assert_eq!(
+            normalized["parse_diagnostics"]["status"],
+            "contract_violation"
+        );
+        assert_eq!(
+            normalized["parse_diagnostics"]["invalid_fields"],
+            json!(["title"])
+        );
+        assert!(!normalized.to_string().contains("raw-private-value"));
+        let review_count: i64 = sqlx::query_scalar("select count(*) from review_items")
+            .fetch_one(&pool)
+            .await
+            .expect("review count");
+        assert_eq!(review_count, 0);
+
+        let updated = fail_job(
+            &pool,
+            contract_job,
+            "worker-a",
+            &safe_error,
+            classify_processing_failure(&error).is_retryable(),
+            None,
+        )
+        .await
+        .expect("route contract failure through normal retry budget");
+        assert!(updated);
+        let row = sqlx::query("select status, error_message from jobs where id = $1")
+            .bind(contract_job.id)
+            .fetch_one(&pool)
+            .await
+            .expect("retried contract job");
+        let status: String = row.try_get("status").expect("retry status");
+        let error_message: String = row.try_get("error_message").expect("safe job error");
+        assert_eq!(status, "queued");
+        assert_eq!(error_message, safe_error);
+        assert!(!error_message.contains("raw-private-value"));
     }
 
     #[test]

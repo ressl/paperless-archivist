@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -1515,70 +1516,308 @@ impl VisionProvider for AnthropicClient {
     }
 }
 
-/// Parses the consolidated metadata response (a JSON object with optional
-/// `title`/`document_type`/`correspondent`/`document_date`/`tags`/`fields` keys)
-/// into a [`MetadataSuggestion`]. Each subfield is decoded independently — a
-/// malformed shape in one subfield should not strip the others, so we walk the
-/// object key-by-key and silently drop subfields that fail to decode.
-///
-/// Behavior contract:
-/// - If the response contains no recognizable JSON object, returns
-///   `Err(anyhow!("model response did not contain JSON"))`.
-/// - If the JSON exists but no recognised key decodes, returns
-///   `Ok(MetadataSuggestion::default())` — the worker will translate that into
-///   "no review items" rather than failing the run.
-pub fn parse_metadata_suggestion(text: &str) -> Result<MetadataSuggestion> {
-    let value =
-        normalize_model_json(text).ok_or_else(|| anyhow!("model response did not contain JSON"))?;
-    let mut object = match value {
-        Value::Object(map) => map,
-        other => {
-            return Err(anyhow!(
-                "metadata response must be a JSON object, got {}",
-                other
-            ));
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataParseStatus {
+    Valid,
+    Omitted,
+    ContractViolation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataEnvelopeError {
+    NoJson,
+    NonObject,
+}
+
+impl std::fmt::Display for MetadataEnvelopeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NoJson => "no_json",
+            Self::NonObject => "non_object",
+        })
+    }
+}
+
+/// Value-free diagnostics for one consolidated metadata response. Unknown key
+/// names are deliberately reduced to a count because model-controlled JSON
+/// keys can contain arbitrary document content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetadataParseDiagnostics {
+    pub status: MetadataParseStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_error: Option<MetadataEnvelopeError>,
+    pub decoded_fields: Vec<String>,
+    pub null_fields: Vec<String>,
+    pub invalid_fields: Vec<String>,
+    pub unknown_field_count: usize,
+}
+
+impl MetadataParseDiagnostics {
+    pub fn has_contract_violation(&self) -> bool {
+        self.status == MetadataParseStatus::ContractViolation
+    }
+
+    pub fn contract_error(&self) -> Option<MetadataContractError> {
+        self.has_contract_violation()
+            .then(|| MetadataContractError {
+                diagnostics: self.clone(),
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetadataContractError {
+    diagnostics: MetadataParseDiagnostics,
+}
+
+impl MetadataContractError {
+    pub fn diagnostics(&self) -> &MetadataParseDiagnostics {
+        &self.diagnostics
+    }
+
+    pub fn invalid_fields(&self) -> &[String] {
+        &self.diagnostics.invalid_fields
+    }
+}
+
+impl std::fmt::Display for MetadataContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "metadata model contract violation")?;
+        if let Some(envelope) = self.diagnostics.envelope_error {
+            write!(formatter, ": envelope={envelope}")?;
         }
+        if !self.diagnostics.invalid_fields.is_empty() {
+            write!(
+                formatter,
+                "; invalid_fields={}",
+                self.diagnostics.invalid_fields.join(",")
+            )?;
+        }
+        if self.diagnostics.unknown_field_count > 0 {
+            write!(
+                formatter,
+                "; unknown_field_count={}",
+                self.diagnostics.unknown_field_count
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for MetadataContractError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedMetadataSuggestion {
+    pub suggestion: MetadataSuggestion,
+    pub diagnostics: MetadataParseDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MetadataFieldShape {
+    Scalar,
+    Object(&'static [&'static str]),
+    ObjectWithArrayItems {
+        object_fields: &'static [&'static str],
+        array_field: &'static str,
+        item_fields: &'static [&'static str],
+    },
+}
+
+/// Parse a consolidated metadata response while retaining every successfully
+/// decoded known field and recording contract violations without their values.
+pub fn parse_metadata_suggestion(text: &str) -> ParsedMetadataSuggestion {
+    let Some(value) = normalize_model_json(text) else {
+        return metadata_envelope_violation(MetadataEnvelopeError::NoJson);
+    };
+    let Value::Object(mut object) = value else {
+        return metadata_envelope_violation(MetadataEnvelopeError::NonObject);
     };
     let mut out = MetadataSuggestion::default();
-    if let Some(field) = object.remove("title")
-        && !field.is_null()
+    let mut decoded_fields = Vec::new();
+    let mut null_fields = Vec::new();
+    let mut invalid_fields = Vec::new();
+    let mut unknown_field_count = 0;
+    out.title = decode_metadata_field(
+        &mut object,
+        "title",
+        MetadataFieldShape::Object(&["title", "confidence"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.document_type = decode_metadata_field(
+        &mut object,
+        "document_type",
+        MetadataFieldShape::Object(&["name", "confidence", "evidence"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.correspondent = decode_metadata_field(
+        &mut object,
+        "correspondent",
+        MetadataFieldShape::Object(&["name", "confidence", "evidence"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.new_correspondent = decode_metadata_field::<String>(
+        &mut object,
+        "new_correspondent",
+        MetadataFieldShape::Scalar,
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    )
+    .map(|name| name.trim().to_owned())
+    .filter(|name| !name.is_empty());
+    if out.new_correspondent.is_none()
+        && decoded_fields
+            .last()
+            .is_some_and(|field| field == "new_correspondent")
     {
-        out.title = serde_json::from_value(field).ok();
+        decoded_fields.pop();
+        null_fields.push("new_correspondent".to_owned());
     }
-    if let Some(field) = object.remove("document_type")
-        && !field.is_null()
+    out.document_date = decode_metadata_field(
+        &mut object,
+        "document_date",
+        MetadataFieldShape::Object(&["date", "confidence", "evidence", "warnings"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.tags = decode_metadata_field(
+        &mut object,
+        "tags",
+        MetadataFieldShape::Object(&["tags", "new_tags", "confidence"]),
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+    out.fields = decode_metadata_field(
+        &mut object,
+        "fields",
+        MetadataFieldShape::ObjectWithArrayItems {
+            object_fields: &["fields", "confidence"],
+            array_field: "fields",
+            item_fields: &["name", "value", "confidence"],
+        },
+        &mut decoded_fields,
+        &mut null_fields,
+        &mut invalid_fields,
+        &mut unknown_field_count,
+    );
+
+    unknown_field_count += object.len();
+    let status = if !invalid_fields.is_empty() || unknown_field_count > 0 {
+        MetadataParseStatus::ContractViolation
+    } else if decoded_fields.is_empty() {
+        MetadataParseStatus::Omitted
+    } else {
+        MetadataParseStatus::Valid
+    };
+    ParsedMetadataSuggestion {
+        suggestion: out,
+        diagnostics: MetadataParseDiagnostics {
+            status,
+            envelope_error: None,
+            decoded_fields,
+            null_fields,
+            invalid_fields,
+            unknown_field_count,
+        },
+    }
+}
+
+fn decode_metadata_field<T: DeserializeOwned>(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+    shape: MetadataFieldShape,
+    decoded_fields: &mut Vec<String>,
+    null_fields: &mut Vec<String>,
+    invalid_fields: &mut Vec<String>,
+    unknown_field_count: &mut usize,
+) -> Option<T> {
+    let value = object.remove(field)?;
+    if value.is_null() {
+        null_fields.push(field.to_owned());
+        return None;
+    }
+    let nested_unknown_count = metadata_unknown_property_count(&value, shape);
+    if nested_unknown_count > 0 {
+        invalid_fields.push(field.to_owned());
+        *unknown_field_count += nested_unknown_count;
+        return None;
+    }
+    match serde_json::from_value(value) {
+        Ok(value) => {
+            decoded_fields.push(field.to_owned());
+            Some(value)
+        }
+        Err(_) => {
+            invalid_fields.push(field.to_owned());
+            None
+        }
+    }
+}
+
+fn metadata_unknown_property_count(value: &Value, shape: MetadataFieldShape) -> usize {
+    let (MetadataFieldShape::Object(allowed_fields)
+    | MetadataFieldShape::ObjectWithArrayItems {
+        object_fields: allowed_fields,
+        ..
+    }) = shape
+    else {
+        return 0;
+    };
+    let Some(object) = value.as_object() else {
+        return 0;
+    };
+    let mut count = object
+        .keys()
+        .filter(|key| !allowed_fields.contains(&key.as_str()))
+        .count();
+    if let MetadataFieldShape::ObjectWithArrayItems {
+        array_field,
+        item_fields,
+        ..
+    } = shape
+        && let Some(items) = object.get(array_field).and_then(Value::as_array)
     {
-        out.document_type = serde_json::from_value(field).ok();
+        count += items
+            .iter()
+            .filter_map(Value::as_object)
+            .map(|item| {
+                item.keys()
+                    .filter(|key| !item_fields.contains(&key.as_str()))
+                    .count()
+            })
+            .sum::<usize>();
     }
-    if let Some(field) = object.remove("correspondent")
-        && !field.is_null()
-    {
-        out.correspondent = serde_json::from_value(field).ok();
+    count
+}
+
+fn metadata_envelope_violation(error: MetadataEnvelopeError) -> ParsedMetadataSuggestion {
+    ParsedMetadataSuggestion {
+        suggestion: MetadataSuggestion::default(),
+        diagnostics: MetadataParseDiagnostics {
+            status: MetadataParseStatus::ContractViolation,
+            envelope_error: Some(error),
+            decoded_fields: Vec::new(),
+            null_fields: Vec::new(),
+            invalid_fields: Vec::new(),
+            unknown_field_count: 0,
+        },
     }
-    if let Some(field) = object.remove("new_correspondent")
-        && !field.is_null()
-    {
-        out.new_correspondent = serde_json::from_value::<String>(field)
-            .ok()
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty());
-    }
-    if let Some(field) = object.remove("document_date")
-        && !field.is_null()
-    {
-        out.document_date = serde_json::from_value(field).ok();
-    }
-    if let Some(field) = object.remove("tags")
-        && !field.is_null()
-    {
-        out.tags = serde_json::from_value(field).ok();
-    }
-    if let Some(field) = object.remove("fields")
-        && !field.is_null()
-    {
-        out.fields = serde_json::from_value(field).ok();
-    }
-    Ok(out)
 }
 
 pub const DEFAULT_OCR_SYSTEM_PROMPT: &str = r#"You transcribe scanned document pages exactly.
@@ -3477,37 +3716,51 @@ mod tests {
             "new_correspondent": "  Brack AG  ",
             "document_type": {"name": "Rechnung", "confidence": 0.98}
         }"#;
-        let parsed = parse_metadata_suggestion(response).expect("parse ok");
-        assert!(parsed.correspondent.is_none(), "no closed-vocab match");
+        let parsed = parse_metadata_suggestion(response);
+        assert_eq!(parsed.diagnostics.status, MetadataParseStatus::Valid);
+        assert!(
+            parsed.suggestion.correspondent.is_none(),
+            "no closed-vocab match"
+        );
         assert_eq!(
-            parsed.new_correspondent.as_deref(),
+            parsed.suggestion.new_correspondent.as_deref(),
             Some("Brack AG"),
             "trimmed proposal is kept"
         );
-        let blank = parse_metadata_suggestion(r#"{"new_correspondent": "   "}"#).expect("parse ok");
+        let blank = parse_metadata_suggestion(r#"{"new_correspondent": "   "}"#);
+        assert_eq!(blank.diagnostics.status, MetadataParseStatus::Omitted);
         assert!(
-            blank.new_correspondent.is_none(),
+            blank.suggestion.new_correspondent.is_none(),
             "whitespace-only proposal is dropped"
         );
     }
 
     #[test]
     fn parse_metadata_decodes_present_subfields_independently() {
-        // Tags subfield is malformed (string instead of object) and must be silently
-        // dropped without erasing the title or document_date subfields.
+        // Tags is malformed (string instead of object). The parser retains the
+        // valid fields for diagnostics, but explicitly rejects the envelope so
+        // the worker cannot partially apply it.
         let response = r#"{
             "title": {"title": "Invoice Beispiel GmbH 2026", "confidence": 0.92},
             "tags": "not-a-json-object",
             "document_date": {"date": "2026-04-12", "confidence": 0.81, "evidence": "Rechnung vom 12. April 2026"}
         }"#;
-        let parsed = parse_metadata_suggestion(response).expect("parse ok");
+        let parsed = parse_metadata_suggestion(response);
         assert_eq!(
-            parsed.title.as_ref().unwrap().title,
+            parsed.diagnostics.status,
+            MetadataParseStatus::ContractViolation
+        );
+        assert_eq!(parsed.diagnostics.invalid_fields, vec!["tags"]);
+        assert_eq!(
+            parsed.suggestion.title.as_ref().unwrap().title,
             "Invoice Beispiel GmbH 2026"
         );
-        assert!(parsed.tags.is_none());
-        assert_eq!(parsed.document_date.as_ref().unwrap().date, "2026-04-12");
-        assert!(parsed.correspondent.is_none());
+        assert!(parsed.suggestion.tags.is_none());
+        assert_eq!(
+            parsed.suggestion.document_date.as_ref().unwrap().date,
+            "2026-04-12"
+        );
+        assert!(parsed.suggestion.correspondent.is_none());
     }
 
     #[test]
@@ -3515,19 +3768,218 @@ mod tests {
         // Models occasionally wrap JSON in markdown fences or prose. normalize_model_json
         // already strips those, so the parser inherits that behavior.
         let response = "Here is the metadata:\n```json\n{\"title\":{\"title\":\"Letter\",\"confidence\":0.7}}\n```";
-        let parsed = parse_metadata_suggestion(response).expect("parse ok");
-        assert_eq!(parsed.title.as_ref().unwrap().title, "Letter");
+        let parsed = parse_metadata_suggestion(response);
+        assert_eq!(parsed.diagnostics.status, MetadataParseStatus::Valid);
+        assert_eq!(parsed.suggestion.title.as_ref().unwrap().title, "Letter");
     }
 
     #[test]
     fn parse_metadata_rejects_non_object_responses() {
-        // A bare array or string is a contract violation — the caller should not get
-        // a silent default. The error keeps the worker from creating empty review items.
-        let err = parse_metadata_suggestion("[1, 2, 3]").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("metadata response must be a JSON object")
+        // A bare array is an explicit, value-free contract violation. It is
+        // returned alongside the empty suggestion so the artifact can retain
+        // safe diagnostics before the worker routes the typed failure.
+        let parsed = parse_metadata_suggestion("[1, 2, 3]");
+        assert_eq!(
+            parsed.diagnostics.status,
+            MetadataParseStatus::ContractViolation
         );
+        assert_eq!(
+            parsed.diagnostics.envelope_error,
+            Some(MetadataEnvelopeError::NonObject)
+        );
+        assert!(parsed.diagnostics.contract_error().is_some());
+        assert_eq!(
+            parsed.diagnostics.contract_error().unwrap().to_string(),
+            "metadata model contract violation: envelope=non_object"
+        );
+    }
+
+    #[test]
+    fn metadata_parser_distinguishes_omissions_from_contract_violations() {
+        struct Case {
+            name: &'static str,
+            response: &'static str,
+            status: MetadataParseStatus,
+            envelope_error: Option<MetadataEnvelopeError>,
+            invalid_fields: &'static [&'static str],
+            unknown_field_count: usize,
+        }
+        let cases = [
+            Case {
+                name: "no json",
+                response: "model returned prose only",
+                status: MetadataParseStatus::ContractViolation,
+                envelope_error: Some(MetadataEnvelopeError::NoJson),
+                invalid_fields: &[],
+                unknown_field_count: 0,
+            },
+            Case {
+                name: "array",
+                response: "[1, 2, 3]",
+                status: MetadataParseStatus::ContractViolation,
+                envelope_error: Some(MetadataEnvelopeError::NonObject),
+                invalid_fields: &[],
+                unknown_field_count: 0,
+            },
+            Case {
+                name: "unknown key",
+                response: r#"{"invented_secret_key":"must-not-be-persisted"}"#,
+                status: MetadataParseStatus::ContractViolation,
+                envelope_error: None,
+                invalid_fields: &[],
+                unknown_field_count: 1,
+            },
+            Case {
+                name: "known field wrong type",
+                response: r#"{"tags":"raw-invalid-secret"}"#,
+                status: MetadataParseStatus::ContractViolation,
+                envelope_error: None,
+                invalid_fields: &["tags"],
+                unknown_field_count: 0,
+            },
+            Case {
+                name: "empty object",
+                response: "{}",
+                status: MetadataParseStatus::Omitted,
+                envelope_error: None,
+                invalid_fields: &[],
+                unknown_field_count: 0,
+            },
+            Case {
+                name: "known nulls",
+                response: r#"{"title":null,"tags":null}"#,
+                status: MetadataParseStatus::Omitted,
+                envelope_error: None,
+                invalid_fields: &[],
+                unknown_field_count: 0,
+            },
+        ];
+
+        for case in cases {
+            let parsed = parse_metadata_suggestion(case.response);
+            assert_eq!(parsed.diagnostics.status, case.status, "{}", case.name);
+            assert_eq!(
+                parsed.diagnostics.envelope_error, case.envelope_error,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                parsed.diagnostics.invalid_fields,
+                case.invalid_fields
+                    .iter()
+                    .map(|field| (*field).to_owned())
+                    .collect::<Vec<_>>(),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                parsed.diagnostics.unknown_field_count, case.unknown_field_count,
+                "{}",
+                case.name
+            );
+            let diagnostics = serde_json::to_string(&parsed.diagnostics).unwrap();
+            assert!(!diagnostics.contains("raw-invalid-secret"));
+            assert!(!diagnostics.contains("invented_secret_key"));
+            assert!(!diagnostics.contains("must-not-be-persisted"));
+        }
+    }
+
+    #[test]
+    fn metadata_parser_preserves_valid_fields_in_a_mixed_contract_violation() {
+        let parsed = parse_metadata_suggestion(
+            r#"{
+                "title":{"title":"Valid invoice","confidence":0.91},
+                "tags":"invalid tags value",
+                "document_date":{"date":"2026-07-17","confidence":0.83}
+            }"#,
+        );
+        assert_eq!(
+            parsed.diagnostics.status,
+            MetadataParseStatus::ContractViolation
+        );
+        assert_eq!(parsed.diagnostics.invalid_fields, vec!["tags"]);
+        assert_eq!(
+            parsed
+                .suggestion
+                .title
+                .as_ref()
+                .map(|title| title.title.as_str()),
+            Some("Valid invoice")
+        );
+        assert_eq!(
+            parsed
+                .suggestion
+                .document_date
+                .as_ref()
+                .map(|date| date.date.as_str()),
+            Some("2026-07-17")
+        );
+        assert!(parsed.suggestion.tags.is_none());
+        let error = parsed
+            .diagnostics
+            .contract_error()
+            .expect("mixed response must produce typed contract error");
+        assert_eq!(error.invalid_fields(), &["tags".to_owned()]);
+    }
+
+    #[test]
+    fn metadata_parser_rejects_unknown_nested_properties_without_persisting_them() {
+        let parsed = parse_metadata_suggestion(
+            r#"{
+                "title":{
+                    "title":"Must not be applied",
+                    "confidence":0.91,
+                    "injected_private_key":"must-not-be-persisted"
+                },
+                "document_date":{"date":"2026-07-17","confidence":0.83}
+            }"#,
+        );
+        assert_eq!(
+            parsed.diagnostics.status,
+            MetadataParseStatus::ContractViolation
+        );
+        assert_eq!(parsed.diagnostics.invalid_fields, vec!["title"]);
+        assert_eq!(parsed.diagnostics.unknown_field_count, 1);
+        assert!(parsed.suggestion.title.is_none());
+        assert_eq!(
+            parsed
+                .suggestion
+                .document_date
+                .as_ref()
+                .map(|date| date.date.as_str()),
+            Some("2026-07-17")
+        );
+        let persisted = json!({
+            "suggestion": parsed.suggestion,
+            "diagnostics": parsed.diagnostics,
+        })
+        .to_string();
+        assert!(!persisted.contains("injected_private_key"));
+        assert!(!persisted.contains("must-not-be-persisted"));
+
+        let nested_array = parse_metadata_suggestion(
+            r#"{
+                "fields":{
+                    "fields":[{
+                        "name":"Invoice Number",
+                        "value":"private-value",
+                        "confidence":0.9,
+                        "unexpected":"must-not-be-persisted"
+                    }],
+                    "confidence":0.9
+                }
+            }"#,
+        );
+        assert_eq!(
+            nested_array.diagnostics.status,
+            MetadataParseStatus::ContractViolation
+        );
+        assert_eq!(nested_array.diagnostics.invalid_fields, vec!["fields"]);
+        assert_eq!(nested_array.diagnostics.unknown_field_count, 1);
+        assert!(nested_array.suggestion.fields.is_none());
+        let persisted = serde_json::to_string(&nested_array.diagnostics).unwrap();
+        assert!(!persisted.contains("unexpected"));
+        assert!(!persisted.contains("must-not-be-persisted"));
     }
 
     #[test]

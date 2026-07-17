@@ -294,6 +294,7 @@ dependencies = [
  "archivist-db",
  "archivist-ocr",
  "archivist-paperless",
+ "archivist-sqlx",
  "chrono",
  "futures",
  "hex",
