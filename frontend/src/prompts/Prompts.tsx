@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, GitCompare, History, Info, Play, RotateCcw, Save } from 'lucide-react';
 import { api, Prompt, PromptExperiment, PromptTestResponse, PromptUsage, Stage } from '../api/client';
-import { promptStageHelp, promptStageOrder, type PromptStageHelp } from '../data/promptHelp';
+import { promptStageOrder, resolvePromptStageHelp, type PromptStageHelp } from '../data/promptHelp';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { Button, PageHeader, Status, localizedErrorMessage, run, useFocusTrap } from '../lib/ui';
 import { formatMs } from '../lib/format';
@@ -61,7 +61,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
       ? editorName.trim() !== selectedPrompt.name ||
         editorContent.trimEnd() !== selectedPrompt.content.trimEnd()
       : editorName.trim() !== 'default' || editorContent.trimEnd() !== '');
-  const stageHelp = promptStageHelp[selectedStage];
+  const stageHelp = resolvePromptStageHelp(selectedStage, t);
   const promptStats = promptTextStats(editorContent);
   const diffStats = comparePrompt && selectedPrompt ? promptDiffStats(comparePrompt.content, editorContent) : null;
   const load = async () => {
@@ -170,7 +170,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
             <span>{t('prompts.versions_count', { count: items.length })}</span>
           </header>
           {promptStageOrder.map((entry) => {
-            const help = promptStageHelp[entry];
+            const help = resolvePromptStageHelp(entry, t);
             const prompts = items.filter((prompt) => prompt.stage === entry);
             const active = prompts.find((prompt) => prompt.active);
             const usageCount = prompts.reduce((sum, prompt) => sum + (usageByPromptId.get(prompt.id)?.run_count ?? 0), 0);
@@ -309,6 +309,10 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
             <p>{stageHelp.expectedOutput}</p>
             <ul>
               {stageHelp.safety.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+            <strong>{t('prompts.stage_examples')}</strong>
+            <ul>
+              {stageHelp.examples.map((item) => <li key={item}>{item}</li>)}
             </ul>
           </section>
           <section>
@@ -650,6 +654,9 @@ function PromptInfoTooltip({
               <em>{help.expectedOutput}</em>
               <ul>
                 {help.safety.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+              <ul>
+                {help.examples.map((item) => <li key={item}>{item}</li>)}
               </ul>
             </>
           )}
