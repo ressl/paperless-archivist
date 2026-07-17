@@ -683,14 +683,20 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProviderTestRequest"];
+                };
+            };
             responses: {
                 /** @description Provider connection result */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ProviderTestResponse"];
+                    };
                 };
             };
         };
@@ -3397,6 +3403,28 @@ export interface components {
             secret_id?: string | null;
             enabled: boolean;
             tuning?: components["schemas"]["ProviderTuningInput"];
+        };
+        /** @description Transient provider draft tested without persistence. */
+        ProviderTestRequest: {
+            name: string;
+            kind: components["schemas"]["AiProviderKind"];
+            base_url: string;
+            model: string;
+            tuning: components["schemas"]["ProviderTuningInput"];
+            /** Format: uuid */
+            secret_id?: string | null;
+            /**
+             * Format: password
+             * @description Transient API secret used only for this probe and never persisted or returned.
+             */
+            secret?: string | null;
+        };
+        ProviderTestResponse: {
+            ok: boolean;
+            provider: string;
+            model: string;
+            /** @description Redacted failure detail. Never contains provider credentials. */
+            error?: string;
         };
         ModelCatalogEntryInput: {
             provider_kind: components["schemas"]["AiProviderKind"];

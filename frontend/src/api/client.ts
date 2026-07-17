@@ -12,6 +12,8 @@ export type ModelCapability = components['schemas']['ModelCapability'];
 export type ModelUsageTier = components['schemas']['ModelUsageTier'];
 export type ModelCatalogEntry = components['schemas']['ModelCatalogEntry'];
 export type ProviderTuning = components['schemas']['ProviderTuning'];
+export type ProviderTestRequest = components['schemas']['ProviderTestRequest'];
+export type ProviderTestResponse = components['schemas']['ProviderTestResponse'];
 export type Role = components['schemas']['Role'];
 export type PipelineStage = components['schemas']['Stage'];
 export type Stage = Exclude<PipelineStage, 'apply'>;
@@ -682,7 +684,11 @@ export const api = {
     }),
   testPaperless: () => request<{ ok: boolean; error?: string }>('/api/settings/test-paperless', { method: 'POST' }),
   testNotification: () => request<{ ok: boolean; error?: string }>('/api/notifications/test', { method: 'POST' }),
-  testProvider: () => request<{ ok: boolean; error?: string; details?: unknown }>('/api/model-providers/test', { method: 'POST' }),
+  testProvider: (input: ProviderTestRequest) =>
+    request<ProviderTestResponse>('/api/model-providers/test', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }),
   ollamaModels: (providerName: string) =>
     request<{ provider: string; models: OllamaInstalledModel[] }>(`/api/model-providers/${encodeURIComponent(providerName)}/models`, { method: 'POST' }),
   aiRuntimeHints: (provider?: string) => {

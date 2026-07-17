@@ -14,10 +14,11 @@ use archivist_apply::{
 };
 use archivist_config::AppConfig;
 use archivist_core::{
-    AiProviderKind, AuditEventInput, DashboardProviderCostSummary, DashboardRange, DashboardStats,
-    DocumentChatSource, DocumentInventoryItem, DocumentPatch, Permission, ProcessingMode,
-    ProviderUsageStats, Role, RuntimeSettings, Stage, WorkflowRules, build_document_chat_prompt,
-    document_chat_snippet, document_chat_terms, roles_have_permission, score_document_chat_source,
+    AiProviderKind, AiProviderSettings, AuditEventInput, DashboardProviderCostSummary,
+    DashboardRange, DashboardStats, DocumentChatSource, DocumentInventoryItem, DocumentPatch,
+    EffectiveTuning, Permission, ProcessingMode, ProviderTuning, ProviderUsageStats, Role,
+    RuntimeSettings, Stage, WorkflowRules, build_document_chat_prompt, document_chat_snippet,
+    document_chat_terms, roles_have_permission, score_document_chat_source,
 };
 use archivist_db::{
     AmbiguousUserIdentityLinkError, AuthUser, DbPool, DocumentChatCandidate,
@@ -2047,24 +2048,42 @@ async fn test_paperless(
     }
 }
 
+#[derive(Deserialize)]
+struct TestProviderRequest {
+    name: String,
+    kind: AiProviderKind,
+    base_url: String,
+    model: String,
+    #[serde(default)]
+    tuning: ProviderTuning,
+    secret_id: Option<Uuid>,
+    secret: Option<String>,
+}
+
 async fn test_provider(
     State(state): State<AppState>,
     auth: Authenticated,
+    Json(request): Json<TestProviderRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadSettings)?;
+    require(&auth.0, Permission::WriteSettings)?;
+    require_user_session(&auth.0, "provider tests require a user session")?;
     let settings = get_runtime_settings(&state.pool).await?;
-    let provider = provider_for_default_text(&settings)?;
-    if let Err(error) = validate_outbound_url(&provider.base_url).await {
-        return Ok(Json(json!({
-            "ok": false,
-            "error": format!("AI provider base URL rejected: {}", error.message),
-        })));
+    let (provider, tuning) = provider_test_target(&settings, &request)?;
+    let secret = provider_test_secret(&state, &settings, &provider, request.secret).await;
+    let response_secret = secret.as_ref().ok().and_then(|secret| secret.clone());
+    let result = async {
+        if let Err(error) = validate_outbound_url(&provider.base_url).await {
+            return Err(anyhow!("AI provider base URL rejected: {}", error.message));
+        }
+        let secret = secret?;
+        test_ai_provider(&provider, &tuning, secret.clone()).await
     }
-    let result = test_ai_provider(&state, &provider).await;
-    match result {
-        Ok(value) => Ok(Json(json!({ "ok": true, "details": value }))),
-        Err(error) => Ok(Json(json!({ "ok": false, "error": error.to_string() }))),
-    }
+    .await;
+    Ok(Json(provider_test_response(
+        &provider,
+        result,
+        response_secret.as_ref(),
+    )))
 }
 
 async fn test_notification(
@@ -2644,6 +2663,109 @@ struct ApiProvider {
     secret_id: Option<Uuid>,
 }
 
+fn provider_test_target(
+    settings: &RuntimeSettings,
+    request: &TestProviderRequest,
+) -> Result<(ApiProvider, EffectiveTuning), ApiError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("provider name must not be blank"));
+    }
+    let model = request.model.trim();
+    if model.is_empty() && !matches!(request.kind, AiProviderKind::Mineru) {
+        return Err(ApiError::bad_request("provider model must not be blank"));
+    }
+    let model = if model.is_empty() { "mineru" } else { model };
+    let base_url = provider_base_url(&request.kind, &request.base_url);
+    let draft = AiProviderSettings {
+        name: name.to_owned(),
+        kind: request.kind.clone(),
+        base_url: base_url.clone(),
+        default_text_model: Some(model.to_owned()),
+        default_vision_model: None,
+        cost_per_1m_input_tokens_usd: None,
+        cost_per_1m_output_tokens_usd: None,
+        secret_id: request.secret_id,
+        enabled: true,
+        tuning: request.tuning.clone(),
+    };
+    let mut effective_settings = settings.clone();
+    effective_settings.ai.default_provider = draft.name.clone();
+    if let Some(index) = effective_settings
+        .ai
+        .providers
+        .iter()
+        .position(|provider| provider.name == draft.name)
+    {
+        effective_settings.ai.providers[index] = draft.clone();
+    } else {
+        effective_settings.ai.providers.push(draft.clone());
+    }
+    let tuning = effective_settings.effective_tuning();
+    Ok((
+        ApiProvider {
+            name: draft.name,
+            kind: draft.kind,
+            base_url,
+            model: model.to_owned(),
+            secret_id: draft.secret_id,
+        },
+        tuning,
+    ))
+}
+
+async fn provider_test_secret(
+    state: &AppState,
+    settings: &RuntimeSettings,
+    provider: &ApiProvider,
+    transient: Option<String>,
+) -> Result<Option<SecretString>> {
+    if let Some(secret) = transient.filter(|secret| !secret.trim().is_empty()) {
+        return Ok(Some(SecretString::from(secret)));
+    }
+    if let Some(secret_id) = provider.secret_id
+        && !settings
+            .ai
+            .providers
+            .iter()
+            .any(|saved| saved.secret_id == Some(secret_id))
+    {
+        return Err(anyhow!(
+            "provider secret reference is not assigned to a saved AI provider"
+        ));
+    }
+    provider_secret(state, provider).await
+}
+
+fn provider_test_response(
+    provider: &ApiProvider,
+    result: Result<Value>,
+    secret: Option<&SecretString>,
+) -> Value {
+    match result {
+        Ok(_) => json!({
+            "ok": true,
+            "provider": provider.name,
+            "model": provider.model,
+        }),
+        Err(error) => {
+            let mut message = error.to_string();
+            if let Some(secret) = secret {
+                let exposed = secret.expose_secret();
+                if !exposed.is_empty() {
+                    message = message.replace(exposed, "[REDACTED]");
+                }
+            }
+            json!({
+                "ok": false,
+                "provider": provider.name,
+                "model": provider.model,
+                "error": message,
+            })
+        }
+    }
+}
+
 fn provider_by_name(settings: &RuntimeSettings, name: &str) -> Result<ApiProvider> {
     let mut provider = settings
         .ai
@@ -2728,66 +2850,85 @@ async fn provider_secret(state: &AppState, provider: &ApiProvider) -> Result<Opt
     resolve_secret(&state.pool, &state.config.secret_key, secret_id).await
 }
 
-async fn test_ai_provider(state: &AppState, provider: &ApiProvider) -> Result<Value> {
+fn provider_test_chat_request(provider: &ApiProvider, tuning: &EffectiveTuning) -> ChatRequest {
+    ChatRequest {
+        model: provider.model.clone(),
+        system_prompt: "Return only a short JSON provider health result.".to_owned(),
+        user_prompt: "Return {\"status\":\"ok\"}.".to_owned(),
+        temperature: 0.0,
+        num_ctx: tuning.text_num_ctx,
+        response_schema: Some(json!({
+            "type": "object",
+            "properties": { "status": { "type": "string" } },
+            "required": ["status"],
+            "additionalProperties": false
+        })),
+        reasoning_effort: Some(tuning.reasoning_effort),
+        max_output_tokens: tuning.max_output_tokens,
+        structured_output: Some(tuning.structured_output),
+    }
+}
+
+async fn test_ai_provider(
+    provider: &ApiProvider,
+    tuning: &EffectiveTuning,
+    secret: Option<SecretString>,
+) -> Result<Value> {
+    let timeout = std::time::Duration::from_secs(u64::from(tuning.request_timeout_seconds));
     match provider.kind {
         AiProviderKind::Ollama => {
-            let client = OllamaClient::new(
+            let client = OllamaClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
-                provider_secret(state, provider).await?,
-            )?;
-            client.test_connection(Some(&provider.model)).await
-        }
-        AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
-            let client = OpenAiCompatibleClient::new(
-                &provider.name,
-                &provider.base_url,
-                provider_secret(state, provider).await?,
+                secret,
+                timeout,
             )?;
             let response = client
-                .chat(ChatRequest {
-                    model: provider.model.clone(),
-                    system_prompt: "Return a short health check response.".to_owned(),
-                    user_prompt: "Return OK.".to_owned(),
-                    temperature: 0.0,
-                    num_ctx: None,
-                    response_schema: None,
-                    reasoning_effort: None,
-                    max_output_tokens: None,
-                    structured_output: None,
-                })
+                .chat(provider_test_chat_request(provider, tuning))
+                .await?;
+            Ok(json!({
+                "provider": response.provider,
+                "model": response.model,
+                "text": response.text,
+            }))
+        }
+        AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
+            let client = OpenAiCompatibleClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                secret,
+                timeout,
+            )?;
+            let response = client
+                .chat(provider_test_chat_request(provider, tuning))
                 .await?;
             Ok(
                 json!({ "provider": response.provider, "model": response.model, "text": response.text }),
             )
         }
         AiProviderKind::Anthropic => {
-            let secret = provider_secret(state, provider).await?.ok_or_else(|| {
+            let secret = secret.ok_or_else(|| {
                 anyhow!("AI provider '{}' requires an API key secret", provider.name)
             })?;
-            let client = AnthropicClient::new(&provider.name, &provider.base_url, secret)?;
+            let client = AnthropicClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                secret,
+                timeout,
+            )?;
             let response = client
-                .chat(ChatRequest {
-                    model: provider.model.clone(),
-                    system_prompt: "Return a short health check response.".to_owned(),
-                    user_prompt: "Return OK.".to_owned(),
-                    temperature: 0.0,
-                    num_ctx: None,
-                    response_schema: None,
-                    reasoning_effort: None,
-                    max_output_tokens: None,
-                    structured_output: None,
-                })
+                .chat(provider_test_chat_request(provider, tuning))
                 .await?;
             Ok(
                 json!({ "provider": response.provider, "model": response.model, "text": response.text }),
             )
         }
         AiProviderKind::Mineru => {
-            let client = MineruClient::new(
+            let client = MineruClient::new_with_timeout(
                 &provider.name,
                 &provider.base_url,
-                provider_secret(state, provider).await?,
+                secret,
+                timeout,
             )?;
             client.test_connection().await
         }
@@ -8879,6 +9020,127 @@ mod tests {
         );
         assert_eq!(response.model, "glm-5.1");
         handle.abort();
+    }
+
+    #[derive(Clone, Default)]
+    struct ProviderProbeCapture {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        authorization: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        body: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+    }
+
+    async fn spawn_mock_openai_probe(
+        capture: ProviderProbeCapture,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::Json as AxumJson;
+        use axum::extract::State as AxumState;
+        use axum::http::HeaderMap;
+        use std::sync::atomic::Ordering;
+
+        async fn probe(
+            AxumState(capture): AxumState<ProviderProbeCapture>,
+            headers: HeaderMap,
+            AxumJson(body): AxumJson<Value>,
+        ) -> AxumJson<Value> {
+            capture.calls.fetch_add(1, Ordering::SeqCst);
+            *capture.authorization.lock().unwrap() = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            *capture.body.lock().unwrap() = Some(body);
+            AxumJson(json!({
+                "id": "draft-probe",
+                "model": "gpt-5-draft",
+                "choices": [{ "message": { "content": "{\"status\":\"ok\"}" } }]
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/chat/completions", post(probe))
+            .with_state(capture);
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn provider_draft_probe_uses_draft_endpoint_tuning_and_transient_secret() {
+        use archivist_core::{
+            AiProviderSettings, ProviderTuning, ReasoningEffort, StructuredOutputMode,
+        };
+        use std::sync::atomic::Ordering;
+
+        let saved_capture = ProviderProbeCapture::default();
+        let draft_capture = ProviderProbeCapture::default();
+        let (saved_url, saved_handle) = spawn_mock_openai_probe(saved_capture.clone()).await;
+        let (draft_url, draft_handle) = spawn_mock_openai_probe(draft_capture.clone()).await;
+
+        let mut saved = RuntimeSettings::default();
+        saved.ai.default_provider = "draft-provider".to_owned();
+        saved.ai.providers = vec![AiProviderSettings {
+            name: "draft-provider".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: saved_url,
+            default_text_model: Some("saved-model".to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled: true,
+            tuning: ProviderTuning::default(),
+        }];
+        let request = TestProviderRequest {
+            name: "draft-provider".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: draft_url,
+            model: "gpt-5-draft".to_owned(),
+            tuning: ProviderTuning {
+                reasoning_effort: Some(ReasoningEffort::High),
+                max_output_tokens: Some(777),
+                structured_output: Some(StructuredOutputMode::JsonObject),
+                request_timeout_seconds: Some(2),
+                ..ProviderTuning::default()
+            },
+            secret_id: None,
+            secret: Some("draft-super-secret".to_owned()),
+        };
+
+        let (provider, tuning) = provider_test_target(&saved, &request).unwrap();
+        let transient_secret = SecretString::from(request.secret.clone().unwrap());
+        let result = test_ai_provider(&provider, &tuning, Some(transient_secret.clone())).await;
+        let response = provider_test_response(&provider, result, Some(&transient_secret));
+
+        assert_eq!(saved_capture.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(draft_capture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            draft_capture.authorization.lock().unwrap().as_deref(),
+            Some("Bearer draft-super-secret")
+        );
+        let body = draft_capture.body.lock().unwrap().clone().unwrap();
+        assert_eq!(body["model"], "gpt-5-draft");
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["max_tokens"], 777);
+        assert_eq!(body["response_format"], json!({ "type": "json_object" }));
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["provider"], "draft-provider");
+        assert_eq!(response["model"], "gpt-5-draft");
+        assert!(!response.to_string().contains("draft-super-secret"));
+
+        let echoed_error = provider_test_response(
+            &provider,
+            Err(anyhow!("upstream echoed draft-super-secret")),
+            Some(&transient_secret),
+        );
+        assert_eq!(echoed_error["ok"], false);
+        assert_eq!(echoed_error["provider"], "draft-provider");
+        assert_eq!(echoed_error["model"], "gpt-5-draft");
+        assert!(!echoed_error.to_string().contains("draft-super-secret"));
+
+        saved_handle.abort();
+        draft_handle.abort();
     }
 }
 

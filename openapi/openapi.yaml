@@ -676,6 +676,34 @@ components:
         secret_id: { type: [string, "null"], format: uuid }
         enabled: { type: boolean }
         tuning: { $ref: "#/components/schemas/ProviderTuningInput" }
+    ProviderTestRequest:
+      type: object
+      description: Transient provider draft tested without persistence.
+      required: [name, kind, base_url, model, tuning]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1 }
+        kind: { $ref: "#/components/schemas/AiProviderKind" }
+        base_url: { type: string }
+        model: { type: string }
+        tuning: { $ref: "#/components/schemas/ProviderTuningInput" }
+        secret_id: { type: [string, "null"], format: uuid }
+        secret:
+          type: [string, "null"]
+          format: password
+          writeOnly: true
+          description: Transient API secret used only for this probe and never persisted or returned.
+    ProviderTestResponse:
+      type: object
+      required: [ok, provider, model]
+      additionalProperties: false
+      properties:
+        ok: { type: boolean }
+        provider: { type: string }
+        model: { type: string }
+        error:
+          type: string
+          description: Redacted failure detail. Never contains provider credentials.
     ModelCatalogEntryInput:
       type: object
       required: [provider_kind, capability, model_id]
@@ -2297,9 +2325,17 @@ paths:
           description: Notification webhook delivery test result
   /api/model-providers/test:
     post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderTestRequest" }
       responses:
         "200":
           description: Provider connection result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderTestResponse" }
   /api/model-providers/{name}/models:
     post:
       parameters:

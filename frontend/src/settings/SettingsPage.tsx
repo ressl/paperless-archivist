@@ -187,8 +187,13 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
   const updateProvider = (index: number, patch: Partial<RuntimeSettings['ai']['providers'][number]>) =>
     update((s) => {
       const providers = [...s.ai.providers];
-      providers[index] = { ...providers[index], ...patch };
-      return { ...s, ai: { ...s.ai, providers } };
+      const current = providers[index];
+      providers[index] = { ...current, ...patch };
+      const defaultProviderName =
+        patch.name !== undefined && s.ai.default_provider === current.name
+          ? patch.name
+          : s.ai.default_provider;
+      return { ...s, ai: { ...s.ai, default_provider: defaultProviderName, providers } };
     });
   const updateProviderTuning = (index: number, patch: Partial<ProviderTuning>) =>
     update((s) => {
@@ -257,6 +262,16 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
   const selectedDefaultProviderIndex = settings.ai.providers.findIndex(
     (provider) => provider.name === settings.ai.default_provider
   );
+  const selectedProviderDraft =
+    selectedDefaultProviderIndex >= 0 ? settings.ai.providers[selectedDefaultProviderIndex] : null;
+  const selectedProviderModel =
+    selectedProviderDraft?.kind === 'mineru'
+      ? 'mineru'
+      : selectedProviderDraft?.default_text_model?.trim() ||
+        settings.ai.default_text_model.trim() ||
+        recommendedModel(selectedDefaultProvider, 'text');
+  const selectedProviderSecret =
+    selectedDefaultProviderIndex >= 0 ? providerSecrets[selectedDefaultProviderIndex] : undefined;
 
   const runPaperlessTest = () => {
     if (savedSettings && paperlessSettingsChanged(settings, savedSettings, token)) {
@@ -287,20 +302,34 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
     setProviderTest({
       status: 'running',
       title: t('settings.provider.test_running.title'),
-      description: t('settings.provider.test_running.description', { provider: selectedDefaultProvider.name }),
+      description: t('settings.provider.test_running.description', {
+        provider: selectedDefaultProvider.name,
+        model: selectedProviderModel
+      }),
       hints: [t('settings.provider.test_running.hint')]
     });
     api
-      .testProvider()
+      .testProvider({
+        name: selectedDefaultProvider.name,
+        kind: selectedDefaultProvider.kind,
+        base_url: selectedDefaultProvider.base_url,
+        model: selectedProviderModel,
+        tuning: selectedProviderDraft?.tuning ?? {},
+        secret_id: selectedProviderDraft?.secret_id ?? null,
+        secret: selectedProviderSecret?.trim() ? selectedProviderSecret : null
+      })
       .then((data) => {
+        const testedProvider = { ...selectedDefaultProvider, name: data.provider };
         setProviderTest(
           data.ok
-            ? providerTestSuccess(selectedDefaultProvider, t)
-            : providerTestFailure(selectedDefaultProvider, data.error, t)
+            ? providerTestSuccess(testedProvider, data.model, t)
+            : providerTestFailure(testedProvider, data.model, data.error, t)
         );
       })
       .catch((err) => {
-        setProviderTest(providerTestFailure(selectedDefaultProvider, errorToString(err), t));
+        setProviderTest(
+          providerTestFailure(selectedDefaultProvider, selectedProviderModel, errorToString(err), t)
+        );
       });
   };
   const runNotificationTest = () => {
