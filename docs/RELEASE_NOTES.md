@@ -8,6 +8,14 @@
 
 ## Unreleased
 
+_No changes yet._
+
+## v1.17.0 — Monitoring, MiniMax M3, and reliability hardening
+
+This release adds production-grade authenticated monitoring, the supported
+SGLang/MiniMax M3 operator path, safer OCR normalization, and several ownership,
+lease, provider, and HTTPS hardening fixes.
+
 - **Authenticated production monitoring (#311):** a reusable opt-in
   ServiceMonitor/PrometheusRule component now shares one dedicated Secret with
   the API, while the worker receives no scrape credential. Offline rule tests
@@ -64,6 +72,11 @@
   their existing cookies are reissued with `Secure`. HSTS can remain cached for
   one year, including after rollback; do not enable this profile unless the
   selected hostname and its subdomains will remain HTTPS-capable.
+- **Deployment note:** database migrations run forward automatically. Monitoring
+  remains opt-in and requires the dedicated metrics Secret before enabling its
+  component. A rollback to v1.16.0 may leave the additive failure-counter row in
+  place safely; point the API and ServiceMonitor back to their retained Secret
+  together, or remove the monitoring component to disable scraping.
 
 ## v1.16.0 — Dashboard hierarchy tiers, nav a11y, dead-CSS cleanup
 
