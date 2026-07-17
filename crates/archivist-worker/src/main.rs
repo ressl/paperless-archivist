@@ -10,7 +10,9 @@ use archivist_ai::{
     TextProvider, VisionProvider, VisionRequest, parse_metadata_suggestion, prompt_for_metadata,
 };
 use archivist_apply::{
-    ApplyExecution, ApplyRequest, apply_document, recover_review_apply_intents, resume_apply_source,
+    ApplyExecution, ApplyRequest, ReviewApplyConflict, ReviewApplyPrecondition,
+    ReviewTagOperations, apply_document, recover_review_apply_intents, resume_apply_source,
+    review_apply_baseline,
 };
 use archivist_config::AppConfig;
 use archivist_core::{
@@ -29,14 +31,14 @@ use archivist_db::{
     get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
     get_workflow_safety_status, increment_metric_counter, insert_ai_artifact, is_last_active_job,
     list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
-    list_pending_review_items_for_autopilot_drain, mark_review_auto_applied,
-    named_entity_id_for_name, paperless_sync_cursor, queue_missing_pipeline,
-    rebalance_backfilled_metadata_priorities, record_dashboard_snapshot, record_document_language,
-    release_job_lease_for_cooldown, requeue_vision_crashed_jobs, reset_stale_applying_reviews,
-    reset_stuck_running_pipeline_runs, resolve_secret, revert_review_to_pending_after_failed_drain,
-    selector_document_budget, tag_id_pairs_for_names, tag_ids_for_names,
-    update_paperless_sync_cursor, upsert_inventory_item, upsert_paperless_custom_field,
-    upsert_paperless_named_entity, upsert_paperless_tag,
+    list_pending_review_items_for_autopilot_drain, mark_review_apply_conflict,
+    mark_review_auto_applied, named_entity_id_for_name, paperless_sync_cursor,
+    queue_missing_pipeline, rebalance_backfilled_metadata_priorities, record_dashboard_snapshot,
+    record_document_language, release_job_lease_for_cooldown, requeue_vision_crashed_jobs,
+    reset_stale_applying_reviews, reset_stuck_running_pipeline_runs, resolve_secret,
+    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_id_pairs_for_names,
+    tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
+    upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{
     normalize_ocr_pages, render_document_pages, strip_code_fences, validate_ocr_text,
@@ -2845,8 +2847,9 @@ async fn process_metadata(
             ));
         }
 
+        let baseline = review_apply_baseline(&document);
         for (patch, warnings) in review_items {
-            if create_review_item(pool, job, patch, warnings, lease_owner)
+            if create_review_item(pool, job, patch, warnings, baseline.clone(), lease_owner)
                 .await?
                 .is_none()
             {
@@ -2897,12 +2900,14 @@ async fn process_metadata(
         } else {
             // manual_review (or dry_run): a single composite review item with all validated
             // suggestions so the operator approves the whole set atomically.
+            let baseline = review_apply_baseline(&document);
             let composite_review_patch = serde_json::to_value(&composite_patch)?;
             if create_review_item(
                 pool,
                 job,
                 composite_review_patch,
                 json!(composite_warnings),
+                baseline,
                 lease_owner,
             )
             .await?
@@ -3149,6 +3154,8 @@ async fn handle_patch_result(
     // recorded for audit/UX context. dry_run always forces review regardless of mode.
     let auto_apply = settings.workflow.mode.auto_apply_validated_suggestions();
     if !auto_apply || settings.workflow.dry_run {
+        let document = paperless.get_document(job.paperless_document_id).await?;
+        let baseline = review_apply_baseline(&document);
         let mut review_patch = serde_json::to_value(patch)?;
         if let Some(metadata) = review_metadata
             && let Some(object) = review_patch.as_object_mut()
@@ -3162,9 +3169,15 @@ async fn handle_patch_result(
                     .to_owned(),
             );
         }
-        let Some(review_id) =
-            create_review_item(pool, job, review_patch, json!(review_warnings), lease_owner)
-                .await?
+        let Some(review_id) = create_review_item(
+            pool,
+            job,
+            review_patch,
+            json!(review_warnings),
+            baseline,
+            lease_owner,
+        )
+        .await?
         else {
             warn!(
                 job_id = %job.id,
@@ -3293,6 +3306,7 @@ async fn apply_patch_with_workflow_tags(
             before: Some(before_value),
             metadata: json!({ "stage": job.stage }),
             review_revert_status: None,
+            review_precondition: None,
             allow_custom_fields_fallback: true,
         },
     )
@@ -3496,6 +3510,18 @@ async fn apply_one_autopilot_drain_review(
     let execution = match patch_result {
         Ok(execution) => execution,
         Err(error) => {
+            if let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>() {
+                mark_review_apply_conflict(
+                    pool,
+                    claimed.id,
+                    "pending",
+                    conflict.fields(),
+                    "worker",
+                    Some("autopilot-drain".to_owned()),
+                )
+                .await?;
+                return Err(error);
+            }
             // Revert only when no prepared/in-flight/confirmed intent exists.
             // An ambiguous timeout must remain fenced until recovery performs
             // GET reconciliation; reverting it would permit a duplicate PATCH.
@@ -3541,7 +3567,7 @@ async fn apply_autopilot_drain_patch(
         .edited_patch
         .clone()
         .unwrap_or_else(|| review.suggested_patch.clone());
-    let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
+    let patch: DocumentPatch = serde_json::from_value(patch_value)?;
     // run_id is None only for review items whose run was pruned by retention;
     // those never reach the drain (retention deletes terminal runs only, and
     // a pending review keeps its run in 'waiting_review').
@@ -3550,27 +3576,25 @@ async fn apply_autopilot_drain_patch(
     } else {
         false
     };
-    let document = paperless.get_document(review.paperless_document_id).await?;
-    let mut tag_ids = patch.tags.clone().unwrap_or_else(|| document.tags.clone());
+    let mut additions = Vec::new();
+    let mut removals = Vec::new();
     if let Some(completion_name) = settings
         .workflow
         .tags
         .completion_tag_for_stage(review.stage)
     {
         let tag = ensure_tag_cached(paperless, tag_cache, completion_name).await?;
-        if !tag_ids.contains(&tag.id) {
-            tag_ids.push(tag.id);
-        }
+        additions.push(tag.id);
     }
-    if final_run_stage && !tag_ids.contains(&completion_full.id) {
-        tag_ids.push(completion_full.id);
+    if final_run_stage {
+        additions.push(completion_full.id);
     }
     if let Some(trigger_name) = settings.workflow.tags.trigger_tag_for_stage(review.stage)
         && let Some(tag) = tag_cache
             .iter()
             .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
     {
-        tag_ids.retain(|id| *id != tag.id);
+        removals.push(tag.id);
     }
     if final_run_stage
         && let Some(tag) = tag_cache.iter().find(|tag| {
@@ -3578,13 +3602,12 @@ async fn apply_autopilot_drain_patch(
                 .eq_ignore_ascii_case(&settings.workflow.tags.trigger_process)
         })
     {
-        tag_ids.retain(|id| *id != tag.id);
+        removals.push(tag.id);
     }
-    tag_ids.sort_unstable();
-    tag_ids.dedup();
-    patch.tags = Some(tag_ids);
-    prune_unchanged_patch_fields(&mut patch, &document);
-    let before = audit_before_for_patch(&document, &patch);
+    additions.sort_unstable();
+    additions.dedup();
+    removals.sort_unstable();
+    removals.dedup();
     let execution = apply_document(
         pool,
         paperless,
@@ -3598,14 +3621,24 @@ async fn apply_autopilot_drain_patch(
             job_id: review.job_id,
             review_id: Some(review.id),
             patch,
-            before: Some(before),
+            before: None,
             metadata: json!({
                 "stage": review.stage,
                 "review_id": review.id,
                 "trigger": "autopilot_drain"
             }),
             review_revert_status: Some("pending".to_owned()),
-            allow_custom_fields_fallback: true,
+            review_precondition: Some(ReviewApplyPrecondition {
+                baseline: review.baseline.clone(),
+                tag_operations: ReviewTagOperations {
+                    additions,
+                    removals,
+                },
+            }),
+            // A review apply must have exactly one preconditioned PATCH body.
+            // Retrying a reduced body after a 400 would create a second write
+            // without another field-level concurrency decision.
+            allow_custom_fields_fallback: false,
         },
     )
     .await?;

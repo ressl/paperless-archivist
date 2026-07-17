@@ -73,6 +73,7 @@ async fn fixture() -> Option<Fixture> {
                 job,
                 json!({"content": format!("candidate-{index}")}),
                 json!([]),
+                json!({"content": "sha256:test", "tags": []}),
                 "aggregate-worker",
             )
             .await

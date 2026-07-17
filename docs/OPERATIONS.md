@@ -593,6 +593,17 @@ the failed-attempt counter and lock.
 Autopilot never trusts model output directly. Full autopilot applies only a
 validated Rust `DocumentPatch`.
 
+Review-backed applies use field-level optimistic concurrency. A review records
+fingerprints/IDs for every patchable Paperless field when it is created. Human
+approval and the autopilot review drain read the document again immediately
+before PATCH. A newer edit to a requested scalar field returns HTTP `409`,
+moves the review back to `pending`, and records `review.apply_conflict` with
+field names only; the shared job and run stay in `waiting_review`. Refresh the
+review, compare the named fields with Paperless, then edit/approve again. Tag
+changes are merged as a three-way set delta, so tags added directly in
+Paperless after review creation are retained unless they are workflow trigger
+tags scheduled for removal.
+
 Production rollout should keep automatic selection bounded:
 
 1. Start in `manual_review` and process a representative sample.

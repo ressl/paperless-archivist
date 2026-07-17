@@ -359,6 +359,7 @@ const deMessages: Record<MessageKey, string> = {
   'review.debug_summary': 'Prompt-Sprache {promptLanguage}; Tag-Sprache {tagLanguage}; Selector {reason}',
   'review.debug_summary_no_selector': 'Prompt-Sprache {promptLanguage}; Tag-Sprache {tagLanguage}',
   'review.failed_batch': '{count} Review-Items fehlgeschlagen. Erster Fehler: {error}',
+  'review.conflict': 'Neuere Paperless-Änderungen wurden in folgenden Feldern erkannt: {fields}. Aktualisiere Paperless, vergleiche diese Felder und bearbeite oder genehmige das Review anschließend erneut.',
   'review.auto_fix_all': 'Alle automatisch fixen',
   'review.auto_fix_one': 'Fix',
   'review.auto_fix_confirm': 'Auto-Fix für {count} offene Review-Einträge anwenden? Felder mit Validation-Warnings werden entfernt; übrig bleibt der saubere Patch. Wenn nichts Sinnvolles übrig bleibt, wird der Eintrag abgelehnt. Fortfahren?',

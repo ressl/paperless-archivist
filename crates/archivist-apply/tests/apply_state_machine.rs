@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
 use archivist_apply::{
-    ApplyExecution, ApplyRequest, apply_document, patch_hash, recover_review_apply_intents,
-    resume_apply_source,
+    ApplyExecution, ApplyRequest, ReviewApplyConflict, ReviewApplyPrecondition,
+    ReviewTagOperations, apply_document, patch_hash, recover_review_apply_intents,
+    resume_apply_source, review_apply_baseline,
 };
 use archivist_core::DocumentPatch;
 use archivist_db::{
     ApplyIntentInput, DbPool, connect, get_apply_intent, mark_apply_intent_confirmed,
     mark_apply_intent_in_flight, migrate, prepare_apply_intent,
 };
-use archivist_paperless::PaperlessClient;
+use archivist_paperless::{PaperlessClient, PaperlessDocumentDetail};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -115,6 +116,7 @@ fn request(patch: DocumentPatch) -> ApplyRequest {
         before: Some(json!({"title": "old"})),
         metadata: json!({"stage": "metadata"}),
         review_revert_status: None,
+        review_precondition: None,
         allow_custom_fields_fallback: false,
     }
 }
@@ -129,6 +131,33 @@ fn title_patch() -> DocumentPatch {
         created: None,
         custom_fields: None,
     }
+}
+
+#[tokio::test]
+async fn review_conflict_reads_latest_document_but_never_creates_an_intent_or_patches() {
+    let (client, state) = mock_client(false).await;
+    let original: PaperlessDocumentDetail =
+        serde_json::from_value(state.lock().await.document.clone()).expect("original document");
+    let patch = title_patch();
+    let baseline = review_apply_baseline(&original);
+    state.lock().await.document["title"] = json!("newer manual title");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .expect("lazy pool");
+    let mut request = request(patch);
+    request.review_precondition = Some(ReviewApplyPrecondition {
+        baseline,
+        tag_operations: ReviewTagOperations::default(),
+    });
+
+    let error = apply_document(&pool, &client, request)
+        .await
+        .expect_err("manual title must conflict");
+    let conflict = error
+        .downcast_ref::<ReviewApplyConflict>()
+        .expect("typed review conflict");
+    assert_eq!(conflict.fields(), &["title".to_owned()]);
+    assert_eq!(state.lock().await.patch_count, 0);
 }
 
 #[tokio::test]
@@ -272,6 +301,7 @@ async fn confirmed_human_intent_finalizes_local_review_after_restart() {
         before: Some(json!({"title": "old"})),
         metadata: json!({"stage": "metadata"}),
         review_revert_status: Some("approved".to_owned()),
+        review_precondition: None,
         allow_custom_fields_fallback: false,
     };
     let intent = prepare_apply_intent(

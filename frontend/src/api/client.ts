@@ -534,6 +534,8 @@ export type ReviewItem = {
   suggested_patch: unknown;
   edited_patch?: unknown;
   validation_warnings?: unknown;
+  conflict_fields?: string[];
+  conflicted_at?: string | null;
   debug_context?: WorkflowDebugContext | null;
   paperless_title?: string | null;
   created_at: string;

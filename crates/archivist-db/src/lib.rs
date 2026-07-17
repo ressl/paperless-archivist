@@ -183,6 +183,10 @@ pub struct ReviewItemRecord {
     pub status: String,
     pub suggested_patch: Value,
     pub edited_patch: Option<Value>,
+    #[serde(skip_serializing)]
+    pub baseline: Value,
+    pub conflict_fields: Value,
+    pub conflicted_at: Option<DateTime<Utc>>,
     pub validation_warnings: Value,
     pub debug_context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5756,6 +5760,7 @@ pub async fn create_review_item(
     job: &JobRecord,
     suggested_patch: Value,
     validation_warnings: Value,
+    baseline: Value,
     lease_owner: &str,
 ) -> Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
@@ -5779,8 +5784,11 @@ pub async fn create_review_item(
 
     let id: Uuid = sqlx::query(
         r#"
-        insert into review_items (run_id, job_id, paperless_document_id, stage, status, suggested_patch, validation_warnings)
-        values ($1, $2, $3, $4, 'pending', $5, $6)
+        insert into review_items (
+          run_id, job_id, paperless_document_id, stage, status,
+          suggested_patch, validation_warnings, baseline
+        )
+        values ($1, $2, $3, $4, 'pending', $5, $6, $7)
         returning id
         "#,
     )
@@ -5790,6 +5798,7 @@ pub async fn create_review_item(
     .bind(job.stage.to_string())
     .bind(&suggested_patch)
     .bind(&validation_warnings)
+    .bind(&baseline)
     .fetch_one(&mut *tx)
     .await?
     .try_get("id")?;
@@ -5842,7 +5851,9 @@ pub async fn list_reviews(
         sqlx::query(
             r#"
             select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
-                   ri.suggested_patch, ri.edited_patch, ri.validation_warnings, ri.created_at,
+                   ri.suggested_patch, ri.edited_patch, ri.baseline,
+                   ri.conflict_fields, ri.conflicted_at,
+                   ri.validation_warnings, ri.created_at,
                    di.title as paperless_title,
                    jsonb_build_object(
                      'detected_language', di.detected_language,
@@ -5868,7 +5879,9 @@ pub async fn list_reviews(
         sqlx::query(
             r#"
             select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
-                   ri.suggested_patch, ri.edited_patch, ri.validation_warnings, ri.created_at,
+                   ri.suggested_patch, ri.edited_patch, ri.baseline,
+                   ri.conflict_fields, ri.conflicted_at,
+                   ri.validation_warnings, ri.created_at,
                    di.title as paperless_title,
                    jsonb_build_object(
                      'detected_language', di.detected_language,
@@ -5902,6 +5915,9 @@ pub async fn list_reviews(
                 status: row.try_get("status")?,
                 suggested_patch: row.try_get("suggested_patch")?,
                 edited_patch: row.try_get("edited_patch")?,
+                baseline: row.try_get("baseline")?,
+                conflict_fields: row.try_get("conflict_fields")?,
+                conflicted_at: row.try_get("conflicted_at")?,
                 validation_warnings: row.try_get("validation_warnings")?,
                 debug_context: row.try_get("debug_context")?,
                 paperless_title: row.try_get("paperless_title").ok(),
@@ -5944,7 +5960,9 @@ pub async fn review_decision(
            set status = $2,
                edited_patch = coalesce($3, edited_patch),
                reviewed_by = $4,
-               reviewed_at = now()
+               reviewed_at = now(),
+               conflict_fields = '[]'::jsonb,
+               conflicted_at = null
          where id = $1 and status = 'pending'
         returning run_id, job_id, paperless_document_id, stage, suggested_patch, edited_patch
         "#,
@@ -6518,7 +6536,8 @@ pub async fn claim_review_for_apply(
          where id = $1 and status in ('approved', 'edited')
         returning id, run_id, job_id, paperless_document_id, stage,
                   (select status from prev) as status,
-                  suggested_patch, edited_patch, validation_warnings, created_at
+                  suggested_patch, edited_patch, baseline,
+                  conflict_fields, conflicted_at, validation_warnings, created_at
         "#,
     )
     .bind(review_id)
@@ -6536,6 +6555,9 @@ pub async fn claim_review_for_apply(
             status: row.try_get("status")?,
             suggested_patch: row.try_get("suggested_patch")?,
             edited_patch: row.try_get("edited_patch")?,
+            baseline: row.try_get("baseline")?,
+            conflict_fields: row.try_get("conflict_fields")?,
+            conflicted_at: row.try_get("conflicted_at")?,
             validation_warnings: row.try_get("validation_warnings")?,
             debug_context: None,
             paperless_title: None,
@@ -6771,7 +6793,9 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
         update review_items
            set status = 'applied',
                reviewed_by = coalesce(reviewed_by, $2),
-               reviewed_at = coalesce(reviewed_at, now())
+               reviewed_at = coalesce(reviewed_at, now()),
+               conflict_fields = '[]'::jsonb,
+               conflicted_at = null
          where id = $1 and status = 'applying'
         returning run_id, job_id, paperless_document_id, stage
         "#,
@@ -6838,7 +6862,8 @@ pub async fn list_pending_review_items_for_autopilot_drain(
     let rows = sqlx::query(
         r#"
         select id, run_id, job_id, paperless_document_id, stage, status,
-               suggested_patch, edited_patch, validation_warnings, created_at
+               suggested_patch, edited_patch, baseline,
+               conflict_fields, conflicted_at, validation_warnings, created_at
           from review_items
          where status = 'pending'
          order by created_at asc
@@ -6861,6 +6886,9 @@ pub async fn list_pending_review_items_for_autopilot_drain(
                 status: row.try_get("status")?,
                 suggested_patch: row.try_get("suggested_patch")?,
                 edited_patch: row.try_get("edited_patch")?,
+                baseline: row.try_get("baseline")?,
+                conflict_fields: row.try_get("conflict_fields")?,
+                conflicted_at: row.try_get("conflicted_at")?,
                 validation_warnings: row.try_get("validation_warnings")?,
                 debug_context: None,
                 paperless_title: None,
@@ -6893,7 +6921,8 @@ pub async fn claim_pending_review_for_autopilot_drain(
                reviewed_at = now()
          where id = $1 and status = 'pending'
         returning id, run_id, job_id, paperless_document_id, stage, status,
-                  suggested_patch, edited_patch, validation_warnings, created_at
+                  suggested_patch, edited_patch, baseline,
+                  conflict_fields, conflicted_at, validation_warnings, created_at
         "#,
     )
     .bind(review_id)
@@ -6915,6 +6944,9 @@ pub async fn claim_pending_review_for_autopilot_drain(
         status: row.try_get("status")?,
         suggested_patch: row.try_get("suggested_patch")?,
         edited_patch: row.try_get("edited_patch")?,
+        baseline: row.try_get("baseline")?,
+        conflict_fields: row.try_get("conflict_fields")?,
+        conflicted_at: row.try_get("conflicted_at")?,
         validation_warnings: row.try_get("validation_warnings")?,
         debug_context: None,
         paperless_title: None,
@@ -6962,7 +6994,9 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
         r#"
         update review_items
            set status = 'applied',
-               reviewed_at = coalesce(reviewed_at, now())
+               reviewed_at = coalesce(reviewed_at, now()),
+               conflict_fields = '[]'::jsonb,
+               conflicted_at = null
          where id = $1 and status = 'applying'
         returning run_id, job_id, paperless_document_id, stage
         "#,
@@ -7033,6 +7067,81 @@ pub async fn revert_review_to_pending_after_failed_drain(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Record a field-level optimistic-concurrency conflict without exposing the
+/// document values. The review returns to a retryable state while its shared
+/// job, run, and inventory deliberately remain `waiting_review`.
+pub async fn mark_review_apply_conflict(
+    pool: &DbPool,
+    review_id: Uuid,
+    to_status: &str,
+    fields: &[String],
+    actor_type: &str,
+    actor_id: Option<String>,
+) -> Result<bool> {
+    if !matches!(to_status, "pending" | "approved" | "edited") {
+        return Err(anyhow!("invalid review conflict revert status"));
+    }
+    let mut fields = fields.to_vec();
+    fields.sort();
+    fields.dedup();
+    let mut tx = pool.begin().await?;
+    let Some(row) = sqlx::query(
+        r#"
+        update review_items
+           set status = $2,
+               reviewed_at = case when $2 = 'pending' then null else reviewed_at end,
+               conflict_fields = $3,
+               conflicted_at = now()
+         where id = $1 and status = 'applying'
+        returning run_id, job_id, paperless_document_id, stage
+        "#,
+    )
+    .bind(review_id)
+    .bind(to_status)
+    .bind(json!(fields))
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+
+    let run_id: Option<Uuid> = row.try_get("run_id")?;
+    let job_id: Option<Uuid> = row.try_get("job_id")?;
+    let document_id: i32 = row.try_get("paperless_document_id")?;
+    let stage: String = row.try_get("stage")?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "review.apply_conflict".to_owned(),
+            actor_type: actor_type.to_owned(),
+            actor_id,
+            run_id,
+            job_id,
+            paperless_document_id: Some(document_id),
+            before: None,
+            after: None,
+            metadata: Some(json!({
+                "review_id": review_id,
+                "fields": fields
+            })),
+            outcome: "failed".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tracing::warn!(
+        %review_id,
+        paperless_document_id = document_id,
+        %stage,
+        "review apply stopped by optimistic-concurrency conflict"
+    );
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Release a human-apply claim after the Paperless PATCH failed: move the row

@@ -359,6 +359,7 @@ const nlMessages: Record<MessageKey, string> = {
   'review.debug_summary': 'Prompttaal {promptLanguage}; tagtaal {tagLanguage}; selector {reason}',
   'review.debug_summary_no_selector': 'Prompttaal {promptLanguage}; tagtaal {tagLanguage}',
   'review.failed_batch': '{count} review-items mislukt. Eerste fout: {error}',
+  'review.conflict': 'Er zijn nieuwere Paperless-wijzigingen gevonden in deze velden: {fields}. Vernieuw Paperless, vergelijk deze velden en bewerk of keur de review daarna opnieuw goed.',
   'review.auto_fix_all': 'Alle automatisch fixen',
   'review.auto_fix_one': 'Fix',
   'review.auto_fix_confirm': 'Auto-fix toepassen op {count} openstaande items? Velden met waarschuwingen worden verwijderd; de rest wordt toegepast. Doorgaan?',

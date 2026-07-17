@@ -211,6 +211,9 @@ function ReviewCard({ item, selected, onSelect, onReload, onAutoFix, setError, t
   const handleSelect = useCallback(() => onSelect(item.id), [onSelect, item.id]);
 
   const warnings = reviewWarnings(item.validation_warnings);
+  const conflictFields = Array.isArray(item.conflict_fields)
+    ? item.conflict_fields.filter((field): field is string => typeof field === 'string' && field.length > 0)
+    : [];
   const rows = standardMetadataRows(item.stage, patch, metadata, t);
 
   return (
@@ -223,6 +226,13 @@ function ReviewCard({ item, selected, onSelect, onReload, onAutoFix, setError, t
         </label>
         <span>{stageLabel(item.stage as Stage, t) ?? item.stage}</span>
       </header>
+
+      {conflictFields.length > 0 && (
+        <div className="review-conflict" role="alert">
+          <AlertTriangle size={18} />
+          <span>{t('review.conflict', { fields: conflictFields.join(', ') })}</span>
+        </div>
+      )}
 
       {rows.length > 0 && (
         <div className="metadata-review">
@@ -309,6 +319,8 @@ const ReviewCardMemo = memo(
       a.suggested_patch === b.suggested_patch &&
       a.edited_patch === b.edited_patch &&
       a.validation_warnings === b.validation_warnings &&
+      a.conflict_fields === b.conflict_fields &&
+      a.conflicted_at === b.conflicted_at &&
       a.debug_context === b.debug_context
     );
   }

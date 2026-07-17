@@ -9,7 +9,9 @@ use archivist_ai::{
     AiResponse, AnthropicClient, ChatRequest, MineruClient, OllamaClient, OllamaLoadedModel,
     OllamaModel, OpenAiCompatibleClient, TextProvider,
 };
-use archivist_apply::{ApplyRequest, apply_document};
+use archivist_apply::{
+    ApplyRequest, ReviewApplyConflict, ReviewApplyPrecondition, ReviewTagOperations, apply_document,
+};
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, DashboardProviderCostSummary, DashboardRange, DashboardStats,
@@ -41,7 +43,7 @@ use archivist_db::{
     upsert_inventory_item, upsert_oidc_user, upsert_paperless_custom_field,
     upsert_paperless_named_entity, upsert_paperless_tag, verify_audit_integrity,
 };
-use archivist_paperless::{PaperlessClient, PaperlessDocumentDetail, PaperlessTag};
+use archivist_paperless::{PaperlessClient, PaperlessTag};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Argon2, Params};
@@ -6278,6 +6280,20 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
     // the recovery worker instead of becoming blindly retryable.
     let prior_status = review.status.clone();
     let result = apply_claimed_review(state, &review, actor_id).await;
+    if let Err(error) = &result
+        && let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>()
+    {
+        archivist_db::mark_review_apply_conflict(
+            &state.pool,
+            review_id,
+            "pending",
+            conflict.fields(),
+            "user",
+            Some(actor_id.to_string()),
+        )
+        .await?;
+        return result;
+    }
     if result.is_err() {
         match archivist_db::review_has_nonterminal_apply_intent(&state.pool, review_id).await {
             Ok(false) => {
@@ -6316,7 +6332,7 @@ async fn apply_claimed_review(
         .edited_patch
         .clone()
         .unwrap_or_else(|| review.suggested_patch.clone());
-    let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
+    let patch: DocumentPatch = serde_json::from_value(patch_value)?;
     // run_id is None only for review items whose run was pruned by retention
     // (terminal runs only — a pending review keeps its run alive).
     let final_run_stage = if let (Some(run_id), Some(job_id)) = (review.run_id, review.job_id) {
@@ -6324,11 +6340,10 @@ async fn apply_claimed_review(
     } else {
         false
     };
-    add_completion_and_remove_trigger_tags(state, review, &mut patch, final_run_stage).await?;
-    let client = paperless_client(&state.pool, &state.config).await?;
-    let document = client.get_document(review.paperless_document_id).await?;
-    prune_unchanged_patch_fields(&mut patch, &document);
-    let before = audit_before_for_patch(&document, &patch);
+    let settings = get_runtime_settings(&state.pool).await?;
+    let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
+    let tag_operations =
+        review_workflow_tag_operations(&client, &settings, review.stage, final_run_stage).await?;
     let apply_started = std::time::Instant::now();
     let execution = apply_document(
         &state.pool,
@@ -6343,12 +6358,16 @@ async fn apply_claimed_review(
             job_id: review.job_id,
             review_id: Some(review.id),
             patch,
-            before: Some(before),
+            before: None,
             metadata: json!({
                 "stage": review.stage,
                 "review_id": review.id
             }),
             review_revert_status: Some(review.status.clone()),
+            review_precondition: Some(ReviewApplyPrecondition {
+                baseline: review.baseline.clone(),
+                tag_operations,
+            }),
             allow_custom_fields_fallback: false,
         },
     )
@@ -6366,135 +6385,33 @@ async fn apply_claimed_review(
     Ok(())
 }
 
-fn prune_unchanged_patch_fields(patch: &mut DocumentPatch, document: &PaperlessDocumentDetail) {
-    if patch.content.as_deref() == document.content.as_deref() {
-        patch.content = None;
-    }
-    if patch.title == document.title {
-        patch.title = None;
-    }
-    if patch
-        .tags
-        .as_ref()
-        .is_some_and(|tags| same_i32_set(tags, &document.tags))
-    {
-        patch.tags = None;
-    }
-    if patch
-        .correspondent
-        .as_ref()
-        .is_some_and(|value| *value == document.correspondent)
-    {
-        patch.correspondent = None;
-    }
-    if patch
-        .document_type
-        .as_ref()
-        .is_some_and(|value| *value == document.document_type)
-    {
-        patch.document_type = None;
-    }
-    if patch
-        .created
-        .as_deref()
-        .is_some_and(|value| document_date_equals(document.created.as_deref(), value))
-    {
-        patch.created = None;
-    }
-}
-
-fn same_i32_set(left: &[i32], right: &[i32]) -> bool {
-    let mut left = left.to_vec();
-    let mut right = right.to_vec();
-    left.sort_unstable();
-    left.dedup();
-    right.sort_unstable();
-    right.dedup();
-    left == right
-}
-
-fn document_date_equals(current: Option<&str>, requested: &str) -> bool {
-    current
-        .map(|value| value.get(..10).unwrap_or(value) == requested)
-        .unwrap_or(false)
-}
-
-fn audit_before_for_patch(
-    document: &PaperlessDocumentDetail,
-    patch: &DocumentPatch,
-) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    if patch.content.is_some() {
-        object.insert(
-            "content".to_owned(),
-            audit_text_metadata(document.content.as_deref().unwrap_or_default()),
-        );
-    }
-    if patch.title.is_some() {
-        object.insert("title".to_owned(), json!(document.title));
-    }
-    if patch.tags.is_some() {
-        object.insert("tags".to_owned(), json!(document.tags));
-    }
-    if patch.correspondent.is_some() {
-        object.insert("correspondent".to_owned(), json!(document.correspondent));
-    }
-    if patch.document_type.is_some() {
-        object.insert("document_type".to_owned(), json!(document.document_type));
-    }
-    if patch.created.is_some() {
-        object.insert("created".to_owned(), json!(document.created));
-    }
-    if patch.custom_fields.is_some() {
-        object.insert("custom_fields".to_owned(), json!({ "present": "redacted" }));
-    }
-    serde_json::Value::Object(object)
-}
-
-fn audit_text_metadata(value: &str) -> serde_json::Value {
-    json!({
-        "sha256": hex::encode(Sha256::digest(value.as_bytes())),
-        "chars": value.chars().count(),
-        "redacted": true
-    })
-}
-
-async fn add_completion_and_remove_trigger_tags(
-    state: &AppState,
-    review: &ReviewItemRecord,
-    patch: &mut DocumentPatch,
+async fn review_workflow_tag_operations(
+    client: &PaperlessClient,
+    settings: &RuntimeSettings,
+    stage: Stage,
     final_run_stage: bool,
-) -> Result<()> {
-    let settings = get_runtime_settings(&state.pool).await?;
-    let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
-    let document = client.get_document(review.paperless_document_id).await?;
+) -> Result<ReviewTagOperations> {
     let all_tags = client.list_tags().await?;
-    let completion = settings
-        .workflow
-        .tags
-        .completion_tag_for_stage(review.stage);
-    let trigger = settings.workflow.tags.trigger_tag_for_stage(review.stage);
-    let mut ids = patch.tags.clone().unwrap_or(document.tags);
+    let completion = settings.workflow.tags.completion_tag_for_stage(stage);
+    let trigger = settings.workflow.tags.trigger_tag_for_stage(stage);
+    let mut additions = Vec::new();
+    let mut removals = Vec::new();
     if let Some(completion_name) = completion {
         let tag = client.ensure_tag(completion_name).await?;
-        if !ids.contains(&tag.id) {
-            ids.push(tag.id);
-        }
+        additions.push(tag.id);
     }
     if final_run_stage {
         let tag = client
             .ensure_tag(&settings.workflow.tags.completion_processed)
             .await?;
-        if !ids.contains(&tag.id) {
-            ids.push(tag.id);
-        }
+        additions.push(tag.id);
     }
     if let Some(trigger_name) = trigger
         && let Some(tag) = all_tags
             .iter()
             .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
     {
-        ids.retain(|id| *id != tag.id);
+        removals.push(tag.id);
     }
     if final_run_stage
         && let Some(tag) = all_tags.iter().find(|tag| {
@@ -6502,12 +6419,16 @@ async fn add_completion_and_remove_trigger_tags(
                 .eq_ignore_ascii_case(&settings.workflow.tags.trigger_process)
         })
     {
-        ids.retain(|id| *id != tag.id);
+        removals.push(tag.id);
     }
-    ids.sort_unstable();
-    ids.dedup();
-    patch.tags = Some(ids);
-    Ok(())
+    additions.sort_unstable();
+    additions.dedup();
+    removals.sort_unstable();
+    removals.dedup();
+    Ok(ReviewTagOperations {
+        additions,
+        removals,
+    })
 }
 
 async fn sync_paperless_inventory(
@@ -6646,11 +6567,6 @@ fn parse_paperless_datetime(value: Option<&str>) -> Option<DateTime<Utc>> {
     value
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.with_timezone(&Utc))
-}
-
-async fn paperless_client(pool: &DbPool, config: &AppConfig) -> Result<PaperlessClient> {
-    let settings = get_runtime_settings(pool).await?;
-    paperless_client_from_settings(pool, config, &settings).await
 }
 
 async fn paperless_client_from_settings(
@@ -8718,6 +8634,16 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        if let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>() {
+            warn!(
+                fields = ?conflict.fields(),
+                "review apply rejected due to newer Paperless changes"
+            );
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: conflict.to_string(),
+            };
+        }
         // Log the full cause chain server-side, but never return internal
         // error text (SQL fragments, column/constraint names, pool/reqwest
         // URLs) to the client — some 5xx paths are unauthenticated.

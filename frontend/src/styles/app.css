@@ -2304,6 +2304,23 @@ th {
   font-weight: 700;
 }
 
+.review-conflict {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px 12px;
+  border: 1px solid #d97706;
+  border-radius: var(--radius-md);
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.review-conflict svg {
+  flex: 0 0 auto;
+}
+
 .debug-context {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);

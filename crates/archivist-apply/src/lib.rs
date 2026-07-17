@@ -6,6 +6,8 @@
 //! marks it in flight immediately before the request, and reconciles ambiguous
 //! outcomes with a GET. An existing in-flight intent is never patched again.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Display, Formatter};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
@@ -18,8 +20,11 @@ use archivist_db::{
     prepare_apply_intent, reconcile_apply_intent, revert_review_from_applying,
     revert_review_to_pending_after_failed_drain,
 };
-use archivist_paperless::{PaperlessClient, PaperlessError, document_matches_patch};
-use serde_json::Value;
+use archivist_paperless::{
+    PaperlessClient, PaperlessDocumentDetail, PaperlessError, document_matches_patch,
+};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -37,9 +42,302 @@ pub struct ApplyRequest {
     pub before: Option<Value>,
     pub metadata: Value,
     pub review_revert_status: Option<String>,
+    /// Present only for the first execution of a review-backed apply. The
+    /// resolved patch is persisted in the durable intent; recovery therefore
+    /// leaves this `None` and reconciles that exact body.
+    pub review_precondition: Option<ReviewApplyPrecondition>,
     /// Retry once without custom fields when Paperless explicitly rejects that
     /// part of the request with HTTP 400. The rejected attempt remains audited.
     pub allow_custom_fields_fallback: bool,
+}
+
+/// Field-scoped optimistic-concurrency input for review-backed applies.
+/// Direct worker applies deliberately omit it because they are generated and
+/// applied in one lease-owned operation rather than waiting for a reviewer.
+#[derive(Debug, Clone)]
+pub struct ReviewApplyPrecondition {
+    pub baseline: Value,
+    pub tag_operations: ReviewTagOperations,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewTagOperations {
+    pub additions: Vec<i32>,
+    pub removals: Vec<i32>,
+}
+
+/// A safe, user-actionable refusal to overwrite fields changed after review
+/// creation. Only field names are retained; values never enter the error or
+/// conflict audit event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewApplyConflict {
+    fields: Vec<String>,
+}
+
+impl ReviewApplyConflict {
+    pub fn fields(&self) -> &[String] {
+        &self.fields
+    }
+}
+
+impl Display for ReviewApplyConflict {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "review conflicts with newer Paperless changes in: {}",
+            self.fields.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for ReviewApplyConflict {}
+
+/// Capture every patchable field so a reviewer may safely edit additional
+/// fields before approval. Potentially sensitive strings and custom-field
+/// values are represented by deterministic SHA-256 fingerprints.
+pub fn review_apply_baseline(document: &PaperlessDocumentDetail) -> Value {
+    let mut baseline = Map::new();
+    baseline.insert("tags".to_owned(), json!(normalized_tags(&document.tags)));
+    baseline.insert("content".to_owned(), json!(fingerprint(&document.content)));
+    baseline.insert("title".to_owned(), json!(fingerprint(&document.title)));
+    baseline.insert("correspondent".to_owned(), json!(document.correspondent));
+    baseline.insert("document_type".to_owned(), json!(document.document_type));
+    baseline.insert("created".to_owned(), json!(fingerprint(&document.created)));
+    baseline.insert(
+        "custom_fields".to_owned(),
+        json!(fingerprint_custom_fields(&document.custom_fields)),
+    );
+    Value::Object(baseline)
+}
+
+/// Resolve a review patch against the latest Paperless document. Scalar
+/// fields use optimistic concurrency; tags use a three-way set merge so
+/// unrelated additions/removals made in Paperless are preserved.
+pub fn resolve_review_patch(
+    baseline: &Value,
+    mut desired: DocumentPatch,
+    current: &PaperlessDocumentDetail,
+    tag_operations: &ReviewTagOperations,
+) -> std::result::Result<DocumentPatch, ReviewApplyConflict> {
+    let mut conflicts = Vec::new();
+
+    check_fingerprinted_field(
+        baseline,
+        "content",
+        desired.content.as_ref(),
+        &current.content,
+        &mut conflicts,
+    );
+    check_fingerprinted_field(
+        baseline,
+        "title",
+        desired.title.as_ref(),
+        &current.title,
+        &mut conflicts,
+    );
+    check_plain_field(
+        baseline,
+        "correspondent",
+        desired.correspondent.as_ref(),
+        &current.correspondent,
+        &mut conflicts,
+    );
+    check_plain_field(
+        baseline,
+        "document_type",
+        desired.document_type.as_ref(),
+        &current.document_type,
+        &mut conflicts,
+    );
+    check_fingerprinted_field(
+        baseline,
+        "created",
+        desired.created.as_ref(),
+        &current.created,
+        &mut conflicts,
+    );
+    check_custom_fields(
+        baseline,
+        desired.custom_fields.as_ref(),
+        &current.custom_fields,
+        &mut conflicts,
+    );
+
+    let baseline_tags = baseline
+        .get("tags")
+        .and_then(|value| serde_json::from_value::<Vec<i32>>(value.clone()).ok());
+    if baseline_tags.is_none() {
+        conflicts.push("tags".to_owned());
+    }
+
+    conflicts.sort();
+    conflicts.dedup();
+    if !conflicts.is_empty() {
+        return Err(ReviewApplyConflict { fields: conflicts });
+    }
+
+    if desired.content.as_ref() == current.content.as_ref() {
+        desired.content = None;
+    }
+    if desired.title.as_ref() == current.title.as_ref() {
+        desired.title = None;
+    }
+    if desired
+        .correspondent
+        .as_ref()
+        .is_some_and(|value| value == &current.correspondent)
+    {
+        desired.correspondent = None;
+    }
+    if desired
+        .document_type
+        .as_ref()
+        .is_some_and(|value| value == &current.document_type)
+    {
+        desired.document_type = None;
+    }
+    if desired.created.as_ref() == current.created.as_ref() {
+        desired.created = None;
+    }
+    if desired.custom_fields.as_ref().is_some_and(|value| {
+        canonical_custom_fields(value) == canonical_custom_fields(&current.custom_fields)
+    }) {
+        desired.custom_fields = None;
+    }
+
+    let baseline_tags = BTreeSet::from_iter(baseline_tags.unwrap_or_default());
+    let desired_tags = desired
+        .tags
+        .as_ref()
+        .map(|tags| BTreeSet::from_iter(tags.iter().copied()))
+        .unwrap_or_else(|| baseline_tags.clone());
+    let review_additions = desired_tags
+        .difference(&baseline_tags)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let review_removals = baseline_tags
+        .difference(&desired_tags)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut merged = BTreeSet::from_iter(current.tags.iter().copied());
+    merged.extend(review_additions);
+    merged.extend(tag_operations.additions.iter().copied());
+    for removed in review_removals.iter().chain(tag_operations.removals.iter()) {
+        merged.remove(removed);
+    }
+    let merged = merged.into_iter().collect::<Vec<_>>();
+    desired.tags = (merged != normalized_tags(&current.tags)).then_some(merged);
+    Ok(desired)
+}
+
+fn check_fingerprinted_field(
+    baseline: &Value,
+    field: &str,
+    desired: Option<&String>,
+    current: &Option<String>,
+    conflicts: &mut Vec<String>,
+) {
+    let Some(desired) = desired else {
+        return;
+    };
+    if current.as_ref() == Some(desired) {
+        return;
+    }
+    let matches_baseline = baseline
+        .get(field)
+        .and_then(Value::as_str)
+        .is_some_and(|expected| expected == fingerprint(current));
+    if !matches_baseline {
+        conflicts.push(field.to_owned());
+    }
+}
+
+fn check_plain_field<T: Serialize + PartialEq>(
+    baseline: &Value,
+    field: &str,
+    desired: Option<&T>,
+    current: &T,
+    conflicts: &mut Vec<String>,
+) {
+    let Some(desired) = desired else {
+        return;
+    };
+    if desired == current {
+        return;
+    }
+    let matches_baseline = baseline
+        .get(field)
+        .is_some_and(|expected| *expected == serde_json::to_value(current).unwrap_or(Value::Null));
+    if !matches_baseline {
+        conflicts.push(field.to_owned());
+    }
+}
+
+fn check_custom_fields(
+    baseline: &Value,
+    desired: Option<&Value>,
+    current: &Value,
+    conflicts: &mut Vec<String>,
+) {
+    let Some(desired) = desired else {
+        return;
+    };
+    if canonical_custom_fields(desired) == canonical_custom_fields(current) {
+        return;
+    }
+    let matches_baseline = baseline
+        .get("custom_fields")
+        .and_then(Value::as_str)
+        .is_some_and(|expected| expected == fingerprint_custom_fields(current));
+    if !matches_baseline {
+        conflicts.push("custom_fields".to_owned());
+    }
+}
+
+fn normalized_tags(tags: &[i32]) -> Vec<i32> {
+    BTreeSet::from_iter(tags.iter().copied())
+        .into_iter()
+        .collect()
+}
+
+fn fingerprint<T: Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).expect("serializing a baseline value cannot fail");
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn fingerprint_custom_fields(value: &Value) -> String {
+    fingerprint(&canonical_custom_fields(value))
+}
+
+fn canonical_custom_fields(value: &Value) -> Value {
+    let mut canonical = canonical_json(value);
+    if let Value::Array(items) = &mut canonical
+        && items
+            .iter()
+            .all(|item| item.get("field").is_some() || item.get("id").is_some())
+    {
+        items.sort_by_key(|item| {
+            item.get("field")
+                .or_else(|| item.get("id"))
+                .map(Value::to_string)
+                .unwrap_or_default()
+        });
+    }
+    canonical
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let sorted = object
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_json(value)))
+                .collect::<BTreeMap<_, _>>();
+            Value::Object(Map::from_iter(sorted))
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +437,19 @@ async fn apply_document_inner(
     mut request: ApplyRequest,
     mut custom_fields_dropped: bool,
 ) -> Result<ApplyExecution> {
+    if let Some(precondition) = request.review_precondition.take() {
+        let current = client
+            .get_document(request.paperless_document_id)
+            .await
+            .context("read latest Paperless document for review concurrency check")?;
+        request.patch = resolve_review_patch(
+            &precondition.baseline,
+            request.patch,
+            &current,
+            &precondition.tag_operations,
+        )?;
+        request.before = Some(audit_before_for_patch(&current, &request.patch));
+    }
     loop {
         let patch = serde_json::to_value(&request.patch)
             .context("serialize Paperless patch for apply intent")?;
@@ -399,6 +710,7 @@ fn request_from_intent(intent: &ApplyIntentRecord) -> Result<ApplyRequest> {
         before: intent.before.clone(),
         metadata: intent.metadata.clone(),
         review_revert_status: intent.review_revert_status.clone(),
+        review_precondition: None,
         allow_custom_fields_fallback: false,
     })
 }
@@ -548,4 +860,38 @@ fn is_custom_fields_bad_request(error: &anyhow::Error) -> bool {
         Some(PaperlessError::Client { status: 400, body })
             if body.to_ascii_lowercase().contains("custom")
     )
+}
+
+fn audit_before_for_patch(document: &PaperlessDocumentDetail, patch: &DocumentPatch) -> Value {
+    let mut object = Map::new();
+    if patch.content.is_some() {
+        let content = document.content.as_deref().unwrap_or_default();
+        object.insert(
+            "content".to_owned(),
+            json!({
+                "sha256": hex::encode(Sha256::digest(content.as_bytes())),
+                "chars": content.chars().count(),
+                "redacted": true
+            }),
+        );
+    }
+    if patch.title.is_some() {
+        object.insert("title".to_owned(), json!(document.title));
+    }
+    if patch.tags.is_some() {
+        object.insert("tags".to_owned(), json!(document.tags));
+    }
+    if patch.correspondent.is_some() {
+        object.insert("correspondent".to_owned(), json!(document.correspondent));
+    }
+    if patch.document_type.is_some() {
+        object.insert("document_type".to_owned(), json!(document.document_type));
+    }
+    if patch.created.is_some() {
+        object.insert("created".to_owned(), json!(document.created));
+    }
+    if patch.custom_fields.is_some() {
+        object.insert("custom_fields".to_owned(), json!({ "present": "redacted" }));
+    }
+    Value::Object(object)
 }

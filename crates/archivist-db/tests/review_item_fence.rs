@@ -54,9 +54,16 @@ async fn create_review_item_is_fenced_on_lease_owner() {
     let job = &jobs[0];
 
     // A worker that no longer owns the lease is fenced out entirely.
-    let foreign = create_review_item(&pool, job, json!({"title": "x"}), json!([]), "worker-b")
-        .await
-        .expect("fenced call succeeds");
+    let foreign = create_review_item(
+        &pool,
+        job,
+        json!({"title": "x"}),
+        json!([]),
+        json!({"title": "sha256:test", "tags": []}),
+        "worker-b",
+    )
+    .await
+    .expect("fenced call succeeds");
     assert_eq!(foreign, None);
     let status: String = sqlx::query_scalar("select status from jobs where id = $1")
         .bind(job.id)
@@ -72,13 +79,27 @@ async fn create_review_item_is_fenced_on_lease_owner() {
 
     // The owner creates two per-field items back to back (second call runs
     // against the job already in waiting_review).
-    let first = create_review_item(&pool, job, json!({"title": "x"}), json!([]), "worker-a")
-        .await
-        .expect("first item");
+    let first = create_review_item(
+        &pool,
+        job,
+        json!({"title": "x"}),
+        json!([]),
+        json!({"title": "sha256:test", "tags": []}),
+        "worker-a",
+    )
+    .await
+    .expect("first item");
     assert!(first.is_some());
-    let second = create_review_item(&pool, job, json!({"tags": [1]}), json!([]), "worker-a")
-        .await
-        .expect("second item");
+    let second = create_review_item(
+        &pool,
+        job,
+        json!({"tags": [1]}),
+        json!([]),
+        json!({"tags": []}),
+        "worker-a",
+    )
+    .await
+    .expect("second item");
     assert!(second.is_some());
 
     let status: String = sqlx::query_scalar("select status from jobs where id = $1")

@@ -359,6 +359,7 @@ const itMessages: Record<MessageKey, string> = {
   'review.debug_summary': 'Lingua del prompt {promptLanguage}; lingua dei tag {tagLanguage}; selector {reason}',
   'review.debug_summary_no_selector': 'Lingua del prompt {promptLanguage}; lingua dei tag {tagLanguage}',
   'review.failed_batch': '{count} elementi di review falliti. Primo errore: {error}',
+  'review.conflict': 'Sono state rilevate modifiche Paperless più recenti nei seguenti campi: {fields}. Aggiorna Paperless, confronta questi campi, quindi modifica o approva nuovamente la revisione.',
   'review.auto_fix_all': 'Correggi automaticamente tutti',
   'review.auto_fix_one': 'Correggi',
   'review.auto_fix_confirm': 'Applicare auto-fix a {count} elementi in attesa? I campi con avvisi verranno rimossi; il resto verrà applicato. Continuare?',

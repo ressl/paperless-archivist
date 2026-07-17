@@ -756,6 +756,11 @@ components:
             - $ref: "#/components/schemas/DocumentPatch"
             - type: "null"
         validation_warnings: true
+        conflict_fields:
+          type: array
+          items: { type: string }
+          description: Patch field names whose Paperless values changed after review creation.
+        conflicted_at: { type: [string, "null"], format: date-time }
         debug_context:
           oneOf:
             - $ref: "#/components/schemas/WorkflowDebugContext"

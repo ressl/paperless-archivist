@@ -359,6 +359,7 @@ const frMessages: Record<MessageKey, string> = {
   'review.debug_summary': 'Langue du prompt {promptLanguage} ; langue des tags {tagLanguage} ; selector {reason}',
   'review.debug_summary_no_selector': 'Langue du prompt {promptLanguage} ; langue des tags {tagLanguage}',
   'review.failed_batch': '{count} éléments de review en échec. Première erreur : {error}',
+  'review.conflict': 'Des modifications Paperless plus récentes ont été détectées dans les champs suivants : {fields}. Actualisez Paperless, comparez ces champs, puis modifiez ou approuvez à nouveau la revue.',
   'review.auto_fix_all': 'Tout corriger automatiquement',
   'review.auto_fix_one': 'Corriger',
   'review.auto_fix_confirm': 'Appliquer la correction auto à {count} éléments en attente ? Les champs avec avertissements seront supprimés ; le reste sera appliqué. Continuer ?',

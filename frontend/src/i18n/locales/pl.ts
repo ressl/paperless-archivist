@@ -359,6 +359,7 @@ const plMessages: Record<MessageKey, string> = {
   'review.debug_summary': 'Język promptu {promptLanguage}; język tagów {tagLanguage}; selector {reason}',
   'review.debug_summary_no_selector': 'Język promptu {promptLanguage}; język tagów {tagLanguage}',
   'review.failed_batch': '{count} elementów review nie powiodło się. Pierwszy błąd: {error}',
+  'review.conflict': 'Wykryto nowsze zmiany w Paperless w następujących polach: {fields}. Odśwież Paperless, porównaj te pola, a następnie ponownie edytuj lub zatwierdź przegląd.',
   'review.auto_fix_all': 'Auto-napraw wszystkie',
   'review.auto_fix_one': 'Napraw',
   'review.auto_fix_confirm': 'Zastosować auto-naprawę do {count} oczekujących elementów? Pola z ostrzeżeniami zostaną usunięte; reszta zostanie zastosowana. Kontynuować?',

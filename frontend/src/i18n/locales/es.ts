@@ -359,6 +359,7 @@ const esMessages: Record<MessageKey, string> = {
   'review.debug_summary': 'Idioma del prompt {promptLanguage}; idioma de los tags {tagLanguage}; selector {reason}',
   'review.debug_summary_no_selector': 'Idioma del prompt {promptLanguage}; idioma de los tags {tagLanguage}',
   'review.failed_batch': '{count} elementos de review fallaron. Primer error: {error}',
+  'review.conflict': 'Se detectaron cambios más recientes en Paperless en estos campos: {fields}. Actualiza Paperless, compara estos campos y vuelve a editar o aprobar la revisión.',
   'review.auto_fix_all': 'Auto-arreglar todo',
   'review.auto_fix_one': 'Arreglar',
   'review.auto_fix_confirm': '¿Aplicar auto-arreglo a {count} elementos pendientes? Los campos con advertencias se eliminarán; el resto se aplicará. ¿Continuar?',

@@ -357,6 +357,7 @@ export const enMessages = {
   'review.debug_summary': 'Prompt language {promptLanguage}; tag language {tagLanguage}; selector {reason}',
   'review.debug_summary_no_selector': 'Prompt language {promptLanguage}; tag language {tagLanguage}',
   'review.failed_batch': '{count} review items failed. First error: {error}',
+  'review.conflict': 'Newer Paperless changes were detected in: {fields}. Refresh Paperless, compare these fields, then edit or approve the review again.',
   'review.auto_fix_all': 'Auto-Fix all',
   'review.auto_fix_one': 'Fix',
   'review.auto_fix_confirm': 'Apply auto-fix to {count} pending review items? Items with invalid fields will be cleaned and applied; items where nothing can be applied will be rejected. Continue?',
