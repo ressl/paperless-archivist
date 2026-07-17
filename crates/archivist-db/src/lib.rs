@@ -4852,9 +4852,9 @@ pub async fn create_run_with_jobs_with_priority(
 ///
 /// Used by the `/api/batches/rerun` endpoint so operators can re-trigger a hand-picked set of
 /// "succeeded-but-wrong" documents in one shot instead of one trigger at a time. The active-run
-/// guard inside [`create_run_with_jobs_on_tx`] still applies per document, so ids that already
+/// guard inside [`prepare_run_with_jobs_on_tx`] still applies per document, so ids that already
 /// have an in-flight run are silently reused (no duplicate run). Returns the number of documents
-/// processed (the size of the input set; each contributes exactly one run, new or reused).
+/// processed (the de-duplicated input set; each contributes exactly one run, new or reused).
 pub async fn create_runs_for_documents(
     pool: &DbPool,
     document_ids: &[i32],
@@ -4867,11 +4867,20 @@ pub async fn create_runs_for_documents(
     if document_ids.is_empty() {
         return Ok(0);
     }
+    let mut document_ids = document_ids.to_vec();
+    document_ids.sort_unstable();
+    document_ids.dedup();
+
     // Amortise one transaction across the whole batch instead of a begin+commit per document.
     let mut tx = pool.begin().await?;
+    // Acquire every document lock before the first audit append. Audit chaining
+    // also uses a transaction-scoped advisory lock, so taking all document
+    // locks first gives every batch the same deadlock-free lock order.
+    lock_active_run_documents_tx(&mut tx, &document_ids).await?;
     let mut queued: i64 = 0;
-    for &document_id in document_ids {
-        create_run_with_jobs_on_tx(
+    let mut audit_events = Vec::new();
+    for document_id in document_ids {
+        let prepared = prepare_run_with_jobs_on_tx(
             &mut tx,
             document_id,
             stages,
@@ -4881,7 +4890,13 @@ pub async fn create_runs_for_documents(
             priority,
         )
         .await?;
+        if let Some(event) = prepared.audit_event {
+            audit_events.push(event);
+        }
         queued += 1;
+    }
+    for event in audit_events {
+        append_audit_tx(&mut tx, event).await?;
     }
     tx.commit().await?;
     Ok(queued)
@@ -4911,10 +4926,16 @@ pub async fn failed_document_ids(pool: &DbPool) -> Result<Vec<i32>> {
         .map_err(Into::into)
 }
 
-/// Per-document run/job creation against an existing transaction. Callers own the begin/commit so
-/// batch backfills can amortise one transaction across many documents instead of paying a full
-/// begin+commit per doc. The active-run guard and idempotent inventory upsert are unchanged.
-async fn create_run_with_jobs_on_tx(
+struct PreparedRunCreation {
+    run_id: Uuid,
+    audit_event: Option<AuditEventInput>,
+}
+
+/// Resolve or create one active run and materialise its jobs/inventory state,
+/// but leave the `run.created` audit append to the caller. Batch callers first
+/// prepare every document, then take the global audit-chain lock; this keeps
+/// all unique-index conflict waits ahead of audit serialization.
+async fn prepare_run_with_jobs_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     paperless_document_id: i32,
     stages: &[Stage],
@@ -4922,45 +4943,61 @@ async fn create_run_with_jobs_on_tx(
     trigger_tag: &str,
     actor: &str,
     priority: Option<i64>,
-) -> Result<Uuid> {
+) -> Result<PreparedRunCreation> {
     if stages.is_empty() {
         return Err(anyhow!("cannot create a run without stages"));
     }
 
-    if let Some(row) = sqlx::query(
-        r#"
-        select id from pipeline_runs
-         where paperless_document_id = $1
-           and status in ('queued', 'running', 'waiting_review', 'applying')
-         order by created_at desc
-         limit 1
-        "#,
-    )
-    .bind(paperless_document_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    {
-        return Ok(row.try_get("id")?);
-    }
+    lock_active_run_document_tx(tx, paperless_document_id).await?;
 
     let cross_run_priority =
         priority.unwrap_or_else(|| age_derived_priority(paperless_document_id));
-
     let stages_json = serde_json::to_value(stages)?;
-    let run_id: Uuid = sqlx::query(
-        r#"
-        insert into pipeline_runs (paperless_document_id, mode, trigger_tag, status, stages)
-        values ($1, $2, $3, 'queued', $4)
-        returning id
-        "#,
-    )
-    .bind(paperless_document_id)
-    .bind(mode.to_string())
-    .bind(trigger_tag)
-    .bind(stages_json)
-    .fetch_one(&mut **tx)
-    .await?
-    .try_get("id")?;
+    let mode_text = mode.to_string();
+    let run_id = loop {
+        let inserted = sqlx::query(
+            r#"
+            insert into pipeline_runs (paperless_document_id, mode, trigger_tag, status, stages)
+            values ($1, $2, $3, 'queued', $4)
+            on conflict (paperless_document_id)
+              where status in ('queued', 'running', 'waiting_review', 'applying')
+            do nothing
+            returning id
+            "#,
+        )
+        .bind(paperless_document_id)
+        .bind(&mode_text)
+        .bind(trigger_tag)
+        .bind(&stages_json)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(row) = inserted {
+            break row.try_get("id")?;
+        }
+
+        // `ON CONFLICT DO NOTHING` waits for an in-flight conflicting
+        // transaction. A concurrent active-to-terminal transition can remove
+        // that conflict before this follow-up snapshot; retry in that narrow
+        // window instead of surfacing a missing-row error.
+        if let Some(row) = sqlx::query(
+            r#"
+            select id from pipeline_runs
+             where paperless_document_id = $1
+               and status in ('queued', 'running', 'waiting_review', 'applying')
+             order by created_at desc
+             limit 1
+            "#,
+        )
+        .bind(paperless_document_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        {
+            return Ok(PreparedRunCreation {
+                run_id: row.try_get("id")?,
+                audit_event: None,
+            });
+        }
+    };
 
     for (index, stage) in stages.iter().enumerate() {
         sqlx::query(
@@ -4995,9 +5032,9 @@ async fn create_run_with_jobs_on_tx(
     .execute(&mut **tx)
     .await?;
 
-    append_audit_tx(
-        tx,
-        AuditEventInput {
+    Ok(PreparedRunCreation {
+        run_id,
+        audit_event: Some(AuditEventInput {
             event_type: "run.created".to_owned(),
             actor_type: actor.to_owned(),
             actor_id: None,
@@ -5011,11 +5048,74 @@ async fn create_run_with_jobs_on_tx(
             error_message: None,
             source_ip: None,
             user_agent: None,
-        },
+        }),
+    })
+}
+
+/// Per-document convenience wrapper for single-run callers. Multi-document
+/// callers use `prepare_run_with_jobs_on_tx` directly and defer all audits
+/// until every get-or-create decision has completed.
+async fn create_run_with_jobs_on_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    paperless_document_id: i32,
+    stages: &[Stage],
+    mode: ProcessingMode,
+    trigger_tag: &str,
+    actor: &str,
+    priority: Option<i64>,
+) -> Result<Uuid> {
+    let prepared = prepare_run_with_jobs_on_tx(
+        tx,
+        paperless_document_id,
+        stages,
+        mode,
+        trigger_tag,
+        actor,
+        priority,
     )
     .await?;
+    if let Some(event) = prepared.audit_event {
+        append_audit_tx(tx, event).await?;
+    }
+    Ok(prepared.run_id)
+}
 
-    Ok(run_id)
+/// Serialize the active-run lookup and creation only for one Paperless
+/// document. The unique partial index remains the final database invariant;
+/// this lock turns its expected concurrency conflict into get-or-create
+/// behavior for every caller sharing this transaction helper.
+async fn lock_active_run_document_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    paperless_document_id: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        select pg_advisory_xact_lock(
+          hashtext('paperless_archivist_active_run_document'),
+          $1
+        )
+        "#,
+    )
+    .bind(paperless_document_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Acquire a batch's document locks in canonical order before any run-created
+/// audit event takes the global audit-chain lock. Re-acquiring a lock later in
+/// `prepare_run_with_jobs_on_tx` is transaction-local and re-entrant.
+async fn lock_active_run_documents_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    document_ids: &[i32],
+) -> Result<()> {
+    let mut document_ids = document_ids.to_vec();
+    document_ids.sort_unstable();
+    document_ids.dedup();
+    for &document_id in &document_ids {
+        lock_active_run_document_tx(tx, document_id).await?;
+    }
+    Ok(())
 }
 
 pub async fn queue_missing_stage(
@@ -5056,16 +5156,23 @@ pub async fn queue_missing_stage(
         builder = builder.bind(limit);
     }
     let rows = builder.fetch_all(pool).await?;
+    let document_ids = rows
+        .into_iter()
+        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     // Amortise one transaction across the whole batch instead of a begin+commit per document.
     let mut tx = pool.begin().await?;
+    // Lock the complete ordered candidate set before the first run-created
+    // audit takes the audit-chain lock.
+    lock_active_run_documents_tx(&mut tx, &document_ids).await?;
     let mut created = 0;
-    for row in rows {
-        let document_id: i32 = row.try_get("paperless_document_id")?;
+    let mut audit_events = Vec::new();
+    for document_id in document_ids {
         // Age-derived priority — newer documents jump ahead of older ones in claim_jobs.
         // "manual-batch" is the operator-initiated bulk path, but we still rank by age so
         // a fresh scan doesn't get blocked behind a backfill triggered minutes earlier.
-        create_run_with_jobs_on_tx(
+        let prepared = prepare_run_with_jobs_on_tx(
             &mut tx,
             document_id,
             &[stage],
@@ -5075,7 +5182,13 @@ pub async fn queue_missing_stage(
             Some(age_derived_priority(document_id)),
         )
         .await?;
+        if let Some(event) = prepared.audit_event {
+            audit_events.push(event);
+        }
         created += 1;
+    }
+    for event in audit_events {
+        append_audit_tx(&mut tx, event).await?;
     }
     tx.commit().await?;
     Ok(created)
@@ -5097,14 +5210,14 @@ pub async fn queue_missing_pipeline(
     // a brittle predicate into SQL. When the budget is None, fetch everything in one shot.
     let chunk_size = max_documents.map(|limit| limit.saturating_mul(2).max(16));
 
-    // Amortise one transaction across every chunk + per-doc insert instead of a begin+commit per
-    // document. Pagination SELECTs run on the same tx so just-queued rows stay consistently
-    // excluded, mirroring the previous per-doc-commit behaviour.
+    // Amortise one transaction across every chunk + per-doc insert. Candidate
+    // discovery completes before document locks are taken so no transaction
+    // ever acquires a new document lock after taking the audit-chain lock.
     let mut tx = pool.begin().await?;
-    let mut created: i64 = 0;
+    let mut candidates: Vec<(i32, Vec<Stage>)> = Vec::new();
     let mut last_seen: i32 = i32::MIN;
     loop {
-        if max_documents.is_some_and(|limit| created >= limit) {
+        if max_documents.is_some_and(|limit| candidates.len() as i64 >= limit) {
             break;
         }
         let limit_clause = match chunk_size {
@@ -5145,7 +5258,7 @@ pub async fn queue_missing_pipeline(
         for row in rows {
             let document_id: i32 = row.try_get("paperless_document_id")?;
             last_seen = document_id.max(last_seen);
-            if max_documents.is_some_and(|limit| created >= limit) {
+            if max_documents.is_some_and(|limit| candidates.len() as i64 >= limit) {
                 break;
             }
             let stages = missing_pipeline_stages_for_inventory(
@@ -5162,19 +5275,7 @@ pub async fn queue_missing_pipeline(
                 continue;
             }
 
-            // Age-derived priority — newer Paperless documents drain through the full
-            // pipeline (OCR -> Metadata) before older queued documents.
-            create_run_with_jobs_on_tx(
-                &mut tx,
-                document_id,
-                &stages,
-                mode,
-                trigger_tag,
-                actor,
-                Some(age_derived_priority(document_id)),
-            )
-            .await?;
-            created += 1;
+            candidates.push((document_id, stages));
         }
         // No budget set means we already fetched everything once.
         if chunk_size.is_none() {
@@ -5185,8 +5286,35 @@ pub async fn queue_missing_pipeline(
             break;
         }
     }
+
+    let document_ids = candidates
+        .iter()
+        .map(|(document_id, _)| *document_id)
+        .collect::<Vec<_>>();
+    lock_active_run_documents_tx(&mut tx, &document_ids).await?;
+    let mut audit_events = Vec::new();
+    for (document_id, stages) in &candidates {
+        // Age-derived priority — newer documents drain through the full
+        // pipeline (OCR -> Metadata) before older queued documents.
+        let prepared = prepare_run_with_jobs_on_tx(
+            &mut tx,
+            *document_id,
+            stages,
+            mode,
+            trigger_tag,
+            actor,
+            Some(age_derived_priority(*document_id)),
+        )
+        .await?;
+        if let Some(event) = prepared.audit_event {
+            audit_events.push(event);
+        }
+    }
+    for event in audit_events {
+        append_audit_tx(&mut tx, event).await?;
+    }
     tx.commit().await?;
-    Ok(created)
+    Ok(candidates.len() as i64)
 }
 
 struct InventoryStageState {
@@ -8738,23 +8866,81 @@ pub struct VisionCrashRequeueSummary {
 /// Also flips the matching `pipeline_runs` row back to `queued`, and resets the
 /// inventory stage status, so the dashboard reflects the second chance.
 ///
-/// All writes happen in a single transaction; either all matching rows are requeued or
-/// none of them are. Returns the number of jobs that were lifted.
+/// All writes happen in a single transaction; either the newest matching run per
+/// document is requeued or none are. Returns the number of jobs that were lifted.
 pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashRequeueSummary> {
     let mut tx = pool.begin().await?;
+    // A failed run becomes active again below. Discover candidate documents
+    // without locking rows, then take the same canonical document locks used
+    // by run creation before changing jobs or acquiring the audit-chain lock.
+    let candidate_document_ids = sqlx::query_scalar::<_, i32>(
+        r#"
+        select distinct j.paperless_document_id
+          from jobs j
+          join pipeline_runs pr on pr.id = j.run_id
+         where j.status = 'failed'
+           and j.stage = 'ocr'
+           and pr.status = 'failed'
+           and (
+                j.error_message ilike $1
+             or j.error_message ilike $2
+             or j.error_message ilike $3
+           )
+           and not exists (
+             select 1
+               from pipeline_runs active
+              where active.paperless_document_id = j.paperless_document_id
+                and active.id <> j.run_id
+                and active.status in ('queued', 'running', 'waiting_review', 'applying')
+           )
+         order by j.paperless_document_id
+        "#,
+    )
+    .bind(VISION_CRASH_SQL_PATTERNS[0])
+    .bind(VISION_CRASH_SQL_PATTERNS[1])
+    .bind(VISION_CRASH_SQL_PATTERNS[2])
+    .fetch_all(&mut *tx)
+    .await?;
+    lock_active_run_documents_tx(&mut tx, &candidate_document_ids).await?;
+
     let rows = sqlx::query(
         r#"
-        with crashed as (
-          select id, run_id, paperless_document_id, max_attempts
-            from jobs
-           where status = 'failed'
-             and stage = 'ocr'
+        with eligible_runs as (
+          select distinct on (j.paperless_document_id)
+                 j.run_id,
+                 j.paperless_document_id
+            from jobs j
+            join pipeline_runs pr on pr.id = j.run_id
+           where j.status = 'failed'
+             and j.stage = 'ocr'
+             and pr.status = 'failed'
+             and j.paperless_document_id = any($4)
              and (
-                  error_message ilike $1
-               or error_message ilike $2
-               or error_message ilike $3
+                  j.error_message ilike $1
+               or j.error_message ilike $2
+               or j.error_message ilike $3
              )
-           for update
+             and not exists (
+               select 1
+                 from pipeline_runs active
+                where active.paperless_document_id = j.paperless_document_id
+                  and active.id <> j.run_id
+                  and active.status in ('queued', 'running', 'waiting_review', 'applying')
+             )
+           order by j.paperless_document_id, pr.created_at desc, pr.id desc
+        ),
+        crashed as (
+          select j.id, j.run_id, j.paperless_document_id, j.max_attempts
+            from jobs j
+            join eligible_runs eligible on eligible.run_id = j.run_id
+           where j.status = 'failed'
+             and j.stage = 'ocr'
+             and (
+                  j.error_message ilike $1
+               or j.error_message ilike $2
+               or j.error_message ilike $3
+             )
+           for update of j
         )
         update jobs j
            set status = 'queued',
@@ -8772,6 +8958,7 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
     .bind(VISION_CRASH_SQL_PATTERNS[0])
     .bind(VISION_CRASH_SQL_PATTERNS[1])
     .bind(VISION_CRASH_SQL_PATTERNS[2])
+    .bind(&candidate_document_ids)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -8870,9 +9057,10 @@ pub struct MetadataStageBackfillSummary {
 /// review items that the operator cannot meaningfully act on.
 ///
 /// What this does, in one transaction:
-///   * Find every `pipeline_runs` whose `stages` jsonb array contains "ocr"
-///     but does NOT contain "metadata", AND does not already have a
-///     `metadata`-stage `jobs` row.
+///   * Find at most one relevant `pipeline_runs` row per document whose
+///     `stages` jsonb array contains "ocr" but does NOT contain "metadata",
+///     and which does not already have a `metadata`-stage `jobs` row. Prefer
+///     the active run, otherwise use the newest succeeded run.
 ///   * Append "metadata" to `pipeline_runs.stages`.
 ///   * Insert a queued `metadata` job for the run with `stage_priority=20`
 ///     so it sequences AFTER the OCR job (priority 10).
@@ -8892,23 +9080,84 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
 ) -> Result<MetadataStageBackfillSummary> {
     let mut tx = pool.begin().await?;
 
-    // Step 1: identify the target runs. Lock them for update so a parallel
-    // worker doesn't race us into queueing duplicate metadata jobs.
-    let target_rows = sqlx::query(
+    // Succeeded OCR-only runs are reactivated below. Coordinate that
+    // terminal-to-active transition with concurrent creates, and take every
+    // document lock before any row or audit-chain lock.
+    let candidate_document_ids = sqlx::query_scalar::<_, i32>(
         r#"
-        select pr.id as run_id,
-               pr.paperless_document_id,
-               pr.status as current_status
+        select distinct pr.paperless_document_id
           from pipeline_runs pr
          where pr.stages @> '["ocr"]'::jsonb
            and not (pr.stages @> '["metadata"]'::jsonb)
+           and pr.status in ('queued', 'running', 'waiting_review', 'applying', 'succeeded')
            and not exists (
              select 1 from jobs j
               where j.run_id = pr.id and j.stage = 'metadata'
            )
-         for update of pr skip locked
+           and (
+             pr.status <> 'succeeded'
+             or not exists (
+               select 1
+                 from pipeline_runs active
+                where active.paperless_document_id = pr.paperless_document_id
+                  and active.id <> pr.id
+                  and active.status in ('queued', 'running', 'waiting_review', 'applying')
+             )
+           )
+         order by pr.paperless_document_id
         "#,
     )
+    .fetch_all(&mut *tx)
+    .await?;
+    lock_active_run_documents_tx(&mut tx, &candidate_document_ids).await?;
+
+    // Step 1: identify the target runs. Lock them for update so a parallel
+    // worker doesn't race us into queueing duplicate metadata jobs.
+    let target_rows = sqlx::query(
+        r#"
+        with ranked_targets as (
+          select pr.id,
+                 row_number() over (
+                   partition by pr.paperless_document_id
+                   order by
+                     case
+                       when pr.status in ('queued', 'running', 'waiting_review', 'applying')
+                       then 0 else 1
+                     end,
+                     pr.created_at desc,
+                     pr.id desc
+                 ) as document_rank
+            from pipeline_runs pr
+           where pr.paperless_document_id = any($1)
+             and pr.stages @> '["ocr"]'::jsonb
+             and not (pr.stages @> '["metadata"]'::jsonb)
+             and pr.status in ('queued', 'running', 'waiting_review', 'applying', 'succeeded')
+             and not exists (
+               select 1 from jobs j
+                where j.run_id = pr.id and j.stage = 'metadata'
+             )
+             and (
+               pr.status <> 'succeeded'
+               or not exists (
+                 select 1
+                   from pipeline_runs active
+                  where active.paperless_document_id = pr.paperless_document_id
+                    and active.id <> pr.id
+                    and active.status in ('queued', 'running', 'waiting_review', 'applying')
+               )
+             )
+        )
+        select pr.id as run_id,
+               pr.paperless_document_id,
+               pr.status as current_status
+          from pipeline_runs pr
+          join ranked_targets target
+            on target.id = pr.id
+           and target.document_rank = 1
+        for update of pr skip locked
+        "#,
+    )
+    .bind(&candidate_document_ids)
     .fetch_all(&mut *tx)
     .await?;
 
