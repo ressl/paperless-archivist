@@ -10795,13 +10795,21 @@ pub async fn count_blocked_queued_jobs(pool: &DbPool) -> Result<BlockedQueuedCou
             sum(case when blocker_status = 'waiting_review' then 1 else 0 end)::bigint as blocked_by_review,
             count(*)::bigint as total
           from (
-              select (
-                  select prev.status from jobs prev
-                   where prev.run_id = j.run_id
-                     and prev.stage_priority < j.stage_priority
-                     and prev.status in ('queued','running','waiting_review','failed')
-                   limit 1
-              ) as blocker_status
+              select case
+                  when exists (
+                      select 1 from jobs prev
+                       where prev.run_id = j.run_id
+                         and prev.stage_priority < j.stage_priority
+                         and prev.status = 'failed'
+                  ) then 'failed'
+                  when exists (
+                      select 1 from jobs prev
+                       where prev.run_id = j.run_id
+                         and prev.stage_priority < j.stage_priority
+                         and prev.status = 'waiting_review'
+                  ) then 'waiting_review'
+                  else null
+              end as blocker_status
                 from jobs j
                where j.status = 'queued'
           ) t
