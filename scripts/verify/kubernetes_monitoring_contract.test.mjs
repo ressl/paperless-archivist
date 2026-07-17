@@ -113,4 +113,28 @@ test('monitoring remains opt-in and renders only with its CRDs', {
   assert.ok(api.spec.template.spec.containers[0].env.some(
     ({ name }) => name === 'ARCHIVIST_METRICS_TOKEN'
   ));
+
+  const customInstance = render(
+    'deploy/kubernetes/examples/monitoring-custom-instance/'
+  );
+  const customMonitor = customInstance.find(({ kind }) => kind === 'ServiceMonitor');
+  assert.equal(
+    customMonitor.spec.endpoints[0].relabelings[0].replacement,
+    'another-archivist'
+  );
+  const customRule = customInstance.find(({ kind }) => kind === 'PrometheusRule');
+  const customAlerts = customRule.spec.groups.flatMap(({ rules }) => rules);
+  assert.equal(customAlerts.length, 4);
+  for (const rule of customAlerts) {
+    assert.match(
+      rule.expr,
+      /paperless_archivist_instance="another-archivist"/,
+      `${rule.alert} must select the customized target label`
+    );
+    assert.doesNotMatch(
+      rule.expr,
+      /paperless_archivist_instance="paperless-archivist"/,
+      `${rule.alert} must not retain the component default`
+    );
+  }
 });

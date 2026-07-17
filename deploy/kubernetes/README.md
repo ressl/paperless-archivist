@@ -131,8 +131,16 @@ the base example. Confirm the effective Prometheus pod labels and admit only
 that identity to TCP/8080 in a private overlay; do not open the API port to all
 namespaces. The ServiceMonitor writes the stable target label
 `paperless_archivist_instance="paperless-archivist"`, and every rule selects
-that label instead of a transformable Service name. Patch the replacement to a
-unique value if one Prometheus server monitors multiple Archivist installations.
+that label instead of a transformable Service name. If one Prometheus server
+monitors multiple Archivist installations, assign each installation a unique
+value by patching the ServiceMonitor relabel replacement **and all four rule
+expressions in the same overlay**. Never change only one side of that contract:
+the scrape-down rule would report a false outage while the other alerts would
+silently ignore the installation. Copy the complete five-operation patch from
+[`examples/monitoring-custom-instance`](examples/monitoring-custom-instance/)
+and replace every `another-archivist` occurrence with the chosen value. The
+contract test renders that example and proves every rule selects its customized
+target label.
 
 The initial rules alert on scrape loss, a queue above 100 for 30 minutes, more
 than five new permanent failures in 15 minutes, and any provider-quota event in
