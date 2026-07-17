@@ -21,4 +21,4 @@
 ## Task 3: Verify compatibility and delivery
 
 - [x] Run focused API tests, formatting, Clippy, workspace tests, audit, deny, and migration smoke.
-- [ ] Obtain independent review, commit, push, inspect the MR pipeline, document evidence, and close #349 only after the remote gate is green.
+- [x] Obtain independent review, commit, push, inspect the MR pipeline, document evidence, and close #349 only after the remote gate is green.
