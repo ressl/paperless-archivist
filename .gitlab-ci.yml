@@ -72,6 +72,20 @@ public:rust:test:
   script:
     - cargo test --workspace --locked
 
+public:rust:db-integration:
+  stage: test
+  extends: .rust_public_base
+  services:
+    - name: postgres:18
+      alias: postgres
+  variables:
+    POSTGRES_DB: archivist_ci
+    POSTGRES_USER: archivist_ci
+    POSTGRES_HOST_AUTH_METHOD: trust
+    DATABASE_URL: "postgres://archivist_ci@postgres:5432/archivist_ci"
+  script:
+    - bash scripts/verify/migration_smoke.sh
+
 public:rust:clippy:
   stage: test
   extends: .rust_public_base
