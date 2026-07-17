@@ -1,3 +1,5 @@
+mod markup;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -257,13 +259,21 @@ fn accumulate_rendered_page_size(running_total: u64, page_len: u64) -> Result<u6
 }
 
 pub fn normalize_ocr_pages(page_texts: &[String]) -> String {
-    page_texts
-        .iter()
-        .map(|page| strip_code_fences(page))
-        .map(|page| page.trim().to_owned())
-        .filter(|page| !page.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    markup::normalize_pages(page_texts).text
+}
+
+pub fn normalize_and_validate_ocr_pages(page_texts: &[String], min_chars: usize) -> Result<String> {
+    let normalized = markup::normalize_pages(page_texts);
+    if normalized.normalization_limits_exceeded {
+        return Err(anyhow!("OCR layout markup exceeded normalization limits"));
+    }
+    if normalized.had_layout_markup && normalized.text.trim().is_empty() {
+        return Err(anyhow!(
+            "OCR produced no text after layout markup normalization"
+        ));
+    }
+    validate_ocr_text(&normalized.text, min_chars)?;
+    Ok(normalized.text)
 }
 
 /// Returns true when `line` is a standalone markdown code-fence line, i.e. it
@@ -347,6 +357,215 @@ mod tests {
     fn strip_code_fences_is_noop_on_clean_text() {
         let page = "Use the `--flag` switch to enable it.\nSecond line.";
         assert_eq!(strip_code_fences(page), page);
+    }
+
+    #[test]
+    fn normalize_ocr_pages_preserves_raw_comparisons_inside_markup() {
+        let pages = vec!["<p>Betrag < 100 EUR faellig; 1 < 2 und x > y.</p>".to_owned()];
+        assert_eq!(
+            normalize_ocr_pages(&pages),
+            "Betrag < 100 EUR faellig; 1 < 2 und x > y."
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_pages_keeps_literal_plain_text_tags() {
+        for page in [
+            "A < B and <document> is printed text.",
+            "Der Begriff <brutto> ist kein HTML.",
+            "Use the literal <p> tag in documentation.",
+        ] {
+            assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
+        }
+    }
+
+    #[test]
+    fn normalize_ocr_pages_requires_real_balanced_closing_evidence() {
+        for page in [
+            "<p>literal</paragraph>",
+            r#"<p data-note="</p>">literal"#,
+            "Prefix <p>one</p><!-- </div> --><div>literal",
+            "Prefix <p>one<p>two</p>",
+            "</p></div><p>one<div>two",
+            "<p>literal <div>closed</div>",
+        ] {
+            assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
+        }
+    }
+
+    #[test]
+    fn normalize_ocr_pages_ignores_layout_tokens_inside_raw_text() {
+        for page in [
+            "<script><table><tr><td>hidden</td></tr></table></script>",
+            "<style>.x::before { content: '<table>'; }</style>",
+            "<title><table></title>",
+            "<textarea><table></textarea>",
+            "<xmp><table></xmp>",
+            "<iframe><table></iframe>",
+            "<noembed><table></noembed>",
+            "<noframes><table></noframes>",
+            "<noscript><table></noscript>",
+            "<plaintext><table>",
+        ] {
+            assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
+        }
+    }
+
+    #[test]
+    fn normalize_ocr_pages_recognizes_uppercase_and_marker_free_layout() {
+        let pages = vec![
+            "<DIV><H1>Rechnung</H1><UL><LI>Position eins</LI><LI>Position zwei</LI></UL></DIV>"
+                .to_owned(),
+        ];
+        assert_eq!(
+            normalize_ocr_pages(&pages),
+            "Rechnung\nPosition eins\nPosition zwei"
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_pages_handles_quoted_angles_comments_and_hidden_subtrees() {
+        let pages = vec![
+            r#"<div data-bbox="1 2 3 4" data-note="x > y"><!-- > ignored --><style>p { color: red; }</style><script>alert(1)</script><svg><text>vector</text></svg><noscript>fallback</noscript><p>Rechnung 4711</p></div>"#
+                .to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Rechnung 4711");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_drops_document_head_content() {
+        let pages = vec![
+            r#"<html><head><title>metadata</title></head><body><div data-bbox="1 2 3 4"><p>Rechnung 4711</p></div></body></html>"#
+                .to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Rechnung 4711");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_decodes_safe_entities_without_controls() {
+        let pages = vec![
+            "<p>Caf&eacute; &agrave; Gen&egrave;ve, 25&deg;C, &euro;50; &#0; &#x1f;</p>".to_owned(),
+        ];
+        let normalized = normalize_ocr_pages(&pages);
+        assert!(normalized.starts_with("Café à Genève, 25°C, €50;"));
+        assert!(
+            !normalized
+                .chars()
+                .any(|ch| ch == '\0' || (ch.is_control() && ch != '\n' && ch != '\t'))
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_pages_decodes_entity_after_bare_ampersand() {
+        let pages = vec!["<p>Firma M & M&uuml;ller; R&D</p>".to_owned()];
+        assert_eq!(normalize_ocr_pages(&pages), "Firma M & Müller; R&D");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_leaves_plain_text_entities_unchanged() {
+        let page = "Printed HTML example: Gr&ouml;&szlig;e &amp; value";
+        assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
+    }
+
+    #[test]
+    fn normalize_ocr_pages_preserves_pretty_table_cells() {
+        let pages = vec!["<table>\n<tr>\n<td>Name</td>\n<td>42</td>\n</tr>\n</table>".to_owned()];
+        assert_eq!(normalize_ocr_pages(&pages), "Name | 42");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_preserves_empty_table_columns() {
+        let pages = vec![
+            "<table><tr><td>Name</td><td></td><td>42</td></tr><tr><td></td><td>7</td><td></td></tr></table>"
+                .to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Name | | 42\n| 7 |");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_preserves_fully_empty_table_rows() {
+        let pages = vec![
+            "<table><tr><td></td></tr><tr><td></td><td></td></tr><tr><td>kept</td></tr></table>"
+                .to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "|\n| |\nkept");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_separates_blocks_and_implicit_list_items() {
+        let pages = vec![
+            "<div><h1>Heading</h1><ul><li>One<li>Two</ul><blockquote>Quote</blockquote><p>Tail</p></div>"
+                .to_owned(),
+        ];
+        assert_eq!(
+            normalize_ocr_pages(&pages),
+            "Heading\nOne\nTwo\nQuote\nTail"
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_pages_strips_fences_revealed_by_markup() {
+        let pages = vec![
+            "<p>Invoice 42</p>\n<p>```markdown</p>".to_owned(),
+            "<p>&#96;&#96;&#96;</p>".to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Invoice 42");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_is_idempotent_after_markup_is_removed() {
+        let once = normalize_ocr_pages(&["<p>M&uuml;nchen</p>".to_owned()]);
+        let twice = normalize_ocr_pages(std::slice::from_ref(&once));
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn normalize_and_validate_reports_layout_only_documents() {
+        let pages = vec![r#"<div data-bbox="0 0 100 100" data-label="Picture"></div>"#.to_owned()];
+        let error = normalize_and_validate_ocr_pages(&pages, 10)
+            .expect_err("layout-only OCR must be distinguishable");
+        assert_eq!(
+            error.to_string(),
+            "OCR produced no text after layout markup normalization"
+        );
+    }
+
+    #[test]
+    fn normalize_and_validate_keeps_the_generic_short_text_error_for_plain_text() {
+        let error = normalize_and_validate_ocr_pages(&["short".to_owned()], 10)
+            .expect_err("short plain text must still fail");
+        assert_eq!(error.to_string(), "OCR result is below minimum length");
+    }
+
+    #[test]
+    fn normalize_and_validate_rejects_pathological_layout_nesting() {
+        let deeply_nested = format!(
+            "<div data-bbox=\"0 0 1 1\">{}text{}",
+            "<span>".repeat(300),
+            "</span>".repeat(300)
+        );
+        assert_eq!(
+            normalize_ocr_pages(std::slice::from_ref(&deeply_nested)),
+            deeply_nested,
+            "the legacy convenience API must not silently drop rejected text"
+        );
+        let error = normalize_and_validate_ocr_pages(&[deeply_nested], 1)
+            .expect_err("pathological nesting must be rejected before DOM traversal");
+        assert_eq!(
+            error.to_string(),
+            "OCR layout markup exceeded normalization limits"
+        );
+    }
+
+    #[test]
+    fn normalize_and_validate_rejects_repeated_unclosed_table_cells() {
+        let malformed_table = format!("<table><tr>{}</table>", "<td>cell".repeat(300));
+        let error = normalize_and_validate_ocr_pages(&[malformed_table], 1)
+            .expect_err("pathological unclosed cells must be rejected before DOM traversal");
+        assert_eq!(
+            error.to_string(),
+            "OCR layout markup exceeded normalization limits"
+        );
     }
 
     #[tokio::test]

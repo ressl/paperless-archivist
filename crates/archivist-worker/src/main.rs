@@ -42,9 +42,7 @@ use archivist_db::{
     tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
-use archivist_ocr::{
-    normalize_ocr_pages, render_document_pages, strip_code_fences, validate_ocr_text,
-};
+use archivist_ocr::{normalize_and_validate_ocr_pages, render_document_pages, strip_code_fences};
 use archivist_paperless::{
     PaperlessClient, PaperlessDocumentDetail, PaperlessDocumentSummary, PaperlessError,
     PaperlessTag,
@@ -1975,8 +1973,9 @@ async fn process_ocr(
         );
         any_fallback_used |= fallback_used;
 
-        // Sanitize before caching so any leaked markdown fence is stripped once
-        // and never re-served from the page cache.
+        // Strip fences before caching, but intentionally keep provider layout
+        // markup raw. Document-level normalization runs after page assembly so
+        // parser fixes also apply to cached pages and entities are never decoded twice.
         let page_text = strip_code_fences(&response.text);
 
         // Cache the successful page-level OCR so a future retry / re-trigger
@@ -2023,8 +2022,7 @@ async fn process_ocr(
             return Ok(());
         }
     }
-    let text = normalize_ocr_pages(&texts);
-    validate_ocr_text(&text, settings.ocr.min_chars)?;
+    let text = normalize_and_validate_ocr_pages(&texts, settings.ocr.min_chars)?;
     let language_detection = detect_document_language(&text);
     record_document_language(
         pool,
@@ -5428,6 +5426,8 @@ mod tests {
             anyhow!("Paperless returned 406 Not Acceptable"),
             anyhow!("model response did not contain valid JSON"),
             anyhow!("unknown allowed tag returned by model"),
+            anyhow!("OCR produced no text after layout markup normalization"),
+            anyhow!("OCR layout markup exceeded normalization limits"),
         ];
 
         for error in cases {

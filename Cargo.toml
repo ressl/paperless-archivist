@@ -35,10 +35,12 @@ clap = { version = "4", features = ["derive", "env"] }
 cookie = "0.18"
 futures = "0.3"
 hex = "0.4"
+html5ever = "0.39"
 http = "1"
 http-body-util = "0.1"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 mime_guess = "2"
+markup5ever_rcdom = "=0.39.0"
 rand = "0.9"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "form", "rustls", "stream"] }
