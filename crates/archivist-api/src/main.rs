@@ -20,13 +20,15 @@ use archivist_core::{
     document_chat_snippet, document_chat_terms, roles_have_permission, score_document_chat_source,
 };
 use archivist_db::{
-    AuthUser, DbPool, DocumentChatCandidate, LastEnabledAdminError, MetadataApplyAudit,
-    MetadataArtifact, MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry,
-    ReviewItemRecord, append_audit, apply_security_retention, connect, consume_oidc_login_state,
-    count_reviews, create_document_chat_session, create_oidc_login_state,
+    AmbiguousUserIdentityLinkError, AuthUser, DbPool, DocumentChatCandidate,
+    InvalidUserIdentityError, LastEnabledAdminError, MetadataApplyAudit, MetadataArtifact,
+    MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry, ReviewItemRecord,
+    UserIdentityConflictError, append_audit, apply_security_retention, connect,
+    consume_oidc_login_state, count_reviews, create_document_chat_session, create_oidc_login_state,
     create_run_with_jobs_with_priority, create_runs_for_documents, create_session,
     create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
-    document_chat_session_visible, failed_document_ids, find_api_token, find_session,
+    document_chat_session_visible, failed_document_ids, find_api_token,
+    find_or_create_paperless_bridge_user, find_paperless_bridge_user, find_session,
     find_user_for_login, get_backlog_counts, get_dashboard_live_status, get_dashboard_stats,
     get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
     insert_document_chat_sources, latest_apply_audit_for_run, latest_metadata_artifact_for_run,
@@ -1203,6 +1205,22 @@ struct PaperlessTokenResponse {
     token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PaperlessUiSettingsResponse {
+    user: PaperlessUserIdentity,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaperlessUserIdentity {
+    id: i64,
+    username: String,
+}
+
+struct PaperlessBridgeIdentity {
+    subject: String,
+    username: String,
+}
+
 async fn paperless_login(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1220,38 +1238,39 @@ async fn paperless_login(
         return Err(ApiError::unauthorized("invalid credentials"));
     }
 
-    if verify_paperless_credentials(&settings, paperless_username, &request.password)
-        .await
-        .is_err()
+    let bridge_identity = match verify_paperless_credentials(
+        &settings,
+        paperless_username,
+        &request.password,
+    )
+    .await
     {
-        record_login_failure(
-            &state.pool,
-            None,
-            &paperless_bridge_username(paperless_username),
-            source_ip.as_deref(),
-            user_agent.as_deref(),
-        )
-        .await?;
-        return Err(ApiError::unauthorized("invalid credentials"));
-    }
+        Ok(identity) => identity,
+        Err(_) => {
+            record_login_failure(
+                &state.pool,
+                None,
+                &paperless_bridge_username(paperless_username),
+                source_ip.as_deref(),
+                user_agent.as_deref(),
+            )
+            .await?;
+            return Err(ApiError::unauthorized("invalid credentials"));
+        }
+    };
 
-    let username = paperless_bridge_username(paperless_username);
-    let user = match find_user_for_login(&state.pool, &username).await? {
+    let username = paperless_bridge_username(&bridge_identity.username);
+    let user = match find_paperless_bridge_user(&state.pool, &bridge_identity.subject).await? {
         Some(user) => user,
         None => {
             let disabled_password_hash = hash_password(&random_token())?;
-            create_user_with_roles(
+            find_or_create_paperless_bridge_user(
                 &state.pool,
                 &username,
-                None,
+                &bridge_identity.subject,
                 &disabled_password_hash,
-                &[Role::Viewer],
-                None,
             )
-            .await?;
-            find_user_for_login(&state.pool, &username)
-                .await?
-                .ok_or_else(|| ApiError::internal("created Paperless bridge user was not found"))?
+            .await?
         }
     };
     if !user.enabled {
@@ -1278,7 +1297,7 @@ async fn paperless_login(
             after: None,
             metadata: Some(json!({
                 "username": user.username,
-                "paperless_username": paperless_username
+                "paperless_username": bridge_identity.username
             })),
             outcome: "success".to_owned(),
             error_message: None,
@@ -1310,14 +1329,15 @@ async fn verify_paperless_credentials(
     settings: &RuntimeSettings,
     username: &str,
     password: &str,
-) -> Result<()> {
+) -> Result<PaperlessBridgeIdentity> {
     // Same up-front SSRF validation as the other outbound tester paths —
     // this endpoint forwards user credentials to the configured URL.
     let base_url = validate_outbound_url(settings.paperless.base_url.trim())
         .await
         .map_err(|error| anyhow!("Paperless base URL rejected: {}", error.message))?;
-    let token_url = base_url
-        .join("api/token/")
+    let api_root = base_url.join("api/").context("build Paperless API root")?;
+    let token_url = api_root
+        .join("token/")
         .context("build Paperless token URL")?;
     let client = HttpClient::builder()
         .timeout(std::time::Duration::from_secs(
@@ -1346,10 +1366,42 @@ async fn verify_paperless_credentials(
         .json()
         .await
         .context("decode Paperless token response")?;
-    if token.token.trim().is_empty() {
+    let token = token.token.trim();
+    if token.is_empty() {
         return Err(anyhow!("Paperless returned an empty token"));
     }
-    Ok(())
+    let identity_url = api_root
+        .join("ui_settings/")
+        .context("build Paperless identity URL")?;
+    let identity_response = client
+        .get(identity_url)
+        .header(reqwest::header::AUTHORIZATION, format!("Token {token}"))
+        .send()
+        .await
+        .context("read authenticated Paperless identity")?;
+    let identity_status = identity_response.status();
+    if !identity_status.is_success() {
+        return Err(anyhow!(
+            "Paperless identity endpoint returned {identity_status}"
+        ));
+    }
+    let identity: PaperlessUiSettingsResponse = identity_response
+        .json()
+        .await
+        .context("decode authenticated Paperless identity")?;
+    let identity_username = identity.user.username.trim();
+    if identity.user.id <= 0 || identity_username.is_empty() {
+        return Err(anyhow!("Paperless returned an invalid user identity"));
+    }
+    Ok(PaperlessBridgeIdentity {
+        subject: paperless_user_subject(&api_root, identity.user.id),
+        username: identity_username.to_owned(),
+    })
+}
+
+fn paperless_user_subject(api_root: &Url, user_id: i64) -> String {
+    let instance_hash = hex::encode(Sha256::digest(api_root.as_str().as_bytes()));
+    format!("instance-sha256:{instance_hash}:user-id:{user_id}")
 }
 
 fn paperless_bridge_username(username: &str) -> String {
@@ -7488,6 +7540,24 @@ mod tests {
     }
 
     #[test]
+    fn user_identity_errors_map_to_stable_safe_responses() {
+        let conflict = ApiError::from(anyhow::Error::new(UserIdentityConflictError));
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(conflict.message, "username or email is already assigned");
+
+        let ambiguous = ApiError::from(anyhow::Error::new(AmbiguousUserIdentityLinkError));
+        assert_eq!(ambiguous.status, StatusCode::CONFLICT);
+        assert_eq!(
+            ambiguous.message,
+            "OIDC identity matches multiple local accounts"
+        );
+
+        let invalid = ApiError::from(anyhow::Error::new(InvalidUserIdentityError));
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.message, "username must not be blank");
+    }
+
+    #[test]
     fn ollama_cloud_detection_matches_hosted_endpoint() {
         assert!(is_ollama_cloud("https://ollama.com"));
         assert!(is_ollama_cloud("https://OLLAMA.com/"));
@@ -8361,6 +8431,214 @@ mod tests {
     }
 
     #[test]
+    fn paperless_bridge_subject_scopes_user_id_to_instance() {
+        let instance_a = Url::parse("https://paperless-a.example/api/").unwrap();
+        let instance_b = Url::parse("https://paperless-b.example/api/").unwrap();
+        assert_eq!(
+            paperless_user_subject(&instance_a, 42),
+            paperless_user_subject(&instance_a, 42)
+        );
+        assert_ne!(
+            paperless_user_subject(&instance_a, 42),
+            paperless_user_subject(&instance_a, 43)
+        );
+        assert_ne!(
+            paperless_user_subject(&instance_a, 42),
+            paperless_user_subject(&instance_b, 42)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn paperless_bridge_requires_origin_mapping_and_is_concurrency_safe() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = connect(&database_url, 10)
+            .await
+            .expect("connect identity test database");
+        migrate(&pool).await.expect("apply identity migration");
+        sqlx::query("delete from users")
+            .execute(&pool)
+            .await
+            .expect("delete identity fixtures");
+        sqlx::query("truncate audit_events restart identity")
+            .execute(&pool)
+            .await
+            .expect("truncate audit fixtures");
+
+        let local_id = create_user_with_roles(
+            &pool,
+            "paperless-alice",
+            Some("local@example.com"),
+            "local-hash",
+            &[Role::Admin],
+            None,
+        )
+        .await
+        .expect("create prefixed local account");
+        let paperless_instance = Url::parse("https://paperless-a.example/api/").unwrap();
+        let alice_subject = paperless_user_subject(&paperless_instance, 101);
+        let bridge = find_or_create_paperless_bridge_user(
+            &pool,
+            "paperless-alice",
+            &alice_subject,
+            "disabled-hash",
+        )
+        .await
+        .expect("allocate a distinct bridge-owned account");
+        assert_ne!(bridge.id, local_id);
+        assert_ne!(bridge.username, "paperless-alice");
+        assert_eq!(
+            find_user_for_login(&pool, "paperless-alice")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            local_id,
+            "generic local login still resolves the unrelated local owner"
+        );
+        assert!(
+            find_paperless_bridge_user(&pool, &alice_subject)
+                .await
+                .expect("lookup bridge mapping")
+                .is_some_and(|user| user.id == bridge.id),
+            "only the verified Paperless subject may resolve the bridge account"
+        );
+        sqlx::query("update users set enabled = false where id = $1")
+            .bind(bridge.id)
+            .execute(&pool)
+            .await
+            .expect("disable bridge account");
+        let after_token_rotation = find_or_create_paperless_bridge_user(
+            &pool,
+            "paperless-renamed-alice",
+            &alice_subject,
+            "different-disabled-hash",
+        )
+        .await
+        .expect("stable Paperless user ID resolves after token rotation");
+        assert_eq!(after_token_rotation.id, bridge.id);
+        assert!(!after_token_rotation.enabled);
+        let alice_accounts: i64 = sqlx::query_scalar(
+            "select count(*)::bigint from users where external_auth_provider = 'paperless_bridge' and external_subject = $1",
+        )
+        .bind(&alice_subject)
+        .fetch_one(&pool)
+        .await
+        .expect("count stable bridge mapping");
+        assert_eq!(alice_accounts, 1);
+
+        sqlx::query("delete from users")
+            .execute(&pool)
+            .await
+            .expect("reset identity fixtures");
+        sqlx::query("truncate audit_events restart identity")
+            .execute(&pool)
+            .await
+            .expect("reset audit fixtures");
+        let pool_a = connect(&database_url, 2).await.expect("connect writer A");
+        let pool_b = connect(&database_url, 2).await.expect("connect writer B");
+        let concurrent_subject = paperless_user_subject(&paperless_instance, 202);
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let writer_a = {
+            let barrier = Arc::clone(&barrier);
+            let concurrent_subject = concurrent_subject.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                find_or_create_paperless_bridge_user(
+                    &pool_a,
+                    "paperless-concurrent",
+                    &concurrent_subject,
+                    "disabled-hash-a",
+                )
+                .await
+            })
+        };
+        let writer_b = {
+            let barrier = Arc::clone(&barrier);
+            let concurrent_subject = concurrent_subject.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                find_or_create_paperless_bridge_user(
+                    &pool_b,
+                    " PAPERLESS-CONCURRENT ",
+                    &concurrent_subject,
+                    "disabled-hash-b",
+                )
+                .await
+            })
+        };
+        barrier.wait().await;
+
+        let user_a = writer_a.await.unwrap().expect("writer A resolves user");
+        let user_b = writer_b.await.unwrap().expect("writer B resolves user");
+        assert_eq!(user_a.id, user_b.id);
+        let users: i64 = sqlx::query_scalar("select count(*)::bigint from users")
+            .fetch_one(&pool)
+            .await
+            .expect("count bridge users");
+        assert_eq!(users, 1);
+        let mapping =
+            sqlx::query("select external_auth_provider, external_subject from users where id = $1")
+                .bind(user_a.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read bridge origin mapping");
+        assert_eq!(
+            mapping
+                .try_get::<Option<String>, _>("external_auth_provider")
+                .unwrap()
+                .as_deref(),
+            Some("paperless_bridge")
+        );
+        assert_eq!(
+            mapping
+                .try_get::<Option<String>, _>("external_subject")
+                .unwrap()
+                .as_deref(),
+            Some(concurrent_subject.as_str())
+        );
+
+        let plus_subject = paperless_user_subject(&paperless_instance, 303);
+        let first = find_or_create_paperless_bridge_user(
+            &pool,
+            "paperless-alice-ops",
+            &plus_subject,
+            "disabled-hash-c",
+        )
+        .await
+        .expect("create first lossy-name bridge account");
+        let dash_subject = paperless_user_subject(&paperless_instance, 304);
+        let second = find_or_create_paperless_bridge_user(
+            &pool,
+            "paperless-alice-ops",
+            &dash_subject,
+            "disabled-hash-d",
+        )
+        .await
+        .expect("create second lossy-name bridge account");
+        assert_ne!(first.id, second.id);
+        assert_ne!(first.username, second.username);
+        assert_eq!(
+            find_paperless_bridge_user(&pool, &plus_subject)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+        assert_eq!(
+            find_paperless_bridge_user(&pool, &dash_subject)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            second.id
+        );
+    }
+
+    #[test]
     fn csv_export_escapes_special_characters() {
         assert_eq!(csv_escape("plain"), "plain");
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
@@ -8712,6 +8990,26 @@ impl From<anyhow::Error> for ApiError {
             return Self {
                 status: StatusCode::CONFLICT,
                 message: error.to_string(),
+            };
+        }
+        if error.downcast_ref::<UserIdentityConflictError>().is_some() {
+            warn!("user mutation rejected due to a normalized identity conflict");
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: "username or email is already assigned".to_owned(),
+            };
+        }
+        if error.downcast_ref::<InvalidUserIdentityError>().is_some() {
+            return Self::bad_request(error.to_string());
+        }
+        if error
+            .downcast_ref::<AmbiguousUserIdentityLinkError>()
+            .is_some()
+        {
+            warn!("OIDC linking rejected because claims identify multiple local accounts");
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: "OIDC identity matches multiple local accounts".to_owned(),
             };
         }
         if let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>() {

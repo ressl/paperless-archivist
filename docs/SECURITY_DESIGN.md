@@ -79,8 +79,20 @@ Important:
 - Paperless auth bridge must not store Paperless passwords.
 - Paperless API tokens returned by the login endpoint are not stored.
 - Passwords are forwarded only to the Paperless login endpoint.
-- Bridge accounts are prefixed so a Paperless username cannot take over an
-  existing local admin username.
+- Bridge accounts are prefixed, but the prefix is not proof of ownership. They
+  are resolved only through a database-backed `paperless_bridge` provider and
+  the stable Paperless user ID returned by the token-authenticated
+  `/api/ui_settings/` endpoint, scoped by a SHA-256 hash of the validated
+  canonical API root. The authentication token is used only for that lookup and
+  never stored. The sanitized, mutable local username is never
+  reused as the subject; colliding sanitized names receive deterministic
+  suffixes. Token regeneration and username changes keep the same bridge
+  identity, so they cannot bypass a disabled Archivist account. Switching to a
+  different Paperless API root creates a separate trust domain and cannot adopt
+  mappings from the previous instance. The normalized
+  identity namespace prevents that account's username from matching another
+  account's username or email; an existing unmarked local account is never
+  adopted by the bridge, even when its name already starts with `paperless-`.
 - Failed login behavior must avoid leaking whether Paperless or Archivist
   rejected the user.
 
@@ -108,6 +120,11 @@ is gated twice: username-match linking requires the subject to already map to
 the admin allowlist, and email-match linking additionally requires the
 explicit opt-in `ARCHIVIST_OIDC_ALLOW_EMAIL_LINK=true` (default off), because
 a link permanently grants the OIDC subject the matched account's roles.
+Username and email link candidates use the same PostgreSQL normalization as
+local login: surrounding whitespace is removed, database lowercase is applied,
+and empty values have no claim. If enabled username/email linking identifies
+two different local accounts, the callback fails with a conflict instead of
+choosing one by creation order.
 
 ## 3. Authorization
 

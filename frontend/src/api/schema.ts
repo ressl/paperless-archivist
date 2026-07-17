@@ -2058,6 +2058,7 @@ export interface paths {
             };
         };
         put?: never;
+        /** @description Create a user. Usernames and non-empty emails share one trimmed, case-insensitive identity namespace. */
         post: {
             parameters: {
                 query?: never;
@@ -2079,6 +2080,20 @@ export interface paths {
             responses: {
                 /** @description Created user */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid or blank username */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Normalized username or email is already assigned */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };

@@ -43,6 +43,12 @@ Supported authentication:
 Local passwords are hashed with Argon2id. Browser sessions use HttpOnly cookies
 and CSRF tokens for unsafe requests.
 
+Usernames and non-empty email addresses share one database-enforced login
+namespace. PostgreSQL trims surrounding whitespace and lowercases an identity
+before comparing it. This makes local login deterministic and prevents a
+username from colliding with another account's email. Empty emails are stored
+as `NULL`; Unicode homoglyph detection is intentionally outside this rule.
+
 ## RBAC
 
 Roles:

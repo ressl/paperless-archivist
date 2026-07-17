@@ -35,6 +35,18 @@ const LAST_ENABLED_ADMIN_REJECTION: &str = "last enabled administrator mutation 
 #[error("at least one enabled administrator is required")]
 pub struct LastEnabledAdminError;
 
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("username or email is already assigned to another account")]
+pub struct UserIdentityConflictError;
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("username must not be blank")]
+pub struct InvalidUserIdentityError;
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("OIDC identity matches multiple local accounts")]
+pub struct AmbiguousUserIdentityLinkError;
+
 pub async fn connect(database_url: &str, max_connections: u32) -> Result<DbPool> {
     PgPoolOptions::new()
         .max_connections(max_connections)
@@ -418,6 +430,11 @@ pub async fn create_user_with_roles(
     roles: &[Role],
     actor: Option<Uuid>,
 ) -> Result<Uuid> {
+    let username = username.trim();
+    if username.is_empty() {
+        return Err(InvalidUserIdentityError.into());
+    }
+    let email = email.map(str::trim).filter(|value| !value.is_empty());
     let mut tx = pool.begin().await?;
     let id: Uuid = sqlx::query(
         r#"
@@ -430,7 +447,8 @@ pub async fn create_user_with_roles(
     .bind(email)
     .bind(password_hash)
     .fetch_one(&mut *tx)
-    .await?
+    .await
+    .map_err(map_user_identity_write_error)?
     .try_get("id")?;
 
     for role in roles {
@@ -507,10 +525,10 @@ pub async fn find_user_for_login(
         select u.id, u.username, u.email, u.password_hash, u.enabled, u.failed_login_count,
                u.locked_until,
                coalesce(array_agg(ur.role order by ur.role) filter (where ur.role is not null), '{}') as roles
-          from users u
+          from users_identity_namespace identity
+          join users u on u.id = identity.user_id
           left join user_roles ur on ur.user_id = u.id
-         where lower(u.username) = lower($1)
-            or lower(coalesce(u.email, '')) = lower($1)
+         where identity.normalized_identity = normalize_user_identity($1)
          group by u.id
         "#,
     )
@@ -519,6 +537,162 @@ pub async fn find_user_for_login(
     .await?;
 
     row.map(auth_user_from_row).transpose()
+}
+
+const PAPERLESS_BRIDGE_AUTH_PROVIDER: &str = "paperless_bridge";
+
+/// Resolve a Paperless login bridge account by its DB-backed origin mapping,
+/// never by a coincidentally equal local username/email.
+pub async fn find_paperless_bridge_user(
+    pool: &DbPool,
+    bridge_identity: &str,
+) -> Result<Option<AuthUser>> {
+    let row = sqlx::query(
+        r#"
+        select u.id, u.username, u.email, u.password_hash, u.enabled, u.failed_login_count,
+               u.locked_until,
+               coalesce(array_agg(ur.role order by ur.role) filter (where ur.role is not null), '{}') as roles
+          from users u
+          left join user_roles ur on ur.user_id = u.id
+         where u.external_auth_provider = $1
+           and u.external_subject = $2
+         group by u.id
+        "#,
+    )
+    .bind(PAPERLESS_BRIDGE_AUTH_PROVIDER)
+    .bind(bridge_identity)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(auth_user_from_row).transpose()
+}
+
+/// Create the bridge-owned viewer on first successful Paperless login, or
+/// return the same bridge mapping after a concurrent create. A local account
+/// with the same username deliberately remains a conflict: only the external
+/// provider/subject mapping proves that a bridge login owns an Archivist user.
+pub async fn find_or_create_paperless_bridge_user(
+    pool: &DbPool,
+    preferred_username: &str,
+    external_subject: &str,
+    disabled_password_hash: &str,
+) -> Result<AuthUser> {
+    let username: Option<String> = sqlx::query_scalar("select normalize_user_identity($1)")
+        .bind(preferred_username)
+        .fetch_one(pool)
+        .await?;
+    let base_username = username.ok_or(InvalidUserIdentityError)?;
+    let external_subject = external_subject.trim();
+    if external_subject.is_empty() {
+        return Err(InvalidUserIdentityError.into());
+    }
+    if let Some(user) = find_paperless_bridge_user(pool, external_subject).await? {
+        return Ok(user);
+    }
+
+    let mut tx = pool.begin().await?;
+    // Serialize retries for one verified Paperless principal before taking any
+    // user row lock. The namespace trigger remains the invariant for two
+    // different principals whose preferred local usernames collide.
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended('paperless_bridge:' || $1, 0))")
+        .bind(external_subject)
+        .execute(&mut *tx)
+        .await?;
+
+    let existing_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        select id
+          from users
+         where external_auth_provider = $1
+           and external_subject = $2
+        "#,
+    )
+    .bind(PAPERLESS_BRIDGE_AUTH_PROVIDER)
+    .bind(external_subject)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(user_id) = existing_id {
+        tx.commit().await?;
+        return find_auth_user_by_id(pool, user_id)
+            .await?
+            .ok_or_else(|| anyhow!("Paperless bridge user disappeared after lookup"));
+    }
+
+    let suffix = short_hash(external_subject);
+    let mut inserted = None;
+    for candidate_index in 0..100 {
+        let username = match candidate_index {
+            0 => base_username.clone(),
+            1 => format!("{}-{}", base_username, &suffix[..8]),
+            _ => format!("{}-{}{}", base_username, &suffix[..8], candidate_index - 1),
+        };
+        let mut savepoint: Transaction<'_, Postgres> = Transaction::begin(&mut *tx, None).await?;
+        let result = sqlx::query(
+            r#"
+            insert into users (
+              username, email, password_hash, external_auth_provider, external_subject
+            )
+            values ($1, null, $2, $3, $4)
+            returning id
+            "#,
+        )
+        .bind(&username)
+        .bind(disabled_password_hash)
+        .bind(PAPERLESS_BRIDGE_AUTH_PROVIDER)
+        .bind(external_subject)
+        .fetch_one(&mut *savepoint)
+        .await;
+        match result {
+            Ok(row) => {
+                let user_id: Uuid = row.try_get("id")?;
+                savepoint.commit().await?;
+                inserted = Some((user_id, username));
+                break;
+            }
+            Err(error) if is_user_identity_write_error(&error) => {
+                savepoint.rollback().await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let (user_id, username) =
+        inserted.ok_or_else(|| anyhow!("could not allocate a unique Paperless bridge username"))?;
+    sqlx::query("insert into user_roles (user_id, role) values ($1, $2)")
+        .bind(user_id)
+        .bind(Role::Viewer.to_string())
+        .execute(&mut *tx)
+        .await?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "user.paperless_bridge_created".to_owned(),
+            actor_type: "system".to_owned(),
+            actor_id: None,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(json!({
+                "user_id": user_id,
+                "username": username,
+                "roles": [Role::Viewer]
+            })),
+            metadata: Some(json!({
+                "auth_provider": PAPERLESS_BRIDGE_AUTH_PROVIDER,
+                "external_subject_hash": short_hash(external_subject)
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+
+    find_auth_user_by_id(pool, user_id)
+        .await?
+        .ok_or_else(|| anyhow!("Paperless bridge user disappeared after creation"))
 }
 
 pub async fn find_auth_user_by_id(pool: &DbPool, user_id: Uuid) -> Result<Option<AuthUser>> {
@@ -697,82 +871,123 @@ pub async fn consume_oidc_login_state(
 
 pub async fn upsert_oidc_user(pool: &DbPool, input: OidcUserInput<'_>) -> Result<AuthUser> {
     let mut tx = pool.begin().await?;
+    let email = input.email.map(str::trim).filter(|value| !value.is_empty());
     // Keep the lock order identical to manual role/enabled mutations: the
     // invariant lock always comes before any users/user_roles row lock.
     lock_enabled_admin_invariant_tx(&mut tx).await?;
     let mut linked_existing = false;
     let mut created = false;
 
-    let user_id = if let Some(row) = sqlx::query(
+    let existing_external = sqlx::query(
         r#"
         select id
           from users
          where external_auth_provider = $1
            and external_subject = $2
+         for update
         "#,
     )
     .bind(input.provider)
     .bind(input.subject)
     .fetch_optional(&mut *tx)
-    .await?
-    {
+    .await?;
+
+    let user_id = if let Some(row) = existing_external {
         row.try_get("id")?
-    } else if let Some(row) = sqlx::query(
-        r#"
-        select id
-          from users
-         where external_auth_provider is null
-           and external_subject is null
-           and (
-             ($3::boolean and lower(username) = lower($1))
-             or ($4::boolean and $2::text is not null and lower(coalesce(email, '')) = lower($2::text))
-           )
-         order by created_at
-         limit 1
-        "#,
-    )
-    .bind(input.username)
-    .bind(input.email)
-    .bind(input.allow_username_link)
-    .bind(input.allow_email_link)
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        let id = row.try_get("id")?;
-        sqlx::query(
+    } else {
+        let link_candidates = sqlx::query(
             r#"
-            update users
-               set external_auth_provider = $2,
-                   external_subject = $3,
-                   updated_at = now()
-             where id = $1
+            select u.id
+              from users u
+              join users_identity_namespace identity on identity.user_id = u.id
+             where u.external_auth_provider is null
+               and u.external_subject is null
+               and (
+                 ($3::boolean
+                   and identity.username_claim
+                   and identity.normalized_identity = normalize_user_identity($1))
+                 or
+                 ($4::boolean
+                   and $2::text is not null
+                   and identity.email_claim
+                   and identity.normalized_identity = normalize_user_identity($2::text))
+               )
+             order by u.id
+             for update of u
             "#,
         )
-        .bind(id)
-        .bind(input.provider)
-        .bind(input.subject)
-        .execute(&mut *tx)
+        .bind(input.username)
+        .bind(email)
+        .bind(input.allow_username_link)
+        .bind(input.allow_email_link)
+        .fetch_all(&mut *tx)
         .await?;
-        linked_existing = true;
-        id
-    } else {
-        created = true;
-        insert_oidc_user(&mut tx, &input).await?
+
+        let mut candidate_ids = link_candidates
+            .iter()
+            .map(|row| row.try_get::<Uuid, _>("id"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        candidate_ids.dedup();
+        if candidate_ids.len() > 1 {
+            return Err(AmbiguousUserIdentityLinkError.into());
+        }
+
+        if let Some(id) = candidate_ids.first().copied() {
+            sqlx::query(
+                r#"
+                update users
+                   set external_auth_provider = $2,
+                       external_subject = $3,
+                       updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(input.provider)
+            .bind(input.subject)
+            .execute(&mut *tx)
+            .await?;
+            linked_existing = true;
+            id
+        } else {
+            created = true;
+            insert_oidc_user(&mut tx, &input).await?
+        }
     };
 
-    if let Some(email) = input.email {
-        let owner = sqlx::query("select id from users where lower(email) = lower($1) limit 1")
-            .bind(email)
-            .fetch_optional(&mut *tx)
-            .await?
-            .map(|row| row.try_get::<Uuid, _>("id"))
-            .transpose()?;
+    if let Some(email) = email {
+        let owner = sqlx::query(
+            r#"
+            select user_id
+              from users_identity_namespace
+             where normalized_identity = normalize_user_identity($1)
+            "#,
+        )
+        .bind(email)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|row| row.try_get::<Uuid, _>("user_id"))
+        .transpose()?;
         if owner.is_none_or(|owner_id| owner_id == user_id) {
-            sqlx::query("update users set email = $2, updated_at = now() where id = $1")
-                .bind(user_id)
-                .bind(email)
-                .execute(&mut *tx)
-                .await?;
+            let mut savepoint: Transaction<'_, Postgres> =
+                Transaction::begin(&mut *tx, None).await?;
+            let updated =
+                sqlx::query("update users set email = $2, updated_at = now() where id = $1")
+                    .bind(user_id)
+                    .bind(email.trim())
+                    .execute(&mut *savepoint)
+                    .await;
+            match updated {
+                Ok(_) => savepoint.commit().await?,
+                Err(error) if is_user_identity_write_error(&error) => {
+                    savepoint.rollback().await?;
+                    tracing::warn!(
+                        user_id = %user_id,
+                        "skipping OIDC email update because a concurrent identity writer won the claim"
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 
@@ -899,28 +1114,73 @@ async fn insert_oidc_user(
     tx: &mut Transaction<'_, Postgres>,
     input: &OidcUserInput<'_>,
 ) -> Result<Uuid> {
-    let mut username = input.username.to_owned();
+    let base_username = input.username.trim();
     let suffix = short_hash(input.subject);
-    let mut email = input.email;
+    let mut email = input.email.map(str::trim).filter(|value| !value.is_empty());
     if let Some(email_value) = email {
-        let email_taken = sqlx::query("select 1 from users where lower(email) = lower($1) limit 1")
-            .bind(email_value)
-            .fetch_optional(&mut **tx)
-            .await?
-            .is_some();
+        let email_taken = sqlx::query(
+            r#"
+            select 1
+              from users_identity_namespace
+             where normalized_identity = normalize_user_identity($1)
+            "#,
+        )
+        .bind(email_value)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some();
         if email_taken {
             email = None;
         }
     }
 
-    for attempt in 0..3 {
-        let row = sqlx::query(
+    let mut candidate_index = 0;
+    for _ in 0..6 {
+        let username = match candidate_index {
+            0 => base_username.to_owned(),
+            1 => format!("{}-{}", base_username, &suffix[..8]),
+            _ => format!("{}-{}{}", base_username, &suffix[..8], candidate_index - 1),
+        };
+        let username_taken = sqlx::query(
+            r#"
+            select 1
+              from users_identity_namespace
+             where normalized_identity = normalize_user_identity($1)
+            "#,
+        )
+        .bind(&username)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some();
+        if username_taken {
+            candidate_index += 1;
+            continue;
+        }
+
+        if let Some(email_value) = email {
+            let email_taken = sqlx::query(
+                r#"
+                select 1
+                  from users_identity_namespace
+                 where normalized_identity = normalize_user_identity($1)
+                "#,
+            )
+            .bind(email_value)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some();
+            if email_taken {
+                email = None;
+            }
+        }
+
+        let mut savepoint: Transaction<'_, Postgres> = Transaction::begin(&mut **tx, None).await?;
+        let inserted = sqlx::query(
             r#"
             insert into users (
               username, email, password_hash, external_auth_provider, external_subject
             )
             values ($1, $2, $3, $4, $5)
-            on conflict (username) do nothing
             returning id
             "#,
         )
@@ -929,17 +1189,24 @@ async fn insert_oidc_user(
         .bind(input.disabled_password_hash)
         .bind(input.provider)
         .bind(input.subject)
-        .fetch_optional(&mut **tx)
-        .await?;
-        if let Some(row) = row {
-            return row.try_get("id").context("read inserted OIDC user id");
-        }
+        .fetch_one(&mut *savepoint)
+        .await;
 
-        username = if attempt == 0 {
-            format!("{}-{}", input.username, &suffix[..8])
-        } else {
-            format!("{}-{}{}", input.username, &suffix[..8], attempt)
-        };
+        match inserted {
+            Ok(row) => {
+                savepoint.commit().await?;
+                return row.try_get("id").context("read inserted OIDC user id");
+            }
+            Err(error) if is_user_identity_write_error(&error) => {
+                savepoint.rollback().await?;
+                // A local/Paperless writer may have committed between the
+                // namespace lookup and this insert. Re-read both claims and
+                // either drop the now-taken optional email or advance to the
+                // deterministic username suffix.
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 
     Err(anyhow!("could not allocate unique username for OIDC user"))
@@ -969,6 +1236,26 @@ async fn lock_enabled_admin_invariant_tx(tx: &mut Transaction<'_, Postgres>) -> 
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn map_user_identity_write_error(error: sqlx::Error) -> anyhow::Error {
+    if is_user_identity_write_error(&error) {
+        UserIdentityConflictError.into()
+    } else {
+        error.into()
+    }
+}
+
+fn is_user_identity_write_error(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database_error| database_error.constraint())
+        .is_some_and(|constraint| {
+            matches!(
+                constraint,
+                "users_identity_namespace_pkey" | "users_username_key" | "users_email_key"
+            )
+        })
 }
 
 async fn user_is_enabled_admin_tx(

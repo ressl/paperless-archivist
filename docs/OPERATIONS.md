@@ -684,6 +684,37 @@ The first migration fails on PostgreSQL versions below 18. The schema uses:
 - `FOR UPDATE SKIP LOCKED` for job leasing
 - `pg_trgm` for future fuzzy matching and diagnostics
 
+Migration `0049_user_identity_namespace.sql` creates one normalized login
+namespace across usernames and non-empty emails. Normalization trims surrounding
+whitespace and applies PostgreSQL `lower`; empty email strings become `NULL`.
+The migration aborts before changing the schema when legacy accounts normalize
+to the same identity. Its error `DETAIL` lists every account id, field kind, and
+raw value, and its `HINT` asks the operator to rename the listed usernames or
+emails. Resolve those values explicitly and restart the API; the migration never
+selects or merges an account automatically.
+
+The migration holds an exclusive lock on `users` until its preflight, backfill,
+and synchronization trigger are installed. This deliberately pauses logins and
+user administration from an older rolling-deployment pod instead of allowing a
+case-only collision to commit between the diagnostic scan and enforcement.
+
+Paperless login-bridge accounts are identified by an explicit
+`paperless_bridge` provider/subject mapping, not by the `paperless-` username
+prefix. After credential verification, Archivist uses the issued token once to
+read the stable Paperless user ID from `/api/ui_settings/`; the token is never
+persisted. That ID is scoped by a SHA-256 hash of the validated canonical API
+root and stored separately from the sanitized local name, so token regeneration
+and username changes keep the same disabled state and roles. Changing the
+Paperless base URL to another installation intentionally creates a new trust
+domain; migrate roles only after explicitly verifying the new instance.
+Different principals that sanitize to the same name receive distinct suffixed
+local accounts. Paperless versions that do not return an authenticated user ID
+fail the bridge login closed. Accounts created by older versions without the
+provider marker are not claimed automatically because no safe stable mapping
+can be reconstructed. Let the next verified bridge login create a new,
+non-conflicting account and transfer roles only after an operator verifies
+ownership. Never mark an unrelated local account.
+
 Use SCRAM authentication and a dedicated non-superuser role in production.
 
 ## Backup and Restore

@@ -1742,6 +1742,7 @@ paths:
       responses:
         "200": { description: Users }
     post:
+      description: Create a user. Usernames and non-empty emails share one trimmed, case-insensitive identity namespace.
       requestBody:
         required: true
         content:
@@ -1758,6 +1759,8 @@ paths:
                   items: { $ref: "#/components/schemas/Role" }
       responses:
         "200": { description: Created user }
+        "400": { description: Invalid or blank username }
+        "409": { description: Normalized username or email is already assigned }
   /api/users/{id}/enable:
     post:
       parameters:
