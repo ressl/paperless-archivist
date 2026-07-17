@@ -61,8 +61,16 @@ async function renderWorkbench() {
     </I18nProvider>
   );
   const version = (await screen.findByRole('combobox', { name: 'Version' })) as HTMLSelectElement;
-  await waitFor(() => expect(version.value).toBe('ocr-v2'));
   const content = screen.getByRole('textbox', { name: 'Prompt content' }) as HTMLTextAreaElement;
+  // The selected prompt is derived as soon as the prompt list loads, while a
+  // following effect synchronises the editor fields from that selection. Wait
+  // for both pieces of initial state before a test starts interacting; waiting
+  // for the select alone can click during that one-render hand-off and exercise
+  // the dirty-draft guard instead of the intended clean navigation path.
+  await waitFor(() => {
+    expect(version.value).toBe('ocr-v2');
+    expect(content.value).toBe('OCR version two');
+  });
   return { version, content };
 }
 
