@@ -31,4 +31,4 @@
 
 - [x] Add complete locale strings for title, explanation, cancel, and discard actions.
 - [x] Run focused tests, full frontend tests, i18n parity, accessibility static checks, typecheck, build, and diff checks.
-- [ ] Obtain independent review, commit, push, and close #356 only after the MR pipeline is green.
+- [x] Obtain independent review, commit, push, and close #356 only after the MR pipeline is green.
