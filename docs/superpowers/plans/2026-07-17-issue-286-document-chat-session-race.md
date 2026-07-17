@@ -26,5 +26,5 @@
 ### Task 3: Verify and deliver
 
 - [x] Run the focused race tests, full Frontend tests, lint, typecheck, build, formatting/diff checks, and secret scan.
-- [ ] Obtain an independent Critical/Important review and resolve every finding.
+- [x] Obtain an independent Critical/Important review and resolve every finding.
 - [ ] Commit/push, verify branch and MR pipelines, document evidence, and close #286 only when green.
