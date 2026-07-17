@@ -10,11 +10,11 @@
 - Add: `scripts/verify/kubernetes_custom_ai_egress_contract.test.mjs`
 - Modify: `frontend/package.json`
 
-- [ ] Add failing assertions that the base does not contain the example provider ports.
-- [ ] Require the opt-in policy to select both `api` and `worker`, with no other Archivist component.
-- [ ] Require every peer to combine an exact namespace label and exact provider pod label; reject empty selectors, `ipBlock`, and unrestricted ports.
-- [ ] Assert the public SGLang and MinerU examples use only their documented example TCP ports.
-- [ ] Make the static contract part of the ordinary offline `pnpm test` gate.
+- [x] Add failing assertions that the base does not contain the example provider ports.
+- [x] Require the opt-in policy to select both `api` and `worker`, with no other Archivist component.
+- [x] Require every peer to combine an exact namespace label and exact provider pod label; reject empty selectors, `ipBlock`, and unrestricted ports.
+- [x] Assert the public SGLang and MinerU examples use only their documented example TCP ports.
+- [x] Make the static contract part of the ordinary offline `pnpm test` gate.
 
 ### Task 2: Add the component and renderable example
 
@@ -23,11 +23,11 @@
 - Add: `deploy/kubernetes/components/custom-ai-egress/networkpolicy.yaml`
 - Add: `deploy/kubernetes/examples/custom-ai-egress/kustomization.yaml`
 
-- [ ] Add an additive `NetworkPolicy`; do not modify the base policy or deployments.
-- [ ] Select both backend components through existing stable pod labels.
-- [ ] Add separate SGLang and MinerU peers with namespace/pod selector intersection and explicit TCP ports.
-- [ ] Compose base plus component through an opt-in example Kustomization.
-- [ ] Render base and example with `kubectl kustomize` and assert both policies occur only in the opt-in render.
+- [x] Add an additive `NetworkPolicy`; do not modify the base policy or deployments.
+- [x] Select both backend components through existing stable pod labels.
+- [x] Add separate SGLang and MinerU peers with namespace/pod selector intersection and explicit TCP ports.
+- [x] Compose base plus component through an opt-in example Kustomization.
+- [x] Render base and example with `kubectl kustomize` and assert both policies occur only in the opt-in render.
 
 ### Task 3: Document safe adaptation and diagnosis
 
@@ -36,13 +36,13 @@
 - Modify: `docs/OPERATIONS.md`
 - Modify: `.gitlab-ci.yml`
 
-- [ ] Document render, diff, label, port, apply, and connectivity verification commands.
-- [ ] State that all names and ports are examples and must match the operators own Service target ports and pod labels.
-- [ ] Explain additive policy semantics, API/worker coverage, common policy-drop symptoms, DNS/service/endpoints checks, and CNI flow-log diagnosis.
-- [ ] Add a public render job without introducing private topology or weakening normal offline CI.
+- [x] Document render, diff, label, port, apply, and connectivity verification commands.
+- [x] State that all names and ports are examples and must match the operators own Service target ports and pod labels.
+- [x] Explain additive policy semantics, API/worker coverage, common policy-drop symptoms, DNS/service/endpoints checks, and CNI flow-log diagnosis.
+- [x] Add a public render job without introducing private topology or weakening normal offline CI.
 
 ### Task 4: Verify and deliver
 
-- [ ] Run static contract tests, base/opt-in renders, YAML assertions, docs links, CI lint, formatting, and secret scan.
-- [ ] Obtain an independent Critical/Important review and resolve every finding.
+- [x] Run static contract tests, base/opt-in renders, YAML assertions, docs links, CI lint, formatting, and secret scan.
+- [x] Obtain an independent Critical/Important review and resolve every finding.
 - [ ] Commit/push, verify branch and MR pipelines, document evidence, and close #372 only when green.

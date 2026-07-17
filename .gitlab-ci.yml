@@ -102,6 +102,23 @@ public:sglang:minimax-m3:contract-mock:
   script:
     - node --test scripts/verify/sglang_minimax_m3_contract.test.mjs
 
+# Prove that the restrictive base and the opt-in custom-AI component both
+# render with a pinned public kubectl, and that only the opt-in render adds a
+# second NetworkPolicy. Detailed selector/port assertions run in pnpm test.
+public:kubernetes:custom-ai-egress:render:
+  stage: test
+  image:
+    name: alpine/k8s:1.36.2@sha256:44ef4942e171939b9c665a4a84beb80e2dcdb9a24330d4651cfdfd2e9deecc47
+    entrypoint: [""]
+  extends: .default_retry
+  script:
+    - kubectl kustomize deploy/kubernetes/base > /tmp/base.yaml
+    - kubectl kustomize deploy/kubernetes/examples/custom-ai-egress > /tmp/custom-ai.yaml
+    - |
+      test "$(grep -c '^kind: NetworkPolicy$' /tmp/base.yaml)" -eq 1
+      test "$(grep -c '^kind: NetworkPolicy$' /tmp/custom-ai.yaml)" -eq 2
+      grep -q 'name: paperless-archivist-custom-ai-egress' /tmp/custom-ai.yaml
+
 # Available only when a protected ref receives the protected endpoint
 # variable. Authentication is an optional GitLab file variable, so no secret
 # appears in the command line, logs, report, artifacts, or repository.

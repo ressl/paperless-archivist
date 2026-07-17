@@ -165,6 +165,13 @@ contains API and worker Deployments, probes, resources, Service, Ingress,
 NetworkPolicy, and secret references. Patch it with Kustomize or your GitOps
 tooling; do not commit real secrets.
 
+Custom in-cluster AI ports remain denied by the generic base. The public
+package includes an
+[`opt-in custom-AI egress component`](../deploy/kubernetes/README.md#opt-in-egress-to-custom-ai-providers)
+for explicitly labelled SGLang and MinerU example targets. Adapt namespace,
+pod labels, and Service target ports in a private overlay; never solve a policy
+drop with an unrestricted namespace selector or private-network CIDR.
+
 GA support, upgrade, rollback, and large-archive sizing are documented in:
 
 - [`docs/STABILITY.md`](STABILITY.md)
