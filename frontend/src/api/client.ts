@@ -471,6 +471,7 @@ export type AuditIntegrityReport = {
   legacy_events: number;
   v1_events: number;
   v2_events: number;
+  legacy_precision_events: number;
   latest_event_hash?: string | null;
   broken_event_id?: string | null;
   broken_reason?: string | null;

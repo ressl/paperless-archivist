@@ -5,6 +5,7 @@
 //! used by this project keeps the lockfile limited to PostgreSQL without
 //! changing application call sites or enabling SQLx macros.
 
+pub use sqlx_core::connection::Connection;
 pub use sqlx_core::error::{Error, Result};
 pub use sqlx_core::executor::Executor;
 pub use sqlx_core::migrate;

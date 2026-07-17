@@ -63,8 +63,13 @@ lease, provider, and HTTPS hardening fixes.
   to a typed `RunnerUnavailable` error while persisted/logged diagnostics stay
   redacted; this keeps the fallback reachable after response-body hardening.
 - **Portable audit hashes:** audit timestamps are canonicalized to PostgreSQL's
-  microsecond precision before hashing and insertion. Integrity verification no
-  longer depends on whether the host clock exposes microseconds or nanoseconds.
+  microsecond precision before hashing and insertion. For pre-v1.17 v1/v2
+  hashes, integrity verification reconstructs only the finite sub-microsecond
+  suffix PostgreSQL discarded and reports the number of compatibility matches.
+  The one-time discovery is single-flight and runs off the async executor; its
+  validated suffix hint makes subsequent scans one hash per event. Stored
+  events and hashes are never rewritten, and payload tampering still fails.
+  Integrity verification therefore no longer depends on host clock precision.
 - **Secure Caddy profile (#355):** the reverse-proxy Compose overlay now forces
   `ARCHIVIST_COOKIE_SECURE=true`; session and CSRF cookies issued through the
   public HTTPS profile therefore carry `Secure`. Direct base-only localhost
@@ -77,9 +82,10 @@ lease, provider, and HTTPS hardening fixes.
   selected hostname and its subdomains will remain HTTPS-capable.
 - **Deployment note:** database migrations run forward automatically. Monitoring
   remains opt-in and requires the dedicated metrics Secret before enabling its
-  component. A rollback to v1.16.0 may leave the additive failure-counter row in
-  place safely; point the API and ServiceMonitor back to their retained Secret
-  together, or remove the monitoring component to disable scraping.
+  component. A rollback to v1.16.0 may leave the additive failure-counter row
+  and audit timestamp-hint column in place safely; older binaries ignore both.
+  Point the API and ServiceMonitor back to their retained Secret together, or
+  remove the monitoring component to disable scraping.
 
 ## v1.16.0 — Dashboard hierarchy tiers, nav a11y, dead-CSS cleanup
 

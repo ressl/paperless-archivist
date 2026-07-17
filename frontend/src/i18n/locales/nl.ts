@@ -726,6 +726,7 @@ const nlMessages: Record<MessageKey, string> = {
   'audit.checked_events': '{count} gehashte gebeurtenissen gecontroleerd.',
   'audit.hash_coverage': 'Hashdekking: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} oudere gebeurtenissen dateren van vóór de hashketen-tracering.',
+  'audit.legacy_precision_events': '{count} gebeurtenissen van vóór v1.17 zijn via tijdsprecisiecompatibiliteit geverifieerd; de opgeslagen geschiedenis is niet herschreven.',
   'audit.retention_applied': 'Bewaarbeleid toegepast',
   'audit.retention_summary': '{artifacts} AI-artefacten, {events} auditgebeurtenissen en {ocr_pages} gecachte OCR-pagina’s buiten de bewaartermijn verwijderd.',
   'audit.col_time': 'Tijd',

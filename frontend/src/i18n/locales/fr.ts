@@ -726,6 +726,7 @@ const frMessages: Record<MessageKey, string> = {
   'audit.checked_events': '{count} événements hachés vérifiés.',
   'audit.hash_coverage': 'Couverture des hachages : v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} anciens événements sont antérieurs au suivi par chaîne de hachage.',
+  'audit.legacy_precision_events': '{count} événements antérieurs à v1.17 ont été vérifiés par compatibilité de précision temporelle ; l’historique stocké n’a pas été réécrit.',
   'audit.retention_applied': 'Rétention appliquée',
   'audit.retention_summary': "{artifacts} artefacts d’IA, {events} événements d’audit et {ocr_pages} pages OCR en cache hors rétention supprimés.",
   'audit.col_time': 'Heure',

@@ -4138,6 +4138,11 @@ export interface components {
             v1_events: number;
             /** Format: int64 */
             v2_events: number;
+            /**
+             * Format: int64
+             * @description Hashed pre-v1.17 events verified by reconstructing the sub-microsecond timestamp suffix discarded by PostgreSQL. The validated suffix is persisted as a lookup hint; the stored event and hash are not rewritten.
+             */
+            legacy_precision_events: number;
             latest_event_hash?: string | null;
             /** Format: uuid */
             broken_event_id?: string | null;

@@ -724,6 +724,7 @@ export const enMessages = {
   'audit.checked_events': 'Checked {count} hashed events.',
   'audit.hash_coverage': 'Hash coverage: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} legacy events predate hash-chain tracking.',
+  'audit.legacy_precision_events': '{count} pre-v1.17 events verified through timestamp-precision compatibility; stored history was not rewritten.',
   'audit.retention_applied': 'Retention applied',
   'audit.retention_summary': 'Deleted {artifacts} AI artifacts, {events} audit events, and {ocr_pages} cached OCR pages outside retention.',
   'audit.col_time': 'Time',

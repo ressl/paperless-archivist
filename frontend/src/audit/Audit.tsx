@@ -61,6 +61,7 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
               v2: formatNumber(integrity.v2_events)
             })}`}
             {integrity.legacy_events > 0 ? ` ${t('audit.legacy_events', { count: formatNumber(integrity.legacy_events) })}` : ''}
+            {integrity.legacy_precision_events > 0 ? ` ${t('audit.legacy_precision_events', { count: formatNumber(integrity.legacy_precision_events) })}` : ''}
             {integrity.broken_reason ? ` ${integrity.broken_reason}` : ''}
           </p>
         </div>
