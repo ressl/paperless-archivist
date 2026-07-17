@@ -61,8 +61,8 @@ Common status codes:
 | `GET` | `/api/auth/me` | Return the current user, roles, and CSRF token. |
 | `POST` | `/api/auth/logout` | Revoke the current browser session. |
 | `POST` | `/api/auth/change-password` | Change own password and revoke other sessions. |
-| `GET` | `/api/auth/sessions` | List own active sessions. |
-| `POST` | `/api/auth/sessions/{id}/revoke` | Revoke a session. |
+| `GET` | `/api/auth/sessions` | List own browser sessions, or all sessions as an administrator. Requires an interactive cookie session; API tokens are rejected regardless of scope. |
+| `POST` | `/api/auth/sessions/{id}/revoke` | Revoke a browser session as an administrator. Requires an interactive cookie session; API tokens are rejected regardless of scope. |
 
 ## Runtime Settings
 

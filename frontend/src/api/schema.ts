@@ -412,6 +412,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description List browser sessions. Requires an interactive cookie session; bearer tokens are always rejected regardless of scope. */
         get: {
             parameters: {
                 query?: never;
@@ -421,7 +422,7 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Sessions */
+                /** @description Own sessions, or all sessions for an administrator */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -431,6 +432,13 @@ export interface paths {
                             items?: components["schemas"]["Session"][];
                         };
                     };
+                };
+                /** @description Interactive cookie session required */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
                 };
             };
         };
@@ -451,6 +459,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Revoke a browser session as an administrator. Requires an interactive cookie session; bearer tokens are always rejected regardless of scope. */
         post: {
             parameters: {
                 query?: never;
@@ -464,6 +473,13 @@ export interface paths {
             responses: {
                 /** @description Session revoked */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Interactive administrator cookie session required */
+                403: {
                     headers: {
                         [name: string]: unknown;
                     };

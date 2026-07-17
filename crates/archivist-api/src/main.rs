@@ -1462,18 +1462,21 @@ async fn change_password(
 }
 
 async fn sessions(State(state): State<AppState>, auth: Authenticated) -> ApiResult<Json<Value>> {
-    let user_id = if roles_have_permission(&auth.0.roles, Permission::ManageUsers) {
-        None
-    } else {
-        Some(
-            auth.0
-                .user_id
-                .ok_or_else(|| ApiError::forbidden("session listing requires a user session"))?,
-        )
-    };
+    let user_id = session_listing_user_filter(&auth.0)?;
     Ok(Json(
         json!({ "items": list_sessions(&state.pool, user_id).await? }),
     ))
+}
+
+fn session_listing_user_filter(auth: &AuthContext) -> Result<Option<Uuid>, ApiError> {
+    let user_id = require_user_session(auth, "session listing requires a user session")?;
+    Ok(
+        if roles_have_permission(&auth.roles, Permission::ManageUsers) {
+            None
+        } else {
+            Some(user_id)
+        },
+    )
 }
 
 async fn revoke_session_endpoint(
@@ -7418,6 +7421,61 @@ fn verify_dummy_password(password: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn auth_context_for_session_listing(
+        cookie_auth: bool,
+        user_id: Uuid,
+        roles: Vec<Role>,
+        scopes: Vec<&str>,
+    ) -> AuthContext {
+        AuthContext {
+            actor_type: if cookie_auth { "user" } else { "api_token" }.to_owned(),
+            actor_id: Some(user_id.to_string()),
+            user_id: Some(user_id),
+            username: cookie_auth.then(|| "session-user".to_owned()),
+            roles,
+            scopes: scopes.into_iter().map(str::to_owned).collect(),
+            session_id: cookie_auth.then(Uuid::new_v4),
+            csrf_secret_hash: cookie_auth.then(|| "csrf-hash".to_owned()),
+            cookie_auth,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_listing_rejects_every_api_token_scope_without_metadata() {
+        let user_id = Uuid::new_v4();
+        for scopes in [
+            vec!["runs:read"],
+            vec!["users:manage"],
+            vec!["users:manage", "audit:read", "settings:read"],
+        ] {
+            let auth = auth_context_for_session_listing(false, user_id, Vec::new(), scopes);
+            let error = session_listing_user_filter(&auth)
+                .expect_err("an API token must never list browser sessions");
+            assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read error response");
+            let body: Value = serde_json::from_slice(&body).expect("parse error response");
+            assert_eq!(
+                body,
+                json!({ "error": "session listing requires a user session" })
+            );
+        }
+    }
+
+    #[test]
+    fn session_listing_preserves_cookie_user_and_admin_visibility() {
+        let user_id = Uuid::new_v4();
+        let user = auth_context_for_session_listing(true, user_id, vec![Role::Viewer], Vec::new());
+        assert_eq!(session_listing_user_filter(&user).unwrap(), Some(user_id));
+
+        let admin = auth_context_for_session_listing(true, user_id, vec![Role::Admin], Vec::new());
+        assert_eq!(session_listing_user_filter(&admin).unwrap(), None);
+    }
 
     #[test]
     fn last_enabled_admin_error_maps_to_stable_conflict() {

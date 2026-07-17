@@ -6,19 +6,19 @@
 
 ## Task 1: Add failing authorization coverage
 
-- [ ] Add a handler-policy test that rejects bearer-token contexts for multiple scope sets, including `users:manage`.
-- [ ] Assert the rejection is HTTP 403 and the serialized error body contains no session metadata.
-- [ ] Add positive tests for a regular cookie user and an administrator cookie session.
-- [ ] Assert the regular user filter is their own user id and the administrator filter remains unrestricted.
+- [x] Add a handler-policy test that rejects bearer-token contexts for multiple scope sets, including `users:manage`.
+- [x] Assert the rejection is HTTP 403 and the serialized error body contains no session metadata.
+- [x] Add positive tests for a regular cookie user and an administrator cookie session.
+- [x] Assert the regular user filter is their own user id and the administrator filter remains unrestricted.
 
 ## Task 2: Enforce the interactive-session boundary
 
-- [ ] Require a cookie/user session before evaluating session-list visibility.
-- [ ] Preserve the existing own-session and administrator query behavior.
-- [ ] Keep session revocation bound to an interactive session.
-- [ ] Document the cookie-only boundary in OpenAPI and the API reference.
+- [x] Require a cookie/user session before evaluating session-list visibility.
+- [x] Preserve the existing own-session and administrator query behavior.
+- [x] Keep session revocation bound to an interactive session.
+- [x] Document the cookie-only boundary in OpenAPI and the API reference.
 
 ## Task 3: Verify compatibility and delivery
 
-- [ ] Run focused API tests, formatting, Clippy, workspace tests, audit, deny, and migration smoke.
+- [x] Run focused API tests, formatting, Clippy, workspace tests, audit, deny, and migration smoke.
 - [ ] Obtain independent review, commit, push, inspect the MR pipeline, document evidence, and close #349 only after the remote gate is green.

@@ -1185,9 +1185,12 @@ paths:
         "200": { description: Password changed and sessions revoked }
   /api/auth/sessions:
     get:
+      description: List browser sessions. Requires an interactive cookie session; bearer tokens are always rejected regardless of scope.
+      security:
+        - cookieSession: []
       responses:
         "200":
-          description: Sessions
+          description: Own sessions, or all sessions for an administrator
           content:
             application/json:
               schema:
@@ -1196,8 +1199,12 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/Session" }
+        "403": { description: Interactive cookie session required }
   /api/auth/sessions/{id}/revoke:
     post:
+      description: Revoke a browser session as an administrator. Requires an interactive cookie session; bearer tokens are always rejected regardless of scope.
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -1205,6 +1212,7 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200": { description: Session revoked }
+        "403": { description: Interactive administrator cookie session required }
   /api/settings:
     get:
       responses:
