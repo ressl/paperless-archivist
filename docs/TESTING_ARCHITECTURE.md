@@ -148,10 +148,13 @@ remediation are in the
 
 The versioned report contains public model/runtime/image fingerprints,
 per-contract latency, status, and at most 512 characters of redacted failure
-diagnostics. It never contains the endpoint, authorization value, request
-prompt, provider response, reasoning trace, or tool arguments. The endpoint is
-represented only by SHA-256 so reports from the same deployment can be
-correlated without publishing its address.
+diagnostics. It never stores the endpoint or authorization value; the endpoint
+is represented only by SHA-256 so reports from the same deployment can be
+correlated without publishing its address. Successful results contain no
+request prompt, provider response, reasoning trace, or tool arguments. A
+failed `diagnostic` can include a bounded, redacted excerpt derived from a
+provider error or response body, so failed reports are operator-sensitive and
+must be reviewed before they are shared.
 
 Ordinary CI runs the complete local mock and negative matrix through
 `public:sglang:minimax-m3:contract-mock`; the authoritative internal blueprint

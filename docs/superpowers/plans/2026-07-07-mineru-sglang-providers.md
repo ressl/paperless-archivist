@@ -1,5 +1,14 @@
 # MinerU Provider Kind + OpenAI-Compatible Reasoning Hardening — Implementation Plan
 
+> **Historical implementation record (superseded 2026-07-17):** Do not use
+> the MiniMax M2.7 names, example values, commands, or unchecked steps below as
+> an operator runbook. ADR-014 replaced the target with the text-only
+> `ressl/MiniMax-M3-uncensored-NVFP4` contract. Use the current
+> [Settings guide](../../USER_GUIDE.md#sglang-with-minimax-m3-text-only) and
+> [operations runbook](../../OPERATIONS.md#sglangminimax-m3-operations).
+> The remaining text is preserved unchanged as the implementation history for
+> generic OpenAI-compatible hardening and the MinerU provider.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make SGLang-served MiniMax-M2.7 usable for all text stages (think-block stripping, `max_output_tokens`, structured-output compatibility switch with one-shot 400 self-healing) and add a vision-only `mineru` provider kind that OCRs pages via the MinerU API server (page image → Markdown).

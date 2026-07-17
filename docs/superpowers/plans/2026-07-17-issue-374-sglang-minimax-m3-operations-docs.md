@@ -7,6 +7,7 @@
 ### Task 1: Consolidate the operator path
 
 **Files:**
+- Modify: `docs/API_REFERENCE.md`
 - Modify: `docs/USER_GUIDE.md`
 - Modify: `docs/INSTALLATION.md`
 - Modify: `docs/OPERATIONS.md`

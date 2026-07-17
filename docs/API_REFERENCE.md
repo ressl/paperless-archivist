@@ -83,6 +83,11 @@ payloads: `paperless_token`, `provider_secrets`, and
 `notification_webhook_url`. Secret values are encrypted into secret references
 and are not returned to the frontend after saving.
 
+Settings updates require an interactive administrator cookie session and the
+matching `X-CSRF-Token` value. Bearer/API-token authentication is rejected
+regardless of token scope. A session-aware client must first read the current
+settings, preserve unrelated fields, and send the complete update document.
+
 Default provider records are created for:
 
 - `ollama`

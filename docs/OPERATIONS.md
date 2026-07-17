@@ -226,8 +226,11 @@ Reasoning tokens consume the same output cap as the final answer.
    ```
 
    Omit `SGLANG_CONTRACT_API_KEY_FILE` for an unauthenticated endpoint. Exit 0
-   means every selected contract passed. The bounded report contains no URL,
-   credential, prompt, response, reasoning trace, or tool arguments.
+   means every selected contract passed. A successful report contains no URL,
+   credential, prompt, response, reasoning trace, or tool arguments. On
+   failure, `diagnostic` may contain up to 512 redacted characters derived
+   from the provider error or response body. Treat a failed report as
+   operator-sensitive and inspect it before sharing.
 3. Exercise one Prompt Tester call, one Document Chat request, and one worker
    metadata job. These cover API and worker callers; do not use OCR as an M3
    validation path.

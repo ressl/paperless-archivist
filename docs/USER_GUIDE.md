@@ -281,12 +281,14 @@ For OCR, configure MinerU or Ollama separately. A common split is:
 The OCR override routes only page images to MinerU while every text consumer
 uses M3. The current Settings UI does not edit `stage_models`; an administrator
 reads the current document with `GET /api/settings`, preserves the other
-settings, and sends the added override through `PUT /api/settings` using a
-scoped API token. M3 vision remains outside release scope until ADR-014 is
-updated, the live image contract and OCR quality/capacity gates pass, and
-issues #322 through #338 (especially #323, #324, #326, and #327) are complete.
-The current OCR prompt tester is only a text wrapper around sample OCR text; it
-does not send an image to M3. See the
+settings, and sends the added override through `PUT /api/settings` using an
+interactive administrator cookie session and its CSRF token. Bearer/API tokens
+are rejected for settings updates regardless of scope; see the
+[API reference](API_REFERENCE.md#runtime-settings). M3 vision remains outside
+release scope until ADR-014 is updated, the live image contract and OCR
+quality/capacity gates pass, and issues #322 through #338 (especially #323,
+#324, #326, and #327) are complete. The current OCR prompt tester is only a
+text wrapper around sample OCR text; it does not send an image to M3. See the
 [operations runbook](OPERATIONS.md#sglangminimax-m3-operations) for live
 validation, NetworkPolicy, capacity, and symptom-specific troubleshooting.
 
