@@ -5606,10 +5606,11 @@ mod tests {
         }
     }
 
-    async fn assert_production_vision_path_stops_at_lost_lease(
+    async fn assert_production_vision_fencing(
         lease_results: Vec<bool>,
         expected_chat_calls: u32,
         expected_tag_calls: u32,
+        expect_fallback_success: bool,
     ) {
         let (base_url, state, server) = spawn_mock_ollama(Duration::from_millis(10)).await;
         let pool = vision_test_pool();
@@ -5665,7 +5666,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(outcome.is_none(), "lease loss must stop OCR cleanly");
+        if expect_fallback_success {
+            let (response, model, fallback_used) =
+                outcome.expect("three successful renewals must run the fallback");
+            assert_eq!(response.text, "fallback response");
+            assert_eq!(model, "qwen2.5vl:7b");
+            assert!(fallback_used);
+        } else {
+            assert!(outcome.is_none(), "lease loss must stop OCR cleanly");
+        }
         assert_eq!(
             lease_index.load(Ordering::SeqCst) as usize,
             lease_results.len()
@@ -5678,12 +5687,16 @@ mod tests {
     #[tokio::test]
     async fn production_vision_path_fences_primary_discovery_and_fallback_calls() {
         // Lost before primary: no provider request at all.
-        assert_production_vision_path_stops_at_lost_lease(vec![false], 0, 0).await;
+        assert_production_vision_fencing(vec![false], 0, 0, false).await;
         // Slow primary crashes, then ownership is lost: discovery is never called.
-        assert_production_vision_path_stops_at_lost_lease(vec![true, false], 1, 0).await;
+        assert_production_vision_fencing(vec![true, false], 1, 0, false).await;
         // Primary crashes and slow discovery succeeds, then ownership is lost:
         // the selected fallback is never called and no success audit can run.
-        assert_production_vision_path_stops_at_lost_lease(vec![true, true, false], 1, 1).await;
+        assert_production_vision_fencing(vec![true, true, false], 1, 1, false).await;
+        // All three renewals succeed: the real second /api/chat request runs,
+        // its response/model are returned, and only then can the best-effort
+        // success audit be attempted.
+        assert_production_vision_fencing(vec![true, true, true], 2, 1, true).await;
     }
 
     #[tokio::test]
