@@ -93,6 +93,24 @@ throughput by about 13% versus two while increasing p50 latency from 1.01 to
 method, p50/p95, throughput, timeout/error rates, the mixed application-path
 E2E gate, retry bounds, and the revalidation command.
 
+### OCR vision fallback lease fencing
+
+One OCR page can involve three high-level provider calls when an Ollama vision
+runtime crashes: the primary vision request, local model discovery through
+`/api/tags`, and one fallback vision request. The Worker renews its
+owner-scoped database lease immediately before each call. It does not rely on
+one lease window to cover the whole chain. Model discovery uses the same
+resolved `request_timeout_seconds` as the primary and fallback clients, so each
+step is bounded by the timeout used to size the lease.
+
+If any renewal reports that another Worker owns the job, the protected network
+future is never polled. OCR exits without writing a page cache entry, fallback
+success audit, job completion, review, or Paperless apply result. Search Worker
+logs for `OCR lease lost` and the structured `vision_phase` value (`primary`,
+`model_discovery`, or `fallback`) to locate the boundary. Persistent lease loss
+usually means Worker replicas or database latency exceed the configured model
+capacity; inspect expired leases and queue age before raising concurrency.
+
 ## Operational Targets
 
 Use these as practical targets, not strict promises:

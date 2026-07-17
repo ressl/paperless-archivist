@@ -8,6 +8,14 @@
 
 ## Unreleased
 
+- **Vision fallback lease fencing (#376):** OCR now renews the owner-scoped job
+  lease before each primary vision, Ollama model-discovery, and fallback vision
+  call. A lost lease stops before the next provider future is polled and before
+  cache, fallback-success audit, completion, review, or apply writes, preventing
+  two Worker replicas from processing the same page in parallel.
+- Ollama model discovery now uses the resolved provider
+  `request_timeout_seconds` instead of the constructor's fixed default. Worker
+  logs expose the stopped `vision_phase` when lease ownership is lost.
 - **Secure Caddy profile (#355):** the reverse-proxy Compose overlay now forces
   `ARCHIVIST_COOKIE_SECURE=true`; session and CSRF cookies issued through the
   public HTTPS profile therefore carry `Secure`. Direct base-only localhost

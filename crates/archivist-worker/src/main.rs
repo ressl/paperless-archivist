@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -578,6 +579,24 @@ fn job_lease_seconds(settings: &RuntimeSettings) -> i64 {
         .max()
         .unwrap_or(i64::from(archivist_core::DEFAULT_AI_REQUEST_TIMEOUT_SECS));
     BASE_JOB_LEASE_SECONDS.max(slowest_call_budget + JOB_LEASE_TIMEOUT_MARGIN_SECONDS)
+}
+
+/// Renew an owner-scoped job lease before polling a potentially slow network
+/// future. Keeping the call future unpolled until the renewal succeeds is the
+/// fencing guarantee: once another worker owns the job, this worker cannot
+/// start the next provider request and later reach cache/apply completion.
+async fn run_after_lease_renewal<T, Renewal, Call>(
+    renewal: Renewal,
+    call: Call,
+) -> Result<Option<T>>
+where
+    Renewal: Future<Output = Result<bool>>,
+    Call: Future<Output = T>,
+{
+    if !renewal.await? {
+        return Ok(None);
+    }
+    Ok(Some(call.await))
 }
 
 async fn process_available_jobs(
@@ -1495,7 +1514,12 @@ async fn installed_ollama_models_for_provider(
             return Vec::new();
         }
     };
-    let client = match OllamaClient::new(&provider.name, &provider.base_url, secret) {
+    let client = match OllamaClient::new_with_timeout(
+        &provider.name,
+        &provider.base_url,
+        secret,
+        ollama_discovery_timeout(provider),
+    ) {
         Ok(client) => client,
         Err(error) => {
             warn!(
@@ -1519,22 +1543,29 @@ async fn installed_ollama_models_for_provider(
     }
 }
 
+fn ollama_discovery_timeout(provider: &StageProvider) -> Duration {
+    Duration::from_secs(u64::from(provider.request_timeout_seconds))
+}
+
 /// Run a single vision request, transparently retrying on a vision-runtime-crash error
 /// against a configured or auto-discovered fallback model. The return value carries the
 /// model that actually produced the response so the caller can record the swap in
 /// per-page logs / audit metadata.
 ///
 /// Behaviour:
-/// 1. Call the primary provider/model.
+/// 1. Renew the owner-scoped job lease, then call the primary provider/model.
 /// 2. On success, return immediately.
-/// 3. On error: if `is_vision_model_runtime_crash` is true AND a fallback can be picked,
-///    log + emit a `worker.vision_model_fallback` audit event, then retry the exact same
-///    request against the fallback model once.
+/// 3. On a runtime-crash error, renew before Ollama model discovery, choose a fallback,
+///    renew again, emit the audit event, and retry the exact request once.
 /// 4. If the fallback also fails, or no fallback is available, return the original error.
+/// 5. If any renewal reports that ownership was lost, return `Ok(None)` before polling
+///    the following provider future. The OCR caller then exits without cache/apply writes.
 ///
 /// This function does NOT consume the job's attempt slot — both calls happen within the
-/// same worker tick. The orchestrator-driven retry budget only kicks in if the fallback
-/// also fails (transient classification keeps current retry+jitter behaviour intact).
+/// same worker tick. Each high-level network call is independently bounded by the provider
+/// timeout and covered by a fresh lease window. The orchestrator-driven retry budget only
+/// kicks in if the fallback also fails (transient classification keeps current
+/// retry+jitter behaviour intact).
 #[allow(clippy::too_many_arguments)]
 async fn run_vision_with_fallback(
     pool: &DbPool,
@@ -1543,33 +1574,91 @@ async fn run_vision_with_fallback(
     provider: &StageProvider,
     settings: &RuntimeSettings,
     job: &JobRecord,
+    lease_owner: &str,
     page_index: usize,
     request: VisionRequest,
-) -> Result<(AiResponse, String, bool)> {
+) -> Result<Option<(AiResponse, String, bool)>> {
     let primary_model = provider.model.clone();
     let mut request_with_primary = request.clone();
     request_with_primary.model = primary_model.clone();
-    match client.vision(request_with_primary).await {
-        Ok(response) => Ok((response, primary_model, false)),
+    let Some(primary_result) = run_after_lease_renewal(
+        archivist_db::bump_job_lease(pool, job.id, lease_owner, job_lease_seconds(settings)),
+        client.vision(request_with_primary),
+    )
+    .await?
+    else {
+        warn!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            page_index,
+            vision_phase = "primary",
+            "OCR lease lost before vision call; stopping before provider request"
+        );
+        return Ok(None);
+    };
+    match primary_result {
+        Ok(response) => Ok(Some((response, primary_model, false))),
         Err(error) => {
             if !is_vision_model_runtime_crash(&error) {
                 return Err(error);
             }
-            let installed = installed_ollama_models_for_provider(pool, config, provider).await;
+            let Some(installed) = run_after_lease_renewal(
+                archivist_db::bump_job_lease(
+                    pool,
+                    job.id,
+                    lease_owner,
+                    job_lease_seconds(settings),
+                ),
+                installed_ollama_models_for_provider(pool, config, provider),
+            )
+            .await?
+            else {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    page_index,
+                    vision_phase = "model_discovery",
+                    "OCR lease lost after primary failure; stopping before model discovery"
+                );
+                return Ok(None);
+            };
             let Some(choice) = pick_vision_fallback_model(settings, &primary_model, &installed)
             else {
                 return Err(error);
             };
+
             warn!(
                 primary_model = %primary_model,
                 fallback_model = %choice.model,
                 fallback_source = choice.source.as_str(),
                 page_index,
-                vision_model_fallback_used = true,
                 document_id = job.paperless_document_id,
                 stage = %job.stage,
-                "vision model crashed; retrying same page on fallback model"
+                "vision model crashed; selected fallback and renewing lease before retry"
             );
+            let mut fallback_request = request;
+            fallback_request.model = choice.model.clone();
+            let Some(fallback_result) = run_after_lease_renewal(
+                archivist_db::bump_job_lease(
+                    pool,
+                    job.id,
+                    lease_owner,
+                    job_lease_seconds(settings),
+                ),
+                client.vision(fallback_request),
+            )
+            .await?
+            else {
+                warn!(
+                    job_id = %job.id,
+                    document_id = job.paperless_document_id,
+                    page_index,
+                    vision_phase = "fallback",
+                    "OCR lease lost after model discovery; stopping before vision fallback"
+                );
+                return Ok(None);
+            };
+            let response = fallback_result?;
             let auto_discovered = choice.source == VisionFallbackSource::AutoDiscovered;
             let audit_metadata = json!({
                 "primary": primary_model,
@@ -1603,9 +1692,6 @@ async fn run_vision_with_fallback(
             {
                 warn!(error = %audit_error, "failed to record worker.vision_model_fallback audit event");
             }
-            let mut fallback_request = request;
-            fallback_request.model = choice.model.clone();
-            let response = client.vision(fallback_request).await?;
             info!(
                 primary_model = %primary_model,
                 fallback_model = %choice.model,
@@ -1616,7 +1702,7 @@ async fn run_vision_with_fallback(
                 stage = %job.stage,
                 "vision fallback succeeded"
             );
-            Ok((response, choice.model, true))
+            Ok(Some((response, choice.model, true)))
         }
     }
 }
@@ -1834,17 +1920,21 @@ async fn process_ocr(
             }],
         };
         let page_started = std::time::Instant::now();
-        let (response, model_used, fallback_used) = run_vision_with_fallback(
+        let Some((response, model_used, fallback_used)) = run_vision_with_fallback(
             pool,
             config,
             &vision_client,
             &provider,
             settings,
             job,
+            lease_owner,
             index,
             request,
         )
-        .await?;
+        .await?
+        else {
+            return Ok(());
+        };
         // Progress breadcrumb for the slow per-page vision calls — without this
         // the worker went silent for the whole OCR duration (only cache hits
         // logged), so a document stuck mid-OCR was invisible.
@@ -5413,6 +5503,110 @@ mod tests {
         settings.ai.fallback_vision_model = Some("   ".to_owned());
         // Whitespace-only explicit is treated as unset.
         assert!(pick_vision_fallback_model(&settings, "qwen2.5vl:7b", &[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn vision_fallback_sequence_renews_around_slow_primary_discovery_and_fallback() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let primary = {
+            let renew_events = Arc::clone(&events);
+            let call_events = Arc::clone(&events);
+            run_after_lease_renewal(
+                async move {
+                    sleep(Duration::from_millis(5)).await;
+                    renew_events.lock().unwrap().push("renew-primary");
+                    Ok::<bool, anyhow::Error>(true)
+                },
+                async move {
+                    call_events.lock().unwrap().push("primary");
+                    sleep(Duration::from_millis(5)).await;
+                    Err::<(), anyhow::Error>(anyhow!("simulated primary runtime crash"))
+                },
+            )
+            .await
+            .unwrap()
+            .expect("primary call must be fenced and executed")
+        };
+        assert!(primary.is_err(), "the slow primary failure drives fallback");
+
+        let installed = {
+            let renew_events = Arc::clone(&events);
+            let call_events = Arc::clone(&events);
+            run_after_lease_renewal(
+                async move {
+                    sleep(Duration::from_millis(5)).await;
+                    renew_events.lock().unwrap().push("renew-discovery");
+                    Ok::<bool, anyhow::Error>(true)
+                },
+                async move {
+                    call_events.lock().unwrap().push("discovery");
+                    sleep(Duration::from_millis(5)).await;
+                    vec!["fallback-model"]
+                },
+            )
+            .await
+            .unwrap()
+            .expect("discovery call must be fenced and executed")
+        };
+        assert_eq!(installed, vec!["fallback-model"]);
+
+        let fallback = {
+            let renew_events = Arc::clone(&events);
+            let call_events = Arc::clone(&events);
+            run_after_lease_renewal(
+                async move {
+                    sleep(Duration::from_millis(5)).await;
+                    renew_events.lock().unwrap().push("renew-fallback");
+                    Ok::<bool, anyhow::Error>(true)
+                },
+                async move {
+                    call_events.lock().unwrap().push("fallback");
+                    sleep(Duration::from_millis(5)).await;
+                    "fallback-response"
+                },
+            )
+            .await
+            .unwrap()
+            .expect("fallback call must be fenced and executed")
+        };
+        assert_eq!(fallback, "fallback-response");
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "renew-primary",
+                "primary",
+                "renew-discovery",
+                "discovery",
+                "renew-fallback",
+                "fallback",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn vision_network_step_is_never_polled_after_lease_loss() {
+        let provider_call_count = Arc::new(AtomicU32::new(0));
+        for phase in ["primary", "discovery", "fallback"] {
+            let count = Arc::clone(&provider_call_count);
+            let result =
+                run_after_lease_renewal(async { Ok::<bool, anyhow::Error>(false) }, async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    phase
+                })
+                .await
+                .unwrap();
+            assert_eq!(result, None, "{phase} must be fenced on lease loss");
+        }
+        assert_eq!(provider_call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ollama_discovery_uses_resolved_provider_timeout() {
+        let mut provider = stage_provider(AiProviderKind::Ollama);
+        provider.request_timeout_seconds = 47;
+        assert_eq!(ollama_discovery_timeout(&provider), Duration::from_secs(47));
     }
 
     // ---- v1.5.2 Bug 2 regression: name-to-id resolution for review_items ----

@@ -9,18 +9,18 @@
 **Files:**
 - Modify: `crates/archivist-worker/src/main.rs`
 
-- [ ] Add a reusable async test seam that renews a lease before polling a provider future.
-- [ ] Add delayed-call tests proving the order primary heartbeat -> primary, discovery heartbeat -> discovery, and fallback heartbeat -> fallback.
-- [ ] Add lease-loss tests proving the protected provider future is never polled after a failed renewal.
+- [x] Add a reusable async test seam that renews a lease before polling a provider future.
+- [x] Add delayed-call tests proving the order primary heartbeat -> primary, discovery heartbeat -> discovery, and fallback heartbeat -> fallback.
+- [x] Add lease-loss tests proving the protected provider future is never polled after a failed renewal.
 
 ### Task 2: Fence the production fallback path
 
 **Files:**
 - Modify: `crates/archivist-worker/src/main.rs`
 
-- [ ] Renew immediately before the primary call, after a runtime-crash error before discovery, and again before the fallback call.
-- [ ] Propagate lease loss as a controlled OCR stop before cache, audit-success, completion, review, or apply writes.
-- [ ] Preserve the original runtime-crash error when no fallback exists and the existing retry/error classification when a call fails.
+- [x] Renew immediately before the primary call, after a runtime-crash error before discovery, and again before the fallback call.
+- [x] Propagate lease loss as a controlled OCR stop before cache, audit-success, completion, review, or apply writes.
+- [x] Preserve the original runtime-crash error when no fallback exists and the existing retry/error classification when a call fails.
 
 ### Task 3: Align Ollama discovery timeout
 
@@ -28,8 +28,8 @@
 - Modify: `crates/archivist-worker/src/main.rs`
 - Modify/add: focused tests around timeout construction
 
-- [ ] Construct the Ollama discovery client with the resolved `StageProvider.request_timeout_seconds` value.
-- [ ] Prove the resolved provider timeout is used instead of the legacy fixed constructor default.
+- [x] Construct the Ollama discovery client with the resolved `StageProvider.request_timeout_seconds` value.
+- [x] Prove the resolved provider timeout is used instead of the legacy fixed constructor default.
 
 ### Task 4: Document operations
 
@@ -37,11 +37,11 @@
 - Modify: `docs/PERFORMANCE.md`
 - Modify: `docs/RELEASE_NOTES.md`
 
-- [ ] Explain the three independently fenced network steps and the closed behavior on lease loss.
-- [ ] Document the provider-timeout/lease relationship and the existing lease-loss log signal.
+- [x] Explain the three independently fenced network steps and the closed behavior on lease loss.
+- [x] Document the provider-timeout/lease relationship and the existing lease-loss log signal.
 
 ### Task 5: Verify and deliver
 
-- [ ] Run focused Worker tests, the full Worker suite, Clippy, formatting, documentation checks, and secret scan.
+- [x] Run focused Worker tests, the full Worker suite, Clippy, formatting, documentation checks, and secret scan.
 - [ ] Obtain an independent Critical/Important review and resolve every finding.
 - [ ] Commit/push, verify branch and MR pipelines, document evidence, and close #376 only when green.
