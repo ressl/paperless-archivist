@@ -140,7 +140,9 @@ represented only by SHA-256 so reports from the same deployment can be
 correlated without publishing its address.
 
 Ordinary CI runs the complete local mock and negative matrix through
-`public:sglang:minimax-m3:contract-mock`. The live job is exposed as
+`public:sglang:minimax-m3:contract-mock`; the authoritative internal blueprint
+also reaches the same offline matrix through the frontend `pnpm test` script.
+The live job is exposed in the public-safe project pipeline as
 `sglang:minimax-m3:live-contract` only on a protected ref when the protected
 endpoint variable is present; it remains a manual action and stores only the
 redacted JSON report. Use a protected GitLab file variable for the optional API

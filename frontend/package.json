@@ -13,7 +13,7 @@
     "contract:compose:rendered": "node ../scripts/verify/compose_proxy_contract.mjs",
     "accessibility:check": "node ../scripts/verify/accessibility_static_check.mjs",
     "i18n:check": "node ../scripts/verify/i18n_translation_parity.mjs",
-    "test": "pnpm test:a11y && pnpm test:i18n",
+    "test": "node --test ../scripts/verify/sglang_minimax_m3_contract.test.mjs && pnpm test:a11y && pnpm test:i18n",
     "test:a11y": "vitest run --reporter=verbose",
     "test:i18n": "node --test ../scripts/verify/i18n_translation_parity.test.mjs",
     "typecheck": "tsc --noEmit",
