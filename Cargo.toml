@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/archivist-api",
   "crates/archivist-ai",
+  "crates/archivist-apply",
   "crates/archivist-config",
   "crates/archivist-core",
   "crates/archivist-db",

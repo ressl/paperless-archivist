@@ -142,6 +142,7 @@ version = "1.16.0"
 dependencies = [
  "anyhow",
  "archivist-ai",
+ "archivist-apply",
  "archivist-config",
  "archivist-core",
  "archivist-db",
@@ -172,6 +173,26 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "archivist-apply"
+version = "1.16.0"
+dependencies = [
+ "anyhow",
+ "archivist-core",
+ "archivist-db",
+ "archivist-paperless",
+ "archivist-sqlx",
+ "axum",
+ "hex",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -267,6 +288,7 @@ version = "1.16.0"
 dependencies = [
  "anyhow",
  "archivist-ai",
+ "archivist-apply",
  "archivist-config",
  "archivist-core",
  "archivist-db",

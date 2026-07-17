@@ -9,6 +9,9 @@ use archivist_ai::{
     ImageInput, MineruClient, OllamaClient, OpenAiCompatibleClient, PromptLanguageContext,
     TextProvider, VisionProvider, VisionRequest, parse_metadata_suggestion, prompt_for_metadata,
 };
+use archivist_apply::{
+    ApplyExecution, ApplyRequest, apply_document, recover_review_apply_intents, resume_apply_source,
+};
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, DocumentPatch, LanguageDetection, MetadataFieldFlags,
@@ -224,9 +227,21 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         Err(error) => warn!(error = %error, "startup stuck-runs reset failed"),
     }
 
-    // Recover review items stranded in 'applying' by a crash between claim and
-    // apply (#253). 300s comfortably exceeds a healthy apply, so anything
-    // older was abandoned.
+    // Reconcile durable Paperless intents before the legacy stale-review
+    // sweep. Active/confirmed intents remain fenced; only rows with no active
+    // intent or a settled failure may return to a retryable review status.
+    if let Err(error) = timeout(
+        Duration::from_secs(30),
+        recover_review_apply_tick(&pool, &config),
+    )
+    .await
+    .unwrap_or_else(|_| Err(anyhow!("startup review-intent recovery timed out")))
+    {
+        warn!(error = %error, "startup review-intent recovery failed");
+    }
+
+    // Recover legacy review items stranded in 'applying' before durable
+    // intents existed. 300s comfortably exceeds a healthy apply.
     match reset_stale_applying_reviews(&pool, 300).await {
         Ok(count) if count > 0 => {
             info!(
@@ -313,6 +328,15 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 // mid-apply (#253), once per minute. 300s exceeds a healthy
                 // apply, so anything older was abandoned.
                 if tick % 12 == 9 {
+                    if let Err(error) = timeout(
+                        Duration::from_secs(20),
+                        recover_review_apply_tick(&pool, &config),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow!("review-intent recovery timed out")))
+                    {
+                        warn!(error = %error, "review-intent recovery sweep failed");
+                    }
                     match reset_stale_applying_reviews(&pool, 300).await {
                         Ok(count) if count > 0 => warn!(
                             count,
@@ -411,6 +435,22 @@ async fn write_liveness_heartbeat() {
 async fn record_dashboard_snapshot_tick(pool: &DbPool) -> Result<()> {
     let counts = get_backlog_counts(pool).await?;
     record_dashboard_snapshot(pool, &counts).await
+}
+
+async fn recover_review_apply_tick(pool: &DbPool, config: &AppConfig) -> Result<()> {
+    let settings = get_runtime_settings(pool).await?;
+    let paperless = paperless_client(pool, config, &settings).await?;
+    let summary = recover_review_apply_intents(pool, &paperless, 100).await?;
+    if summary.examined > 0 {
+        info!(
+            examined = summary.examined,
+            applied = summary.applied,
+            failed_settled = summary.failed_settled,
+            deferred = summary.deferred,
+            "recovered durable Paperless review intents"
+        );
+    }
+    Ok(())
 }
 
 /// Tick wrapper for the autopilot review drain.
@@ -2822,16 +2862,17 @@ async fn process_metadata(
     } else if !applied_fields.is_empty() {
         if auto_apply {
             let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
-            apply_patch_with_workflow_tags(
+            let execution = apply_patch_with_workflow_tags(
                 pool,
                 paperless,
                 settings,
                 job,
                 composite_patch,
                 final_run_stage,
+                lease_owner,
             )
             .await?;
-            if !complete_job(
+            if complete_job(
                 pool,
                 job,
                 lease_owner,
@@ -2844,6 +2885,8 @@ async fn process_metadata(
             )
             .await?
             {
+                archivist_db::finalize_apply_intent(pool, execution.attempt_id()).await?;
+            } else {
                 warn!(
                     job_id = %job.id,
                     document_id = job.paperless_document_id,
@@ -3154,8 +3197,17 @@ async fn handle_patch_result(
         return Ok(());
     }
     let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
-    apply_patch_with_workflow_tags(pool, paperless, settings, job, patch, final_run_stage).await?;
-    if !complete_job(
+    let execution = apply_patch_with_workflow_tags(
+        pool,
+        paperless,
+        settings,
+        job,
+        patch,
+        final_run_stage,
+        lease_owner,
+    )
+    .await?;
+    if complete_job(
         pool,
         job,
         lease_owner,
@@ -3163,6 +3215,8 @@ async fn handle_patch_result(
     )
     .await?
     {
+        archivist_db::finalize_apply_intent(pool, execution.attempt_id()).await?;
+    } else {
         warn!(
             job_id = %job.id,
             document_id = job.paperless_document_id,
@@ -3179,7 +3233,12 @@ async fn apply_patch_with_workflow_tags(
     job: &JobRecord,
     mut patch: DocumentPatch,
     final_run_stage: bool,
-) -> Result<()> {
+    lease_owner: &str,
+) -> Result<ApplyExecution> {
+    let source_key = format!("job:{}", job.id);
+    if let Some(execution) = resume_apply_source(pool, paperless, &source_key).await? {
+        return Ok(execution);
+    }
     let document = paperless.get_document(job.paperless_document_id).await?;
     let tags = paperless.list_tags().await?;
     let mut tag_ids = patch.tags.clone().unwrap_or_else(|| document.tags.clone());
@@ -3218,64 +3277,37 @@ async fn apply_patch_with_workflow_tags(
     patch.tags = Some(tag_ids);
     prune_unchanged_patch_fields(&mut patch, &document);
     let before_value = audit_before_for_patch(&document, &patch);
-    let patch_value = audit_patch_payload(&patch);
-    let apply_started = std::time::Instant::now();
-    if let Err(error) = patch_document_dropping_bad_custom_fields(
+    let execution = apply_document(
         pool,
         paperless,
-        job.paperless_document_id,
-        &patch,
-        Some(job.run_id),
-        Some(job.id),
-        json!({ "stage": job.stage }),
-    )
-    .await
-    {
-        let duration_ms = apply_started.elapsed().as_millis() as u64;
-        append_audit(
-            pool,
-            AuditEventInput {
-                event_type: "document.patch_apply_failed".to_owned(),
-                actor_type: "worker".to_owned(),
-                actor_id: None,
-                run_id: Some(job.run_id),
-                job_id: Some(job.id),
-                paperless_document_id: Some(job.paperless_document_id),
-                before: Some(before_value),
-                after: Some(patch_value),
-                metadata: Some(json!({ "stage": job.stage, "duration_ms": duration_ms })),
-                outcome: "failed".to_owned(),
-                error_message: Some(error.to_string()),
-                source_ip: None,
-                user_agent: None,
-            },
-        )
-        .await?;
-        increment_metric_counter(pool, "apply_failure_total", 1).await?;
-        return Err(error);
-    }
-    let duration_ms = apply_started.elapsed().as_millis() as u64;
-    append_audit(
-        pool,
-        AuditEventInput {
-            event_type: "document.patch_applied".to_owned(),
-            actor_type: "worker".to_owned(),
-            actor_id: None,
+        ApplyRequest {
+            source: "worker_auto".to_owned(),
+            source_key,
+            owner_type: "worker".to_owned(),
+            owner_id: lease_owner.to_owned(),
+            paperless_document_id: job.paperless_document_id,
             run_id: Some(job.run_id),
             job_id: Some(job.id),
-            paperless_document_id: Some(job.paperless_document_id),
+            review_id: None,
+            patch,
             before: Some(before_value),
-            after: Some(patch_value),
-            metadata: Some(json!({ "stage": job.stage, "duration_ms": duration_ms })),
-            outcome: "success".to_owned(),
-            error_message: None,
-            source_ip: None,
-            user_agent: None,
+            metadata: json!({ "stage": job.stage }),
+            review_revert_status: None,
+            allow_custom_fields_fallback: true,
         },
     )
     .await?;
-    increment_metric_counter(pool, "apply_success_total", 1).await?;
-    Ok(())
+    if execution.custom_fields_dropped() {
+        audit_custom_fields_dropped(
+            pool,
+            job.paperless_document_id,
+            Some(job.run_id),
+            Some(job.id),
+            json!({ "stage": job.stage }),
+        )
+        .await?;
+    }
+    Ok(execution)
 }
 
 /// Decide whether the autopilot review drain should run on this tick.
@@ -3461,24 +3493,39 @@ async fn apply_one_autopilot_drain_review(
     )
     .await
     .unwrap_or_else(|_| Err(anyhow!("per-item drain patch timeout after 45s")));
-    if let Err(error) = patch_result {
-        // Roll the row back to pending so the next tick can retry. We
-        // deliberately don't audit a failure event here — Paperless errors
-        // already get an `document.patch_apply_failed` audit inside
-        // `apply_autopilot_drain_patch`; non-Paperless errors are rare and
-        // logged via the caller's `warn!`.
-        if let Err(revert_error) =
-            revert_review_to_pending_after_failed_drain(pool, claimed.id).await
-        {
-            warn!(
-                review_id = %claimed.id,
-                error = %revert_error,
-                "failed to revert review item to pending after drain failure"
-            );
+    let execution = match patch_result {
+        Ok(execution) => execution,
+        Err(error) => {
+            // Revert only when no prepared/in-flight/confirmed intent exists.
+            // An ambiguous timeout must remain fenced until recovery performs
+            // GET reconciliation; reverting it would permit a duplicate PATCH.
+            match archivist_db::review_has_nonterminal_apply_intent(pool, claimed.id).await {
+                Ok(false) => {
+                    if let Err(revert_error) =
+                        revert_review_to_pending_after_failed_drain(pool, claimed.id).await
+                    {
+                        warn!(
+                            review_id = %claimed.id,
+                            error = %revert_error,
+                            "failed to revert review item after terminal drain failure"
+                        );
+                    }
+                }
+                Ok(true) => warn!(
+                    review_id = %claimed.id,
+                    "autopilot review remains fenced while its apply intent is recovered"
+                ),
+                Err(lookup_error) => warn!(
+                    review_id = %claimed.id,
+                    error = %lookup_error,
+                    "could not prove autopilot review safe to revert; leaving it fenced"
+                ),
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     mark_review_auto_applied(pool, claimed.id).await?;
+    archivist_db::finalize_apply_intent(pool, execution.attempt_id()).await?;
     Ok(true)
 }
 
@@ -3489,7 +3536,7 @@ async fn apply_autopilot_drain_patch(
     review: &ReviewItemRecord,
     tag_cache: &mut Vec<archivist_paperless::PaperlessTag>,
     completion_full: &archivist_paperless::PaperlessTag,
-) -> Result<()> {
+) -> Result<ApplyExecution> {
     let patch_value = review
         .edited_patch
         .clone()
@@ -3538,120 +3585,58 @@ async fn apply_autopilot_drain_patch(
     patch.tags = Some(tag_ids);
     prune_unchanged_patch_fields(&mut patch, &document);
     let before = audit_before_for_patch(&document, &patch);
-    let after = audit_patch_payload(&patch);
-    let apply_started = std::time::Instant::now();
-    if let Err(error) = patch_document_dropping_bad_custom_fields(
+    let execution = apply_document(
         pool,
         paperless,
-        review.paperless_document_id,
-        &patch,
-        review.run_id,
-        review.job_id,
-        json!({
-            "stage": review.stage,
-            "review_id": review.id,
-            "trigger": "autopilot_drain"
-        }),
-    )
-    .await
-    {
-        let duration_ms = apply_started.elapsed().as_millis() as u64;
-        append_audit(
-            pool,
-            AuditEventInput {
-                event_type: "document.patch_apply_failed".to_owned(),
-                actor_type: "worker".to_owned(),
-                actor_id: None,
-                run_id: review.run_id,
-                job_id: review.job_id,
-                paperless_document_id: Some(review.paperless_document_id),
-                before: Some(before),
-                after: Some(after),
-                metadata: Some(json!({
-                    "stage": review.stage,
-                    "review_id": review.id,
-                    "duration_ms": duration_ms,
-                    "trigger": "autopilot_drain"
-                })),
-                outcome: "failed".to_owned(),
-                error_message: Some(error.to_string()),
-                source_ip: None,
-                user_agent: None,
-            },
-        )
-        .await?;
-        increment_metric_counter(pool, "apply_failure_total", 1).await?;
-        return Err(error);
-    }
-    let duration_ms = apply_started.elapsed().as_millis() as u64;
-    append_audit(
-        pool,
-        AuditEventInput {
-            event_type: "document.patch_applied".to_owned(),
-            actor_type: "worker".to_owned(),
-            actor_id: None,
+        ApplyRequest {
+            source: "autopilot_drain".to_owned(),
+            source_key: format!("review:{}", review.id),
+            owner_type: "worker".to_owned(),
+            owner_id: "autopilot-drain".to_owned(),
+            paperless_document_id: review.paperless_document_id,
             run_id: review.run_id,
             job_id: review.job_id,
-            paperless_document_id: Some(review.paperless_document_id),
+            review_id: Some(review.id),
+            patch,
             before: Some(before),
-            after: Some(after),
-            metadata: Some(json!({
+            metadata: json!({
                 "stage": review.stage,
                 "review_id": review.id,
-                "duration_ms": duration_ms,
                 "trigger": "autopilot_drain"
-            })),
-            outcome: "success".to_owned(),
-            error_message: None,
-            source_ip: None,
-            user_agent: None,
+            }),
+            review_revert_status: Some("pending".to_owned()),
+            allow_custom_fields_fallback: true,
         },
     )
     .await?;
-    increment_metric_counter(pool, "apply_success_total", 1).await?;
-    Ok(())
+    if execution.custom_fields_dropped() {
+        audit_custom_fields_dropped(
+            pool,
+            review.paperless_document_id,
+            review.run_id,
+            review.job_id,
+            json!({
+                "stage": review.stage,
+                "review_id": review.id,
+                "trigger": "autopilot_drain"
+            }),
+        )
+        .await?;
+    }
+    Ok(execution)
 }
 
-/// Whether a `patch_document` failure is a Paperless 400 that implicates
-/// `custom_fields`. The typed `PaperlessError::Client` Display embeds both
-/// `status=` and the response `body`, and a Paperless validation 400 names the
-/// offending field (`custom_fields`) in that body — so matching on the rendered
-/// error string is enough to recognise the "one bad custom field" case.
-fn is_custom_fields_400(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.contains("status=400") && message.contains("custom_fields")
-}
-
-/// Apply `patch` to a Paperless document, resilient to a single bad custom
-/// field sinking the whole patch. If the initial PATCH fails with a Paperless
-/// 400 that implicates `custom_fields`, retry ONCE with the same patch but
-/// `custom_fields = None`, so title/tags/correspondent/date still land. On a
-/// successful retry, append a `document.custom_fields_dropped` audit event
-/// recording that the custom fields were dropped due to a Paperless 400. If the
-/// retry also fails — or the failure was not a custom_fields 400 — the original
-/// error is propagated unchanged. A single retry only; never a loop.
-async fn patch_document_dropping_bad_custom_fields(
+/// Keep the existing operator-visible marker when the shared durable executor
+/// had to prepare a second, reduced intent after Paperless rejected custom
+/// fields. The failed and successful HTTP attempts themselves are audited by
+/// the intent state transitions.
+async fn audit_custom_fields_dropped(
     pool: &DbPool,
-    paperless: &PaperlessClient,
     document_id: i32,
-    patch: &DocumentPatch,
     run_id: Option<Uuid>,
     job_id: Option<Uuid>,
     extra_metadata: serde_json::Value,
 ) -> Result<()> {
-    let error = match paperless.patch_document(document_id, patch).await {
-        Ok(_) => return Ok(()),
-        Err(error) => error,
-    };
-    if patch.custom_fields.is_none() || !is_custom_fields_400(&error) {
-        return Err(error);
-    }
-    let mut retry = patch.clone();
-    retry.custom_fields = None;
-    if paperless.patch_document(document_id, &retry).await.is_err() {
-        // Dropping custom_fields didn't help — surface the original failure.
-        return Err(error);
-    }
     let mut metadata = extra_metadata;
     if let Some(object) = metadata.as_object_mut() {
         object.insert(
@@ -3679,7 +3664,7 @@ async fn patch_document_dropping_bad_custom_fields(
             after: None,
             metadata: Some(metadata),
             outcome: "success".to_owned(),
-            error_message: Some(error.to_string()),
+            error_message: None,
             source_ip: None,
             user_agent: None,
         },
@@ -3773,6 +3758,7 @@ fn audit_before_for_patch(
     serde_json::Value::Object(object)
 }
 
+#[cfg(test)]
 fn audit_patch_payload(patch: &DocumentPatch) -> serde_json::Value {
     let mut object = serde_json::Map::new();
     if let Some(content) = &patch.content {
@@ -4710,6 +4696,7 @@ mod tests {
             tags: vec![1, 2],
             correspondent: Some(7),
             document_type: Some(9),
+            custom_fields: serde_json::Value::Null,
             original_file_name: Some("document.pdf".to_owned()),
         }
     }

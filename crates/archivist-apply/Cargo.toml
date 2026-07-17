@@ -1,28 +1,23 @@
 [package]
-name = "archivist-worker"
+name = "archivist-apply"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-archivist-ai = { path = "../archivist-ai" }
-archivist-apply = { path = "../archivist-apply" }
-archivist-config = { path = "../archivist-config" }
 archivist-core = { path = "../archivist-core" }
 archivist-db = { path = "../archivist-db" }
-archivist-ocr = { path = "../archivist-ocr" }
 archivist-paperless = { path = "../archivist-paperless" }
-chrono.workspace = true
-futures.workspace = true
 hex.workspace = true
-reqwest.workspace = true
-secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+secrecy.workspace = true
+sqlx.workspace = true
+tokio.workspace = true

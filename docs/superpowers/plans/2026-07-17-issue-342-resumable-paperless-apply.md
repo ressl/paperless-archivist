@@ -30,15 +30,15 @@
 - Consumes: existing `review_items.applying` fence and `PaperlessDocumentDetail`.
 - Produces: RED tests for stable intent reuse, state transitions, stale-review protection, and patch-vs-document matching.
 
-- [ ] **Step 1: Write DB tests before DB helpers exist**
+- [x] **Step 1: Write DB tests before DB helpers exist**
 
 Cover prepare-before-send, `(source_key, patch_hash)` idempotency, ownership/attempt ID persistence, valid transition ordering, metric/audit once-only behavior, and exclusion of active intents from the old stale-`applying` reset.
 
-- [ ] **Step 2: Write pure reconciliation tests**
+- [x] **Step 2: Write pure reconciliation tests**
 
 Cover title/content/date/correspondent/type, order-insensitive tags, custom fields, empty patches, and a single mismatching requested field.
 
-- [ ] **Step 3: Run the targeted tests and capture RED**
+- [x] **Step 3: Run the targeted tests and capture RED**
 
 Run the Paperless unit tests and the ignored PostgreSQL review fence test. Expected: compile/schema failures until Tasks 2 and 3 are implemented.
 
@@ -52,19 +52,19 @@ Run the Paperless unit tests and the ignored PostgreSQL review fence test. Expec
 - Consumes: source key, document ID, canonical patch/hash, run/job/review IDs, owner, audit metadata.
 - Produces: states `prepared -> in_flight -> confirmed|reconciled|failed -> finalized` with an immutable attempt ID.
 
-- [ ] **Step 1: Add schema and constraints**
+- [x] **Step 1: Add schema and constraints**
 
 Persist attempt ID, source/source key, owner type/ID, document/run/job/review IDs, patch/hash, before image, metadata, review fallback status, timestamps, error, and state. Unique `(source_key, patch_hash)` makes retries return the same attempt.
 
-- [ ] **Step 2: Add typed CRUD/transition helpers**
+- [x] **Step 2: Add typed CRUD/transition helpers**
 
 Prepare/get, start, confirm, reconcile, fail, finalize, list recoverable review intents, and fetch current intent. Conditional updates make every transition idempotent.
 
-- [ ] **Step 3: Couple audit and metrics to transitions**
+- [x] **Step 3: Couple audit and metrics to transitions**
 
 Write `document.patch_intent`, `document.patch_confirmed`, `document.patch_reconciled`, and `document.patch_failed`; success/failure counters increment only on the first corresponding transition.
 
-- [ ] **Step 4: Make stale review recovery intent-aware**
+- [x] **Step 4: Make stale review recovery intent-aware**
 
 The legacy timeout sweep may reset `applying` only when no non-finalized apply intent exists.
 
@@ -80,19 +80,19 @@ The legacy timeout sweep may reset `applying` only when no non-finalized apply i
 - Consumes: an apply request plus `DbPool` and `PaperlessClient`.
 - Produces: confirmed/reconciled/no-op result with exactly-once HTTP behavior per durable attempt.
 
-- [ ] **Step 1: Add canonical hashing and document matching**
+- [x] **Step 1: Add canonical hashing and document matching**
 
 Serialize the typed patch deterministically, hash it with SHA-256, and compare every requested field against a fresh Paperless detail response.
 
-- [ ] **Step 2: Execute new/prepared attempts safely**
+- [x] **Step 2: Execute new/prepared attempts safely**
 
 Persist `prepared`, atomically transition to `in_flight`, then send PATCH. A successful response transitions to `confirmed` before returning to caller.
 
-- [ ] **Step 3: Reconcile existing/ambiguous attempts**
+- [x] **Step 3: Reconcile existing/ambiguous attempts**
 
 An existing `in_flight` attempt performs GET only. Matching state becomes `reconciled`; mismatch becomes `failed` for operator/retry handling and is never blindly re-PATCHed. Timeout/network/5xx errors perform the same read-after-error reconciliation; an unavailable read leaves the intent in-flight for recovery.
 
-- [ ] **Step 4: Preserve custom-field fallback safely**
+- [x] **Step 4: Preserve custom-field fallback safely**
 
 If Paperless definitively rejects `custom_fields`, fail that attempt and prepare a second intent for the reduced patch before the one allowed fallback PATCH.
 
@@ -108,19 +108,19 @@ If Paperless definitively rejects `custom_fields`, fail that attempt and prepare
 - Consumes: existing human review, direct full-auto, and autopilot drain patch builders.
 - Produces: one common durable apply executor with caller-specific idempotent local finalization.
 
-- [ ] **Step 1: Human apply**
+- [x] **Step 1: Human apply**
 
 Use source key `review:<id>`, user ownership, and prior review status. Do not revert an intent-backed ambiguous/confirmed apply to an blindly retryable review state.
 
-- [ ] **Step 2: Direct worker auto-apply**
+- [x] **Step 2: Direct worker auto-apply**
 
 Use source key `job:<id>` and lease owner. A retry/new lease reuses confirmed/reconciled intent state and skips HTTP before calling the existing fenced `complete_job`.
 
-- [ ] **Step 3: Autopilot drain**
+- [x] **Step 3: Autopilot drain**
 
 Use the review source key with worker ownership and the same executor. Timeout recovery uses the intent state rather than reverting blindly to pending.
 
-- [ ] **Step 4: Recover stranded review intents**
+- [x] **Step 4: Recover stranded review intents**
 
 At startup and periodic recovery ticks, execute prepared intents, reconcile in-flight intents, finalize confirmed/reconciled human or drain reviews, and return failed review intents to their recorded safe status.
 
@@ -134,11 +134,11 @@ At startup and periodic recovery ticks, execute prepared intents, reconcile in-f
 - Consumes: the completed state machine and PostgreSQL 18 CI gate.
 - Produces: a reviewable #342 commit with failure-boundary evidence.
 
-- [ ] **Step 1: Test every failure boundary**
+- [x] **Step 1: Test every failure boundary**
 
 Inject failure after intent, ambiguous HTTP timeout, confirmed HTTP followed by local failure, audit/metric transition replay, process restart, and lease-owner change. Assert the mock PATCH count never exceeds one for an intent.
 
-- [ ] **Step 2: Run all gates**
+- [x] **Step 2: Run all gates**
 
 ```bash
 cargo fmt --all -- --check
@@ -149,6 +149,6 @@ cargo audit --deny warnings
 cargo deny check
 ```
 
-- [ ] **Step 3: Commit, push, inspect pipeline, and document #342**
+- [x] **Step 3: Commit, push, inspect pipeline, and document #342**
 
 Include migration compatibility, state diagram, fault-injection results, commit SHA, and exact CI job links in the issue/MR evidence.

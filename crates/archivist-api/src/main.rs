@@ -9,6 +9,7 @@ use archivist_ai::{
     AiResponse, AnthropicClient, ChatRequest, MineruClient, OllamaClient, OllamaLoadedModel,
     OllamaModel, OpenAiCompatibleClient, TextProvider,
 };
+use archivist_apply::{ApplyRequest, apply_document};
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, DashboardProviderCostSummary, DashboardRange, DashboardStats,
@@ -24,7 +25,7 @@ use archivist_db::{
     create_runs_for_documents, create_session, create_user_with_roles, dashboard_bucket_labels,
     dashboard_range_start, document_chat_session_visible, failed_document_ids, find_api_token,
     find_session, find_user_for_login, get_backlog_counts, get_dashboard_live_status,
-    get_dashboard_stats, get_runtime_settings, has_any_user, hash_token, increment_metric_counter,
+    get_dashboard_stats, get_runtime_settings, has_any_user, hash_token,
     insert_document_chat_message, insert_document_chat_sources, latest_apply_audit_for_run,
     latest_metadata_artifact_for_run, latest_metadata_run_for_document, list_audit_events,
     list_document_chat_messages, list_document_chat_sessions, list_inventory,
@@ -4060,7 +4061,7 @@ impl MetadataField {
         ]
     }
 
-    /// Key under which `audit_events.document.patch_applied.after` carries
+    /// Key under which durable patch-intent audit events carry
     /// this field's value. `document_date` is keyed as `created` because the
     /// worker writes to Paperless's `created` field. `fields` is keyed as
     /// `custom_fields` (the Paperless API name).
@@ -6272,15 +6273,31 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
     };
     // review.status holds the pre-claim status ('approved'/'edited'). The row
     // is now 'applying', which fences out a concurrent apply / autopilot
-    // drain. If any step below fails, restore that prior status so the
-    // operator can retry instead of the row being stuck in 'applying'.
+    // drain. Only failures that never produced a nonterminal durable intent
+    // may be reverted immediately; ambiguous HTTP outcomes stay fenced for
+    // the recovery worker instead of becoming blindly retryable.
     let prior_status = review.status.clone();
     let result = apply_claimed_review(state, &review, actor_id).await;
     if result.is_err() {
-        // Best-effort release of our claim; a success path already moved the
-        // row to 'applied', so this no-ops there.
-        let _ =
-            archivist_db::revert_review_from_applying(&state.pool, review_id, &prior_status).await;
+        match archivist_db::review_has_nonterminal_apply_intent(&state.pool, review_id).await {
+            Ok(false) => {
+                let _ = archivist_db::revert_review_from_applying(
+                    &state.pool,
+                    review_id,
+                    &prior_status,
+                )
+                .await;
+            }
+            Ok(true) => warn!(
+                %review_id,
+                "review apply remains fenced while its Paperless intent is recovered"
+            ),
+            Err(error) => warn!(
+                %review_id,
+                error = %error,
+                "could not prove review apply safe to revert; leaving it fenced"
+            ),
+        }
     }
     result
 }
@@ -6312,67 +6329,33 @@ async fn apply_claimed_review(
     let document = client.get_document(review.paperless_document_id).await?;
     prune_unchanged_patch_fields(&mut patch, &document);
     let before = audit_before_for_patch(&document, &patch);
-    let after = audit_patch_payload(&patch);
     let apply_started = std::time::Instant::now();
-    if let Err(error) = client
-        .patch_document(review.paperless_document_id, &patch)
-        .await
-    {
-        let duration_ms = apply_started.elapsed().as_millis() as u64;
-        append_audit(
-            &state.pool,
-            AuditEventInput {
-                event_type: "document.patch_apply_failed".to_owned(),
-                actor_type: "user".to_owned(),
-                actor_id: Some(actor_id.to_string()),
-                run_id: review.run_id,
-                job_id: review.job_id,
-                paperless_document_id: Some(review.paperless_document_id),
-                before: Some(before),
-                after: Some(after),
-                metadata: Some(json!({
-                    "stage": review.stage,
-                    "review_id": review.id,
-                    "duration_ms": duration_ms
-                })),
-                outcome: "failed".to_owned(),
-                error_message: Some(error.to_string()),
-                source_ip: None,
-                user_agent: None,
-            },
-        )
-        .await?;
-        increment_metric_counter(&state.pool, "apply_failure_total", 1).await?;
-        // The caller (`apply_review_patch`) releases the `applying` claim on
-        // any Err return, so the row reverts to its prior status for retry.
-        return Err(error);
-    }
-    let duration_ms = apply_started.elapsed().as_millis() as u64;
-    append_audit(
+    let execution = apply_document(
         &state.pool,
-        AuditEventInput {
-            event_type: "document.patch_applied".to_owned(),
-            actor_type: "user".to_owned(),
-            actor_id: Some(actor_id.to_string()),
+        &client,
+        ApplyRequest {
+            source: "human_review".to_owned(),
+            source_key: format!("review:{review_id}"),
+            owner_type: "user".to_owned(),
+            owner_id: actor_id.to_string(),
+            paperless_document_id: review.paperless_document_id,
             run_id: review.run_id,
             job_id: review.job_id,
-            paperless_document_id: Some(review.paperless_document_id),
+            review_id: Some(review.id),
+            patch,
             before: Some(before),
-            after: Some(after),
-            metadata: Some(json!({
+            metadata: json!({
                 "stage": review.stage,
-                "review_id": review.id,
-                "duration_ms": duration_ms
-            })),
-            outcome: "success".to_owned(),
-            error_message: None,
-            source_ip: None,
-            user_agent: None,
+                "review_id": review.id
+            }),
+            review_revert_status: Some(review.status.clone()),
+            allow_custom_fields_fallback: false,
         },
     )
     .await?;
-    increment_metric_counter(&state.pool, "apply_success_total", 1).await?;
+    let duration_ms = apply_started.elapsed().as_millis() as u64;
     archivist_db::mark_review_applied(&state.pool, review_id, actor_id).await?;
+    archivist_db::finalize_apply_intent(&state.pool, execution.attempt_id()).await?;
     info!(
         %review_id,
         run_id = ?review.run_id,
@@ -6464,38 +6447,6 @@ fn audit_before_for_patch(
     }
     if patch.custom_fields.is_some() {
         object.insert("custom_fields".to_owned(), json!({ "present": "redacted" }));
-    }
-    serde_json::Value::Object(object)
-}
-
-fn audit_patch_payload(patch: &DocumentPatch) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    if let Some(content) = &patch.content {
-        object.insert("content".to_owned(), audit_text_metadata(content));
-    }
-    if let Some(title) = &patch.title {
-        object.insert("title".to_owned(), json!(title));
-    }
-    if let Some(tags) = &patch.tags {
-        object.insert("tags".to_owned(), json!(tags));
-    }
-    if let Some(correspondent) = &patch.correspondent {
-        object.insert("correspondent".to_owned(), json!(correspondent));
-    }
-    if let Some(document_type) = &patch.document_type {
-        object.insert("document_type".to_owned(), json!(document_type));
-    }
-    if let Some(created) = &patch.created {
-        object.insert("created".to_owned(), json!(created));
-    }
-    if let Some(custom_fields) = &patch.custom_fields {
-        object.insert(
-            "custom_fields".to_owned(),
-            json!({
-                "sha256": hex::encode(Sha256::digest(custom_fields.to_string().as_bytes())),
-                "redacted": true
-            }),
-        );
     }
     serde_json::Value::Object(object)
 }

@@ -7,9 +7,13 @@
 
 use archivist_core::Stage;
 use archivist_db::{
-    DbPool, claim_pending_review_for_autopilot_drain, claim_review_for_apply, connect, migrate,
-    reset_stale_applying_reviews, revert_review_from_applying,
+    ApplyIntentInput, DbPool, claim_pending_review_for_autopilot_drain, claim_review_for_apply,
+    connect, fail_apply_intent, finalize_apply_intent, get_apply_intent,
+    list_recoverable_review_apply_intents, mark_apply_intent_confirmed,
+    mark_apply_intent_in_flight, migrate, prepare_apply_intent, reset_stale_applying_reviews,
+    revert_review_from_applying,
 };
+use serde_json::json;
 use sqlx::Executor;
 use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
@@ -25,11 +29,29 @@ async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, DbPool)> {
     let pool = connect(&url, 10).await.expect("connect test database");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
-        r#"truncate review_items, pipeline_runs, document_inventory, audit_events restart identity cascade;"#,
+        r#"truncate paperless_apply_intents, review_items, pipeline_runs, document_inventory, audit_events, metrics_counters restart identity cascade;"#,
     )
     .await
     .expect("truncate test tables");
     Some((guard, pool))
+}
+
+fn intent_input(review_id: Uuid) -> ApplyIntentInput {
+    ApplyIntentInput {
+        source: "human_review".to_owned(),
+        source_key: format!("review:{review_id}"),
+        owner_type: "user".to_owned(),
+        owner_id: "operator-1".to_owned(),
+        paperless_document_id: 1,
+        run_id: None,
+        job_id: None,
+        review_id: Some(review_id),
+        patch_hash: "sha256:stable".to_owned(),
+        patch: json!({"title": "x"}),
+        before: Some(json!({"title": "old"})),
+        metadata: json!({"stage": "metadata"}),
+        review_revert_status: Some("approved".to_owned()),
+    }
 }
 
 async fn seed_review(pool: &DbPool, status: &str) -> Uuid {
@@ -154,4 +176,175 @@ async fn stale_applying_rows_are_recovered() {
         .await
         .expect("status");
     assert_eq!(status, "pending");
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn apply_intent_is_stable_and_transitions_are_idempotent() {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
+        return;
+    };
+    let review_id = seed_review(&pool, "approved").await;
+    let input = intent_input(review_id);
+
+    let first = prepare_apply_intent(&pool, &input).await.expect("prepare");
+    let repeated = prepare_apply_intent(&pool, &input)
+        .await
+        .expect("repeat prepare");
+    assert_eq!(first.attempt_id, repeated.attempt_id);
+    assert_eq!(first.state, "prepared");
+    assert_eq!(first.owner_id, "operator-1");
+
+    assert!(
+        mark_apply_intent_in_flight(&pool, first.attempt_id, "operator-1")
+            .await
+            .expect("start")
+    );
+    assert!(
+        !mark_apply_intent_in_flight(&pool, first.attempt_id, "operator-1")
+            .await
+            .expect("repeat start")
+    );
+    assert!(
+        mark_apply_intent_confirmed(
+            &pool,
+            first.attempt_id,
+            "operator-1",
+            Some(json!({"title": "x"})),
+            12,
+        )
+        .await
+        .expect("confirm")
+    );
+    assert!(
+        !mark_apply_intent_confirmed(
+            &pool,
+            first.attempt_id,
+            "operator-1",
+            Some(json!({"title": "x"})),
+            12,
+        )
+        .await
+        .expect("repeat confirm")
+    );
+
+    let stored = get_apply_intent(&pool, first.attempt_id)
+        .await
+        .expect("get")
+        .expect("intent exists");
+    assert_eq!(stored.state, "confirmed");
+
+    let success_counter: i64 =
+        sqlx::query_scalar("select value from metrics_counters where name = 'apply_success_total'")
+            .fetch_one(&pool)
+            .await
+            .expect("success counter");
+    assert_eq!(success_counter, 1);
+    let intent_audits: i64 = sqlx::query_scalar(
+        "select count(*) from audit_events where event_type = 'document.patch_intent'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("intent audit count");
+    let confirmed_audits: i64 = sqlx::query_scalar(
+        "select count(*) from audit_events where event_type = 'document.patch_confirmed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("confirmed audit count");
+    assert_eq!((intent_audits, confirmed_audits), (1, 1));
+
+    assert!(
+        finalize_apply_intent(&pool, first.attempt_id)
+            .await
+            .expect("finalize")
+    );
+    assert!(
+        !finalize_apply_intent(&pool, first.attempt_id)
+            .await
+            .expect("repeat finalize")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn stale_review_recovery_never_requeues_an_active_intent() {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
+        return;
+    };
+    let review_id = seed_review(&pool, "approved").await;
+    claim_review_for_apply(&pool, review_id)
+        .await
+        .expect("claim");
+    sqlx::query(
+        "update review_items set reviewed_at = now() - interval '10 minutes' where id = $1",
+    )
+    .bind(review_id)
+    .execute(&pool)
+    .await
+    .expect("backdate");
+    let intent = prepare_apply_intent(&pool, &intent_input(review_id))
+        .await
+        .expect("prepare");
+
+    assert_eq!(
+        reset_stale_applying_reviews(&pool, 300)
+            .await
+            .expect("protected sweep"),
+        0
+    );
+    let status: String = sqlx::query_scalar("select status from review_items where id = $1")
+        .bind(review_id)
+        .fetch_one(&pool)
+        .await
+        .expect("status");
+    assert_eq!(status, "applying");
+
+    assert!(
+        fail_apply_intent(&pool, intent.attempt_id, "operator-1", "definite failure")
+            .await
+            .expect("fail intent")
+    );
+    assert_eq!(
+        reset_stale_applying_reviews(&pool, 300)
+            .await
+            .expect("terminal sweep"),
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn review_recovery_selects_only_the_newest_fallback_intent() {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
+        return;
+    };
+    let review_id = seed_review(&pool, "approved").await;
+    claim_review_for_apply(&pool, review_id)
+        .await
+        .expect("claim review");
+    let first = prepare_apply_intent(&pool, &intent_input(review_id))
+        .await
+        .expect("prepare first intent");
+    fail_apply_intent(
+        &pool,
+        first.attempt_id,
+        "operator-1",
+        "custom field rejected",
+    )
+    .await
+    .expect("fail first intent");
+
+    let mut fallback = intent_input(review_id);
+    fallback.patch_hash = "sha256:fallback".to_owned();
+    fallback.patch = json!({"title": "x"});
+    let second = prepare_apply_intent(&pool, &fallback)
+        .await
+        .expect("prepare fallback intent");
+
+    let recoverable = list_recoverable_review_apply_intents(&pool, 10)
+        .await
+        .expect("list recoverable");
+    assert_eq!(recoverable.len(), 1);
+    assert_eq!(recoverable[0].attempt_id, second.attempt_id);
 }

@@ -568,6 +568,67 @@ pub struct PaperlessDocumentSummary {
     pub original_file_name: Option<String>,
 }
 
+/// Return true when every field requested by `patch` already has the intended
+/// value on the latest Paperless representation. Unrequested fields are
+/// deliberately ignored: reconciliation proves our side effect landed without
+/// treating unrelated Paperless edits as a reason to repeat it.
+pub fn document_matches_patch(document: &PaperlessDocumentDetail, patch: &DocumentPatch) -> bool {
+    if patch
+        .content
+        .as_ref()
+        .is_some_and(|value| document.content.as_ref() != Some(value))
+    {
+        return false;
+    }
+    if patch
+        .title
+        .as_ref()
+        .is_some_and(|value| document.title.as_ref() != Some(value))
+    {
+        return false;
+    }
+    if let Some(expected) = &patch.tags {
+        let mut expected = expected.clone();
+        let mut actual = document.tags.clone();
+        expected.sort_unstable();
+        expected.dedup();
+        actual.sort_unstable();
+        actual.dedup();
+        if actual != expected {
+            return false;
+        }
+    }
+    if patch
+        .correspondent
+        .as_ref()
+        .is_some_and(|value| document.correspondent != *value)
+    {
+        return false;
+    }
+    if patch
+        .document_type
+        .as_ref()
+        .is_some_and(|value| document.document_type != *value)
+    {
+        return false;
+    }
+    if patch
+        .created
+        .as_ref()
+        .is_some_and(|value| document.created.as_ref() != Some(value))
+    {
+        return false;
+    }
+    if patch
+        .custom_fields
+        .as_ref()
+        .is_some_and(|value| document.custom_fields != *value)
+    {
+        return false;
+    }
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperlessDocumentDetail {
     pub id: i32,
@@ -582,6 +643,8 @@ pub struct PaperlessDocumentDetail {
     pub tags: Vec<i32>,
     pub correspondent: Option<i32>,
     pub document_type: Option<i32>,
+    #[serde(default)]
+    pub custom_fields: serde_json::Value,
     #[serde(default, alias = "original_file_name")]
     pub original_file_name: Option<String>,
 }
@@ -589,6 +652,64 @@ pub struct PaperlessDocumentDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn reconciliation_document() -> PaperlessDocumentDetail {
+        PaperlessDocumentDetail {
+            id: 42,
+            title: Some("Invoice".to_owned()),
+            created: Some("2026-07-17".to_owned()),
+            modified: Some("2026-07-17T06:00:00Z".to_owned()),
+            content: Some("body".to_owned()),
+            tags: vec![3, 1, 2],
+            correspondent: Some(7),
+            document_type: None,
+            original_file_name: Some("invoice.pdf".to_owned()),
+            custom_fields: json!([{"field": 9, "value": "paid"}]),
+        }
+    }
+
+    #[test]
+    fn requested_patch_fields_match_document_for_reconciliation() {
+        let patch = DocumentPatch {
+            content: Some("body".to_owned()),
+            title: Some("Invoice".to_owned()),
+            tags: Some(vec![1, 2, 3]),
+            correspondent: Some(Some(7)),
+            document_type: Some(None),
+            created: Some("2026-07-17".to_owned()),
+            custom_fields: Some(json!([{"field": 9, "value": "paid"}])),
+        };
+
+        assert!(document_matches_patch(&reconciliation_document(), &patch));
+        assert!(document_matches_patch(
+            &reconciliation_document(),
+            &DocumentPatch {
+                content: None,
+                title: None,
+                tags: None,
+                correspondent: None,
+                document_type: None,
+                created: None,
+                custom_fields: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn reconciliation_rejects_any_requested_field_mismatch() {
+        let patch = DocumentPatch {
+            content: None,
+            title: Some("Different".to_owned()),
+            tags: Some(vec![1, 2, 3]),
+            correspondent: None,
+            document_type: None,
+            created: None,
+            custom_fields: None,
+        };
+
+        assert!(!document_matches_patch(&reconciliation_document(), &patch));
+    }
 
     #[test]
     fn download_size_accumulation_enforces_cap() {

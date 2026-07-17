@@ -190,6 +190,49 @@ pub struct ReviewItemRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ApplyIntentInput {
+    pub source: String,
+    pub source_key: String,
+    pub owner_type: String,
+    pub owner_id: String,
+    pub paperless_document_id: i32,
+    pub run_id: Option<Uuid>,
+    pub job_id: Option<Uuid>,
+    pub review_id: Option<Uuid>,
+    pub patch_hash: String,
+    pub patch: Value,
+    pub before: Option<Value>,
+    pub metadata: Value,
+    pub review_revert_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyIntentRecord {
+    pub attempt_id: Uuid,
+    pub source: String,
+    pub source_key: String,
+    pub owner_type: String,
+    pub owner_id: String,
+    pub paperless_document_id: i32,
+    pub run_id: Option<Uuid>,
+    pub job_id: Option<Uuid>,
+    pub review_id: Option<Uuid>,
+    pub patch_hash: String,
+    pub patch: Value,
+    pub before: Option<Value>,
+    pub response: Option<Value>,
+    pub metadata: Value,
+    pub review_revert_status: Option<String>,
+    pub state: String,
+    pub last_error: Option<String>,
+    pub request_started_at: Option<DateTime<Utc>>,
+    pub confirmed_at: Option<DateTime<Utc>>,
+    pub finalized_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEventRecord {
     pub id: Uuid,
@@ -5992,6 +6035,498 @@ pub async fn review_decision(
     Ok(())
 }
 
+fn apply_intent_from_row(row: PgRow) -> Result<ApplyIntentRecord> {
+    Ok(ApplyIntentRecord {
+        attempt_id: row.try_get("attempt_id")?,
+        source: row.try_get("source")?,
+        source_key: row.try_get("source_key")?,
+        owner_type: row.try_get("owner_type")?,
+        owner_id: row.try_get("owner_id")?,
+        paperless_document_id: row.try_get("paperless_document_id")?,
+        run_id: row.try_get("run_id")?,
+        job_id: row.try_get("job_id")?,
+        review_id: row.try_get("review_id")?,
+        patch_hash: row.try_get("patch_hash")?,
+        patch: row.try_get("patch")?,
+        before: row.try_get("before_state")?,
+        response: row.try_get("response_state")?,
+        metadata: row.try_get("metadata")?,
+        review_revert_status: row.try_get("review_revert_status")?,
+        state: row.try_get("state")?,
+        last_error: row.try_get("last_error")?,
+        request_started_at: row.try_get("request_started_at")?,
+        confirmed_at: row.try_get("confirmed_at")?,
+        finalized_at: row.try_get("finalized_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+const APPLY_INTENT_COLUMNS: &str = r#"
+    attempt_id, source, source_key, owner_type, owner_id,
+    paperless_document_id, run_id, job_id, review_id, patch_hash, patch,
+    before_state, response_state, metadata, review_revert_status, state,
+    last_error, request_started_at, confirmed_at, finalized_at,
+    created_at, updated_at
+"#;
+
+fn apply_audit_patch(patch: &Value) -> Value {
+    let Some(source) = patch.as_object() else {
+        return json!({ "redacted": true, "sha256": short_hash(&patch.to_string()) });
+    };
+    let mut audit = serde_json::Map::new();
+    for (key, value) in source {
+        match key.as_str() {
+            "content" => {
+                let text = value.as_str().unwrap_or_default();
+                audit.insert(
+                    key.clone(),
+                    json!({
+                        "redacted": true,
+                        "sha256": short_hash(text),
+                        "chars": text.chars().count()
+                    }),
+                );
+            }
+            "custom_fields" => {
+                audit.insert(
+                    key.clone(),
+                    json!({
+                        "redacted": true,
+                        "sha256": short_hash(&value.to_string())
+                    }),
+                );
+            }
+            _ => {
+                audit.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Value::Object(audit)
+}
+
+/// Persist the immutable intent for one logical Paperless PATCH. Repeating the
+/// same source-key/hash pair returns its original attempt ID and state.
+pub async fn prepare_apply_intent(
+    pool: &DbPool,
+    input: &ApplyIntentInput,
+) -> Result<ApplyIntentRecord> {
+    if input.source.trim().is_empty()
+        || input.source_key.trim().is_empty()
+        || input.owner_id.trim().is_empty()
+        || input.patch_hash.trim().is_empty()
+        || !matches!(input.owner_type.as_str(), "user" | "worker")
+        || input
+            .review_revert_status
+            .as_deref()
+            .is_some_and(|status| !matches!(status, "pending" | "approved" | "edited"))
+    {
+        return Err(anyhow!("invalid Paperless apply intent"));
+    }
+
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"
+        insert into paperless_apply_intents (
+          source, source_key, owner_type, owner_id, paperless_document_id,
+          run_id, job_id, review_id, patch_hash, patch, before_state,
+          metadata, review_revert_status
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        on conflict (source_key, patch_hash) do nothing
+        returning {APPLY_INTENT_COLUMNS}
+        "#
+    )))
+    .bind(&input.source)
+    .bind(&input.source_key)
+    .bind(&input.owner_type)
+    .bind(&input.owner_id)
+    .bind(input.paperless_document_id)
+    .bind(input.run_id)
+    .bind(input.job_id)
+    .bind(input.review_id)
+    .bind(&input.patch_hash)
+    .bind(&input.patch)
+    .bind(&input.before)
+    .bind(&input.metadata)
+    .bind(&input.review_revert_status)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let (record, was_inserted) = if let Some(row) = inserted {
+        (apply_intent_from_row(row)?, true)
+    } else {
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "select {APPLY_INTENT_COLUMNS} from paperless_apply_intents where source_key = $1 and patch_hash = $2"
+        )))
+        .bind(&input.source_key)
+        .bind(&input.patch_hash)
+        .fetch_one(&mut *tx)
+        .await?;
+        let record = apply_intent_from_row(row)?;
+        if record.paperless_document_id != input.paperless_document_id
+            || record.patch != input.patch
+        {
+            tx.rollback().await?;
+            return Err(anyhow!("Paperless apply intent hash collision"));
+        }
+        (record, false)
+    };
+
+    if was_inserted {
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "document.patch_intent".to_owned(),
+                actor_type: record.owner_type.clone(),
+                actor_id: Some(record.owner_id.clone()),
+                run_id: record.run_id,
+                job_id: record.job_id,
+                paperless_document_id: Some(record.paperless_document_id),
+                before: record.before.clone(),
+                after: Some(json!({
+                    "attempt_id": record.attempt_id,
+                    "patch_hash": record.patch_hash,
+                    "source": record.source,
+                    "state": "prepared"
+                })),
+                metadata: Some(json!({
+                    "source_key": record.source_key,
+                    "context": record.metadata
+                })),
+                outcome: "success".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(record)
+}
+
+pub async fn get_apply_intent(
+    pool: &DbPool,
+    attempt_id: Uuid,
+) -> Result<Option<ApplyIntentRecord>> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "select {APPLY_INTENT_COLUMNS} from paperless_apply_intents where attempt_id = $1"
+    )))
+    .bind(attempt_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(apply_intent_from_row).transpose()
+}
+
+/// Return the durable unfinished attempt for a logical caller. This lets a
+/// reacquired job lease resume the original body even when a fresh Paperless
+/// read would prune fields that were already applied.
+pub async fn get_recoverable_apply_intent_by_source_key(
+    pool: &DbPool,
+    source_key: &str,
+) -> Result<Option<ApplyIntentRecord>> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"
+        select {APPLY_INTENT_COLUMNS}
+          from paperless_apply_intents
+         where source_key = $1
+           and state in ('prepared', 'in_flight', 'confirmed', 'reconciled')
+           and finalized_at is null
+         order by created_at desc
+         limit 1
+        "#
+    )))
+    .bind(source_key)
+    .fetch_optional(pool)
+    .await?;
+    row.map(apply_intent_from_row).transpose()
+}
+
+/// Claim a prepared attempt immediately before HTTP. A recovery worker may
+/// take over a prepared intent because no request has started yet.
+pub async fn mark_apply_intent_in_flight(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    owner_id: &str,
+) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'in_flight', owner_id = $2,
+               request_started_at = now(), updated_at = now()
+         where attempt_id = $1 and state = 'prepared'
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+pub async fn mark_apply_intent_confirmed(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    owner_id: &str,
+    response: Option<Value>,
+    duration_ms: i64,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'confirmed', response_state = $3,
+               confirmed_at = now(), updated_at = now(), last_error = null
+         where attempt_id = $1 and owner_id = $2 and state = 'in_flight'
+        returning source, source_key, owner_type, owner_id, run_id, job_id,
+                  review_id, paperless_document_id, patch_hash, patch,
+                  before_state, metadata
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(owner_id)
+    .bind(&response)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let run_id: Option<Uuid> = row.try_get("run_id")?;
+    let job_id: Option<Uuid> = row.try_get("job_id")?;
+    let document_id: i32 = row.try_get("paperless_document_id")?;
+    let patch: Value = row.try_get("patch")?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "document.patch_confirmed".to_owned(),
+            actor_type: row.try_get("owner_type")?,
+            actor_id: Some(row.try_get("owner_id")?),
+            run_id,
+            job_id,
+            paperless_document_id: Some(document_id),
+            before: row.try_get("before_state")?,
+            after: Some(apply_audit_patch(&patch)),
+            metadata: Some(json!({
+                "attempt_id": attempt_id,
+                "patch_hash": row.try_get::<String, _>("patch_hash")?,
+                "source": row.try_get::<String, _>("source")?,
+                "source_key": row.try_get::<String, _>("source_key")?,
+                "duration_ms": duration_ms,
+                "context": row.try_get::<Value, _>("metadata")?
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    increment_metric_counter_tx(&mut tx, "apply_success_total", 1).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub async fn reconcile_apply_intent(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    reconciled_by: &str,
+    response: Option<Value>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'reconciled', owner_id = $2, response_state = $3,
+               confirmed_at = now(), updated_at = now(), last_error = null
+         where attempt_id = $1 and state = 'in_flight'
+        returning source, source_key, owner_type, owner_id, run_id, job_id,
+                  paperless_document_id, patch_hash, patch, before_state, metadata
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(reconciled_by)
+    .bind(&response)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "document.patch_reconciled".to_owned(),
+            actor_type: row.try_get("owner_type")?,
+            actor_id: Some(row.try_get("owner_id")?),
+            run_id: row.try_get("run_id")?,
+            job_id: row.try_get("job_id")?,
+            paperless_document_id: Some(row.try_get("paperless_document_id")?),
+            before: row.try_get("before_state")?,
+            after: Some(apply_audit_patch(&row.try_get("patch")?)),
+            metadata: Some(json!({
+                "attempt_id": attempt_id,
+                "patch_hash": row.try_get::<String, _>("patch_hash")?,
+                "source": row.try_get::<String, _>("source")?,
+                "source_key": row.try_get::<String, _>("source_key")?,
+                "context": row.try_get::<Value, _>("metadata")?
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    increment_metric_counter_tx(&mut tx, "apply_success_total", 1).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub async fn fail_apply_intent(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    failed_by: &str,
+    error: &str,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'failed', owner_id = $2, last_error = $3, updated_at = now()
+         where attempt_id = $1 and state in ('prepared', 'in_flight')
+        returning source, source_key, owner_type, owner_id, run_id, job_id,
+                  paperless_document_id, patch_hash, patch, before_state, metadata
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(failed_by)
+    .bind(error)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "document.patch_failed".to_owned(),
+            actor_type: row.try_get("owner_type")?,
+            actor_id: Some(row.try_get("owner_id")?),
+            run_id: row.try_get("run_id")?,
+            job_id: row.try_get("job_id")?,
+            paperless_document_id: Some(row.try_get("paperless_document_id")?),
+            before: row.try_get("before_state")?,
+            after: Some(apply_audit_patch(&row.try_get("patch")?)),
+            metadata: Some(json!({
+                "attempt_id": attempt_id,
+                "patch_hash": row.try_get::<String, _>("patch_hash")?,
+                "source": row.try_get::<String, _>("source")?,
+                "source_key": row.try_get::<String, _>("source_key")?,
+                "context": row.try_get::<Value, _>("metadata")?
+            })),
+            outcome: "failed".to_owned(),
+            error_message: Some(error.to_owned()),
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    increment_metric_counter_tx(&mut tx, "apply_failure_total", 1).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub async fn finalize_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'finalized', finalized_at = now(), updated_at = now()
+         where attempt_id = $1 and state in ('confirmed', 'reconciled')
+        "#,
+    )
+    .bind(attempt_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Mark a failed intent as locally settled without making it look successful.
+/// Keeping `state = 'failed'` ensures the same source key/hash cannot later be
+/// mistaken for an already-applied request.
+pub async fn finalize_failed_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set finalized_at = now(), updated_at = now()
+         where attempt_id = $1 and state = 'failed' and finalized_at is null
+        "#,
+    )
+    .bind(attempt_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Whether reverting an `applying` review would make an ambiguous Paperless
+/// side effect blindly retryable. On lookup errors callers should fail closed
+/// and leave the review in `applying` for the recovery worker.
+pub async fn review_has_nonterminal_apply_intent(pool: &DbPool, review_id: Uuid) -> Result<bool> {
+    sqlx::query_scalar(
+        r#"
+        select exists (
+          select 1
+            from paperless_apply_intents
+           where review_id = $1
+             and state in ('prepared', 'in_flight', 'confirmed', 'reconciled')
+             and finalized_at is null
+        )
+        "#,
+    )
+    .bind(review_id)
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
+pub async fn get_review_status(pool: &DbPool, review_id: Uuid) -> Result<Option<String>> {
+    sqlx::query_scalar("select status from review_items where id = $1")
+        .bind(review_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(Into::into)
+}
+
+pub async fn list_recoverable_review_apply_intents(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<ApplyIntentRecord>> {
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"
+        select {APPLY_INTENT_COLUMNS}
+          from paperless_apply_intents candidate
+         where candidate.review_id is not null
+           and candidate.state in ('prepared', 'in_flight', 'confirmed', 'reconciled', 'failed')
+           and candidate.finalized_at is null
+           and not exists (
+             select 1
+               from paperless_apply_intents newer
+              where newer.review_id = candidate.review_id
+                and newer.finalized_at is null
+                and newer.created_at > candidate.created_at
+           )
+         order by candidate.created_at asc
+         limit $1
+        "#
+    )))
+    .bind(limit.clamp(1, 1000))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(apply_intent_from_row).collect()
+}
+
 /// Atomically claim an approved/edited review item for application by moving
 /// it to the intermediate `applying` status, returning the record with its
 /// *prior* status (so a failed apply can revert precisely). Returns `None`
@@ -8362,10 +8897,11 @@ pub struct StuckRunStatusFixSummary {
 /// recording the terminal status leaves the row owned-but-never-finished, and
 /// neither the drain (lists `pending`) nor the operator (lists
 /// `approved`/`edited`) would ever pick it up again. A row in `applying`
-/// older than `older_than_seconds` is reverted to `pending` so the next drain
-/// tick (or a fresh operator apply after re-approval) retries it. The Paperless
-/// PATCH is idempotent on redo (it overwrites the same fields), so re-applying
-/// is safe. Returns the number of rows recovered. #253.
+/// older than `older_than_seconds` is reverted to `pending` only when it has no
+/// durable, non-terminal Paperless apply intent. Intent-backed rows must be
+/// reconciled/finalized by the apply recovery state machine; blindly requeuing
+/// them could repeat an externally successful PATCH. Returns the number of
+/// rows recovered. #253, #342.
 pub async fn reset_stale_applying_reviews(pool: &DbPool, older_than_seconds: i64) -> Result<i64> {
     let reset = sqlx::query(
         r#"
@@ -8374,6 +8910,12 @@ pub async fn reset_stale_applying_reviews(pool: &DbPool, older_than_seconds: i64
                reviewed_at = null
          where status = 'applying'
            and reviewed_at < now() - make_interval(secs => $1)
+           and not exists (
+             select 1
+               from paperless_apply_intents pai
+              where pai.review_id = review_items.id
+                and pai.state in ('prepared', 'in_flight', 'confirmed', 'reconciled')
+           )
         "#,
     )
     .bind(older_than_seconds as f64)

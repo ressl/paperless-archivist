@@ -57,7 +57,7 @@ fi
 export ARCHIVIST_MIGRATIONS_DIR="${ARCHIVIST_MIGRATIONS_DIR:-${ROOT_DIR}/migrations}"
 
 EXPECTED_TESTS="$({
-  grep -R -E '^[[:space:]]*#\[ignore' "${ROOT_DIR}/crates/archivist-db/tests" --include='*.rs' || true
+  grep -R -E '^[[:space:]]*#\[ignore' "${ROOT_DIR}/crates" --include='*.rs' || true
 } | wc -l | tr -d '[:space:]')"
 
 if [[ "$EXPECTED_TESTS" -eq 0 ]]; then
@@ -69,7 +69,7 @@ RESULTS_FILE="$(mktemp)"
 set +e
 (
   cd "$ROOT_DIR"
-  cargo test -p archivist-db --tests --locked -- --ignored --nocapture --test-threads=1
+  cargo test --workspace --tests --locked -- --ignored --nocapture --test-threads=1
 ) 2>&1 | tee "$RESULTS_FILE"
 CARGO_STATUS=${PIPESTATUS[0]}
 set -e
