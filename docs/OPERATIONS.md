@@ -535,10 +535,20 @@ content.
 
 ## Metrics
 
-Prometheus metrics are available without authentication:
+Prometheus metrics require a dedicated bearer token. With
+`ARCHIVIST_METRICS_TOKEN` unset the endpoint returns `503`; with a missing or
+wrong token it returns `401`. Keep the value in a secret manager. For an
+operator smoke test, read it from a protected file and let curl consume a
+temporary mode-0600 config so it never appears in the command line:
 
 ```bash
-curl http://127.0.0.1:8080/metrics
+METRICS_TOKEN_FILE=/run/secrets/paperless-archivist-metrics-token
+umask 077
+METRICS_CURL_CONFIG="$(mktemp)"
+awk '{ print "header = \"Authorization: Bearer " $0 "\"" }' \
+  "$METRICS_TOKEN_FILE" > "$METRICS_CURL_CONFIG"
+curl --fail --config "$METRICS_CURL_CONFIG" http://127.0.0.1:8080/metrics
+rm -f "$METRICS_CURL_CONFIG"
 ```
 
 The service exports:
@@ -547,6 +557,7 @@ The service exports:
 - pending reviews, active runs, and audit event count
 - automatic selector run count and queued-document count
 - retry-scheduled count
+- permanent job-failure count (`paperless_archivist_job_failures_total`)
 - provider quota-exhausted event count (`paperless_archivist_provider_quota_total`)
 - model-stage error count
 - Paperless apply success/failure count
@@ -554,7 +565,7 @@ The service exports:
 
 Recommended initial alert rules:
 
-- `paperless_archivist_jobs_failed > 0` for 15 minutes
+- `increase(paperless_archivist_job_failures_total[15m]) > 5` for 5 minutes
 - `increase(paperless_archivist_job_retries_scheduled_total[30m]) > 10`
 - `increase(paperless_archivist_provider_quota_total[1h]) > 0` — a provider hit
   its usage cap; the backlog is parked on a cooldown until it resets (#311)
@@ -836,8 +847,9 @@ Check readiness:
 
 ```bash
 curl http://127.0.0.1:8080/readyz
-curl http://127.0.0.1:8080/metrics
 ```
+
+Check `/metrics` with the protected-file procedure in [Metrics](#metrics).
 
 Common failures:
 

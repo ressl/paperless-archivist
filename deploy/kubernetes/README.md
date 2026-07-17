@@ -11,6 +11,7 @@ Kubernetes manifests without any private deployment topology.
 - ConfigMap for non-secret runtime settings
 - example Secret manifest for required secret keys
 - `values.example.yaml` documenting the settings that operators usually patch
+- opt-in Prometheus Operator monitoring and custom-AI egress components
 
 The package does not include PostgreSQL, Paperless-ngx, Ollama, certificate
 issuers, DNS, or private registry automation. Bring those from your platform.
@@ -102,6 +103,52 @@ port. Cilium/Hubble, Calico flow logs, and other enforcing CNIs expose this in
 different tools; follow the CNI-specific procedure rather than adding a broad
 namespace or RFC1918 allow rule.
 
+## Opt-in Authenticated Monitoring
+
+[`components/monitoring`](components/monitoring/) adds a ServiceMonitor, a
+PrometheusRule, and an API Deployment patch for `ARCHIVIST_METRICS_TOKEN`. It is
+opt-in because clusters without Prometheus Operator CRDs cannot accept those
+resource kinds. The unchanged base remains portable.
+
+The component expects a dedicated Secret named
+`paperless-archivist-metrics`, with key `ARCHIVIST_METRICS_TOKEN`, in the same
+namespace as the application and ServiceMonitor. The API and Prometheus read
+the same key; the worker does not receive it. Generate the real value with a
+cryptographically secure secret manager and never commit it. The second
+document in `secret.example.yaml` shows the required shape only.
+
+Render the opt-in example before adapting it:
+
+```bash
+kubectl kustomize deploy/kubernetes/base > /tmp/archivist-base.yaml
+kubectl kustomize deploy/kubernetes/examples/monitoring \
+  > /tmp/archivist-monitoring.yaml
+```
+
+Patch the ServiceMonitor labels if the Prometheus installation applies a
+selector, and patch the NetworkPolicy monitoring namespace if it differs from
+the base example. Confirm the effective Prometheus pod labels and admit only
+that identity to TCP/8080 in a private overlay; do not open the API port to all
+namespaces.
+
+The initial rules alert on scrape loss, a queue above 100 for 30 minutes, more
+than five new permanent failures in 15 minutes, and any provider-quota event in
+one hour. Validate custom thresholds with the local workload before changing
+them. The checked-in synthetic rule fixture proves that a rising quota counter
+fires and a flat counter stays quiet:
+
+```bash
+docker run --rm -v "$PWD/scripts/verify:/workspace" -w /workspace \
+  --entrypoint /bin/promtool \
+  quay.io/prometheus/prometheus@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac \
+  test rules paperless_archivist_alert_rules.test.yaml
+```
+
+Rotate the metrics token by updating the dedicated Secret and restarting the
+API; the ServiceMonitor observes the same Secret key. Verify authenticated
+`200` and target health before removing the old secret version. Rollback removes
+the component and environment patch; `/metrics` then safely returns `503`.
+
 ## Migration Order
 
 1. Upgrade PostgreSQL compatibility first; Paperless Archivist requires
@@ -123,6 +170,8 @@ Required secret keys:
 - `ARCHIVIST_SECRET_KEY`
 - either `ARCHIVIST_ADMIN_PASSWORD` for bootstrap login or OIDC settings for SSO
 - optional `ARCHIVIST_OIDC_CLIENT_SECRET`
+- optional dedicated `paperless-archivist-metrics` Secret with
+  `ARCHIVIST_METRICS_TOKEN` when the monitoring component is enabled
 
 Paperless API tokens and model-provider API keys are normally entered in the UI
 and stored as encrypted secret references. Kubernetes operators may also seed

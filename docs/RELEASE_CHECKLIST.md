@@ -54,8 +54,10 @@ Keep the three version identities in lockstep with the release tag `vX.Y.Z`:
 ## Release
 
 - [ ] Public CI is green on GitHub.
-- [ ] Public CI is green on GitLab.com.
 - [ ] Internal source pipeline is green.
 - [ ] Public export completed successfully.
+- [ ] GitHub and GitLab.com mirrors point to the exact exported commit.
+- [ ] The official GitLab.com source mirror did not create a pipeline (CI/CD is
+      intentionally disabled there; the portable `.gitlab-ci.yml` is for forks).
 - [ ] Release tag points at the verified commit.
 - [ ] Release notes are attached to the release.

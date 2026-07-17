@@ -8,6 +8,17 @@
 
 ## Unreleased
 
+- **Authenticated production monitoring (#311):** a reusable opt-in
+  ServiceMonitor/PrometheusRule component now shares one dedicated Secret with
+  the API, while the worker receives no scrape credential. Offline rule tests
+  cover scrape loss, sustained queue depth, a new monotone permanent-job-
+  failure counter, and provider-quota exhaustion; a synthetic quota increase
+  reaches the firing state. `/metrics` remains `503` when disabled and `401`
+  for missing or invalid bearer credentials.
+- **Public mirror policy (#61):** GitHub Actions is the canonical public gate.
+  The official GitLab.com project is a source mirror with CI/CD intentionally
+  disabled, while the public-safe `.gitlab-ci.yml` remains available to forks.
+  Releases require exact commit equality across both mirrors.
 - **Safe MinerU layout normalization (#322–#338):** OCR layout HTML is parsed
   with a browser-grade HTML5 parser and rendered into stable archival text. Raw
   `<` comparisons, quoted attributes, entities, empty table cells, block

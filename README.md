@@ -541,8 +541,12 @@ Health and metrics:
 ```bash
 curl http://127.0.0.1:8080/healthz
 curl http://127.0.0.1:8080/readyz
-curl http://127.0.0.1:8080/metrics
 ```
+
+`/metrics` is disabled until `ARCHIVIST_METRICS_TOKEN` is configured and then
+requires that dedicated bearer token. See the
+[authenticated monitoring procedure](docs/OPERATIONS.md#metrics); do not place
+the token in shell history or a committed manifest.
 
 ## Local Development
 

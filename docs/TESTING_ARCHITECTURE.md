@@ -246,7 +246,9 @@ into which layer:
 * **Manual E2E** — the release-notes "verify in prod" recipe is the
   authoritative check that tuning the worker_concurrency live in
   the UI actually changes `paperless_archivist_jobs_running` in
-  `/metrics`. Operator-level smoke.
+  `/metrics`. Repository tests verify the dedicated-token decision and the
+  opt-in ServiceMonitor/PrometheusRule contract; operator smoke additionally
+  proves live `401`/`200`, target health, and active NetworkPolicy reachability.
 
 ## Known gaps
 
