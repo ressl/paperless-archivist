@@ -33,4 +33,4 @@
 
 - [x] Run focused red/green tests, `cargo test -p archivist-ai`, formatting, lint, and workspace checks.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #367 only when green.
+- [x] Commit/push, verify both GitLab pipelines, document evidence, and close #367 only when green.
