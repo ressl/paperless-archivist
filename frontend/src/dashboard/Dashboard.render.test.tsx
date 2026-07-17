@@ -1,5 +1,5 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, cleanup, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { render, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { axe, toHaveNoViolations } from 'jest-axe';
 import { I18nProvider } from '../i18n/I18nProvider';
 import type { Counts, DashboardLiveStatus, DashboardStats, Permissions } from '../api/client';
@@ -131,9 +131,29 @@ async function renderDashboard() {
   );
 }
 
+function useCompactLayout() {
+  return vi.spyOn(window, 'matchMedia').mockImplementation(
+    (query) =>
+      ({
+        matches: query === '(max-width: 1100px)',
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => false
+      }) as MediaQueryList
+  );
+}
+
 describe('<Dashboard> render smoke', () => {
   beforeEach(() => {
     cleanup();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('renders the page heading after the stats fetch resolves', async () => {
@@ -157,6 +177,89 @@ describe('<Dashboard> render smoke', () => {
       rules: {
         // The dashboard contains many landmarks/cards; we only want to flag the
         // critical interaction issues (labels, names, contrast handled in CSS test).
+        region: { enabled: false },
+        'color-contrast': { enabled: false }
+      }
+    });
+    expect(results).toHaveNoViolations();
+  });
+
+  it('implements automatically activated keyboard tabs in the compact layout', async () => {
+    useCompactLayout();
+    const { container, findByRole, getByRole } = await renderDashboard();
+    await findByRole('tablist');
+
+    const analyticsTab = getByRole('tab', { name: 'Charts' });
+    const liveTab = getByRole('tab', { name: 'Live' });
+    const activityTab = getByRole('tab', { name: 'Activity' });
+    const tabs = [analyticsTab, liveTab, activityTab];
+    const analyticsPanel = container.querySelector<HTMLElement>('#dashboard-panel-analytics');
+    const livePanel = container.querySelector<HTMLElement>('#dashboard-panel-live');
+    const activityPanel = container.querySelector<HTMLElement>('#dashboard-panel-activity');
+
+    expect(analyticsPanel).not.toBeNull();
+    expect(livePanel).not.toBeNull();
+    expect(activityPanel).not.toBeNull();
+    expect(analyticsTab).toHaveAttribute('aria-controls', 'dashboard-panel-analytics');
+    expect(liveTab).toHaveAttribute('aria-controls', 'dashboard-panel-live');
+    expect(activityTab).toHaveAttribute('aria-controls', 'dashboard-panel-activity');
+    expect(analyticsPanel).toHaveAttribute('aria-labelledby', 'dashboard-tab-analytics');
+    expect(livePanel).toHaveAttribute('aria-labelledby', 'dashboard-tab-live');
+    expect(activityPanel).toHaveAttribute('aria-labelledby', 'dashboard-tab-activity');
+    expect(tabs.filter((tab) => tab.tabIndex === 0)).toHaveLength(1);
+    expect(analyticsTab).toHaveAttribute('tabindex', '0');
+    expect(liveTab).toHaveAttribute('tabindex', '-1');
+    expect(activityTab).toHaveAttribute('tabindex', '-1');
+    expect(analyticsPanel).not.toHaveAttribute('hidden');
+    expect(analyticsPanel).toHaveAttribute('tabindex', '0');
+    expect(livePanel).toHaveAttribute('hidden');
+    expect(livePanel).not.toHaveAttribute('tabindex');
+    expect(activityPanel).toHaveAttribute('hidden');
+    expect(activityPanel).not.toHaveAttribute('tabindex');
+
+    analyticsTab.focus();
+    fireEvent.keyDown(analyticsTab, { key: 'ArrowRight' });
+    expect(liveTab).toHaveFocus();
+    expect(liveTab).toHaveAttribute('aria-selected', 'true');
+    expect(livePanel).not.toHaveAttribute('hidden');
+    expect(livePanel).toHaveAttribute('tabindex', '0');
+    expect(analyticsPanel).toHaveAttribute('hidden');
+    expect(analyticsPanel).not.toHaveAttribute('tabindex');
+
+    fireEvent.keyDown(liveTab, { key: 'ArrowRight' });
+    expect(activityTab).toHaveFocus();
+    expect(activityTab).toHaveAttribute('aria-selected', 'true');
+    expect(activityTab).toHaveAttribute('tabindex', '0');
+    expect(activityPanel).not.toHaveAttribute('hidden');
+    expect(tabs.filter((tab) => tab.tabIndex === 0)).toHaveLength(1);
+
+    fireEvent.keyDown(activityTab, { key: 'ArrowRight' });
+    expect(analyticsTab).toHaveFocus();
+    expect(analyticsTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(analyticsTab, { key: 'ArrowLeft' });
+    expect(activityTab).toHaveFocus();
+    expect(activityPanel).not.toHaveAttribute('hidden');
+
+    fireEvent.keyDown(activityTab, { key: 'Home' });
+    expect(analyticsTab).toHaveFocus();
+
+    fireEvent.keyDown(analyticsTab, { key: 'End' });
+    expect(activityTab).toHaveFocus();
+
+    fireEvent.keyDown(activityTab, { key: 'Home' });
+    expect(analyticsTab).toHaveFocus();
+    expect(analyticsPanel).not.toHaveAttribute('hidden');
+    expect(activityPanel).toHaveAttribute('hidden');
+  });
+
+  it('has no axe violations in the compact tab interface', async () => {
+    useCompactLayout();
+    const { container, findByRole } = await renderDashboard();
+    await findByRole('tablist');
+
+    const results = await axe(container, {
+      rules: {
         region: { enabled: false },
         'color-contrast': { enabled: false }
       }
