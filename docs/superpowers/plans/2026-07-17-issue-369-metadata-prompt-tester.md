@@ -43,4 +43,4 @@
 - [x] Keep audit metadata limited to stage, provider, model, sample size, duration, and validity; never store prompts or model output.
 - [x] Run focused red/green tests, API/AI/workspace checks, formatting, lint, generated-client validation, and documentation checks.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #369 only when green.
+- [x] Commit/push, verify both GitLab pipelines, document evidence, and close #369 only when green.
