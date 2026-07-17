@@ -28,4 +28,4 @@
 
 - [x] Run focused identity/migration tests and the full PostgreSQL migration smoke suite.
 - [x] Run formatting, Clippy, workspace tests, audit, deny, and frontend gates.
-- [ ] Obtain independent review, commit, push, inspect the MR pipeline, document evidence, and close #350 only after the remote gate is green.
+- [x] Obtain independent review, commit, push, inspect the MR pipeline, document evidence, and close #350 only after the remote gate is green.
