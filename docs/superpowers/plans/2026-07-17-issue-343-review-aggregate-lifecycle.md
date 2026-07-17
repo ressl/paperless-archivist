@@ -6,28 +6,28 @@
 
 ## Task 1: Add failing PostgreSQL aggregate contracts
 
-- [ ] Seed a run/job/inventory with three sibling review items.
-- [ ] Prove the first applied or rejected item cannot finalize job, run, or inventory.
-- [ ] Cover approve/approve, approve/reject, reject-first, all-rejected, and concurrent final decisions.
-- [ ] Assert the next stage remains unclaimable until the aggregate is terminal.
+- [x] Seed a run/job/inventory with three sibling review items.
+- [x] Prove the first applied or rejected item cannot finalize job, run, or inventory.
+- [x] Cover approve/approve, approve/reject, reject-first, all-rejected, and concurrent final decisions.
+- [x] Assert the next stage remains unclaimable until the aggregate is terminal.
 
 ## Task 2: Centralize atomic aggregate finalization
 
-- [ ] Lock the shared job row before evaluating sibling state.
-- [ ] Count terminal/applied/rejected siblings in the same transaction.
-- [ ] Keep `waiting_review` and `needs_review=true` while any sibling is nonterminal.
-- [ ] On the last terminal review, transition the job and downstream run/inventory exactly once.
-- [ ] Emit one aggregate-finalized audit event from the winning conditional transition.
+- [x] Lock the shared job row before evaluating sibling state.
+- [x] Count terminal/applied/rejected siblings in the same transaction.
+- [x] Keep `waiting_review` and `needs_review=true` while any sibling is nonterminal.
+- [x] On the last terminal review, transition the job and downstream run/inventory exactly once.
+- [x] Emit one aggregate-finalized audit event from the winning conditional transition.
 
 ## Task 3: Route every decision path through the aggregate
 
-- [ ] Human rejection must no longer reject the run immediately.
-- [ ] Human apply and autopilot apply must not succeed the job after one item.
-- [ ] Preserve per-item `review.applied` / `review.rejected` audit events.
-- [ ] Keep the #342 apply-intent finalization separate and idempotent.
+- [x] Human rejection must no longer reject the run immediately.
+- [x] Human apply and autopilot apply must not succeed the job after one item.
+- [x] Preserve per-item `review.applied` / `review.rejected` audit events.
+- [x] Keep the #342 apply-intent finalization separate and idempotent.
 
 ## Task 4: Verify and deliver
 
-- [ ] Run the targeted PostgreSQL tests with PostgreSQL 18.
-- [ ] Run formatting, Clippy, workspace tests, audit, deny, and the full DB gate.
-- [ ] Commit, push, inspect the MR pipeline, document evidence, and close #343 only after the remote gate is green.
+- [x] Run the targeted PostgreSQL tests with PostgreSQL 18.
+- [x] Run formatting, Clippy, workspace tests, audit, deny, and the full DB gate.
+- [x] Commit, push, inspect the MR pipeline, document evidence, and close #343 only after the remote gate is green.

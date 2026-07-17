@@ -5964,53 +5964,8 @@ pub async fn review_decision(
     let job_id: Option<Uuid> = row.try_get("job_id")?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
     let stage_text: String = row.try_get("stage")?;
-    let stage: Stage = stage_text.parse()?;
     let suggested_patch: Value = row.try_get("suggested_patch")?;
     let stored_edited_patch: Option<Value> = row.try_get("edited_patch")?;
-
-    if status == "rejected" {
-        set_inventory_stage_status_tx(&mut tx, document_id, stage, "rejected", None, false, run_id)
-            .await?;
-        if let Some(run_id) = run_id {
-            sqlx::query(
-                r#"
-                update jobs
-                   set status = 'cancelled',
-                       lease_owner = null,
-                       lease_until = null,
-                       updated_at = now()
-                 where run_id = $1
-                   and status in ('queued', 'running', 'waiting_review')
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'rejected',
-                       finished_at = now(),
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'rejected',
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
 
     append_audit_tx(
         &mut tx,
@@ -6031,6 +5986,18 @@ pub async fn review_decision(
         },
     )
     .await?;
+    if status == "rejected"
+        && let Some(job_id) = job_id
+    {
+        finalize_review_aggregate_tx(
+            &mut tx,
+            job_id,
+            review_id,
+            "user",
+            Some(actor_id.to_string()),
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -6578,6 +6545,222 @@ pub async fn claim_review_for_apply(
     .transpose()
 }
 
+/// Finalize the shared job only after every sibling review is terminal.
+///
+/// The job row is the aggregate lock. Concurrent last decisions serialize on
+/// it; after the first transaction commits, the waiter observes the complete
+/// sibling set and performs the single conditional job transition.
+async fn finalize_review_aggregate_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    triggering_review_id: Uuid,
+    actor_type: &str,
+    actor_id: Option<String>,
+) -> Result<bool> {
+    let Some(job) = sqlx::query(
+        r#"
+        select run_id, paperless_document_id, stage, status
+          from jobs
+         where id = $1
+         for update
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
+        return Ok(false);
+    };
+    let job_status: String = job.try_get("status")?;
+    if job_status != "waiting_review" {
+        return Ok(false);
+    }
+
+    let counts = sqlx::query(
+        r#"
+        select count(*)::bigint as total,
+               count(*) filter (where status in ('applied', 'rejected'))::bigint as terminal,
+               count(*) filter (where status = 'applied')::bigint as applied,
+               count(*) filter (where status = 'rejected')::bigint as rejected
+          from review_items
+         where job_id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let total: i64 = counts.try_get("total")?;
+    let terminal: i64 = counts.try_get("terminal")?;
+    let applied: i64 = counts.try_get("applied")?;
+    let rejected: i64 = counts.try_get("rejected")?;
+    if total == 0 || terminal != total {
+        return Ok(false);
+    }
+
+    let run_id: Uuid = job.try_get("run_id")?;
+    let document_id: i32 = job.try_get("paperless_document_id")?;
+    let stage_text: String = job.try_get("stage")?;
+    let stage: Stage = stage_text.parse()?;
+    let aggregate_status = if applied > 0 {
+        "succeeded"
+    } else {
+        "cancelled"
+    };
+    let updated = sqlx::query(
+        r#"
+        update jobs
+           set status = $2,
+               lease_owner = null,
+               lease_until = null,
+               updated_at = now()
+         where id = $1 and status = 'waiting_review'
+        "#,
+    )
+    .bind(job_id)
+    .bind(aggregate_status)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    if applied == 0 {
+        set_inventory_stage_status_tx(
+            tx,
+            document_id,
+            stage,
+            "rejected",
+            None,
+            false,
+            Some(run_id),
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            update jobs
+               set status = 'cancelled',
+                   lease_owner = null,
+                   lease_until = null,
+                   updated_at = now()
+             where run_id = $1
+               and status in ('queued', 'running', 'waiting_review')
+            "#,
+        )
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update pipeline_runs
+               set status = 'rejected', finished_at = now(), updated_at = now()
+             where id = $1
+               and status not in ('succeeded', 'failed', 'cancelled', 'rejected')
+            "#,
+        )
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update document_inventory
+               set current_run_status = 'rejected',
+                   complete = false,
+                   updated_at = now()
+             where paperless_document_id = $1
+            "#,
+        )
+        .bind(document_id)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        set_inventory_stage_status_tx(
+            tx,
+            document_id,
+            stage,
+            "succeeded",
+            None,
+            false,
+            Some(run_id),
+        )
+        .await?;
+        if no_remaining_jobs_tx(tx, run_id).await? {
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'succeeded', finished_at = now(), updated_at = now()
+                 where id = $1
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'succeeded',
+                       complete = true,
+                       updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut **tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                update pipeline_runs
+                   set status = 'queued', updated_at = now()
+                 where id = $1
+                   and status not in ('succeeded', 'failed', 'cancelled', 'rejected')
+                "#,
+            )
+            .bind(run_id)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query(
+                r#"
+                update document_inventory
+                   set current_run_status = 'queued', updated_at = now()
+                 where paperless_document_id = $1
+                "#,
+            )
+            .bind(document_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
+    append_audit_tx(
+        tx,
+        AuditEventInput {
+            event_type: "review.aggregate_finalized".to_owned(),
+            actor_type: actor_type.to_owned(),
+            actor_id,
+            run_id: Some(run_id),
+            job_id: Some(job_id),
+            paperless_document_id: Some(document_id),
+            before: Some(json!({ "status": "waiting_review" })),
+            after: Some(json!({
+                "status": aggregate_status,
+                "total": total,
+                "applied": applied,
+                "rejected": rejected
+            })),
+            metadata: Some(json!({
+                "stage": stage,
+                "triggering_review_id": triggering_review_id
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    Ok(true)
+}
+
 pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid) -> Result<()> {
     let mut tx = pool.begin().await?;
     // Gate on `applying`: the caller claimed the row via `claim_review_for_apply`
@@ -6603,82 +6786,12 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
     };
 
     let job_id: Option<Uuid> = row.try_get("job_id")?;
-    if let Some(job_id) = job_id {
-        sqlx::query("update jobs set status = 'succeeded', updated_at = now() where id = $1")
-            .bind(job_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
     let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
     // None only when the originating run was pruned by retention (terminal
     // runs only) — decoded defensively since migration 0041 made the column
     // nullable; the run-progress block below is skipped without a run.
     let run_id: Option<Uuid> = row.try_get("run_id")?;
-    set_inventory_stage_status_tx(
-        &mut tx,
-        document_id,
-        stage,
-        "succeeded",
-        None,
-        false,
-        run_id,
-    )
-    .await?;
-
-    if let Some(run_id) = run_id {
-        if no_remaining_jobs_tx(&mut tx, run_id).await? {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'succeeded',
-                       finished_at = now(),
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'succeeded',
-                       complete = true,
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'queued',
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'queued',
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-
     append_audit_tx(
         &mut tx,
         AuditEventInput {
@@ -6698,6 +6811,16 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
         },
     )
     .await?;
+    if let Some(job_id) = job_id {
+        finalize_review_aggregate_tx(
+            &mut tx,
+            job_id,
+            review_id,
+            "user",
+            Some(actor_id.to_string()),
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -6853,82 +6976,12 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
     };
 
     let job_id: Option<Uuid> = row.try_get("job_id")?;
-    if let Some(job_id) = job_id {
-        sqlx::query("update jobs set status = 'succeeded', updated_at = now() where id = $1")
-            .bind(job_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
     let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
     let document_id: i32 = row.try_get("paperless_document_id")?;
     // None only when the originating run was pruned by retention (terminal
     // runs only) — decoded defensively since migration 0041 made the column
     // nullable; the run-progress block below is skipped without a run.
     let run_id: Option<Uuid> = row.try_get("run_id")?;
-    set_inventory_stage_status_tx(
-        &mut tx,
-        document_id,
-        stage,
-        "succeeded",
-        None,
-        false,
-        run_id,
-    )
-    .await?;
-
-    if let Some(run_id) = run_id {
-        if no_remaining_jobs_tx(&mut tx, run_id).await? {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'succeeded',
-                       finished_at = now(),
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'succeeded',
-                       complete = true,
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'queued',
-                       updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'queued',
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-
     append_audit_tx(
         &mut tx,
         AuditEventInput {
@@ -6951,6 +7004,9 @@ pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<
         },
     )
     .await?;
+    if let Some(job_id) = job_id {
+        finalize_review_aggregate_tx(&mut tx, job_id, review_id, "worker", None).await?;
+    }
     tx.commit().await?;
     Ok(())
 }
