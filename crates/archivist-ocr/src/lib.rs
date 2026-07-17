@@ -262,6 +262,17 @@ pub fn normalize_ocr_pages(page_texts: &[String]) -> String {
     markup::normalize_pages(page_texts).text
 }
 
+pub fn normalize_and_validate_ocr_pages(page_texts: &[String], min_chars: usize) -> Result<String> {
+    let normalized = markup::normalize_pages(page_texts);
+    if normalized.had_layout_markup && normalized.text.trim().is_empty() {
+        return Err(anyhow!(
+            "OCR produced no text after layout markup normalization"
+        ));
+    }
+    validate_ocr_text(&normalized.text, min_chars)?;
+    Ok(normalized.text)
+}
+
 /// Returns true when `line` is a standalone markdown code-fence line, i.e. it
 /// trims to three backticks optionally followed by an ASCII language tag (the
 /// `^\s*```[a-zA-Z]*\s*$` shape). Inline backticks inside running text never
@@ -462,6 +473,24 @@ mod tests {
         let once = normalize_ocr_pages(&["<p>M&uuml;nchen</p>".to_owned()]);
         let twice = normalize_ocr_pages(std::slice::from_ref(&once));
         assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn normalize_and_validate_reports_layout_only_documents() {
+        let pages = vec![r#"<div data-bbox="0 0 100 100" data-label="Picture"></div>"#.to_owned()];
+        let error = normalize_and_validate_ocr_pages(&pages, 10)
+            .expect_err("layout-only OCR must be distinguishable");
+        assert_eq!(
+            error.to_string(),
+            "OCR produced no text after layout markup normalization"
+        );
+    }
+
+    #[test]
+    fn normalize_and_validate_keeps_the_generic_short_text_error_for_plain_text() {
+        let error = normalize_and_validate_ocr_pages(&["short".to_owned()], 10)
+            .expect_err("short plain text must still fail");
+        assert_eq!(error.to_string(), "OCR result is below minimum length");
     }
 
     #[tokio::test]
