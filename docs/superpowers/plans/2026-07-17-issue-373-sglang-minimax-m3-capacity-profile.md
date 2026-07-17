@@ -55,4 +55,4 @@
 
 - [x] Run offline harness tests, the bounded live load, frontend tests/lint/typecheck, focused Rust tests, formatting, documentation links, and secret scan.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify branch and MR pipelines, document aggregate evidence, and close #373 only when green.
+- [x] Commit/push, verify branch and MR pipelines, document aggregate evidence, and close #373 only when green.
