@@ -38,4 +38,4 @@
 ### Task 4: Verify and close
 
 - [x] Run focused contracts, API tests, formatting, Compose rendering, Caddy validation, and repository diff checks.
-- [ ] Obtain independent review, commit, push, and close #355 only after the MR pipeline is green.
+- [x] Obtain independent review, commit, push, and close #355 only after the MR pipeline is green.
