@@ -43,5 +43,5 @@
 ### Task 5: Verify and deliver
 
 - [x] Run focused Worker tests, the full Worker suite, Clippy, formatting, documentation checks, and secret scan.
-- [ ] Obtain an independent Critical/Important review and resolve every finding.
+- [x] Obtain an independent Critical/Important review and resolve every finding.
 - [ ] Commit/push, verify branch and MR pipelines, document evidence, and close #376 only when green.
