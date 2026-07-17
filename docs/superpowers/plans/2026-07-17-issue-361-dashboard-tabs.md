@@ -26,4 +26,4 @@
 ### Task 3: Verify and deliver
 
 - [x] Run focused tests red then green, full frontend tests, lint/contracts, typecheck, build, and `git diff --check`.
-- [ ] Obtain independent review, commit, push, inspect both remote test traces, and close #361 only after branch and MR pipelines are green.
+- [x] Obtain independent review, commit, push, inspect both remote test traces, and close #361 only after branch and MR pipelines are green.
