@@ -22,14 +22,15 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::{PgPoolOptions, PgRow};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::postgres::{PgConnection, PgPoolOptions, PgRow};
+use sqlx::{Connection, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub type DbPool = PgPool;
 
 const LAST_ENABLED_ADMIN_REJECTION: &str = "last enabled administrator mutation rejected";
+static AUDIT_INTEGRITY_VERIFY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 #[error("at least one enabled administrator is required")]
@@ -279,6 +280,10 @@ pub struct AuditIntegrityReport {
     pub legacy_events: i64,
     pub v1_events: i64,
     pub v2_events: i64,
+    /// Hashed events written before timestamp canonicalization whose original
+    /// sub-microsecond suffix was reconstructed, persisted as a validated
+    /// lookup hint, and verified without changing the stored event or hash.
+    pub legacy_precision_events: i64,
     pub latest_event_hash: Option<String>,
     pub broken_event_id: Option<Uuid>,
     pub broken_reason: Option<String>,
@@ -8631,7 +8636,7 @@ async fn append_audit_tx(
     .map(|row| row.try_get("event_hash"))
     .transpose()?;
     let id = Uuid::now_v7();
-    let created_at = Utc::now();
+    let created_at = postgres_timestamp_precision(Utc::now());
     let hash_version = AUDIT_HASH_VERSION_V2;
     let event_hash = audit_event_hash_v2(id, created_at, &prev_event_hash, &event);
 
@@ -8641,9 +8646,9 @@ async fn append_audit_tx(
           id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
           source_ip, user_agent,
           before, after, metadata, outcome, error_message, prev_event_hash, event_hash,
-          hash_version, created_at
+          hash_version, created_at, hash_created_at_ns_suffix
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         "#,
     )
     .bind(id)
@@ -8664,6 +8669,7 @@ async fn append_audit_tx(
     .bind(&event_hash)
     .bind(hash_version)
     .bind(created_at)
+    .bind(0_i16)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -8671,6 +8677,16 @@ async fn append_audit_tx(
 
 const AUDIT_HASH_VERSION_V1: i16 = 1;
 const AUDIT_HASH_VERSION_V2: i16 = 2;
+
+/// PostgreSQL `timestamp with time zone` stores microseconds. Canonicalize the
+/// application timestamp before hashing and binding it so the hash input is
+/// byte-for-byte reproducible after a database round trip on hosts whose clock
+/// exposes nanoseconds.
+fn postgres_timestamp_precision(timestamp: DateTime<Utc>) -> DateTime<Utc> {
+    timestamp
+        .with_nanosecond(timestamp.nanosecond() / 1_000 * 1_000)
+        .expect("a truncated nanosecond value is always valid")
+}
 
 fn audit_event_hash_v1(
     id: Uuid,
@@ -8739,6 +8755,91 @@ fn audit_event_hash_for_version(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditHashVerification {
+    Exact,
+    LegacyTimestampPrecision(i16),
+    Mismatch,
+}
+
+impl AuditHashVerification {
+    fn validated_timestamp_suffix(self) -> Option<i16> {
+        match self {
+            Self::Exact => Some(0),
+            Self::LegacyTimestampPrecision(suffix) => Some(suffix),
+            Self::Mismatch => None,
+        }
+    }
+}
+
+/// Verify both canonical timestamps and timestamps produced by writers before
+/// v1.17.0. Those writers hashed the host's nanosecond value, then PostgreSQL
+/// stored only its microseconds. The missing three decimal digits have exactly
+/// 1,000 possibilities, so we can validate the original hash without mutating
+/// it or weakening verification of any other payload field.
+fn verify_audit_event_hash(
+    hash_version: i16,
+    id: Uuid,
+    stored_created_at: DateTime<Utc>,
+    prev_event_hash: &Option<String>,
+    event: &AuditEventInput,
+    event_hash: &str,
+    persisted_suffix: Option<i16>,
+) -> Option<AuditHashVerification> {
+    if let Some(suffix) = persisted_suffix {
+        let Some(source_created_at) =
+            stored_created_at.checked_add_signed(ChronoDuration::nanoseconds(i64::from(suffix)))
+        else {
+            return Some(AuditHashVerification::Mismatch);
+        };
+        let candidate = audit_event_hash_for_version(
+            hash_version,
+            id,
+            source_created_at,
+            prev_event_hash,
+            event,
+        )?;
+        return Some(if candidate == event_hash {
+            if suffix == 0 {
+                AuditHashVerification::Exact
+            } else {
+                AuditHashVerification::LegacyTimestampPrecision(suffix)
+            }
+        } else {
+            AuditHashVerification::Mismatch
+        });
+    }
+
+    let exact =
+        audit_event_hash_for_version(hash_version, id, stored_created_at, prev_event_hash, event)?;
+    if exact == event_hash {
+        return Some(AuditHashVerification::Exact);
+    }
+
+    for nanosecond_suffix in 1..1_000 {
+        let Some(source_created_at) =
+            stored_created_at.checked_add_signed(ChronoDuration::nanoseconds(nanosecond_suffix))
+        else {
+            return Some(AuditHashVerification::Mismatch);
+        };
+        let candidate = audit_event_hash_for_version(
+            hash_version,
+            id,
+            source_created_at,
+            prev_event_hash,
+            event,
+        )
+        .expect("the validated hash version remains supported");
+        if candidate == event_hash {
+            return Some(AuditHashVerification::LegacyTimestampPrecision(
+                nanosecond_suffix as i16,
+            ));
+        }
+    }
+
+    Some(AuditHashVerification::Mismatch)
+}
+
 pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEventRecord>> {
     let rows = sqlx::query(
         r#"
@@ -8773,9 +8874,9 @@ pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEve
         .collect()
 }
 
-pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityReport> {
-    use futures::TryStreamExt;
-
+async fn verify_audit_integrity_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<AuditIntegrityReport> {
     let coverage = sqlx::query(
         r#"
         select count(*) filter (where event_hash is null)::bigint as legacy_events,
@@ -8784,93 +8885,172 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
           from audit_events
         "#,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await?;
     let legacy_events: i64 = coverage.try_get("legacy_events")?;
     let v1_events: i64 = coverage.try_get("v1_events")?;
     let v2_events: i64 = coverage.try_get("v2_events")?;
 
-    // Stream the audit chain instead of loading the entire table into memory.
-    // Verification is intrinsically streamable: each row's prev_event_hash
-    // must match the previous row's event_hash, so we only carry one cursor
-    // value forward.
-    let mut stream = sqlx::query(
-        r#"
-        select id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
-               source_ip, user_agent, before, after, metadata, outcome, error_message, created_at,
-               prev_event_hash, event_hash, hash_version
-          from audit_events
-         where event_hash is not null
-         order by chain_position asc
-        "#,
-    )
-    .fetch(pool);
-
     let mut checked_events = 0_i64;
+    let mut legacy_precision_events = 0_i64;
     let mut latest_event_hash: Option<String> = None;
-    while let Some(row) = stream.try_next().await? {
-        let id: Uuid = row.try_get("id")?;
-        let created_at: DateTime<Utc> = row.try_get("created_at")?;
-        let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
-        let event_hash: String = row.try_get("event_hash")?;
-        let hash_version: Option<i16> = row.try_get("hash_version")?;
-        if let Some(expected_prev) = &latest_event_hash
-            && prev_event_hash.as_ref() != Some(expected_prev)
-        {
-            return Ok(AuditIntegrityReport {
-                ok: false,
-                checked_events,
-                legacy_events,
-                v1_events,
-                v2_events,
-                latest_event_hash,
-                broken_event_id: Some(id),
-                broken_reason: Some("previous event hash does not match chain".to_owned()),
-            });
+    let mut last_chain_position = 0_i64;
+    loop {
+        // Bounded pages keep memory stable while the transaction-level
+        // advisory lock provides one cluster-wide verifier/backfill flight.
+        let rows = sqlx::query(
+            r#"
+            select id, run_id, job_id, paperless_document_id, event_type, actor_type, actor_id,
+                   source_ip, user_agent, before, after, metadata, outcome, error_message,
+                   created_at, prev_event_hash, event_hash, hash_version,
+                   hash_created_at_ns_suffix, chain_position
+              from audit_events
+             where event_hash is not null
+               and chain_position > $1
+             order by chain_position asc
+             limit 256
+            "#,
+        )
+        .bind(last_chain_position)
+        .fetch_all(&mut **tx)
+        .await?;
+        if rows.is_empty() {
+            break;
         }
-        let event = AuditEventInput {
-            run_id: row.try_get("run_id")?,
-            job_id: row.try_get("job_id")?,
-            paperless_document_id: row.try_get("paperless_document_id")?,
-            event_type: row.try_get("event_type")?,
-            actor_type: row.try_get("actor_type")?,
-            actor_id: row.try_get("actor_id")?,
-            before: row.try_get("before")?,
-            after: row.try_get("after")?,
-            metadata: row.try_get("metadata")?,
-            outcome: row.try_get("outcome")?,
-            error_message: row.try_get("error_message")?,
-            source_ip: row.try_get("source_ip")?,
-            user_agent: row.try_get("user_agent")?,
-        };
-        let Some(expected_hash) = hash_version.and_then(|version| {
-            audit_event_hash_for_version(version, id, created_at, &prev_event_hash, &event)
-        }) else {
-            return Ok(AuditIntegrityReport {
-                ok: false,
-                checked_events,
-                legacy_events,
-                v1_events,
-                v2_events,
-                latest_event_hash,
-                broken_event_id: Some(id),
-                broken_reason: Some("unsupported or missing audit hash version".to_owned()),
-            });
-        };
-        if expected_hash != event_hash {
-            return Ok(AuditIntegrityReport {
-                ok: false,
-                checked_events,
-                legacy_events,
-                v1_events,
-                v2_events,
-                latest_event_hash,
-                broken_event_id: Some(id),
-                broken_reason: Some("event hash does not match event payload".to_owned()),
-            });
+
+        for row in rows {
+            let id: Uuid = row.try_get("id")?;
+            let created_at: DateTime<Utc> = row.try_get("created_at")?;
+            let prev_event_hash: Option<String> = row.try_get("prev_event_hash")?;
+            let event_hash: String = row.try_get("event_hash")?;
+            let hash_version: Option<i16> = row.try_get("hash_version")?;
+            let persisted_suffix: Option<i16> = row.try_get("hash_created_at_ns_suffix")?;
+            last_chain_position = row.try_get("chain_position")?;
+            if let Some(expected_prev) = &latest_event_hash
+                && prev_event_hash.as_ref() != Some(expected_prev)
+            {
+                return Ok(AuditIntegrityReport {
+                    ok: false,
+                    checked_events,
+                    legacy_events,
+                    v1_events,
+                    v2_events,
+                    legacy_precision_events,
+                    latest_event_hash,
+                    broken_event_id: Some(id),
+                    broken_reason: Some("previous event hash does not match chain".to_owned()),
+                });
+            }
+            let event = AuditEventInput {
+                run_id: row.try_get("run_id")?,
+                job_id: row.try_get("job_id")?,
+                paperless_document_id: row.try_get("paperless_document_id")?,
+                event_type: row.try_get("event_type")?,
+                actor_type: row.try_get("actor_type")?,
+                actor_id: row.try_get("actor_id")?,
+                before: row.try_get("before")?,
+                after: row.try_get("after")?,
+                metadata: row.try_get("metadata")?,
+                outcome: row.try_get("outcome")?,
+                error_message: row.try_get("error_message")?,
+                source_ip: row.try_get("source_ip")?,
+                user_agent: row.try_get("user_agent")?,
+            };
+            let Some(version) = hash_version else {
+                return Ok(AuditIntegrityReport {
+                    ok: false,
+                    checked_events,
+                    legacy_events,
+                    v1_events,
+                    v2_events,
+                    legacy_precision_events,
+                    latest_event_hash,
+                    broken_event_id: Some(id),
+                    broken_reason: Some("unsupported or missing audit hash version".to_owned()),
+                });
+            };
+            let hash_verification = if persisted_suffix.is_some() {
+                verify_audit_event_hash(
+                    version,
+                    id,
+                    created_at,
+                    &prev_event_hash,
+                    &event,
+                    &event_hash,
+                    persisted_suffix,
+                )
+            } else {
+                // The one-time 999-suffix discovery can hash large JSON payloads
+                // repeatedly. Keep it off Tokio's async executor; the validated
+                // suffix is persisted below so later scans perform one hash.
+                let previous = prev_event_hash.clone();
+                let expected_hash = event_hash.clone();
+                tokio::task::spawn_blocking(move || {
+                    verify_audit_event_hash(
+                        version,
+                        id,
+                        created_at,
+                        &previous,
+                        &event,
+                        &expected_hash,
+                        None,
+                    )
+                })
+                .await
+                .context("join audit timestamp precision verification task")?
+            };
+            let Some(hash_verification) = hash_verification else {
+                return Ok(AuditIntegrityReport {
+                    ok: false,
+                    checked_events,
+                    legacy_events,
+                    v1_events,
+                    v2_events,
+                    legacy_precision_events,
+                    latest_event_hash,
+                    broken_event_id: Some(id),
+                    broken_reason: Some("unsupported or missing audit hash version".to_owned()),
+                });
+            };
+            if hash_verification == AuditHashVerification::Mismatch {
+                return Ok(AuditIntegrityReport {
+                    ok: false,
+                    checked_events,
+                    legacy_events,
+                    v1_events,
+                    v2_events,
+                    legacy_precision_events,
+                    latest_event_hash,
+                    broken_event_id: Some(id),
+                    broken_reason: Some("event hash does not match event payload".to_owned()),
+                });
+            }
+            if matches!(
+                hash_verification,
+                AuditHashVerification::LegacyTimestampPrecision(_)
+            ) {
+                legacy_precision_events += 1;
+            }
+            if persisted_suffix.is_none() {
+                let validated_suffix = hash_verification
+                    .validated_timestamp_suffix()
+                    .expect("a verified event always has a timestamp suffix");
+                sqlx::query(
+                    r#"
+                update audit_events
+                   set hash_created_at_ns_suffix = $2
+                 where id = $1
+                   and hash_created_at_ns_suffix is null
+                "#,
+                )
+                .bind(id)
+                .bind(validated_suffix)
+                .execute(&mut **tx)
+                .await?;
+            }
+            checked_events += 1;
+            latest_event_hash = Some(event_hash);
         }
-        checked_events += 1;
-        latest_event_hash = Some(event_hash);
     }
 
     Ok(AuditIntegrityReport {
@@ -8879,10 +9059,60 @@ pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityRepor
         legacy_events,
         v1_events,
         v2_events,
+        legacy_precision_events,
         latest_event_hash,
         broken_event_id: None,
         broken_reason: None,
     })
+}
+
+async fn verify_audit_integrity_session(
+    connection: &mut PgConnection,
+) -> Result<AuditIntegrityReport> {
+    // The session-level advisory lock is already held before this transaction
+    // starts, so REPEATABLE READ cannot capture a stale pre-lock snapshot.
+    let mut tx = connection.begin().await?;
+    sqlx::query("set transaction isolation level repeatable read")
+        .execute(&mut *tx)
+        .await?;
+
+    let result = verify_audit_integrity_tx(&mut tx).await;
+    match result {
+        Ok(report) => {
+            tx.commit().await?;
+            Ok(report)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+pub async fn verify_audit_integrity(pool: &DbPool) -> Result<AuditIntegrityReport> {
+    let _process_guard = AUDIT_INTEGRITY_VERIFY_LOCK.lock().await;
+    let mut connection = pool.acquire().await?;
+    // Session advisory locks survive a transaction. Closing instead of
+    // returning this connection to the pool guarantees lock release even if
+    // the request future is cancelled before the explicit unlock below.
+    connection.close_on_drop();
+    sqlx::query("select pg_advisory_lock(hashtext('paperless_archivist_audit_integrity_verify'))")
+        .execute(&mut *connection)
+        .await?;
+
+    let result = verify_audit_integrity_session(&mut connection).await;
+    let unlock = sqlx::query_scalar::<_, bool>(
+        "select pg_advisory_unlock(hashtext('paperless_archivist_audit_integrity_verify'))",
+    )
+    .fetch_one(&mut *connection)
+    .await;
+
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+        (Ok(_), Ok(false)) => Err(anyhow!("audit integrity advisory lock was not held")),
+        (Ok(report), Ok(true)) => Ok(report),
+    }
 }
 
 pub async fn apply_security_retention(
@@ -10671,6 +10901,32 @@ mod tests {
                 &previous,
                 &audit_hash_fixture(Some("203.0.113.17"), None)
             )
+        );
+    }
+
+    #[test]
+    fn audit_timestamp_is_canonicalized_to_postgres_precision_before_hashing() {
+        let id = Uuid::parse_str("018f0000-0000-7000-8000-000000000003").unwrap();
+        let source = "2026-07-17T08:00:00.123456789Z"
+            .parse::<DateTime<Utc>>()
+            .unwrap();
+        let stored = "2026-07-17T08:00:00.123456Z"
+            .parse::<DateTime<Utc>>()
+            .unwrap();
+        let previous = Some("previous-event-hash".to_owned());
+        let event = audit_hash_fixture(None, None);
+
+        let canonical = postgres_timestamp_precision(source);
+        assert_eq!(canonical, stored);
+        assert_ne!(
+            audit_event_hash_v2(id, source, &previous, &event),
+            audit_event_hash_v2(id, stored, &previous, &event),
+            "the regression requires a source timestamp PostgreSQL would truncate"
+        );
+        assert_eq!(
+            audit_event_hash_v2(id, canonical, &previous, &event),
+            audit_event_hash_v2(id, stored, &previous, &event),
+            "the hash input must exactly match the timestamp read back from PostgreSQL"
         );
     }
 

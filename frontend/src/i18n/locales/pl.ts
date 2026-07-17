@@ -726,6 +726,7 @@ const plMessages: Record<MessageKey, string> = {
   'audit.checked_events': 'Sprawdzono {count} zdarzeń z haszem.',
   'audit.hash_coverage': 'Pokrycie haszami: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} starszych zdarzeń pochodzi sprzed śledzenia łańcuchem haszy.',
+  'audit.legacy_precision_events': '{count} zdarzeń sprzed v1.17 zweryfikowano przez zgodność precyzji czasu; zapisanej historii nie przepisano.',
   'audit.retention_applied': 'Retencja zastosowana',
   'audit.retention_summary': 'Usunięto {artifacts} artefaktów AI, {events} zdarzeń audytu i {ocr_pages} stron OCR z pamięci podręcznej poza okresem retencji.',
   'audit.col_time': 'Czas',

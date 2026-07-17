@@ -726,6 +726,7 @@ const deMessages: Record<MessageKey, string> = {
   'audit.checked_events': '{count} gehashte Ereignisse geprüft.',
   'audit.hash_coverage': 'Hash-Abdeckung: v1 {v1}, v2 {v2}.',
   'audit.legacy_events': '{count} ältere Ereignisse stammen aus der Zeit vor der Hash-Ketten-Verfolgung.',
+  'audit.legacy_precision_events': '{count} Ereignisse vor v1.17 wurden über die Zeitstempel-Präzisionskompatibilität verifiziert; der gespeicherte Verlauf wurde nicht umgeschrieben.',
   'audit.retention_applied': 'Aufbewahrung angewendet',
   'audit.retention_summary': '{artifacts} KI-Artefakte, {events} Audit-Ereignisse und {ocr_pages} gecachte OCR-Seiten außerhalb der Aufbewahrungsfrist gelöscht.',
   'audit.col_time': 'Zeit',

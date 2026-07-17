@@ -413,7 +413,14 @@ Retention and token policy are part of runtime settings under `security`.
 Audit CSV exports include `prev_event_hash` and `event_hash` for events created
 after hash-chain tracking was enabled. `GET /api/audit/integrity` returns
 whether the current chain verifies, how many hashed events were checked, and how
-many legacy events predate hash-chain tracking.
+many legacy events predate hash-chain tracking. `legacy_precision_events`
+counts pre-v1.17 hashes that verify only after reconstructing the three
+sub-microsecond timestamp digits discarded by PostgreSQL. Verification tries
+the finite 999 non-canonical suffixes once, off the async executor and under
+process- plus database-wide single-flight locks. It persists the matching
+suffix as a lookup hint that is validated against the hash on every later
+scan. Stored events and hashes are never rewritten, and changes to every hashed
+payload field still fail verification.
 
 Roles are:
 

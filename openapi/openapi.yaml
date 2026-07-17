@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Paperless Archivist API
-  version: 1.16.0
+  version: 1.17.0
 servers:
   - url: /
 security:
@@ -1625,13 +1625,21 @@ components:
       additionalProperties: true
     AuditIntegrityReport:
       type: object
-      required: [ok, checked_events, legacy_events, v1_events, v2_events]
+      required: [ok, checked_events, legacy_events, v1_events, v2_events, legacy_precision_events]
       properties:
         ok: { type: boolean }
         checked_events: { type: integer, format: int64 }
         legacy_events: { type: integer, format: int64 }
         v1_events: { type: integer, format: int64 }
         v2_events: { type: integer, format: int64 }
+        legacy_precision_events:
+          type: integer
+          format: int64
+          description: >-
+            Hashed pre-v1.17 events verified by reconstructing the
+            sub-microsecond timestamp suffix discarded by PostgreSQL. The
+            validated suffix is persisted as a lookup hint; the stored event
+            and hash are not rewritten.
         latest_event_hash: { type: [string, "null"] }
         broken_event_id: { type: [string, "null"], format: uuid }
         broken_reason: { type: [string, "null"] }
