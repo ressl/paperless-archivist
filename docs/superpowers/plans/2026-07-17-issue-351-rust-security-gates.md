@@ -203,3 +203,43 @@ git commit -m "fix(deps): restore Rust security gates"
 ```
 
 Expected: one commit containing the minimal dependency changes, with no OCR worktree content; this plan remains in its preceding documentation commit.
+
+### Task 5: Satisfy the stricter shared GitLab audit gate
+
+**Files:**
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `crates/archivist-db/Cargo.toml`
+- Modify: `crates/archivist-api/Cargo.toml`
+- Modify: SQLx call sites under `crates/archivist-db` and `crates/archivist-api`
+
+**Interfaces:**
+- Consumes: pipeline 9521, job 62808, whose group blueprint runs `cargo audit --deny warnings`.
+- Produces: a lockfile with no dormant SQLite/MySQL facade packages and therefore no yanked `spin` package at all.
+
+- [ ] **Step 1: Capture the stricter remote RED state**
+
+Inspect job 62808.
+
+Expected: the local `cargo audit` exits 0, but the shared job exits 1 because `--deny warnings` promotes the dormant `sqlx-sqlite -> flume -> spin 0.9.8` lockfile warning to an error.
+
+- [ ] **Step 2: Replace the multi-driver facade with exact PostgreSQL-only crates**
+
+Alias exact `sqlx-core = 0.9.0` as the existing `sqlx` dependency and add exact `sqlx-postgres = 0.9.0`. Keep the same Tokio, Rustls, migration, Chrono, UUID, and JSON capabilities. Exact pins are required because SQLx Core's API is semver-exempt.
+
+- [ ] **Step 3: Mechanically adapt only facade re-exports**
+
+Use `sqlx_core` module paths for query helpers/traits and `sqlx_postgres` for `PgPool`, `PgRow`, `PgPoolOptions`, and `Postgres`. Do not change SQL, transaction behavior, pool configuration, or migration logic.
+
+- [ ] **Step 4: Prove lockfile and runtime compatibility**
+
+Run:
+
+```bash
+cargo audit --deny warnings
+cargo deny check
+cargo test --workspace --locked
+bash scripts/verify/migration_smoke.sh
+```
+
+Expected: no `spin`, `flume`, `sqlx-sqlite`, `sqlx-mysql`, or SQLx macro packages remain in `Cargo.lock`; all unit, wire, migration, and 40 PostgreSQL integration tests pass.
