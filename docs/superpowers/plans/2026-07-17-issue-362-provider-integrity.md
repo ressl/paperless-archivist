@@ -38,5 +38,5 @@
 
 ### Task 4: Verify and deliver
 
-- [ ] Run focused tests red then green, affected Rust suites, full frontend verification, workspace checks, and `git diff --check`.
-- [ ] Obtain independent review, commit, push, inspect both remote pipelines, and close #362 only after branch and MR pipelines are green.
+- [x] Run focused tests red then green, affected Rust suites, full frontend verification, workspace checks, and `git diff --check`.
+- [x] Obtain independent review, commit, push, inspect both remote pipelines, and close #362 only after branch and MR pipelines are green.
