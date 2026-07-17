@@ -1945,15 +1945,119 @@ components:
           type: [string, "null"]
         model:
           type: [string, "null"]
+    PromptTestParsed:
+      oneOf:
+        - $ref: "#/components/schemas/OcrPromptTestParsed"
+        - $ref: "#/components/schemas/MetadataPromptTestParsed"
+    OcrPromptTestParsed:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: { type: string }
+    MetadataPromptTestParsed:
+      type: object
+      additionalProperties: false
+      required: [suggestion, diagnostics]
+      properties:
+        suggestion: { $ref: "#/components/schemas/PromptTestMetadataSuggestion" }
+        diagnostics: { $ref: "#/components/schemas/MetadataParseDiagnostics" }
+    PromptTestMetadataSuggestion:
+      type: object
+      additionalProperties: false
+      properties:
+        title: { $ref: "#/components/schemas/PromptTestTitleSuggestion" }
+        document_type: { $ref: "#/components/schemas/PromptTestChoiceSuggestion" }
+        correspondent: { $ref: "#/components/schemas/PromptTestChoiceSuggestion" }
+        new_correspondent: { type: string }
+        document_date: { $ref: "#/components/schemas/PromptTestDocumentDateSuggestion" }
+        tags: { $ref: "#/components/schemas/PromptTestTagSuggestion" }
+        fields: { $ref: "#/components/schemas/PromptTestFieldSuggestion" }
+    PromptTestTitleSuggestion:
+      type: object
+      additionalProperties: false
+      required: [title, confidence]
+      properties:
+        title: { type: string }
+        confidence: { type: [number, "null"], format: float }
+    PromptTestChoiceSuggestion:
+      type: object
+      additionalProperties: false
+      required: [name, confidence, evidence]
+      properties:
+        name: { type: string }
+        confidence: { type: [number, "null"], format: float }
+        evidence: { type: [string, "null"] }
+    PromptTestDocumentDateSuggestion:
+      type: object
+      additionalProperties: false
+      required: [date, confidence, evidence, warnings]
+      properties:
+        date: { type: string }
+        confidence: { type: [number, "null"], format: float }
+        evidence: { type: [string, "null"] }
+        warnings:
+          type: array
+          items: { type: string }
+    PromptTestTagSuggestion:
+      type: object
+      additionalProperties: false
+      required: [tags, new_tags, confidence]
+      properties:
+        tags:
+          type: array
+          items: { type: string }
+        new_tags:
+          type: array
+          items: { type: string }
+        confidence: { type: [number, "null"], format: float }
+    PromptTestFieldSuggestion:
+      type: object
+      additionalProperties: false
+      required: [fields, confidence]
+      properties:
+        fields:
+          type: array
+          items: { $ref: "#/components/schemas/PromptTestFieldValueSuggestion" }
+        confidence: { type: [number, "null"], format: float }
+    PromptTestFieldValueSuggestion:
+      type: object
+      additionalProperties: false
+      required: [name, value, confidence]
+      properties:
+        name: { type: string }
+        value: true
+        confidence: { type: [number, "null"], format: float }
+    MetadataParseDiagnostics:
+      type: object
+      additionalProperties: false
+      required: [status, decoded_fields, null_fields, invalid_fields, unknown_field_count]
+      properties:
+        status:
+          type: string
+          enum: [valid, omitted, contract_violation]
+        envelope_error:
+          type: string
+          enum: [no_json, non_object]
+        decoded_fields:
+          type: array
+          items: { type: string }
+        null_fields:
+          type: array
+          items: { type: string }
+        invalid_fields:
+          type: array
+          items: { type: string }
+        unknown_field_count: { type: integer }
     TestPromptResponse:
       type: object
-      required: [provider, model, stage, raw_text, validation_errors, warnings, duration_ms]
+      required: [provider, model, stage, raw_text, parsed, validation_errors, warnings, duration_ms]
       properties:
         provider: { type: string }
         model: { type: string }
         stage: { $ref: "#/components/schemas/Stage" }
         raw_text: { type: string }
-        parsed: true
+        parsed: { $ref: "#/components/schemas/PromptTestParsed" }
         validation_errors:
           type: array
           items: { type: string }

@@ -4360,12 +4360,74 @@ export interface components {
             provider_name?: string | null;
             model?: string | null;
         };
+        PromptTestParsed: components["schemas"]["OcrPromptTestParsed"] | components["schemas"]["MetadataPromptTestParsed"];
+        OcrPromptTestParsed: {
+            content: string;
+        };
+        MetadataPromptTestParsed: {
+            suggestion: components["schemas"]["PromptTestMetadataSuggestion"];
+            diagnostics: components["schemas"]["MetadataParseDiagnostics"];
+        };
+        PromptTestMetadataSuggestion: {
+            title?: components["schemas"]["PromptTestTitleSuggestion"];
+            document_type?: components["schemas"]["PromptTestChoiceSuggestion"];
+            correspondent?: components["schemas"]["PromptTestChoiceSuggestion"];
+            new_correspondent?: string;
+            document_date?: components["schemas"]["PromptTestDocumentDateSuggestion"];
+            tags?: components["schemas"]["PromptTestTagSuggestion"];
+            fields?: components["schemas"]["PromptTestFieldSuggestion"];
+        };
+        PromptTestTitleSuggestion: {
+            title: string;
+            /** Format: float */
+            confidence: number | null;
+        };
+        PromptTestChoiceSuggestion: {
+            name: string;
+            /** Format: float */
+            confidence: number | null;
+            evidence: string | null;
+        };
+        PromptTestDocumentDateSuggestion: {
+            date: string;
+            /** Format: float */
+            confidence: number | null;
+            evidence: string | null;
+            warnings: string[];
+        };
+        PromptTestTagSuggestion: {
+            tags: string[];
+            new_tags: string[];
+            /** Format: float */
+            confidence: number | null;
+        };
+        PromptTestFieldSuggestion: {
+            fields: components["schemas"]["PromptTestFieldValueSuggestion"][];
+            /** Format: float */
+            confidence: number | null;
+        };
+        PromptTestFieldValueSuggestion: {
+            name: string;
+            value: unknown;
+            /** Format: float */
+            confidence: number | null;
+        };
+        MetadataParseDiagnostics: {
+            /** @enum {string} */
+            status: "valid" | "omitted" | "contract_violation";
+            /** @enum {string} */
+            envelope_error?: "no_json" | "non_object";
+            decoded_fields: string[];
+            null_fields: string[];
+            invalid_fields: string[];
+            unknown_field_count: number;
+        };
         TestPromptResponse: {
             provider: string;
             model: string;
             stage: components["schemas"]["Stage"];
             raw_text: string;
-            parsed?: unknown;
+            parsed: components["schemas"]["PromptTestParsed"];
             validation_errors: string[];
             warnings: string[];
             /** Format: int32 */

@@ -518,7 +518,7 @@ export type PromptTestResponse = {
   model: string;
   stage: Stage;
   raw_text: string;
-  parsed?: unknown;
+  parsed: components['schemas']['PromptTestParsed'];
   validation_errors: string[];
   warnings: string[];
   duration_ms: number;

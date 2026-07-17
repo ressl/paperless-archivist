@@ -6,8 +6,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use archivist_ai::{
-    AiResponse, AnthropicClient, ChatRequest, MineruClient, OllamaClient, OllamaLoadedModel,
-    OllamaModel, OpenAiCompatibleClient, TextProvider,
+    AiResponse, AnthropicClient, ChatRequest, MetadataEnvelopeError, MetadataParseStatus,
+    MineruClient, OllamaClient, OllamaLoadedModel, OllamaModel, OpenAiCompatibleClient,
+    PromptLanguageContext, TextProvider, parse_metadata_suggestion, prompt_for_metadata,
+    schema_for_metadata,
 };
 use archivist_apply::{
     ApplyRequest, ReviewApplyConflict, ReviewApplyPrecondition, ReviewTagOperations, apply_document,
@@ -16,9 +18,10 @@ use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AiProviderSettings, AuditEventInput, DashboardProviderCostSummary,
     DashboardRange, DashboardStats, DocumentChatSource, DocumentInventoryItem, DocumentPatch,
-    EffectiveTuning, Permission, ProcessingMode, ProviderTuning, ProviderUsageStats, Role,
-    RuntimeSettings, Stage, WorkflowRules, build_document_chat_prompt, document_chat_snippet,
-    document_chat_terms, roles_have_permission, score_document_chat_source,
+    EffectiveTuning, MetadataFieldFlags, Permission, ProcessingMode, ProviderTuning,
+    ProviderUsageStats, Role, RuntimeSettings, Stage, WorkflowRules, build_document_chat_prompt,
+    detect_document_language, document_chat_snippet, document_chat_terms,
+    prefilter_allowed_list_lower, roles_have_permission, score_document_chat_source,
 };
 use archivist_db::{
     AmbiguousUserIdentityLinkError, AuthUser, DbPool, DocumentChatCandidate,
@@ -33,7 +36,8 @@ use archivist_db::{
     find_user_for_login, get_backlog_counts, get_dashboard_live_status, get_dashboard_stats,
     get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
     insert_document_chat_sources, latest_apply_audit_for_run, latest_metadata_artifact_for_run,
-    latest_metadata_run_for_document, list_audit_events, list_document_chat_messages,
+    latest_metadata_run_for_document, list_allowed_named_entities, list_allowed_tag_names,
+    list_audit_events, list_custom_fields, list_document_chat_messages,
     list_document_chat_sessions, list_inventory, list_prompt_experiments, list_prompt_usage,
     list_prompts, list_reviews, list_secret_references, list_sessions, list_users,
     metadata_review_items_for_run, metrics_snapshot as db_metrics_snapshot, migrate,
@@ -1911,29 +1915,31 @@ async fn test_prompt_endpoint(
 
     let settings = get_runtime_settings(&state.pool).await?;
     let sample_text = prompt_test_sample_text(&state, &settings, &request).await?;
-    let mut chat_request = build_prompt_test_chat_request(&request, &sample_text)
-        .await
+    let provider = prompt_test_provider(&settings, &request)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    chat_request.system_prompt = request.content.trim().to_owned();
 
-    let mut provider = if let Some(provider_name) = request
-        .provider_name
-        .as_deref()
-        .filter(|provider_name| !provider_name.trim().is_empty())
-    {
-        provider_by_name(&settings, provider_name)
+    let mut chat_request = match request.stage {
+        Stage::Ocr => build_ocr_prompt_test_chat_request(&sample_text),
+        Stage::Metadata => {
+            let enabled =
+                MetadataFieldFlags::from_enabled_stages(&settings.workflow.enabled_stages);
+            let catalog = load_metadata_prompt_test_catalog(&state.pool, enabled).await?;
+            build_metadata_prompt_test_chat_request(
+                &settings,
+                &provider.tuning,
+                &sample_text,
+                catalog,
+            )
             .map_err(|error| ApiError::bad_request(error.to_string()))?
-    } else {
-        provider_for_default_text(&settings)
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        }
+        Stage::Apply => {
+            return Err(ApiError::bad_request(format!(
+                "prompt testing is not supported for stage {}",
+                request.stage
+            )));
+        }
     };
-    if let Some(model) = request
-        .model
-        .as_deref()
-        .filter(|model| !model.trim().is_empty())
-    {
-        provider.model = model.trim().to_owned();
-    }
+    apply_prompt_test_system_prompt(&mut chat_request, &request.content);
     chat_request.model = provider.model.clone();
     apply_api_provider_tuning(&provider, &mut chat_request);
 
@@ -1955,6 +1961,7 @@ async fn test_prompt_endpoint(
                 "provider": provider.name,
                 "model": provider.model,
                 "sample_chars": sample_text.chars().count(),
+                "duration_ms": response.duration_ms,
                 "valid": parsed.validation_errors.is_empty()
             })),
             outcome: if parsed.validation_errors.is_empty() {
@@ -1981,9 +1988,35 @@ async fn test_prompt_endpoint(
     })))
 }
 
+fn prompt_test_provider(
+    settings: &RuntimeSettings,
+    request: &TestPromptRequest,
+) -> Result<ApiProvider> {
+    let mut provider = if let Some(provider_name) = request
+        .provider_name
+        .as_deref()
+        .filter(|provider_name| !provider_name.trim().is_empty())
+    {
+        provider_by_name(settings, provider_name)?
+    } else {
+        match request.stage {
+            Stage::Metadata => provider_for_stage_text(settings, Stage::Metadata)?,
+            Stage::Ocr | Stage::Apply => provider_for_default_text(settings)?,
+        }
+    };
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    {
+        provider.model = model.trim().to_owned();
+    }
+    Ok(provider)
+}
+
 #[derive(Debug)]
 struct PromptTestParsed {
-    parsed: Option<Value>,
+    parsed: Value,
     validation_errors: Vec<String>,
     warnings: Vec<String>,
 }
@@ -2024,50 +2057,182 @@ async fn prompt_test_sample_text(
     ))
 }
 
-async fn build_prompt_test_chat_request(
-    request: &TestPromptRequest,
-    sample_text: &str,
-) -> Result<ChatRequest> {
-    match request.stage {
-        Stage::Ocr => Ok(ChatRequest {
-            model: String::new(),
-            system_prompt: String::new(),
-            user_prompt: format!(
-                "Test this OCR prompt against sample text. Return the best OCR text only.\n\nSample text:\n{}",
-                sample_text.chars().take(12_000).collect::<String>()
-            ),
-            temperature: 0.0,
-            num_ctx: None,
-            response_schema: None,
-            reasoning_effort: None,
-            max_output_tokens: None,
-            structured_output: None,
-        }),
-        // Stage::Metadata uses the consolidated prompt builder added alongside the worker
-        // handler. The builder is registered in archivist-ai in a follow-up commit; until
-        // then, surface a clear error rather than silently testing a stale prompt.
-        Stage::Metadata => Err(anyhow!(
-            "prompt testing for the consolidated metadata stage is added in a later v1.4.0 commit"
-        )),
-        Stage::Apply => Err(anyhow!(
-            "prompt testing is not supported for stage {}",
-            request.stage
-        )),
+fn build_ocr_prompt_test_chat_request(sample_text: &str) -> ChatRequest {
+    ChatRequest {
+        model: String::new(),
+        system_prompt: String::new(),
+        user_prompt: format!(
+            "Test this OCR prompt against sample text. Return the best OCR text only.\n\nSample text:\n{}",
+            sample_text.chars().take(12_000).collect::<String>()
+        ),
+        temperature: 0.0,
+        num_ctx: None,
+        response_schema: None,
+        reasoning_effort: None,
+        max_output_tokens: None,
+        structured_output: None,
     }
+}
+
+#[derive(Debug)]
+struct MetadataPromptTestCatalog {
+    correspondents: Vec<String>,
+    document_types: Vec<String>,
+    tags: Vec<String>,
+    fields: Vec<(String, Option<String>)>,
+}
+
+async fn load_metadata_prompt_test_catalog(
+    pool: &DbPool,
+    enabled: MetadataFieldFlags,
+) -> ApiResult<MetadataPromptTestCatalog> {
+    let correspondents = if enabled.correspondent {
+        list_allowed_named_entities(pool, "paperless_correspondents").await?
+    } else {
+        Vec::new()
+    };
+    let document_types = if enabled.document_type {
+        list_allowed_named_entities(pool, "paperless_document_types").await?
+    } else {
+        Vec::new()
+    };
+    let tags = if enabled.tags {
+        list_allowed_tag_names(pool).await?
+    } else {
+        Vec::new()
+    };
+    let fields = if enabled.fields {
+        list_custom_fields(pool)
+            .await?
+            .into_iter()
+            .map(|field| (field.name, field.data_type))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(MetadataPromptTestCatalog {
+        correspondents,
+        document_types,
+        tags,
+        fields,
+    })
+}
+
+fn build_metadata_prompt_test_chat_request(
+    settings: &RuntimeSettings,
+    tuning: &EffectiveTuning,
+    sample_text: &str,
+    catalog: MetadataPromptTestCatalog,
+) -> Result<ChatRequest> {
+    let enabled = MetadataFieldFlags::from_enabled_stages(&settings.workflow.enabled_stages);
+    if !enabled.any() {
+        return Err(anyhow!(
+            "metadata prompt testing requires the metadata workflow stage to be enabled"
+        ));
+    }
+
+    let content_lower = sample_text.to_lowercase();
+    let allowed_list_max = tuning.allowed_list_max as usize;
+    let correspondents =
+        prefilter_allowed_list_lower(&content_lower, &catalog.correspondents, allowed_list_max);
+    let document_types =
+        prefilter_allowed_list_lower(&content_lower, &catalog.document_types, allowed_list_max);
+    let tags = prefilter_allowed_list_lower(&content_lower, &catalog.tags, allowed_list_max);
+    let fields = catalog
+        .fields
+        .into_iter()
+        .filter(|(name, _)| settings.fields.field_enabled(name))
+        .collect::<Vec<_>>();
+    let field_names = fields
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let detection = detect_document_language(sample_text);
+    let language = PromptLanguageContext::new(&detection, &settings.tagging.tag_output_language);
+    let mut request = prompt_for_metadata(
+        sample_text,
+        &correspondents,
+        &document_types,
+        &tags,
+        &fields,
+        &enabled,
+        &language,
+        tuning.max_tags as usize,
+        settings.fields.max_fields,
+        "",
+    );
+    request.response_schema = schema_for_metadata(
+        &correspondents,
+        &document_types,
+        &tags,
+        &field_names,
+        &enabled,
+        tuning.max_tags as usize,
+        settings.fields.max_fields,
+    );
+    Ok(request)
+}
+
+fn apply_prompt_test_system_prompt(request: &mut ChatRequest, content: &str) {
+    request.system_prompt = content.trim().to_owned();
 }
 
 fn parse_prompt_test_output(stage: Stage, text: &str) -> PromptTestParsed {
     match stage {
         Stage::Ocr => PromptTestParsed {
-            parsed: Some(json!({ "content": text })),
+            parsed: json!({ "content": text }),
             validation_errors: Vec::new(),
             warnings: Vec::new(),
         },
-        Stage::Metadata | Stage::Apply => PromptTestParsed {
-            parsed: None,
+        Stage::Metadata => parse_metadata_prompt_test_output(text),
+        Stage::Apply => PromptTestParsed {
+            parsed: Value::Null,
             validation_errors: vec![format!("unsupported stage: {stage}")],
             warnings: Vec::new(),
         },
+    }
+}
+
+fn parse_metadata_prompt_test_output(text: &str) -> PromptTestParsed {
+    let parsed = parse_metadata_suggestion(text);
+    let mut validation_errors = Vec::new();
+    if let Some(envelope_error) = parsed.diagnostics.envelope_error {
+        validation_errors.push(match envelope_error {
+            MetadataEnvelopeError::NoJson => {
+                "metadata response envelope is not valid JSON".to_owned()
+            }
+            MetadataEnvelopeError::NonObject => {
+                "metadata response must be a JSON object".to_owned()
+            }
+        });
+    }
+    if !parsed.diagnostics.invalid_fields.is_empty() {
+        validation_errors.push(format!(
+            "metadata field(s) have wrong types or unknown nested properties: {}",
+            parsed.diagnostics.invalid_fields.join(", ")
+        ));
+    }
+    if parsed.diagnostics.unknown_field_count > 0 {
+        validation_errors.push(format!(
+            "metadata response contains {} unknown field(s)",
+            parsed.diagnostics.unknown_field_count
+        ));
+    }
+
+    let mut warnings = parsed
+        .suggestion
+        .document_date
+        .as_ref()
+        .map(|date| date.warnings.clone())
+        .unwrap_or_default();
+    if parsed.diagnostics.status == MetadataParseStatus::Omitted {
+        warnings.push("metadata response omitted every requested field".to_owned());
+    }
+
+    PromptTestParsed {
+        parsed: json!(parsed),
+        validation_errors,
+        warnings,
     }
 }
 
@@ -2879,6 +3044,47 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
     let model = settings.ai.default_model_for_provider(&provider, false);
+    let base_url = provider_base_url(&provider.name, &provider.base_url)?;
+    let tuning = settings.effective_tuning_for_provider(&provider);
+    Ok(ApiProvider {
+        name: provider.name,
+        kind: provider.kind,
+        base_url,
+        model,
+        secret_id: provider.secret_id,
+        tuning,
+    })
+}
+
+fn provider_for_stage_text(settings: &RuntimeSettings, stage: Stage) -> Result<ApiProvider> {
+    let stage_override = settings
+        .ai
+        .stage_models
+        .iter()
+        .find(|override_model| override_model.stage == stage);
+    let provider_name = stage_override
+        .map(|override_model| override_model.provider.as_str())
+        .unwrap_or(&settings.ai.default_provider);
+    let mut provider = settings
+        .ai
+        .providers
+        .iter()
+        .find(|provider| provider.enabled && provider.name.eq_ignore_ascii_case(provider_name))
+        .cloned()
+        .or_else(|| {
+            if provider_name.eq_ignore_ascii_case("ollama") {
+                Some(archivist_core::AiProviderSettings::ollama_default())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| anyhow!("AI provider '{provider_name}' is not configured or disabled"))?;
+    if provider.name.eq_ignore_ascii_case("ollama") {
+        provider.base_url = settings.ai.ollama_base_url.clone();
+    }
+    let model = settings
+        .ai
+        .model_for_stage_provider(&provider, stage, false);
     let base_url = provider_base_url(&provider.name, &provider.base_url)?;
     let tuning = settings.effective_tuning_for_provider(&provider);
     Ok(ApiProvider {
@@ -9107,6 +9313,178 @@ mod tests {
         }
     }
 
+    fn metadata_prompt_test_settings() -> RuntimeSettings {
+        let mut settings = RuntimeSettings::default();
+        settings.workflow.enabled_stages = vec![Stage::Metadata];
+        settings.tagging.tag_output_language = "de".to_owned();
+        settings.fields.max_fields = 1;
+        settings.fields.mappings = vec![archivist_core::CustomFieldMapping {
+            field_name: "HiddenField".to_owned(),
+            enabled: false,
+            aliases: Vec::new(),
+            instructions: None,
+        }];
+        settings.ai.providers[0].tuning.allowed_list_max = Some(2);
+        settings.ai.providers[0].tuning.max_tags = Some(3);
+        settings
+    }
+
+    fn metadata_prompt_test_catalog() -> MetadataPromptTestCatalog {
+        MetadataPromptTestCatalog {
+            correspondents: vec![
+                "Acme AG".to_owned(),
+                "Beta GmbH".to_owned(),
+                "Gamma AG".to_owned(),
+            ],
+            document_types: vec![
+                "Invoice".to_owned(),
+                "Letter".to_owned(),
+                "Receipt".to_owned(),
+            ],
+            tags: vec!["Finance".to_owned(), "Tax".to_owned(), "Urgent".to_owned()],
+            fields: vec![
+                ("InvoiceNumber".to_owned(), Some("string".to_owned())),
+                ("HiddenField".to_owned(), Some("integer".to_owned())),
+            ],
+        }
+    }
+
+    #[test]
+    fn metadata_prompt_test_request_matches_worker_prompt_schema_and_runtime_catalog() {
+        let settings = metadata_prompt_test_settings();
+        let tuning = settings.effective_tuning();
+        let request = build_metadata_prompt_test_chat_request(
+            &settings,
+            &tuning,
+            "Rechnung für Beratung und Entwicklung von Acme AG. Der Betrag ist mit Datum fällig. Invoice Tax Urgent Rechnungsnummer 41",
+            metadata_prompt_test_catalog(),
+        )
+        .expect("metadata prompt request");
+
+        assert!(
+            request
+                .user_prompt
+                .contains("Detected document language: de")
+        );
+        assert!(
+            request
+                .user_prompt
+                .contains("Desired language for newly generated business tags: de")
+        );
+        assert!(request.user_prompt.contains("Acme AG"));
+        assert!(!request.user_prompt.contains("Beta GmbH"));
+        assert!(!request.user_prompt.contains("Gamma AG"));
+        assert!(request.user_prompt.contains("Invoice"));
+        assert!(!request.user_prompt.contains("Receipt"));
+        assert!(request.user_prompt.contains("Tax"));
+        assert!(request.user_prompt.contains("Urgent"));
+        assert!(!request.user_prompt.contains("Finance"));
+        assert!(request.user_prompt.contains("\"InvoiceNumber\" (text)"));
+        assert!(!request.user_prompt.contains("HiddenField"));
+        assert!(request.user_prompt.contains("at most 3 tags"));
+        assert!(request.user_prompt.contains("at most 1 entries"));
+
+        let schema = request.response_schema.expect("metadata response schema");
+        assert_eq!(
+            schema["properties"]["correspondent"]["properties"]["name"]["enum"],
+            json!(["Acme AG"])
+        );
+        assert_eq!(
+            schema["properties"]["tags"]["properties"]["tags"]["items"]["enum"],
+            json!(["Tax", "Urgent"])
+        );
+        assert_eq!(
+            schema["properties"]["fields"]["properties"]["fields"]["items"]["properties"]["name"]["enum"],
+            json!(["InvoiceNumber"])
+        );
+        assert_eq!(
+            schema["properties"]["tags"]["properties"]["tags"]["maxItems"],
+            3
+        );
+        assert_eq!(
+            schema["properties"]["fields"]["properties"]["fields"]["maxItems"],
+            1
+        );
+    }
+
+    #[test]
+    fn metadata_prompt_test_editor_content_replaces_only_system_prompt() {
+        let settings = metadata_prompt_test_settings();
+        let mut request = build_metadata_prompt_test_chat_request(
+            &settings,
+            &settings.effective_tuning(),
+            "Acme AG Invoice",
+            metadata_prompt_test_catalog(),
+        )
+        .unwrap();
+        let original_user = request.user_prompt.clone();
+        let original_schema = request.response_schema.clone();
+
+        apply_prompt_test_system_prompt(&mut request, "  operator system prompt  ");
+
+        assert_eq!(request.system_prompt, "operator system prompt");
+        assert_eq!(request.user_prompt, original_user);
+        assert_eq!(request.response_schema, original_schema);
+    }
+
+    #[test]
+    fn metadata_prompt_test_parser_returns_typed_valid_and_partial_results() {
+        let valid = parse_prompt_test_output(
+            Stage::Metadata,
+            r#"{"title":{"title":"Invoice 41","confidence":0.98},"document_date":{"date":"2026-07-17","confidence":0.9,"warnings":["date inferred"]}}"#,
+        );
+        assert!(valid.validation_errors.is_empty());
+        assert_eq!(valid.parsed["suggestion"]["title"]["title"], "Invoice 41");
+        assert_eq!(valid.parsed["diagnostics"]["status"], "valid");
+        assert_eq!(valid.warnings, vec!["date inferred"]);
+
+        let partial = parse_prompt_test_output(
+            Stage::Metadata,
+            r#"{"title":{"title":"Retained","confidence":0.8},"tags":"wrong","extra":"redacted"}"#,
+        );
+        assert_eq!(partial.parsed["suggestion"]["title"]["title"], "Retained");
+        assert!(partial.parsed["suggestion"].get("tags").is_none());
+        assert_eq!(
+            partial.parsed["diagnostics"]["status"],
+            "contract_violation"
+        );
+        assert_eq!(
+            partial.validation_errors,
+            vec![
+                "metadata field(s) have wrong types or unknown nested properties: tags",
+                "metadata response contains 1 unknown field(s)",
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_prompt_test_parser_rejects_malformed_non_object_and_omitted_outputs() {
+        let malformed = parse_prompt_test_output(Stage::Metadata, "not json");
+        assert_eq!(
+            malformed.validation_errors,
+            vec!["metadata response envelope is not valid JSON"]
+        );
+        assert_eq!(malformed.parsed["diagnostics"]["envelope_error"], "no_json");
+
+        let non_object = parse_prompt_test_output(Stage::Metadata, "[1, 2]");
+        assert_eq!(
+            non_object.validation_errors,
+            vec!["metadata response must be a JSON object"]
+        );
+        assert_eq!(
+            non_object.parsed["diagnostics"]["envelope_error"],
+            "non_object"
+        );
+
+        let omitted = parse_prompt_test_output(Stage::Metadata, "{}");
+        assert!(omitted.validation_errors.is_empty());
+        assert_eq!(
+            omitted.warnings,
+            vec!["metadata response omitted every requested field"]
+        );
+        assert_eq!(omitted.parsed["diagnostics"]["status"], "omitted");
+    }
+
     #[test]
     fn api_provider_tuning_follows_selected_provider_without_cross_profile_leakage() {
         let settings = api_provider_profile_settings(
@@ -9147,6 +9525,58 @@ mod tests {
             Some(archivist_core::StructuredOutputMode::JsonObject)
         );
         assert_eq!(second.tuning.request_timeout_seconds, 22);
+    }
+
+    #[test]
+    fn prompt_tester_defaults_to_metadata_stage_provider_but_keeps_explicit_overrides() {
+        let mut settings = api_provider_profile_settings(
+            "https://first.example.test/v1",
+            "https://second.example.test/v1",
+        );
+        settings.ai.stage_models = vec![archivist_core::StageModelOverride {
+            stage: Stage::Metadata,
+            provider: "second".to_owned(),
+            model: "ressl/MiniMax-M3-uncensored-NVFP4".to_owned(),
+        }];
+        let mut request = TestPromptRequest {
+            stage: Stage::Metadata,
+            content: "metadata system".to_owned(),
+            sample_text: Some("sample".to_owned()),
+            paperless_document_id: None,
+            provider_name: None,
+            model: None,
+        };
+
+        let stage_provider = prompt_test_provider(&settings, &request).unwrap();
+        assert_eq!(stage_provider.name, "second");
+        assert_eq!(stage_provider.model, "ressl/MiniMax-M3-uncensored-NVFP4");
+        assert_eq!(stage_provider.tuning.text_num_ctx, Some(22_222));
+        assert_eq!(stage_provider.tuning.max_output_tokens, Some(222));
+
+        request.provider_name = Some("first".to_owned());
+        request.model = Some("explicit-model".to_owned());
+        let explicit_provider = prompt_test_provider(&settings, &request).unwrap();
+        assert_eq!(explicit_provider.name, "first");
+        assert_eq!(explicit_provider.model, "explicit-model");
+        assert_eq!(explicit_provider.tuning.text_num_ctx, Some(11_111));
+        assert_eq!(explicit_provider.tuning.max_output_tokens, Some(111));
+
+        settings.ai.providers[1].kind = AiProviderKind::Mineru;
+        settings
+            .ai
+            .stage_models
+            .push(archivist_core::StageModelOverride {
+                stage: Stage::Ocr,
+                provider: "second".to_owned(),
+                model: "mineru".to_owned(),
+            });
+        request.stage = Stage::Ocr;
+        request.provider_name = None;
+        request.model = None;
+        let ocr_text_provider = prompt_test_provider(&settings, &request).unwrap();
+        assert_eq!(ocr_text_provider.name, "first");
+        assert_eq!(ocr_text_provider.kind, AiProviderKind::OpenaiCompatible);
+        assert_eq!(ocr_text_provider.model, "gpt-5-first");
     }
 
     #[test]
@@ -9423,10 +9853,8 @@ mod tests {
             provider_name: Some("second".to_owned()),
             model: Some(prompt_provider.model.clone()),
         };
-        let mut prompt_request = build_prompt_test_chat_request(&prompt_input, "sample")
-            .await
-            .unwrap();
-        prompt_request.system_prompt = prompt_input.content;
+        let mut prompt_request = build_ocr_prompt_test_chat_request("sample");
+        apply_prompt_test_system_prompt(&mut prompt_request, &prompt_input.content);
         prompt_request.model = prompt_provider.model.clone();
         apply_api_provider_tuning(&prompt_provider, &mut prompt_request);
         chat_with_api_provider(&state, &prompt_provider, prompt_request)
