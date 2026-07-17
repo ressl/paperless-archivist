@@ -542,13 +542,16 @@ operator smoke test, read it from a protected file and let curl consume a
 temporary mode-0600 config so it never appears in the command line:
 
 ```bash
-METRICS_TOKEN_FILE=/run/secrets/paperless-archivist-metrics-token
-umask 077
-METRICS_CURL_CONFIG="$(mktemp)"
-awk '{ print "header = \"Authorization: Bearer " $0 "\"" }' \
-  "$METRICS_TOKEN_FILE" > "$METRICS_CURL_CONFIG"
-curl --fail --config "$METRICS_CURL_CONFIG" http://127.0.0.1:8080/metrics
-rm -f "$METRICS_CURL_CONFIG"
+(
+  set -eu
+  METRICS_TOKEN_FILE=/run/secrets/paperless-archivist-metrics-token
+  umask 077
+  METRICS_CURL_CONFIG="$(mktemp)"
+  trap 'rm -f "$METRICS_CURL_CONFIG"' EXIT HUP INT TERM
+  awk '{ print "header = \"Authorization: Bearer " $0 "\"" }' \
+    "$METRICS_TOKEN_FILE" > "$METRICS_CURL_CONFIG"
+  curl --fail --config "$METRICS_CURL_CONFIG" http://127.0.0.1:8080/metrics
+)
 ```
 
 The service exports:

@@ -17,6 +17,23 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: archivist_ci
+          POSTGRES_USER: archivist_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U archivist_ci -d archivist_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://archivist_ci@127.0.0.1:5432/archivist_ci
+      ARCHIVIST_MIGRATIONS_DIR: ${{ github.workspace }}/migrations
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -30,6 +47,7 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace --locked
+      - run: bash scripts/verify/migration_smoke.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo install cargo-audit --locked
       - run: cargo install cargo-deny --locked

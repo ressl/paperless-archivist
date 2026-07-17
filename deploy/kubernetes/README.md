@@ -129,7 +129,10 @@ Patch the ServiceMonitor labels if the Prometheus installation applies a
 selector, and patch the NetworkPolicy monitoring namespace if it differs from
 the base example. Confirm the effective Prometheus pod labels and admit only
 that identity to TCP/8080 in a private overlay; do not open the API port to all
-namespaces.
+namespaces. The ServiceMonitor writes the stable target label
+`paperless_archivist_instance="paperless-archivist"`, and every rule selects
+that label instead of a transformable Service name. Patch the replacement to a
+unique value if one Prometheus server monitors multiple Archivist installations.
 
 The initial rules alert on scrape loss, a queue above 100 for 30 minutes, more
 than five new permanent failures in 15 minutes, and any provider-quota event in
@@ -144,10 +147,18 @@ docker run --rm -v "$PWD/scripts/verify:/workspace" -w /workspace \
   test rules paperless_archivist_alert_rules.test.yaml
 ```
 
-Rotate the metrics token by updating the dedicated Secret and restarting the
-API; the ServiceMonitor observes the same Secret key. Verify authenticated
-`200` and target health before removing the old secret version. Rollback removes
-the component and environment patch; `/metrics` then safely returns `503`.
+Do not rotate this environment-backed credential by changing one Secret in
+place: the API reads it only when a pod starts, while Prometheus may reload it
+earlier, producing indefinite `401` scrapes. Instead create a versioned Secret,
+patch both the API and ServiceMonitor references in a private overlay, and keep
+the prior Secret. Where secrets and workloads are separate GitOps applications,
+sync and prove the new Secret first. Apply the two reference changes, explicitly
+restart the API, and expect a brief scrape interruption while the pod and
+ServiceMonitor converge. Verify authenticated `200`, rollout health, and
+`up == 1`; then remove the prior Secret in a later change. Rollback points both
+references to the retained Secret and restarts the API. Removing the component
+and environment patch disables `/metrics` with `503`; if GitOps pruning is off,
+delete the obsolete monitoring CRs explicitly after reviewing their exact names.
 
 ## Migration Order
 

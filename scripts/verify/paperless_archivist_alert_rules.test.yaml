@@ -4,10 +4,97 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  - name: scoped scrape failure reaches firing state
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="example",paperless_archivist_instance="paperless-archivist"}'
+        values: '0+0x8'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PaperlessArchivistScrapeDown
+        exp_alerts:
+          - exp_labels:
+              namespace: example
+              paperless_archivist_instance: paperless-archivist
+              severity: critical
+            exp_annotations:
+              summary: Paperless Archivist metrics are unavailable
+              description: Prometheus cannot scrape the authenticated Paperless Archivist metrics endpoint.
+
+  - name: healthy default scrape ignores another failing installation
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="example",paperless_archivist_instance="paperless-archivist"}'
+        values: '1+0x8'
+      - series: 'up{namespace="other",paperless_archivist_instance="another-archivist"}'
+        values: '0+0x8'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PaperlessArchivistScrapeDown
+        exp_alerts: []
+
+  - name: sustained scoped queue reaches firing state
+    interval: 1m
+    input_series:
+      - series: 'paperless_archivist_jobs_queued{namespace="example",paperless_archivist_instance="paperless-archivist"}'
+        values: '101+0x35'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: PaperlessArchivistQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              namespace: example
+              paperless_archivist_instance: paperless-archivist
+              severity: warning
+            exp_annotations:
+              summary: Paperless Archivist queue depth is sustained above 100
+              description: The processing backlog has remained above the initial operational threshold for 30 minutes.
+
+  - name: queue threshold and another installation stay quiet
+    interval: 1m
+    input_series:
+      - series: 'paperless_archivist_jobs_queued{namespace="example",paperless_archivist_instance="paperless-archivist"}'
+        values: '100+0x35'
+      - series: 'paperless_archivist_jobs_queued{namespace="other",paperless_archivist_instance="another-archivist"}'
+        values: '1000+0x35'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: PaperlessArchivistQueueBacklog
+        exp_alerts: []
+
+  - name: permanent failure increase reaches firing state
+    interval: 1m
+    input_series:
+      - series: 'paperless_archivist_job_failures_total{namespace="example",paperless_archivist_instance="paperless-archivist"}'
+        values: '0 6+0x10'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: PaperlessArchivistJobFailureRateHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: example
+              paperless_archivist_instance: paperless-archivist
+              severity: warning
+            exp_annotations:
+              summary: Paperless Archivist permanent job failures are elevated
+              description: More than five jobs entered a permanent failed state within 15 minutes.
+
+  - name: failure threshold and another installation stay quiet
+    interval: 1m
+    input_series:
+      - series: 'paperless_archivist_job_failures_total{namespace="example",paperless_archivist_instance="paperless-archivist"}'
+        values: '0 5+0x10'
+      - series: 'paperless_archivist_job_failures_total{namespace="other",paperless_archivist_instance="another-archivist"}'
+        values: '0 100+0x10'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: PaperlessArchivistJobFailureRateHigh
+        exp_alerts: []
+
   - name: quota increase reaches firing state
     interval: 1m
     input_series:
-      - series: 'paperless_archivist_provider_quota_total{namespace="example"}'
+      - series: 'paperless_archivist_provider_quota_total{namespace="example",paperless_archivist_instance="paperless-archivist"}'
         values: '0 0 0 1 1 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 9m
@@ -15,16 +102,19 @@ tests:
         exp_alerts:
           - exp_labels:
               namespace: example
+              paperless_archivist_instance: paperless-archivist
               severity: warning
             exp_annotations:
               summary: A Paperless Archivist AI provider exhausted its quota
               description: At least one provider quota-exhaustion event occurred during the last hour; processing may be parked until its cooldown expires.
 
-  - name: flat quota counter stays quiet
+  - name: flat quota counter and another installation stay quiet
     interval: 1m
     input_series:
-      - series: 'paperless_archivist_provider_quota_total{namespace="example"}'
-        values: '0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'paperless_archivist_provider_quota_total{namespace="example",paperless_archivist_instance="paperless-archivist"}'
+        values: '0+0x10'
+      - series: 'paperless_archivist_provider_quota_total{namespace="other",paperless_archivist_instance="another-archivist"}'
+        values: '0 10+0x9'
     alert_rule_test:
       - eval_time: 9m
         alertname: PaperlessArchivistProviderQuotaExhausted

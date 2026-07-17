@@ -30,6 +30,7 @@ monitoring:
   enabled: false
   existingSecret: paperless-archivist-metrics
   tokenKey: ARCHIVIST_METRICS_TOKEN
+  instanceLabel: paperless-archivist
   prometheusNamespace: monitoring
   scrapeInterval: 30s
   alerts:

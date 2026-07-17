@@ -20,3 +20,7 @@ spec:
         credentials:
           name: paperless-archivist-metrics
           key: ARCHIVIST_METRICS_TOKEN
+      relabelings:
+        - action: replace
+          targetLabel: paperless_archivist_instance
+          replacement: paperless-archivist

@@ -45,6 +45,11 @@ test('monitoring component uses one dedicated Secret for API and Prometheus', as
       key: 'ARCHIVIST_METRICS_TOKEN'
     }
   });
+  assert.deepEqual(monitor.spec.endpoints[0].relabelings, [{
+    action: 'replace',
+    targetLabel: 'paperless_archivist_instance',
+    replacement: 'paperless-archivist'
+  }]);
 });
 
 test('supported alert rules include scrape, queue, permanent failures and quota', async () => {
@@ -63,6 +68,14 @@ test('supported alert rules include scrape, queue, permanent failures and quota'
   assert.match(alerts.get('PaperlessArchivistQueueBacklog').expr, /jobs_queued/);
   assert.match(alerts.get('PaperlessArchivistJobFailureRateHigh').expr, /job_failures_total/);
   assert.match(alerts.get('PaperlessArchivistProviderQuotaExhausted').expr, /provider_quota_total/);
+  for (const rule of alerts.values()) {
+    assert.match(
+      rule.expr,
+      /paperless_archivist_instance="paperless-archivist"/,
+      `${rule.alert} must be scoped to the stable target label`
+    );
+    assert.doesNotMatch(rule.expr, /service="paperless-archivist"/);
+  }
   assert.doesNotMatch(
     alerts.get('PaperlessArchivistJobFailureRateHigh').expr,
     /jobs_failed/,
@@ -94,8 +107,9 @@ test('monitoring remains opt-in and renders only with its CRDs', {
   assert.equal(monitored.filter(({ kind }) => kind === 'ServiceMonitor').length, 1);
   assert.equal(monitored.filter(({ kind }) => kind === 'PrometheusRule').length, 1);
   const api = monitored.find(({ kind, metadata }) =>
-    kind === 'Deployment' && metadata.name === 'paperless-archivist-api'
+    kind === 'Deployment' && metadata.name === 'example-paperless-archivist-api'
   );
+  assert.ok(api, 'namePrefix render must retain the API deployment and monitoring patch');
   assert.ok(api.spec.template.spec.containers[0].env.some(
     ({ name }) => name === 'ARCHIVIST_METRICS_TOKEN'
   ));

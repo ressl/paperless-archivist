@@ -31,7 +31,7 @@ Add an opt-in `monitoring` Kustomize component and example. The component
 contains:
 
 - a ServiceMonitor selecting the API Service and reading the bearer credential
-  from the existing application Secret;
+  from a dedicated metrics Secret;
 - a PrometheusRule with alerts for sustained queue depth, terminal-job failure
   rate, scrape loss, and any provider-quota counter increase;
 - no Secret object or credential value.
@@ -55,9 +55,11 @@ increment it. This makes the recent failure-rate alert semantically correct.
 ## Production deployment
 
 The production API Deployment references a dedicated SOPS-managed metrics
-Secret. The ServiceMonitor reads the same key, so the application and
-Prometheus cannot drift to different credentials and the worker receives no
-unneeded credential. The production
+Secret. The ServiceMonitor reads the same key in steady state and the worker
+receives no unneeded credential. Rotation uses a second versioned Secret,
+updates both references, explicitly rolls the API, and retains the previous
+version for rollback; an in-place update is unsafe because environment values
+do not live-reload. The production
 CiliumNetworkPolicy admits only monitoring-stack pods to the API port in
 addition to the existing ingress path. The private Kustomization includes the
 ServiceMonitor and PrometheusRule.
