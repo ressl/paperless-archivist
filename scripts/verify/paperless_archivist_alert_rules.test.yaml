@@ -1,0 +1,31 @@
+rule_files:
+  - paperless_archivist_alert_rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: quota increase reaches firing state
+    interval: 1m
+    input_series:
+      - series: 'paperless_archivist_provider_quota_total{namespace="example"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: PaperlessArchivistProviderQuotaExhausted
+        exp_alerts:
+          - exp_labels:
+              namespace: example
+              severity: warning
+            exp_annotations:
+              summary: A Paperless Archivist AI provider exhausted its quota
+              description: At least one provider quota-exhaustion event occurred during the last hour; processing may be parked until its cooldown expires.
+
+  - name: flat quota counter stays quiet
+    interval: 1m
+    input_series:
+      - series: 'paperless_archivist_provider_quota_total{namespace="example"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: PaperlessArchivistProviderQuotaExhausted
+        exp_alerts: []

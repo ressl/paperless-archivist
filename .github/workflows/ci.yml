@@ -37,6 +37,23 @@ jobs:
       - run: cargo deny check
       - run: pnpm install --frozen-lockfile
         working-directory: frontend
+      - run: node --test scripts/verify/kubernetes_monitoring_contract.test.mjs
+      - run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            --entrypoint kubectl \
+            alpine/k8s:1.36.2@sha256:44ef4942e171939b9c665a4a84beb80e2dcdb9a24330d4651cfdfd2e9deecc47 \
+            kustomize deploy/kubernetes/examples/monitoring > /tmp/monitoring.yaml
+          test "$(grep -c '^kind: ServiceMonitor$' /tmp/monitoring.yaml)" -eq 1
+          test "$(grep -c '^kind: PrometheusRule$' /tmp/monitoring.yaml)" -eq 1
+      - run: |
+          docker run --rm -v "$PWD/scripts/verify:/workspace" -w /workspace \
+            --entrypoint /bin/promtool \
+            quay.io/prometheus/prometheus@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac \
+            check rules paperless_archivist_alert_rules.yaml
+          docker run --rm -v "$PWD/scripts/verify:/workspace" -w /workspace \
+            --entrypoint /bin/promtool \
+            quay.io/prometheus/prometheus@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac \
+            test rules paperless_archivist_alert_rules.test.yaml
       - run: pnpm generate:client
         working-directory: frontend
       # Fail if the committed client is out of date with the OpenAPI spec

@@ -1,3 +1,7 @@
+# This public-safe pipeline is retained for forks and downstream GitLab users.
+# GitHub Actions is the canonical public gate for the official project; CI/CD
+# is intentionally disabled in the official GitLab.com source mirror.
+
 stages:
   - validate
   - test
@@ -127,6 +131,38 @@ public:kubernetes:custom-ai-egress:render:
       test "$(grep -c '^kind: NetworkPolicy$' /tmp/base.yaml)" -eq 1
       test "$(grep -c '^kind: NetworkPolicy$' /tmp/custom-ai.yaml)" -eq 2
       grep -q 'name: paperless-archivist-custom-ai-egress' /tmp/custom-ai.yaml
+
+public:kubernetes:monitoring:contract:
+  stage: test
+  extends:
+    - .frontend_base
+    - .default_retry
+  script:
+    - node --test ../scripts/verify/kubernetes_monitoring_contract.test.mjs
+
+public:kubernetes:monitoring:render:
+  stage: test
+  image:
+    name: alpine/k8s:1.36.2@sha256:44ef4942e171939b9c665a4a84beb80e2dcdb9a24330d4651cfdfd2e9deecc47
+    entrypoint: [""]
+  extends: .default_retry
+  script:
+    - kubectl kustomize deploy/kubernetes/base > /tmp/base.yaml
+    - kubectl kustomize deploy/kubernetes/examples/monitoring > /tmp/monitoring.yaml
+    - test "$(grep -c '^kind: ServiceMonitor$' /tmp/base.yaml || true)" -eq 0
+    - test "$(grep -c '^kind: PrometheusRule$' /tmp/base.yaml || true)" -eq 0
+    - test "$(grep -c '^kind: ServiceMonitor$' /tmp/monitoring.yaml)" -eq 1
+    - test "$(grep -c '^kind: PrometheusRule$' /tmp/monitoring.yaml)" -eq 1
+
+public:prometheus:monitoring-rules:
+  stage: test
+  image:
+    name: quay.io/prometheus/prometheus@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac
+    entrypoint: [""]
+  extends: .default_retry
+  script:
+    - promtool check rules scripts/verify/paperless_archivist_alert_rules.yaml
+    - promtool test rules scripts/verify/paperless_archivist_alert_rules.test.yaml
 
 # Available only when a protected ref receives the protected endpoint
 # variable. Authentication is an optional GitLab file variable, so no secret
