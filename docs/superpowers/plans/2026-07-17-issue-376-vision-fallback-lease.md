@@ -44,4 +44,4 @@
 
 - [x] Run focused Worker tests, the full Worker suite, Clippy, formatting, documentation checks, and secret scan.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify branch and MR pipelines, document evidence, and close #376 only when green.
+- [x] Commit/push, verify branch and MR pipelines, document evidence, and close #376 only when green.
