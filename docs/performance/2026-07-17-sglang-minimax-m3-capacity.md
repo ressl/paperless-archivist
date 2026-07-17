@@ -93,6 +93,7 @@ overrides. The endpoint variable must be a credential-free URL;
 authentication, when needed, must use a readable file.
 
 ```bash
+mkdir -p target
 SGLANG_CAPACITY_BASE_URL=https://sglang.example.invalid/v1 \
 SGLANG_CAPACITY_API_KEY_FILE=/run/secrets/sglang-key \
 SGLANG_CAPACITY_REQUESTS=8 \

@@ -218,6 +218,7 @@ Reasoning tokens consume the same output cap as the final answer.
    file:
 
    ```bash
+   mkdir -p target
    SGLANG_CONTRACT_BASE_URL=https://sglang.example.invalid/v1 \
    SGLANG_CONTRACT_API_KEY_FILE=/run/secrets/sglang-key \
    SGLANG_CONTRACTS=models,text,schema,reasoning-disabled,reasoning-enabled,reasoning-adaptive,tool \
