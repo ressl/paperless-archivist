@@ -48,4 +48,4 @@
 - [x] Prove no `sglang` provider kind is introduced in Core, frontend, or OpenAPI.
 - [x] Run focused red/green tests, workspace tests, Clippy, formatting, frontend tests/typecheck/lint/build, OpenAPI contracts, and documentation checks.
 - [x] Obtain an independent Critical/Important review and resolve every finding.
-- [ ] Commit/push, verify both GitLab pipelines, document evidence, and close #370 only when green.
+- [x] Commit/push, verify both GitLab pipelines, document evidence, and close #370 only when green.
