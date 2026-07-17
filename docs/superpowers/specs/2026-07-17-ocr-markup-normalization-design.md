@@ -26,10 +26,12 @@ from tests on the clean `origin/main` implementation.
 
 ## Chosen Approach
 
-Use `scraper` 0.27 with default features disabled. `scraper` uses the Servo
-`html5ever` parser, so tag boundaries, comments, quoted attributes, malformed
-HTML, case folding, and HTML entities use a browser-grade parser rather than a
-project-local scanner.
+Use Servo `html5ever` 0.39 with the matching `markup5ever_rcdom` tree sink. Tag
+boundaries, comments, quoted attributes, malformed HTML, case folding, and HTML
+entities therefore use a browser-grade parser rather than a project-local
+scanner. The higher-level `scraper` facade was evaluated and rejected because
+its CSS-selector dependency graph introduces MPL-2.0 packages that the
+repository license policy intentionally does not allow.
 
 The OCR crate owns a small deterministic DOM-to-archive-text renderer:
 

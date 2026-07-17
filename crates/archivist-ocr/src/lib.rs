@@ -1,3 +1,5 @@
+mod markup;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -257,13 +259,7 @@ fn accumulate_rendered_page_size(running_total: u64, page_len: u64) -> Result<u6
 }
 
 pub fn normalize_ocr_pages(page_texts: &[String]) -> String {
-    page_texts
-        .iter()
-        .map(|page| strip_code_fences(page))
-        .map(|page| page.trim().to_owned())
-        .filter(|page| !page.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    markup::normalize_pages(page_texts).text
 }
 
 /// Returns true when `line` is a standalone markdown code-fence line, i.e. it
@@ -384,7 +380,16 @@ mod tests {
     #[test]
     fn normalize_ocr_pages_handles_quoted_angles_comments_and_hidden_subtrees() {
         let pages = vec![
-            r#"<div data-bbox="1 2 3 4" data-note="x > y"><!-- > ignored --><style>p { color: red; }</style><script>alert(1)</script><head>metadata</head><svg><text>vector</text></svg><noscript>fallback</noscript><p>Rechnung 4711</p></div>"#
+            r#"<div data-bbox="1 2 3 4" data-note="x > y"><!-- > ignored --><style>p { color: red; }</style><script>alert(1)</script><svg><text>vector</text></svg><noscript>fallback</noscript><p>Rechnung 4711</p></div>"#
+                .to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Rechnung 4711");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_drops_document_head_content() {
+        let pages = vec![
+            r#"<html><head><title>metadata</title></head><body><div data-bbox="1 2 3 4"><p>Rechnung 4711</p></div></body></html>"#
                 .to_owned(),
         ];
         assert_eq!(normalize_ocr_pages(&pages), "Rechnung 4711");
@@ -393,14 +398,15 @@ mod tests {
     #[test]
     fn normalize_ocr_pages_decodes_safe_entities_without_controls() {
         let pages = vec![
-            "<p>Caf&eacute; &agrave; Gen&egrave;ve, 25&deg;C, &euro;50; &#0; &#x1f;</p>"
-                .to_owned(),
+            "<p>Caf&eacute; &agrave; Gen&egrave;ve, 25&deg;C, &euro;50; &#0; &#x1f;</p>".to_owned(),
         ];
         let normalized = normalize_ocr_pages(&pages);
         assert!(normalized.starts_with("Café à Genève, 25°C, €50;"));
-        assert!(!normalized
-            .chars()
-            .any(|ch| ch == '\0' || (ch.is_control() && ch != '\n' && ch != '\t')));
+        assert!(
+            !normalized
+                .chars()
+                .any(|ch| ch == '\0' || (ch.is_control() && ch != '\n' && ch != '\t'))
+        );
     }
 
     #[test]
@@ -417,9 +423,7 @@ mod tests {
 
     #[test]
     fn normalize_ocr_pages_preserves_pretty_table_cells() {
-        let pages = vec![
-            "<table>\n<tr>\n<td>Name</td>\n<td>42</td>\n</tr>\n</table>".to_owned(),
-        ];
+        let pages = vec!["<table>\n<tr>\n<td>Name</td>\n<td>42</td>\n</tr>\n</table>".to_owned()];
         assert_eq!(normalize_ocr_pages(&pages), "Name | 42");
     }
 

@@ -4,9 +4,9 @@
 
 **Goal:** Convert MinerU HTML layout fragments into deterministic archival text without corrupting plain text, table structure, entities, or code-fence invariants.
 
-**Architecture:** Parse candidate pages with `scraper`/`html5ever`, require conservative DOM-backed layout evidence before rewriting, then render the DOM through a project-owned deterministic text renderer. Keep page normalization private, expose one validated document-level API to the worker, and preserve raw page-cache semantics.
+**Architecture:** Parse candidate pages with Servo `html5ever` and its matching RcDom tree sink, require conservative DOM-backed layout evidence before rewriting, then render the DOM through a project-owned deterministic text renderer. Keep page normalization private, expose one validated document-level API to the worker, and preserve raw page-cache semantics.
 
-**Tech Stack:** Rust 2024, `scraper` 0.27 with default features disabled, `ego-tree` 0.11, existing `anyhow` error handling and Cargo security gates.
+**Tech Stack:** Rust 2024, `html5ever` 0.39, `markup5ever_rcdom` 0.39.0+unofficial, existing `anyhow` error handling and Cargo security gates.
 
 ## Global Constraints
 
@@ -197,26 +197,28 @@ git commit -m "test(ocr): define layout markup normalization contract"
 Add to `[workspace.dependencies]`:
 
 ```toml
-ego-tree = "0.11"
-scraper = { version = "0.27", default-features = false }
+html5ever = "0.39"
+markup5ever_rcdom = "=0.39.0"
 ```
 
 Add to `crates/archivist-ocr/Cargo.toml`:
 
 ```toml
-ego-tree.workspace = true
-scraper.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
 ```
 
-Run `cargo update -p scraper --precise 0.27.0` to populate `Cargo.lock`.
+Run `cargo check -p archivist-ocr` once without `--locked` to resolve the new
+packages into `Cargo.lock`, then use `--locked` for every subsequent command.
 
 - [ ] **Step 2: Create the parser module with its internal contract**
 
 Create `crates/archivist-ocr/src/markup.rs` with these units:
 
 ```rust
-use ego_tree::NodeRef;
-use scraper::{ElementRef, Html, Node};
+use html5ever::{QualName, local_name, ns, parse_document, parse_fragment};
+use html5ever::tendril::TendrilSink;
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::strip_code_fences;
 
@@ -244,8 +246,8 @@ pub(crate) fn normalize_pages(page_texts: &[String]) -> NormalizedPages {
 
 fn normalize_page(page: &str) -> NormalizedPage {
     let detection_input = strip_code_fences(page);
-    let fragment = Html::parse_fragment(&detection_input);
-    if !looks_like_layout_markup(&detection_input, &fragment) {
+    let dom = parse_html(&detection_input);
+    if !looks_like_layout_markup(&detection_input, &dom) {
         return NormalizedPage {
             text: detection_input,
             had_layout_markup: false,
@@ -253,14 +255,41 @@ fn normalize_page(page: &str) -> NormalizedPage {
     }
 
     let mut rendered = String::with_capacity(detection_input.len());
-    for node in fragment.tree.root().children() {
-        render_node(node, &mut rendered);
-    }
+    render_node(&dom.document, &mut rendered);
     let normalized = normalize_rendered_text(&sanitize_controls(&rendered));
     NormalizedPage {
         text: strip_code_fences(&normalized),
         had_layout_markup: true,
     }
+}
+
+fn parse_html(source: &str) -> RcDom {
+    let source_lower = source.to_ascii_lowercase();
+    if ["html", "head", "body"]
+        .iter()
+        .any(|name| contains_start_tag(&source_lower, name))
+    {
+        parse_document(RcDom::default(), Default::default()).one(source)
+    } else {
+        parse_fragment(
+            RcDom::default(),
+            Default::default(),
+            QualName::new(None, ns!(html), local_name!("body")),
+            Vec::new(),
+            false,
+        )
+        .one(source)
+    }
+}
+
+fn contains_start_tag(source_lower: &str, name: &str) -> bool {
+    let needle = format!("<{name}");
+    source_lower.match_indices(&needle).any(|(index, _)| {
+        source_lower[index + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| next.is_ascii_whitespace() || matches!(next, '>' | '/'))
+    })
 }
 ```
 
@@ -279,25 +308,16 @@ struct LayoutEvidence {
     explicitly_closed_elements: usize,
 }
 
-fn looks_like_layout_markup(source: &str, fragment: &Html) -> bool {
+fn looks_like_layout_markup(source: &str, dom: &RcDom) -> bool {
     let source_lower = source.to_ascii_lowercase();
     let mut evidence = LayoutEvidence::default();
-    for node in fragment.tree.nodes() {
-        let Some(element) = ElementRef::wrap(node) else { continue };
-        let name = element.value().name();
-        if element.attr("data-bbox").is_some() || element.attr("data-label").is_some() {
-            evidence.marker_attribute = true;
-        }
-        if name == "table" {
-            evidence.table = true;
-        }
-        if is_layout_element(name) {
-            evidence.recognized_elements += 1;
-            if source_lower.contains(&format!("</{name}")) {
-                evidence.explicitly_closed_elements += 1;
-            }
-        }
-    }
+    collect_layout_evidence(&dom.document, &source_lower, &mut evidence);
+
+    // Inspect the parsed RcDom recursively. For each Element node, read
+    // `name.local` and `attrs`; html5ever has already normalized case and tag
+    // boundaries. Count known layout elements, marker attributes, tables, and
+    // elements whose explicit closing token exists in `source_lower`.
+    // `collect_layout_evidence` recurses over `node.children.borrow()`.
 
     let starts_with_layout = source_lower.trim_start().strip_prefix('<').is_some_and(|rest| {
         let name = rest
@@ -311,6 +331,29 @@ fn looks_like_layout_markup(source: &str, fragment: &Html) -> bool {
         || evidence.table
         || (starts_with_layout && evidence.explicitly_closed_elements >= 1)
         || (evidence.recognized_elements >= 2 && evidence.explicitly_closed_elements >= 2)
+}
+
+fn collect_layout_evidence(node: &Handle, source_lower: &str, evidence: &mut LayoutEvidence) {
+    if let NodeData::Element { name, attrs, .. } = &node.data {
+        let element_name = name.local.as_ref();
+        if attrs.borrow().iter().any(|attribute| {
+            matches!(attribute.name.local.as_ref(), "data-bbox" | "data-label")
+        }) {
+            evidence.marker_attribute = true;
+        }
+        if element_name == "table" {
+            evidence.table = true;
+        }
+        if is_layout_element(element_name) {
+            evidence.recognized_elements += 1;
+            if source_lower.contains(&format!("</{element_name}")) {
+                evidence.explicitly_closed_elements += 1;
+            }
+        }
+    }
+    for child in node.children.borrow().iter() {
+        collect_layout_evidence(child, source_lower, evidence);
+    }
 }
 
 fn is_layout_element(name: &str) -> bool {
@@ -330,21 +373,22 @@ Implement `render_node`, `render_element`, `render_table`, and row collection.
 The exact behavior is:
 
 ```rust
-fn render_node(node: NodeRef<'_, Node>, output: &mut String) {
-    match node.value() {
-        Node::Text(text) => output.push_str(text),
-        Node::Element(_) => render_element(ElementRef::wrap(node).expect("element"), output),
-        Node::Document | Node::Fragment => {
-            for child in node.children() {
+fn render_node(node: &Handle, output: &mut String) {
+    match &node.data {
+        NodeData::Text { contents } => output.push_str(&contents.borrow()),
+        NodeData::Element { name, .. } => render_element(node, name.local.as_ref(), output),
+        NodeData::Document => {
+            for child in node.children.borrow().iter() {
                 render_node(child, output);
             }
         }
-        Node::Doctype(_) | Node::Comment(_) | Node::ProcessingInstruction(_) => {}
+        NodeData::Doctype { .. }
+        | NodeData::Comment { .. }
+        | NodeData::ProcessingInstruction { .. } => {}
     }
 }
 
-fn render_element(element: ElementRef<'_>, output: &mut String) {
-    let name = element.value().name();
+fn render_element(element: &Handle, name: &str, output: &mut String) {
     if matches!(name, "style" | "script" | "head" | "svg" | "noscript") {
         return;
     }
@@ -360,7 +404,7 @@ fn render_element(element: ElementRef<'_>, output: &mut String) {
     if block {
         push_line_break(output);
     }
-    for child in element.children() {
+    for child in element.children.borrow().iter() {
         render_node(child, output);
     }
     if block {
@@ -368,14 +412,16 @@ fn render_element(element: ElementRef<'_>, output: &mut String) {
     }
 }
 
-fn render_table(table: ElementRef<'_>, output: &mut String) {
+fn render_table(table: &Handle, output: &mut String) {
     let mut rows = Vec::new();
     collect_table_rows(table, &mut rows);
     push_line_break(output);
     for row in rows {
         let cells = row
-            .child_elements()
-            .filter(|cell| matches!(cell.value().name(), "td" | "th"))
+            .children
+            .borrow()
+            .iter()
+            .filter(|cell| matches!(element_name(cell), Some("td" | "th")))
             .map(render_table_cell)
             .collect::<Vec<_>>();
         if !cells.is_empty() {
@@ -385,19 +431,26 @@ fn render_table(table: ElementRef<'_>, output: &mut String) {
     }
 }
 
-fn collect_table_rows<'a>(element: ElementRef<'a>, rows: &mut Vec<ElementRef<'a>>) {
-    for child in element.child_elements() {
-        match child.value().name() {
-            "tr" => rows.push(child),
-            "table" => {}
+fn collect_table_rows(element: &Handle, rows: &mut Vec<Handle>) {
+    for child in element.children.borrow().iter() {
+        match element_name(child) {
+            Some("tr") => rows.push(child.clone()),
+            Some("table") => {}
             _ => collect_table_rows(child, rows),
         }
     }
 }
 
-fn render_table_cell(cell: ElementRef<'_>) -> String {
+fn element_name(node: &Handle) -> Option<&str> {
+    match &node.data {
+        NodeData::Element { name, .. } => Some(name.local.as_ref()),
+        _ => None,
+    }
+}
+
+fn render_table_cell(cell: &Handle) -> String {
     let mut rendered = String::new();
-    for child in cell.children() {
+    for child in cell.children.borrow().iter() {
         render_node(child, &mut rendered);
     }
     rendered.split_whitespace().collect::<Vec<_>>().join(" ")
