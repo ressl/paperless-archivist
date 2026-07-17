@@ -349,6 +349,117 @@ mod tests {
         assert_eq!(strip_code_fences(page), page);
     }
 
+    #[test]
+    fn normalize_ocr_pages_preserves_raw_comparisons_inside_markup() {
+        let pages = vec!["<p>Betrag < 100 EUR faellig; 1 < 2 und x > y.</p>".to_owned()];
+        assert_eq!(
+            normalize_ocr_pages(&pages),
+            "Betrag < 100 EUR faellig; 1 < 2 und x > y."
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_pages_keeps_literal_plain_text_tags() {
+        for page in [
+            "A < B and <document> is printed text.",
+            "Der Begriff <brutto> ist kein HTML.",
+            "Use the literal <p> tag in documentation.",
+        ] {
+            assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
+        }
+    }
+
+    #[test]
+    fn normalize_ocr_pages_recognizes_uppercase_and_marker_free_layout() {
+        let pages = vec![
+            "<DIV><H1>Rechnung</H1><UL><LI>Position eins</LI><LI>Position zwei</LI></UL></DIV>"
+                .to_owned(),
+        ];
+        assert_eq!(
+            normalize_ocr_pages(&pages),
+            "Rechnung\nPosition eins\nPosition zwei"
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_pages_handles_quoted_angles_comments_and_hidden_subtrees() {
+        let pages = vec![
+            r#"<div data-bbox="1 2 3 4" data-note="x > y"><!-- > ignored --><style>p { color: red; }</style><script>alert(1)</script><head>metadata</head><svg><text>vector</text></svg><noscript>fallback</noscript><p>Rechnung 4711</p></div>"#
+                .to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Rechnung 4711");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_decodes_safe_entities_without_controls() {
+        let pages = vec![
+            "<p>Caf&eacute; &agrave; Gen&egrave;ve, 25&deg;C, &euro;50; &#0; &#x1f;</p>"
+                .to_owned(),
+        ];
+        let normalized = normalize_ocr_pages(&pages);
+        assert!(normalized.starts_with("Café à Genève, 25°C, €50;"));
+        assert!(!normalized
+            .chars()
+            .any(|ch| ch == '\0' || (ch.is_control() && ch != '\n' && ch != '\t')));
+    }
+
+    #[test]
+    fn normalize_ocr_pages_decodes_entity_after_bare_ampersand() {
+        let pages = vec!["<p>Firma M & M&uuml;ller; R&D</p>".to_owned()];
+        assert_eq!(normalize_ocr_pages(&pages), "Firma M & Müller; R&D");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_leaves_plain_text_entities_unchanged() {
+        let page = "Printed HTML example: Gr&ouml;&szlig;e &amp; value";
+        assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
+    }
+
+    #[test]
+    fn normalize_ocr_pages_preserves_pretty_table_cells() {
+        let pages = vec![
+            "<table>\n<tr>\n<td>Name</td>\n<td>42</td>\n</tr>\n</table>".to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Name | 42");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_preserves_empty_table_columns() {
+        let pages = vec![
+            "<table><tr><td>Name</td><td></td><td>42</td></tr><tr><td></td><td>7</td><td></td></tr></table>"
+                .to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Name | | 42\n| 7 |");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_separates_blocks_and_implicit_list_items() {
+        let pages = vec![
+            "<div><h1>Heading</h1><ul><li>One<li>Two</ul><blockquote>Quote</blockquote><p>Tail</p></div>"
+                .to_owned(),
+        ];
+        assert_eq!(
+            normalize_ocr_pages(&pages),
+            "Heading\nOne\nTwo\nQuote\nTail"
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_pages_strips_fences_revealed_by_markup() {
+        let pages = vec![
+            "<p>Invoice 42</p>\n<p>```markdown</p>".to_owned(),
+            "<p>&#96;&#96;&#96;</p>".to_owned(),
+        ];
+        assert_eq!(normalize_ocr_pages(&pages), "Invoice 42");
+    }
+
+    #[test]
+    fn normalize_ocr_pages_is_idempotent_after_markup_is_removed() {
+        let once = normalize_ocr_pages(&["<p>M&uuml;nchen</p>".to_owned()]);
+        let twice = normalize_ocr_pages(std::slice::from_ref(&once));
+        assert_eq!(twice, once);
+    }
+
     #[tokio::test]
     async fn image_input_is_rejected_over_the_per_page_cap() {
         // A small image passes through without rendering.
