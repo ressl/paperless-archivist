@@ -1,7 +1,7 @@
 # OCR Layout-Markup Normalization Design
 
-**Date:** 2026-07-17  
-**Issues:** #322, #323, #324, #325, #326, #331, #335  
+**Date:** 2026-07-17
+**Issues:** #322, #323, #324, #325, #326, #331, #335
 **Status:** Approved for implementation
 
 ## Goal
