@@ -209,9 +209,8 @@ Expected: one commit containing the minimal dependency changes, with no OCR work
 **Files:**
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
-- Modify: `crates/archivist-db/Cargo.toml`
-- Modify: `crates/archivist-api/Cargo.toml`
-- Modify: SQLx call sites under `crates/archivist-db` and `crates/archivist-api`
+- Add: `crates/archivist-sqlx/Cargo.toml`
+- Add: `crates/archivist-sqlx/src/lib.rs`
 
 **Interfaces:**
 - Consumes: pipeline 9521, job 62808, whose group blueprint runs `cargo audit --deny warnings`.
@@ -223,13 +222,13 @@ Inspect job 62808.
 
 Expected: the local `cargo audit` exits 0, but the shared job exits 1 because `--deny warnings` promotes the dormant `sqlx-sqlite -> flume -> spin 0.9.8` lockfile warning to an error.
 
-- [ ] **Step 2: Replace the multi-driver facade with exact PostgreSQL-only crates**
+- [ ] **Step 2: Replace the multi-driver facade with an internal PostgreSQL-only facade**
 
-Alias exact `sqlx-core = 0.9.0` as the existing `sqlx` dependency and add exact `sqlx-postgres = 0.9.0`. Keep the same Tokio, Rustls, migration, Chrono, UUID, and JSON capabilities. Exact pins are required because SQLx Core's API is semver-exempt.
+Add the non-published `archivist-sqlx` workspace crate, whose library name remains `sqlx`. It depends on exact `sqlx-core = 0.9.0` and `sqlx-postgres = 0.9.0` and exposes only the API subset already used by the application. Keep the same Tokio, Rustls, migration, Chrono, UUID, and JSON capabilities. Exact pins are required because SQLx Core's API is semver-exempt.
 
-- [ ] **Step 3: Mechanically adapt only facade re-exports**
+- [ ] **Step 3: Preserve the existing application-facing facade contract**
 
-Use `sqlx_core` module paths for query helpers/traits and `sqlx_postgres` for `PgPool`, `PgRow`, `PgPoolOptions`, and `Postgres`. Do not change SQL, transaction behavior, pool configuration, or migration logic.
+Re-export query helpers/traits from `sqlx-core` and `PgPool`, `PgRow`, `PgPoolOptions`, and `Postgres` through the PostgreSQL driver. Existing call sites stay unchanged; SQL, transaction behavior, pool configuration, and migration logic are not modified.
 
 - [ ] **Step 4: Prove lockfile and runtime compatibility**
 
