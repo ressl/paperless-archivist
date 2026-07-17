@@ -14,7 +14,7 @@ import {
   recommendedModel,
   withModelDefaults
 } from '../modelCatalog';
-import { useI18n } from '../i18n/I18nProvider';
+import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { ActionButton, PageHeader, errorToString, localizedErrorMessage, run } from '../lib/ui';
 import { LanguageSelector } from '../lib/LanguageSelector';
 import { AiDefaultsSection } from './sections/AiDefaultsSection';
@@ -26,7 +26,7 @@ import { ModelCatalogEditor } from './sections/ModelCatalogEditor';
 import { NotificationsSection } from './sections/NotificationsSection';
 import { OcrSection } from './sections/OcrSection';
 import { PaperlessSection } from './sections/PaperlessSection';
-import { ProviderCard } from './sections/ProviderCard';
+import { ProviderCard, type ProviderFieldErrors } from './sections/ProviderCard';
 import { SecuritySection } from './sections/SecuritySection';
 import { TaggingSection } from './sections/TaggingSection';
 import { UiSection } from './sections/UiSection';
@@ -62,6 +62,105 @@ function providerSecretsByName(
     if (secret && provider.name) out[provider.name] = secret;
   });
   return out;
+}
+
+type ProviderConfigurationValidation = {
+  providerErrors: ProviderFieldErrors[];
+  defaultProvider?: string;
+  ollamaBaseUrl?: string;
+  referenceErrors: string[];
+  hasErrors: boolean;
+};
+
+function validHttpBaseUrl(value: string) {
+  try {
+    const parsed = new URL(value.trim());
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function validateProviderConfiguration(
+  settings: RuntimeSettings,
+  t: TFunction
+): ProviderConfigurationValidation {
+  const providers = settings.ai.providers;
+  const providerErrors: ProviderFieldErrors[] = providers.map(() => ({}));
+  const nameGroups = new Map<string, number[]>();
+
+  providers.forEach((provider, index) => {
+    const name = provider.name.trim();
+    if (!name) {
+      providerErrors[index].name = t('settings.provider.validation.name_required');
+      return;
+    }
+    const normalized = name.toLowerCase();
+    nameGroups.set(normalized, [...(nameGroups.get(normalized) ?? []), index]);
+  });
+
+  for (const indexes of nameGroups.values()) {
+    if (indexes.length < 2) continue;
+    indexes.forEach((index, position) => {
+      const other = indexes[(position + 1) % indexes.length];
+      providerErrors[index].name = t('settings.provider.validation.name_duplicate', {
+        name: providers[other].name.trim()
+      });
+    });
+  }
+
+  let ollamaBaseUrl: string | undefined;
+  providers.forEach((provider, index) => {
+    if (!provider.enabled) return;
+    const name = provider.name.trim() || t('settings.provider.provider');
+    const legacyOllama = provider.name.trim().toLowerCase() === 'ollama';
+    const baseUrl = legacyOllama ? settings.ai.ollama_base_url : provider.base_url;
+    const error = !baseUrl.trim()
+      ? t('settings.provider.validation.base_url_required', { provider: name })
+      : !validHttpBaseUrl(baseUrl)
+        ? t('settings.provider.validation.base_url_invalid', { provider: name })
+        : undefined;
+    if (legacyOllama) ollamaBaseUrl = error;
+    else providerErrors[index].baseUrl = error;
+  });
+
+  const enabledMatches = (reference: string) => {
+    const normalized = reference.trim().toLowerCase();
+    return providers.filter(
+      (provider) => provider.enabled && provider.name.trim().toLowerCase() === normalized
+    );
+  };
+  const defaultProvider =
+    enabledMatches(settings.ai.default_provider).length === 1
+      ? undefined
+      : t('settings.provider.validation.default_invalid', {
+          provider: settings.ai.default_provider.trim() || t('settings.provider.provider')
+        });
+
+  const referenceErrors: string[] = [];
+  const stages = new Set<string>();
+  for (const override of settings.ai.stage_models) {
+    if (stages.has(override.stage)) {
+      referenceErrors.push(
+        t('settings.provider.validation.duplicate_stage', { stage: override.stage })
+      );
+    }
+    stages.add(override.stage);
+    if (enabledMatches(override.provider).length !== 1) {
+      referenceErrors.push(
+        t('settings.provider.validation.stage_invalid', {
+          stage: override.stage,
+          provider: override.provider.trim() || t('settings.provider.provider')
+        })
+      );
+    }
+  }
+
+  const hasErrors =
+    providerErrors.some((error) => Boolean(error.name || error.baseUrl)) ||
+    Boolean(defaultProvider || ollamaBaseUrl) ||
+    referenceErrors.length > 0;
+  return { providerErrors, defaultProvider, ollamaBaseUrl, referenceErrors, hasErrors };
 }
 
 export function SettingsPage({ setError }: { setError: (error: string | null) => void }) {
@@ -272,6 +371,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         recommendedModel(selectedDefaultProvider, 'text');
   const selectedProviderSecret =
     selectedDefaultProviderIndex >= 0 ? providerSecrets[selectedDefaultProviderIndex] : undefined;
+  const providerValidation = validateProviderConfiguration(settings, t);
 
   const runPaperlessTest = () => {
     if (savedSettings && paperlessSettingsChanged(settings, savedSettings, token)) {
@@ -380,8 +480,9 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
 
   const firstRunSteps = firstRunWizardSteps(settings, savedSettings, selectedDefaultProvider, t);
 
-  const saveSettings = () =>
-    run(
+  const saveSettings = () => {
+    if (providerValidation.hasErrors) return;
+    return run(
       setBusy,
       setError,
       () =>
@@ -399,6 +500,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           }),
       t
     );
+  };
 
   return (
     <section className="page">
@@ -428,6 +530,10 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           onRefreshModels={() => loadOllamaModels(selectedDefaultProviderIndex, selectedDefaultProvider.name)}
           test={providerTest}
           onTest={runProviderTest}
+          errors={{
+            defaultProvider: providerValidation.defaultProvider,
+            ollamaBaseUrl: providerValidation.ollamaBaseUrl
+          }}
         />
         <WorkflowProcessingSection value={settings.workflow} onChange={updateWorkflow} />
         <OcrSection value={settings.ocr} onChange={updateOcr} />
@@ -467,6 +573,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             onChangeTuning={(patch) => updateProviderTuning(index, patch)}
             onResetTuningBlock={(fields) => resetProviderTuningBlock(index, fields)}
             onRefreshModels={() => loadOllamaModels(index, provider.name)}
+            errors={providerValidation.providerErrors[index]}
           />
         ))}
       </div>
@@ -475,8 +582,26 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         <button title={t('settings.provider.add')} onClick={addProvider}>
           <UserPlus size={16} /> {t('settings.provider.add')}
         </button>
-        <ActionButton icon={<Save />} label={t('generic.save')} busy={busy} onClick={saveSettings} />
+        <ActionButton
+          icon={<Save />}
+          label={t('generic.save')}
+          busy={busy}
+          disabled={providerValidation.hasErrors}
+          onClick={saveSettings}
+        />
         {result && <span className="result">{result}</span>}
+        {providerValidation.hasErrors && (
+          <div className="settings-validation-summary" role="alert">
+            <span>{t('settings.provider.validation.save_blocked')}</span>
+            {providerValidation.referenceErrors.length > 0 && (
+              <ul>
+                {providerValidation.referenceErrors.map((error, index) => (
+                  <li key={`${error}-${index}`}>{error}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
     </section>
   );

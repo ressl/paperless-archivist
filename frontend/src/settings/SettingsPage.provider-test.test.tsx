@@ -142,6 +142,7 @@ vi.mock('../api/client', async () => {
       ...actual.api,
       settings: vi.fn(async () => settingsFixture()),
       ollamaModels: vi.fn(async () => ({ provider: 'ollama', models: [] })),
+      saveSettings: vi.fn(async (settings: RuntimeSettings) => settings),
       testProvider: vi.fn(async (input: ProviderTestRequest) => ({
         ok: true,
         provider: input.name,
@@ -152,12 +153,14 @@ vi.mock('../api/client', async () => {
 });
 
 const testProviderMock = vi.mocked(api.testProvider);
+const saveSettingsMock = vi.mocked(api.saveSettings);
 
 describe('<SettingsPage> provider draft test', () => {
   beforeEach(() => {
     cleanup();
     window.localStorage.clear();
     testProviderMock.mockClear();
+    saveSettingsMock.mockClear();
   });
 
   it('sends the visible unsaved provider, model, tuning, and transient secret', async () => {
@@ -207,5 +210,35 @@ describe('<SettingsPage> provider draft test', () => {
       })
     );
     expect(await screen.findByText(/renamed-provider.*draft-model/i)).toBeInTheDocument();
+  });
+
+  it('blocks saving and identifies conflicting providers and invalid active URLs', async () => {
+    const { SettingsPage } = await import('./SettingsPage');
+    render(
+      <I18nProvider>
+        <SettingsPage setError={() => undefined} />
+      </I18nProvider>
+    );
+
+    await screen.findByRole('group', { name: 'draft-provider' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
+
+    let addedProvider = screen.getByRole('group', { name: /^provider-\d+$/ });
+    fireEvent.change(within(addedProvider).getByRole('textbox', { name: 'Name' }), {
+      target: { value: ' DRAFT-PROVIDER ' }
+    });
+    addedProvider = screen.getByRole('group', { name: 'DRAFT-PROVIDER' });
+    fireEvent.change(within(addedProvider).getByRole('textbox', { name: 'Base URL' }), {
+      target: { value: 'not-a-url' }
+    });
+
+    expect(screen.getAllByText(/conflicts with provider/i)).toHaveLength(2);
+    expect(within(addedProvider).getByText(/valid HTTP\(S\) base URL/i)).toBeInTheDocument();
+    const save = screen.getByRole('button', { name: 'Save' });
+    expect(save).toBeDisabled();
+    expect(screen.getByText(/fix the provider configuration errors before saving/i)).toBeInTheDocument();
+
+    fireEvent.click(save);
+    expect(saveSettingsMock).not.toHaveBeenCalled();
   });
 });

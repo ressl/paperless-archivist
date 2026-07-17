@@ -1559,6 +1559,52 @@ struct UpdateSettingsRequest {
     provider_secrets: Option<HashMap<String, String>>,
 }
 
+fn canonicalize_provider_secrets(
+    settings: &RuntimeSettings,
+    provider_secrets: HashMap<String, String>,
+) -> ApiResult<HashMap<String, String>> {
+    let mut canonical = HashMap::with_capacity(provider_secrets.len());
+    for (submitted_name, secret) in provider_secrets {
+        let submitted_name = submitted_name.trim();
+        let provider = settings
+            .ai
+            .providers
+            .iter()
+            .find(|provider| provider.name.eq_ignore_ascii_case(submitted_name))
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "AI provider secret target '{submitted_name}' is not configured"
+                ))
+            })?;
+        if canonical.insert(provider.name.clone(), secret).is_some() {
+            return Err(ApiError::bad_request(format!(
+                "multiple AI provider secrets resolve to '{}'",
+                provider.name
+            )));
+        }
+    }
+    Ok(canonical)
+}
+
+fn prepare_settings_update(request: &mut UpdateSettingsRequest) -> ApiResult<()> {
+    // Runtime normalization can append provider presets, so it must happen
+    // before provider validation and the enabled-URL preflight. Performing it
+    // again after those checks could create unchecked persisted providers.
+    request.settings = std::mem::take(&mut request.settings).normalized();
+    request
+        .settings
+        .ai
+        .normalize_and_validate_providers()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if let Some(provider_secrets) = request.provider_secrets.take() {
+        request.provider_secrets = Some(canonicalize_provider_secrets(
+            &request.settings,
+            provider_secrets,
+        )?);
+    }
+    Ok(())
+}
+
 #[tracing::instrument(
     skip(state, auth, request),
     fields(user_id = tracing::field::Empty)
@@ -1571,6 +1617,11 @@ async fn update_settings(
     require(&auth.0, Permission::WriteSettings)?;
     let actor_id = require_user_session(&auth.0, "settings updates require a user session")?;
     Span::current().record("user_id", tracing::field::display(actor_id));
+
+    // Validate and canonicalize every name-based AI reference before the
+    // first secret or settings write. Any failure therefore leaves both the
+    // runtime settings and all encrypted-secret mappings untouched.
+    prepare_settings_update(&mut request)?;
 
     // Config-time SSRF guard (SECURITY_DESIGN §4.3): outbound URLs are
     // validated when they are PERSISTED, not only when the operator happens
@@ -1620,10 +1671,14 @@ async fn update_settings(
             })?;
     }
     for provider in &request.settings.ai.providers {
-        let base_url = provider.base_url.trim();
-        if !provider.enabled || base_url.is_empty() {
+        if !provider.enabled {
             continue;
         }
+        let base_url = if provider.name.eq_ignore_ascii_case("ollama") {
+            request.settings.ai.ollama_base_url.trim()
+        } else {
+            provider.base_url.trim()
+        };
         validate_outbound_url_for_save(base_url)
             .await
             .map_err(|error| {
@@ -1710,13 +1765,9 @@ async fn update_settings(
             )
         });
 
-    // Persist — and below, return — the NORMALIZED settings so the PUT
-    // response, the audit payload and the next GET all agree (mirrors
-    // update_workflow_controls). Previously the raw request was stored
-    // verbatim and normalization only happened on read, so a clamped value
-    // came back different on the next GET than the response the frontend
-    // adopted as state (#313).
-    request.settings = request.settings.normalized();
+    // The preflight normalized the final provider inventory before any URL or
+    // secret checks. Persist — and below, return — that same normalized object
+    // so the PUT response, audit payload and next GET agree (#313).
     update_runtime_settings(&state.pool, &request.settings, actor_id).await?;
     info!(%actor_id, "runtime settings updated");
 
@@ -2676,7 +2727,9 @@ fn provider_test_target(
         return Err(ApiError::bad_request("provider model must not be blank"));
     }
     let model = if model.is_empty() { "mineru" } else { model };
-    let base_url = provider_base_url(&request.kind, &request.base_url);
+    let base_url = provider_base_url(name, &request.base_url).map_err(|error| {
+        ApiError::bad_request(format!("AI provider '{name}' base URL: {error}"))
+    })?;
     let draft = AiProviderSettings {
         name: name.to_owned(),
         kind: request.kind.clone(),
@@ -2771,21 +2824,21 @@ fn provider_by_name(settings: &RuntimeSettings, name: &str) -> Result<ApiProvide
         .ai
         .providers
         .iter()
-        .find(|provider| provider.name == name)
+        .find(|provider| provider.name.eq_ignore_ascii_case(name))
         .cloned()
         .or_else(|| {
-            if name == "ollama" {
+            if name.eq_ignore_ascii_case("ollama") {
                 Some(archivist_core::AiProviderSettings::ollama_default())
             } else {
                 None
             }
         })
         .ok_or_else(|| anyhow!("AI provider '{name}' is not configured"))?;
-    if provider.name == "ollama" {
+    if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
     let model = settings.ai.default_model_for_provider(&provider, false);
-    let base_url = provider_base_url(&provider.kind, &provider.base_url);
+    let base_url = provider_base_url(&provider.name, &provider.base_url)?;
     Ok(ApiProvider {
         name: provider.name,
         kind: provider.kind,
@@ -2800,10 +2853,15 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
         .ai
         .providers
         .iter()
-        .find(|provider| provider.enabled && provider.name == settings.ai.default_provider)
+        .find(|provider| {
+            provider.enabled
+                && provider
+                    .name
+                    .eq_ignore_ascii_case(&settings.ai.default_provider)
+        })
         .cloned()
         .or_else(|| {
-            if settings.ai.default_provider == "ollama" {
+            if settings.ai.default_provider.eq_ignore_ascii_case("ollama") {
                 Some(archivist_core::AiProviderSettings::ollama_default())
             } else {
                 None
@@ -2815,11 +2873,11 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
                 settings.ai.default_provider
             )
         })?;
-    if provider.name == "ollama" {
+    if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
     let model = settings.ai.default_model_for_provider(&provider, false);
-    let base_url = provider_base_url(&provider.kind, &provider.base_url);
+    let base_url = provider_base_url(&provider.name, &provider.base_url)?;
     Ok(ApiProvider {
         name: provider.name,
         kind: provider.kind,
@@ -2829,18 +2887,14 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
     })
 }
 
-fn provider_base_url(kind: &AiProviderKind, configured: &str) -> String {
+fn provider_base_url(provider_name: &str, configured: &str) -> Result<String> {
     let trimmed = configured.trim();
-    if !trimmed.is_empty() {
-        return trimmed.trim_end_matches('/').to_owned();
+    if trimmed.is_empty() {
+        return Err(anyhow!(
+            "AI provider '{provider_name}' has an empty base URL; repair the runtime settings"
+        ));
     }
-    match kind {
-        AiProviderKind::Ollama => "http://ollama:11434".to_owned(),
-        AiProviderKind::Openai => "https://api.openai.com/v1".to_owned(),
-        AiProviderKind::Anthropic => "https://api.anthropic.com/v1".to_owned(),
-        AiProviderKind::OpenaiCompatible => "http://localhost:8000/v1".to_owned(),
-        AiProviderKind::Mineru => "http://localhost:8001".to_owned(),
-    }
+    Ok(trimmed.trim_end_matches('/').to_owned())
 }
 
 async fn provider_secret(state: &AppState, provider: &ApiProvider) -> Result<Option<SecretString>> {
@@ -7614,6 +7668,124 @@ fn verify_dummy_password(password: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_secret_names_are_canonicalized_before_persistence() {
+        let settings = RuntimeSettings::default();
+        let secrets = HashMap::from([(" OLLAMA ".to_owned(), "secret".to_owned())]);
+
+        let canonical = canonicalize_provider_secrets(&settings, secrets)
+            .expect("known provider name should canonicalize");
+
+        assert_eq!(canonical.get("ollama").map(String::as_str), Some("secret"));
+        assert_eq!(canonical.len(), 1);
+    }
+
+    #[test]
+    fn provider_secret_names_reject_unknown_and_duplicate_targets() {
+        let settings = RuntimeSettings::default();
+        let unknown = canonicalize_provider_secrets(
+            &settings,
+            HashMap::from([("missing".to_owned(), "secret".to_owned())]),
+        )
+        .expect_err("unknown secret target must fail before any write");
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+        assert!(unknown.message.contains("missing"));
+
+        let duplicate = canonicalize_provider_secrets(
+            &settings,
+            HashMap::from([
+                ("ollama".to_owned(), "first".to_owned()),
+                (" OLLAMA ".to_owned(), "second".to_owned()),
+            ]),
+        )
+        .expect_err("two inputs resolving to one provider must fail atomically");
+        assert_eq!(duplicate.status, StatusCode::BAD_REQUEST);
+        assert!(duplicate.message.contains("ollama"));
+    }
+
+    #[test]
+    fn settings_update_preflight_rejects_before_secret_mapping_changes() {
+        let mut settings = RuntimeSettings::default();
+        let mut duplicate = settings.ai.providers[0].clone();
+        duplicate.name = format!(" {} ", duplicate.name.to_uppercase());
+        duplicate.secret_id = Some(Uuid::new_v4());
+        settings.ai.providers.push(duplicate);
+        let original_secret_ids = settings
+            .ai
+            .providers
+            .iter()
+            .map(|provider| provider.secret_id)
+            .collect::<Vec<_>>();
+        let submitted_secrets = HashMap::from([("ollama".to_owned(), "new-secret".to_owned())]);
+        let mut request = UpdateSettingsRequest {
+            settings,
+            paperless_token: Some("paperless-secret".to_owned()),
+            notification_webhook_url: Some("https://hooks.example.test".to_owned()),
+            provider_secrets: Some(submitted_secrets.clone()),
+        };
+
+        let error = prepare_settings_update(&mut request)
+            .expect_err("duplicate provider names must stop the save preflight");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(request.provider_secrets.as_ref(), Some(&submitted_secrets));
+        assert_eq!(
+            request
+                .settings
+                .ai
+                .providers
+                .iter()
+                .map(|provider| provider.secret_id)
+                .collect::<Vec<_>>(),
+            original_secret_ids
+        );
+    }
+
+    #[test]
+    fn settings_update_preflight_validates_defaults_added_by_normalization() {
+        let mut settings = RuntimeSettings::default();
+        let custom = AiProviderSettings {
+            name: "custom".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: "https://custom.example.test/v1".to_owned(),
+            default_text_model: Some("custom-model".to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled: true,
+            tuning: ProviderTuning::default(),
+        };
+        settings.ai.providers = vec![custom];
+        settings.ai.default_provider = "custom".to_owned();
+        settings.ai.ollama_base_url = "   ".to_owned();
+        let mut request = UpdateSettingsRequest {
+            settings,
+            paperless_token: None,
+            notification_webhook_url: None,
+            provider_secrets: None,
+        };
+
+        let error = prepare_settings_update(&mut request)
+            .expect_err("newly appended enabled defaults must be part of save validation");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("ollama"));
+        assert!(error.message.contains("base URL"));
+    }
+
+    #[test]
+    fn default_provider_rejects_empty_legacy_base_url() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.ollama_base_url = "  ".to_owned();
+
+        let error = provider_for_default_text(&settings)
+            .expect_err("corrupt legacy settings must not fall back to localhost");
+
+        assert!(error.to_string().contains("empty base URL"));
+        assert!(error.to_string().contains("ollama"));
+    }
 
     #[test]
     fn tls_mode_marks_session_and_csrf_cookies_secure() {

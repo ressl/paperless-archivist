@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -1280,6 +1280,22 @@ impl Default for AiSettings {
     }
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ProviderConfigurationError {
+    #[error("AI provider at index {index} has a blank name")]
+    BlankName { index: usize },
+    #[error("AI provider name '{name}' duplicates provider '{existing}' (case-insensitive)")]
+    DuplicateName { name: String, existing: String },
+    #[error("AI provider '{name}' is enabled but has no explicit base URL")]
+    MissingBaseUrl { name: String },
+    #[error("AI default provider '{name}' must reference exactly one enabled provider")]
+    InvalidDefaultProvider { name: String },
+    #[error("AI stage '{stage}' provider '{name}' must reference exactly one enabled provider")]
+    InvalidStageProvider { stage: Stage, name: String },
+    #[error("AI settings contain multiple overrides for stage '{stage}'")]
+    DuplicateStageOverride { stage: Stage },
+}
+
 /// Capability a catalog entry applies to. Mirrors the per-provider
 /// `default_text_model` / `default_vision_model` split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1607,6 +1623,84 @@ fn default_model_catalog() -> Vec<ModelCatalogEntry> {
 }
 
 impl AiSettings {
+    /// Canonicalize provider identity fields and enforce the invariants relied
+    /// on by name-based default, stage, and secret resolution.
+    pub fn normalize_and_validate_providers(&mut self) -> Result<(), ProviderConfigurationError> {
+        self.default_provider = self.default_provider.trim().to_owned();
+        self.ollama_base_url = self.ollama_base_url.trim().to_owned();
+        for provider in &mut self.providers {
+            provider.name = provider.name.trim().to_owned();
+            provider.base_url = provider.base_url.trim().to_owned();
+        }
+        for stage_model in &mut self.stage_models {
+            stage_model.provider = stage_model.provider.trim().to_owned();
+            stage_model.model = stage_model.model.trim().to_owned();
+        }
+
+        let mut names = HashMap::<String, String>::new();
+        for (index, provider) in self.providers.iter().enumerate() {
+            if provider.name.is_empty() {
+                return Err(ProviderConfigurationError::BlankName { index });
+            }
+            let normalized = provider.name.to_lowercase();
+            if let Some(existing) = names.insert(normalized, provider.name.clone()) {
+                return Err(ProviderConfigurationError::DuplicateName {
+                    name: provider.name.clone(),
+                    existing,
+                });
+            }
+
+            let configured_base_url = if provider.name.eq_ignore_ascii_case("ollama") {
+                &self.ollama_base_url
+            } else {
+                &provider.base_url
+            };
+            if provider.enabled && configured_base_url.is_empty() {
+                return Err(ProviderConfigurationError::MissingBaseUrl {
+                    name: provider.name.clone(),
+                });
+            }
+        }
+
+        let enabled_names = self
+            .providers
+            .iter()
+            .filter(|provider| provider.enabled)
+            .map(|provider| provider.name.clone())
+            .collect::<Vec<_>>();
+        let canonical_name = |reference: &str| {
+            let normalized_reference = reference.to_lowercase();
+            enabled_names
+                .iter()
+                .find(|name| name.to_lowercase() == normalized_reference)
+                .cloned()
+        };
+
+        self.default_provider = canonical_name(&self.default_provider).ok_or_else(|| {
+            ProviderConfigurationError::InvalidDefaultProvider {
+                name: self.default_provider.clone(),
+            }
+        })?;
+
+        let mut stages = HashSet::new();
+        for stage_model in &self.stage_models {
+            if !stages.insert(stage_model.stage) {
+                return Err(ProviderConfigurationError::DuplicateStageOverride {
+                    stage: stage_model.stage,
+                });
+            }
+        }
+        for stage_model in &mut self.stage_models {
+            stage_model.provider = canonical_name(&stage_model.provider).ok_or_else(|| {
+                ProviderConfigurationError::InvalidStageProvider {
+                    stage: stage_model.stage,
+                    name: stage_model.provider.clone(),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn ensure_default_providers(&mut self) {
         AiProviderSettings::append_missing_defaults(&mut self.providers);
     }
@@ -2022,9 +2116,10 @@ impl AiProviderSettings {
 
     pub fn append_missing_defaults(providers: &mut Vec<Self>) {
         for default_provider in Self::default_providers() {
+            let default_name = default_provider.name.to_lowercase();
             if !providers
                 .iter()
-                .any(|provider| provider.name == default_provider.name)
+                .any(|provider| provider.name.to_lowercase() == default_name)
             {
                 providers.push(default_provider);
             }
@@ -5035,6 +5130,189 @@ mod tests {
             AiProviderSettings::openai_default(),
         ];
         settings
+    }
+
+    fn provider_fixture(name: &str, base_url: &str, enabled: bool) -> AiProviderSettings {
+        AiProviderSettings {
+            name: name.to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: base_url.to_owned(),
+            default_text_model: Some("test-model".to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled,
+            tuning: ProviderTuning::default(),
+        }
+    }
+
+    #[test]
+    fn provider_configuration_rejects_blank_and_case_insensitive_duplicate_names() {
+        let mut blank = RuntimeSettings::default();
+        blank.ai.providers = vec![provider_fixture("   ", "https://one.example/v1", true)];
+        blank.ai.default_provider = "   ".to_owned();
+        let error = blank
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("blank provider name must fail");
+        assert!(error.to_string().contains("blank name"));
+
+        let mut duplicate = RuntimeSettings::default();
+        duplicate.ai.providers = vec![
+            provider_fixture("Primary", "https://one.example/v1", true),
+            provider_fixture(" primary ", "https://two.example/v1", true),
+        ];
+        duplicate.ai.default_provider = "Primary".to_owned();
+        let error = duplicate
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("case-insensitive duplicate must fail");
+        assert!(error.to_string().contains("duplicates provider"));
+        assert!(error.to_string().contains("Primary"));
+    }
+
+    #[test]
+    fn provider_configuration_requires_explicit_url_only_for_enabled_providers() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![
+            provider_fixture("active", "   ", true),
+            provider_fixture("disabled-placeholder", "", false),
+        ];
+        settings.ai.default_provider = "active".to_owned();
+        let error = settings
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("enabled provider without URL must fail");
+        assert!(error.to_string().contains("active"));
+        assert!(error.to_string().contains("base URL"));
+
+        settings.ai.providers[0].base_url = " https://active.example/v1/ ".to_owned();
+        settings
+            .ai
+            .normalize_and_validate_providers()
+            .expect("disabled empty placeholder is allowed");
+        assert_eq!(
+            settings.ai.providers[0].base_url,
+            "https://active.example/v1/"
+        );
+        assert_eq!(settings.ai.providers[1].base_url, "");
+    }
+
+    #[test]
+    fn provider_configuration_canonicalizes_trimmed_default_and_stage_references() {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![provider_fixture(
+            " Primary ",
+            " https://primary.example/v1 ",
+            true,
+        )];
+        settings.ai.default_provider = " primary ".to_owned();
+        settings.ai.stage_models = vec![StageModelOverride {
+            stage: Stage::Metadata,
+            provider: " PRIMARY ".to_owned(),
+            model: "model".to_owned(),
+        }];
+
+        settings
+            .ai
+            .normalize_and_validate_providers()
+            .expect("single enabled case-insensitive reference resolves");
+
+        assert_eq!(settings.ai.providers[0].name, "Primary");
+        assert_eq!(
+            settings.ai.providers[0].base_url,
+            "https://primary.example/v1"
+        );
+        assert_eq!(settings.ai.default_provider, "Primary");
+        assert_eq!(settings.ai.stage_models[0].provider, "Primary");
+    }
+
+    #[test]
+    fn provider_configuration_rejects_disabled_or_missing_references_and_duplicate_stages() {
+        let mut disabled_default = RuntimeSettings::default();
+        disabled_default.ai.providers = vec![provider_fixture(
+            "disabled",
+            "https://disabled.example/v1",
+            false,
+        )];
+        disabled_default.ai.default_provider = "disabled".to_owned();
+        let error = disabled_default
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("disabled default provider must fail");
+        assert!(error.to_string().contains("default provider 'disabled'"));
+
+        let mut invalid_stage = RuntimeSettings::default();
+        invalid_stage.ai.providers = vec![provider_fixture(
+            "primary",
+            "https://primary.example/v1",
+            true,
+        )];
+        invalid_stage.ai.default_provider = "primary".to_owned();
+        invalid_stage.ai.stage_models = vec![StageModelOverride {
+            stage: Stage::Ocr,
+            provider: "missing".to_owned(),
+            model: "model".to_owned(),
+        }];
+        let error = invalid_stage
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("missing stage provider must fail");
+        assert!(error.to_string().contains("stage 'ocr' provider 'missing'"));
+
+        invalid_stage.ai.stage_models = vec![
+            StageModelOverride {
+                stage: Stage::Ocr,
+                provider: "primary".to_owned(),
+                model: "one".to_owned(),
+            },
+            StageModelOverride {
+                stage: Stage::Ocr,
+                provider: "primary".to_owned(),
+                model: "two".to_owned(),
+            },
+        ];
+        let error = invalid_stage
+            .ai
+            .normalize_and_validate_providers()
+            .expect_err("duplicate stage overrides must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("multiple overrides for stage 'ocr'")
+        );
+    }
+
+    #[test]
+    fn normalized_settings_do_not_duplicate_case_renamed_provider_presets() {
+        let mut settings = RuntimeSettings::default();
+        let ollama = settings
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "ollama")
+            .expect("ollama preset exists");
+        ollama.name = "OLLAMA".to_owned();
+        settings.ai.default_provider = " OLLAMA ".to_owned();
+        settings
+            .ai
+            .normalize_and_validate_providers()
+            .expect("case-only rename remains a unique valid provider");
+
+        let normalized = settings.normalized();
+
+        assert_eq!(normalized.ai.default_provider, "OLLAMA");
+        assert_eq!(
+            normalized
+                .ai
+                .providers
+                .iter()
+                .filter(|provider| provider.name.eq_ignore_ascii_case("ollama"))
+                .count(),
+            1,
+            "default normalization must not append a lowercase duplicate"
+        );
     }
 
     #[test]

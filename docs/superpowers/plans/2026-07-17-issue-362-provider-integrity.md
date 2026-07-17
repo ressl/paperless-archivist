@@ -7,9 +7,9 @@
 **Files:**
 - Modify: `crates/archivist-core/src/lib.rs`
 
-- [ ] Add red tests for blank/whitespace names, case-insensitive duplicates, empty enabled URLs, disabled empty placeholders, and invalid default/stage references.
-- [ ] Normalize provider names, URLs, and references by trimming; canonicalize valid case-insensitive references to the single configured name.
-- [ ] Require every default/stage reference to resolve to exactly one enabled provider and reject duplicate stage overrides.
+- [x] Add red tests for blank/whitespace names, case-insensitive duplicates, empty enabled URLs, disabled empty placeholders, and invalid default/stage references.
+- [x] Normalize provider names, URLs, and references by trimming; canonicalize valid case-insensitive references to the single configured name.
+- [x] Require every default/stage reference to resolve to exactly one enabled provider and reject duplicate stage overrides.
 
 ### Task 2: Gate API writes and runtime resolution
 
@@ -17,10 +17,10 @@
 - Modify: `crates/archivist-api/src/main.rs`
 - Modify: `crates/archivist-worker/src/main.rs`
 
-- [ ] Invoke core normalization/validation before Paperless, provider, or notification secret writes.
-- [ ] Canonicalize and validate provider-secret map keys before writes so unknown/ambiguous keys cannot create orphaned secrets.
-- [ ] Validate every enabled provider effective URL through the existing outbound URL guard, including empty URLs.
-- [ ] Replace provider-kind localhost fallbacks with explicit configuration errors in API and worker; add corrupt-legacy regression tests.
+- [x] Invoke core normalization/validation before Paperless, provider, or notification secret writes.
+- [x] Canonicalize and validate provider-secret map keys before writes so unknown/ambiguous keys cannot create orphaned secrets.
+- [x] Validate every enabled provider effective URL through the existing outbound URL guard, including empty URLs.
+- [x] Replace provider-kind localhost fallbacks with explicit configuration errors in API and worker; add corrupt-legacy regression tests.
 
 ### Task 3: Block invalid settings in the UI
 
@@ -32,9 +32,9 @@
 - Modify: `frontend/src/i18n/locales/{de,es,fr,it,nl,pl}.ts`
 - Modify: `frontend/src/settings/SettingsPage.provider-test.test.tsx`
 
-- [ ] Mirror blank/duplicate-name and enabled URL validation without weakening backend authority.
-- [ ] Render provider-specific, field-adjacent accessible errors and disable Save while any provider/reference error exists.
-- [ ] Prove invalid edits do not call `saveSettings` and identify the conflicting provider.
+- [x] Mirror blank/duplicate-name and enabled URL validation without weakening backend authority.
+- [x] Render provider-specific, field-adjacent accessible errors and disable Save while any provider/reference error exists.
+- [x] Prove invalid edits do not call `saveSettings` and identify the conflicting provider.
 
 ### Task 4: Verify and deliver
 

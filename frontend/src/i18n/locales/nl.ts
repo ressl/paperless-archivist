@@ -555,6 +555,21 @@ const nlMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Actief',
   'settings.provider.add': 'Provider toevoegen',
+  'settings.provider.validation.name_required': 'De providernaam is verplicht.',
+  'settings.provider.validation.name_duplicate':
+    'De naam conflicteert met provider ‘{name}’. Hoofdletters worden genegeerd.',
+  'settings.provider.validation.base_url_required':
+    'De actieve provider ‘{provider}’ vereist een Base URL.',
+  'settings.provider.validation.base_url_invalid':
+    'Provider ‘{provider}’ moet een geldige HTTP(S)-Base URL gebruiken.',
+  'settings.provider.validation.default_invalid':
+    'Standaardprovider ‘{provider}’ moet naar precies één actieve provider verwijzen.',
+  'settings.provider.validation.stage_invalid':
+    'Stage ‘{stage}’ verwijst naar de ontbrekende, inactieve of dubbelzinnige provider ‘{provider}’.',
+  'settings.provider.validation.duplicate_stage':
+    'Stage ‘{stage}’ heeft meer dan één provider-override.',
+  'settings.provider.validation.save_blocked':
+    'Herstel de providerconfiguratiefouten voordat u opslaat.',
   'settings.provider.mineru_base_url_hint':
     'URL van de MinerU API-server (FastAPI), zonder /v1. De OCR-promptinstelling heeft geen effect voor dit providertype.',
   'settings.paperless.test_running.title': 'Paperless-test loopt',

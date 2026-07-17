@@ -555,6 +555,21 @@ const deMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API-Key',
   'settings.provider.enabled': 'Aktiv',
   'settings.provider.add': 'Provider hinzufügen',
+  'settings.provider.validation.name_required': 'Ein Provider-Name ist erforderlich.',
+  'settings.provider.validation.name_duplicate':
+    'Der Provider-Name kollidiert mit Provider „{name}“. Groß-/Kleinschreibung zählt nicht.',
+  'settings.provider.validation.base_url_required':
+    'Der aktive Provider „{provider}“ benötigt eine Basis-URL.',
+  'settings.provider.validation.base_url_invalid':
+    'Provider „{provider}“ benötigt eine gültige HTTP(S)-Basis-URL.',
+  'settings.provider.validation.default_invalid':
+    'Der Default Provider „{provider}“ muss genau einen aktiven Provider referenzieren.',
+  'settings.provider.validation.stage_invalid':
+    'Stage „{stage}“ referenziert den fehlenden, inaktiven oder mehrdeutigen Provider „{provider}“.',
+  'settings.provider.validation.duplicate_stage':
+    'Stage „{stage}“ hat mehr als ein Provider-Override.',
+  'settings.provider.validation.save_blocked':
+    'Behebe vor dem Speichern die Fehler in der Provider-Konfiguration.',
   'settings.provider.mineru_base_url_hint':
     'URL des MinerU-API-Servers (FastAPI), ohne /v1. Das OCR-Prompt-Setting hat für diesen Provider-Typ keine Wirkung.',
   'settings.paperless.test_running.title': 'Paperless-Test läuft',

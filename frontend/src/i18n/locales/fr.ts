@@ -555,6 +555,21 @@ const frMessages: Record<MessageKey, string> = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Activé',
   'settings.provider.add': 'Ajouter un provider',
+  'settings.provider.validation.name_required': 'Le nom du provider est obligatoire.',
+  'settings.provider.validation.name_duplicate':
+    'Le nom entre en conflit avec le provider « {name} ». La casse est ignorée.',
+  'settings.provider.validation.base_url_required':
+    'Le provider actif « {provider} » nécessite une Base URL.',
+  'settings.provider.validation.base_url_invalid':
+    'Le provider « {provider} » doit utiliser une Base URL HTTP(S) valide.',
+  'settings.provider.validation.default_invalid':
+    'Le provider par défaut « {provider} » doit référencer exactement un provider actif.',
+  'settings.provider.validation.stage_invalid':
+    'L’étape « {stage} » référence le provider absent, inactif ou ambigu « {provider} ».',
+  'settings.provider.validation.duplicate_stage':
+    'L’étape « {stage} » possède plusieurs overrides de provider.',
+  'settings.provider.validation.save_blocked':
+    'Corrigez les erreurs de configuration des providers avant d’enregistrer.',
   'settings.provider.mineru_base_url_hint':
     "URL du serveur API MinerU (FastAPI), sans /v1. Le réglage de prompt OCR n’a aucun effet pour ce type de provider.",
   'settings.paperless.test_running.title': 'Test Paperless en cours',

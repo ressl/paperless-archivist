@@ -9,6 +9,7 @@ import { optionalNumber } from './helpers';
 import type { OllamaModelLoadState } from './types';
 
 type Provider = RuntimeSettings['ai']['providers'][number];
+export type ProviderFieldErrors = { name?: string; baseUrl?: string };
 
 export function ProviderCard({
   provider,
@@ -20,7 +21,8 @@ export function ProviderCard({
   onChangeProvider,
   onChangeTuning,
   onResetTuningBlock,
-  onRefreshModels
+  onRefreshModels,
+  errors = {}
 }: {
   provider: Provider;
   catalog: ModelCatalogEntry[];
@@ -32,6 +34,7 @@ export function ProviderCard({
   onChangeTuning: (patch: Partial<ProviderTuning>) => void;
   onResetTuningBlock: (fields: readonly TuningField[]) => void;
   onRefreshModels: () => void;
+  errors?: ProviderFieldErrors;
 }) {
   const { t } = useI18n();
   const ids = {
@@ -42,11 +45,20 @@ export function ProviderCard({
     outputCost: useId(),
     apiKey: useId()
   };
+  const nameErrorId = `${ids.name}-error`;
+  const baseUrlErrorId = `${ids.baseUrl}-error`;
   return (
     <fieldset className="card">
-      <legend>{provider.name || t('settings.provider.provider')}</legend>
-      <FormField label={t('settings.provider.name')} htmlFor={ids.name}>
-        <input id={ids.name} value={provider.name} onChange={(event) => onChangeProvider({ name: event.target.value })} />
+      <legend>{provider.name.trim() || t('settings.provider.provider')}</legend>
+      <FormField label={t('settings.provider.name')} htmlFor={ids.name} error={errors.name} errorId={nameErrorId}>
+        <input
+          id={ids.name}
+          value={provider.name}
+          aria-label={t('settings.provider.name')}
+          aria-invalid={Boolean(errors.name)}
+          aria-describedby={errors.name ? nameErrorId : undefined}
+          onChange={(event) => onChangeProvider({ name: event.target.value })}
+        />
       </FormField>
       <FormField label={t('settings.provider.kind')} htmlFor={ids.kind}>
         <select
@@ -73,10 +85,15 @@ export function ProviderCard({
         label={t('settings.provider.base_url')}
         htmlFor={ids.baseUrl}
         help={provider.kind === 'mineru' ? t('settings.provider.mineru_base_url_hint') : undefined}
+        error={errors.baseUrl}
+        errorId={baseUrlErrorId}
       >
         <input
           id={ids.baseUrl}
           value={provider.base_url}
+          aria-label={t('settings.provider.base_url')}
+          aria-invalid={Boolean(errors.baseUrl)}
+          aria-describedby={errors.baseUrl ? baseUrlErrorId : undefined}
           onChange={(event) => onChangeProvider({ base_url: event.target.value })}
         />
       </FormField>

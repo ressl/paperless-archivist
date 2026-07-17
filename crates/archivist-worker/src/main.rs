@@ -4290,23 +4290,23 @@ fn provider_for_stage(
         .ai
         .providers
         .iter()
-        .find(|provider| provider.enabled && provider.name == provider_name)
+        .find(|provider| provider.enabled && provider.name.eq_ignore_ascii_case(provider_name))
         .cloned()
         .or_else(|| {
-            if provider_name == "ollama" {
+            if provider_name.eq_ignore_ascii_case("ollama") {
                 Some(archivist_core::AiProviderSettings::ollama_default())
             } else {
                 None
             }
         })
         .ok_or_else(|| anyhow!("AI provider '{provider_name}' is not configured or disabled"))?;
-    if provider.name == "ollama" {
+    if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
     let model = settings
         .ai
         .model_for_stage_provider(&provider, stage, vision);
-    let base_url = provider_base_url(&provider.kind, &provider.base_url);
+    let base_url = provider_base_url(&provider.name, &provider.base_url)?;
     let reasoning_effort = provider.tuning.reasoning_effort.unwrap_or_default();
     let max_output_tokens = provider
         .tuning
@@ -4332,18 +4332,14 @@ fn provider_for_stage(
     })
 }
 
-fn provider_base_url(kind: &AiProviderKind, configured: &str) -> String {
+fn provider_base_url(provider_name: &str, configured: &str) -> Result<String> {
     let trimmed = configured.trim();
-    if !trimmed.is_empty() {
-        return trimmed.trim_end_matches('/').to_owned();
+    if trimmed.is_empty() {
+        return Err(anyhow!(
+            "AI provider '{provider_name}' has an empty base URL; repair the runtime settings"
+        ));
     }
-    match kind {
-        AiProviderKind::Ollama => "http://ollama:11434".to_owned(),
-        AiProviderKind::Openai => "https://api.openai.com/v1".to_owned(),
-        AiProviderKind::Anthropic => "https://api.anthropic.com/v1".to_owned(),
-        AiProviderKind::OpenaiCompatible => "http://localhost:8000/v1".to_owned(),
-        AiProviderKind::Mineru => "http://localhost:8001".to_owned(),
-    }
+    Ok(trimmed.trim_end_matches('/').to_owned())
 }
 
 /// v1.5.15 (#119) experiment-aware active-prompt loader. Picks the A or B
@@ -4647,13 +4643,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_base_url_defaults_for_mineru() {
+    fn provider_base_url_rejects_empty_legacy_configuration() {
+        let error = provider_base_url("mineru", "")
+            .expect_err("corrupt settings must not silently target localhost");
+        assert!(error.to_string().contains("empty base URL"));
+        assert!(error.to_string().contains("mineru"));
         assert_eq!(
-            provider_base_url(&AiProviderKind::Mineru, ""),
-            "http://localhost:8001"
-        );
-        assert_eq!(
-            provider_base_url(&AiProviderKind::Mineru, "http://omega:8001/"),
+            provider_base_url("mineru", "http://omega:8001/").unwrap(),
             "http://omega:8001"
         );
     }

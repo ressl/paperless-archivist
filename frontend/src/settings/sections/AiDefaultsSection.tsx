@@ -15,7 +15,8 @@ export function AiDefaultsSection({
   onSelectDefaultProvider,
   onRefreshModels,
   test,
-  onTest
+  onTest,
+  errors = {}
 }: {
   ai: RuntimeSettings['ai'];
   onChange: (patch: Partial<RuntimeSettings['ai']>) => void;
@@ -25,6 +26,7 @@ export function AiDefaultsSection({
   onRefreshModels: () => void;
   test: ConnectionTestState | null;
   onTest: () => void;
+  errors?: { defaultProvider?: string; ollamaBaseUrl?: string };
 }) {
   const { t } = useI18n();
   const ids = {
@@ -33,14 +35,24 @@ export function AiDefaultsSection({
     visionCtx: useId(),
     textCtx: useId()
   };
+  const providerErrorId = `${ids.provider}-error`;
+  const ollamaUrlErrorId = `${ids.ollamaUrl}-error`;
   const catalog: ModelCatalogEntry[] = ai.model_catalog;
   const testing = test?.status === 'running';
   return (
     <Section title={t('settings.ai_defaults')}>
-      <FormField label={t('settings.ai.default_provider')} htmlFor={ids.provider}>
+      <FormField
+        label={t('settings.ai.default_provider')}
+        htmlFor={ids.provider}
+        error={errors.defaultProvider}
+        errorId={providerErrorId}
+      >
         <select
           id={ids.provider}
           value={ai.default_provider}
+          aria-label={t('settings.ai.default_provider')}
+          aria-invalid={Boolean(errors.defaultProvider)}
+          aria-describedby={errors.defaultProvider ? providerErrorId : undefined}
           onChange={(event) => onSelectDefaultProvider(event.target.value)}
         >
           {ai.providers.map((provider) => (
@@ -50,10 +62,18 @@ export function AiDefaultsSection({
           ))}
         </select>
       </FormField>
-      <FormField label={t('settings.ai.legacy_ollama_url')} htmlFor={ids.ollamaUrl}>
+      <FormField
+        label={t('settings.ai.legacy_ollama_url')}
+        htmlFor={ids.ollamaUrl}
+        error={errors.ollamaBaseUrl}
+        errorId={ollamaUrlErrorId}
+      >
         <input
           id={ids.ollamaUrl}
           value={ai.ollama_base_url}
+          aria-label={t('settings.ai.legacy_ollama_url')}
+          aria-invalid={Boolean(errors.ollamaBaseUrl)}
+          aria-describedby={errors.ollamaBaseUrl ? ollamaUrlErrorId : undefined}
           onChange={(event) => onChange({ ollama_base_url: event.target.value })}
         />
       </FormField>

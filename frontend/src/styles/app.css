@@ -108,6 +108,16 @@
   color: var(--muted);
   font-size: var(--font-size-sm);
 }
+.form-field-error {
+  color: var(--danger);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+.settings-validation-summary {
+  color: var(--danger);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
 
 /* Metric tile tone accents (left border) for KpiCard. */
 .metric--success { border-left: 3px solid var(--success); }

@@ -553,6 +553,21 @@ export const enMessages = {
   'settings.provider.api_key': 'API key',
   'settings.provider.enabled': 'Enabled',
   'settings.provider.add': 'Add Provider',
+  'settings.provider.validation.name_required': 'Provider name is required.',
+  'settings.provider.validation.name_duplicate':
+    'Provider name conflicts with provider "{name}". Names must be unique regardless of case.',
+  'settings.provider.validation.base_url_required':
+    'Enabled provider "{provider}" requires a base URL.',
+  'settings.provider.validation.base_url_invalid':
+    'Provider "{provider}" must use a valid HTTP(S) base URL.',
+  'settings.provider.validation.default_invalid':
+    'Default provider "{provider}" must reference exactly one enabled provider.',
+  'settings.provider.validation.stage_invalid':
+    'Stage "{stage}" references missing, disabled, or ambiguous provider "{provider}".',
+  'settings.provider.validation.duplicate_stage':
+    'Stage "{stage}" has more than one provider override.',
+  'settings.provider.validation.save_blocked':
+    'Fix the provider configuration errors before saving.',
   'settings.provider.mineru_base_url_hint':
     'URL of the MinerU API server (FastAPI), without /v1. The OCR prompt setting has no effect for this kind.',
   'settings.paperless.test_running.title': 'Paperless test running',

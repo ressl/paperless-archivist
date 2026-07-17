@@ -45,12 +45,31 @@ export function Section({ title, children, className }: { title: string; childre
 }
 
 /** A labelled form control with optional help text. Wrap an input/select/etc. */
-export function FormField({ label, help, htmlFor, children }: { label: string; help?: string; htmlFor?: string; children: ReactNode }) {
+export function FormField({
+  label,
+  help,
+  error,
+  errorId,
+  htmlFor,
+  children
+}: {
+  label: string;
+  help?: string;
+  error?: string;
+  errorId?: string;
+  htmlFor?: string;
+  children: ReactNode;
+}) {
   return (
     <label className="form-field" htmlFor={htmlFor}>
       <span className="form-field-label">{label}</span>
       {children}
       {help && <span className="form-field-help">{help}</span>}
+      {error && (
+        <span className="form-field-error" id={errorId} role="alert">
+          {error}
+        </span>
+      )}
     </label>
   );
 }
@@ -287,8 +306,8 @@ export function Status({ value }: { value: string }) {
   );
 }
 
-export function ActionButton({ icon, label, busy, onClick }: { icon: ReactNode; label: string; busy: boolean; onClick: () => void | Promise<void> }) {
-  return <button className="primary-button" title={label} disabled={busy} onClick={onClick}>{icon}{label}</button>;
+export function ActionButton({ icon, label, busy, disabled = false, onClick }: { icon: ReactNode; label: string; busy: boolean; disabled?: boolean; onClick: () => void | Promise<void> }) {
+  return <button className="primary-button" title={label} disabled={busy || disabled} onClick={onClick}>{icon}{label}</button>;
 }
 
 export async function run(
