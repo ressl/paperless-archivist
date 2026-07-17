@@ -27,4 +27,4 @@
 ### Task 3: Verify and deliver
 
 - [x] Run focused and full frontend tests, i18n parity, typecheck, build, contract/lint checks, and `git diff --check`.
-- [ ] Obtain independent review, commit, push, and close #359 only after both branch and MR pipelines are green.
+- [x] Obtain independent review, commit, push, and close #359 only after both branch and MR pipelines are green.
