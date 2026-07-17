@@ -252,6 +252,16 @@ fn safe_body_diagnostic(body: &BoundedResponseBody) -> String {
     diagnostic
 }
 
+/// Detect only the well-known local-runner crash signatures needed for the
+/// Ollama vision fallback. The raw bounded body is inspected in memory, while
+/// the typed error retains only the redacted diagnostic.
+fn is_ollama_vision_runner_crash_body(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("ggml_assert")
+        || body.contains("runner process no longer running")
+        || body.contains("signal arrived during cgo execution")
+}
+
 fn body_limit_error(operation: &str, body: &BoundedResponseBody) -> anyhow::Error {
     anyhow::Error::new(AiProviderError::InvalidResponse(format!(
         "{operation} response body exceeded {}-byte limit: {}",
@@ -964,6 +974,12 @@ impl VisionProvider for OllamaClient {
         let status = response.status();
         if !status.is_success() {
             let error = check_quota_then_take_body(&self.provider_name, response).await?;
+            if is_ollama_vision_runner_crash_body(&error.raw_body) {
+                return Err(anyhow::Error::new(AiProviderError::RunnerUnavailable(
+                    error.safe_body,
+                ))
+                .context("Ollama vision call"));
+            }
             return Err(anyhow::Error::new(AiProviderError::from_http(
                 error.status.as_u16(),
                 error.safe_body,

@@ -15,7 +15,10 @@
   two Worker replicas from processing the same page in parallel.
 - Ollama model discovery now uses the resolved provider
   `request_timeout_seconds` instead of the constructor's fixed default. Worker
-  logs expose the stopped `vision_phase` when lease ownership is lost.
+  logs expose the stopped `vision_phase` when lease ownership is lost. Known
+  Ollama runner-crash signatures are converted from the bounded in-memory body
+  to a typed `RunnerUnavailable` error while persisted/logged diagnostics stay
+  redacted; this keeps the fallback reachable after response-body hardening.
 - **Secure Caddy profile (#355):** the reverse-proxy Compose overlay now forces
   `ARCHIVIST_COOKIE_SECURE=true`; session and CSRF cookies issued through the
   public HTTPS profile therefore carry `Secure`. Direct base-only localhost
