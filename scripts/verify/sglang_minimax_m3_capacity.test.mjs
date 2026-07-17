@@ -147,31 +147,33 @@ test('bounded suite reports sequential, parallel, and mixed aggregate metrics sa
 
 test('timeouts and response failures are aggregated without response bodies', async () => {
   let calls = 0;
-  await withMockServer(async () => {
+  const controlledFetch = async () => {
     calls += 1;
     if (calls % 2 === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      return successfulResponse({});
+      const error = new Error('controlled timeout');
+      error.name = 'TimeoutError';
+      throw error;
     }
-    return { status: 503, body: JSON.stringify({ error: 'private-response-body' }) };
-  }, async (baseUrl) => {
-    const { config, cleanup } = await configFor(baseUrl, {
-      SGLANG_CAPACITY_REQUESTS: '2',
-      SGLANG_CAPACITY_TIMEOUT_MS: '15'
-    });
-    try {
-      const { report, exitCode } = await runCapacitySuite(config);
-      assert.equal(exitCode, 1);
-      assert.ok(report.scenarios.every(({ error_count }) => error_count === 2));
-      assert.ok(report.scenarios.every(({ timeout_count }) => timeout_count === 1));
-      assert.ok(report.scenarios.every(({ error_rate }) => error_rate === 1));
-      assert.ok(report.scenarios.every(({ timeout_rate }) => timeout_rate === 0.5));
-      assert.doesNotMatch(JSON.stringify(report), /private-response-body/);
-      assert.deepEqual(report.scenarios[0].error_classes, { http_5xx: 1, timeout: 1 });
-    } finally {
-      await cleanup();
-    }
+    return new Response(JSON.stringify({ error: 'private-response-body' }), { status: 503 });
+  };
+  const { config, cleanup } = await configFor('https://capacity.example.invalid', {
+    SGLANG_CAPACITY_REQUESTS: '2'
   });
+  try {
+    const { report, exitCode } = await runCapacitySuite(config, {
+      fetchImpl: controlledFetch
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(calls, 6);
+    assert.ok(report.scenarios.every(({ error_count }) => error_count === 2));
+    assert.ok(report.scenarios.every(({ timeout_count }) => timeout_count === 1));
+    assert.ok(report.scenarios.every(({ error_rate }) => error_rate === 1));
+    assert.ok(report.scenarios.every(({ timeout_rate }) => timeout_rate === 0.5));
+    assert.doesNotMatch(JSON.stringify(report), /private-response-body/);
+    assert.deepEqual(report.scenarios[0].error_classes, { http_5xx: 1, timeout: 1 });
+  } finally {
+    await cleanup();
+  }
 });
 
 test('metadata schema type violations count as contract failures', async () => {

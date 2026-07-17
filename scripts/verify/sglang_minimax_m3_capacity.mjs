@@ -267,12 +267,12 @@ function validateResponse(consumer, parsed) {
   }
 }
 
-async function capacityRequest(config, consumer, index) {
+async function capacityRequest(config, consumer, index, fetchImpl) {
   const headers = { accept: 'application/json', 'content-type': 'application/json' };
   if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
   let response;
   try {
-    response = await fetch(`${config.baseUrl}/chat/completions`, {
+    response = await fetchImpl(`${config.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify(capacityPayload(consumer, config, index)),
@@ -341,12 +341,12 @@ function percentile(values, fraction) {
   return sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
 }
 
-async function runScenario(config, name, consumers, concurrency) {
+async function runScenario(config, name, consumers, concurrency, fetchImpl) {
   const started = performance.now();
   const results = await runBounded(
     consumers,
     concurrency,
-    (consumer, index) => capacityRequest(config, consumer, index)
+    (consumer, index) => capacityRequest(config, consumer, index, fetchImpl)
   );
   const durationMs = performance.now() - started;
   const errors = results.filter(({ ok }) => !ok);
@@ -377,7 +377,7 @@ async function runScenario(config, name, consumers, concurrency) {
   };
 }
 
-export async function runCapacitySuite(config) {
+export async function runCapacitySuite(config, { fetchImpl = fetch } = {}) {
   const warmups = Array.from(
     { length: config.warmupRequests },
     (_, index) => index % 2 === 0 ? 'worker_metadata' : 'document_chat'
@@ -385,7 +385,7 @@ export async function runCapacitySuite(config) {
   const warmupResults = await runBounded(
     warmups,
     1,
-    (consumer, index) => capacityRequest(config, consumer, -index - 1)
+    (consumer, index) => capacityRequest(config, consumer, -index - 1, fetchImpl)
   );
   const workerOnly = Array(config.requests).fill('worker_metadata');
   const mixed = Array.from(
@@ -397,19 +397,22 @@ export async function runCapacitySuite(config) {
     config,
     'sequential_worker_metadata',
     workerOnly,
-    1
+    1,
+    fetchImpl
   ));
   scenarios.push(await runScenario(
     config,
     'parallel_worker_metadata',
     workerOnly,
-    config.concurrency
+    config.concurrency,
+    fetchImpl
   ));
   scenarios.push(await runScenario(
     config,
     'mixed_worker_metadata_document_chat',
     mixed,
-    config.concurrency
+    config.concurrency,
+    fetchImpl
   ));
   const warmupFailures = warmupResults.filter(({ ok }) => !ok).length;
   const failed = warmupFailures > 0 || scenarios.some(({ error_count }) => error_count > 0);
