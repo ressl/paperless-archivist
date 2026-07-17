@@ -61,7 +61,7 @@ A page is treated as layout markup when at least one condition holds:
 1. a start-tag token has `data-bbox` or `data-label`;
 2. a table start-tag token is present;
 3. the trimmed page begins with a recognized layout element and the tokenizer
-   observes its matched explicit closing tag;
+   observes a matched explicit closing tag for that exact first start token;
 4. at least two recognized layout elements with matched structural closing
    tags are present.
 
@@ -74,10 +74,13 @@ plain-text path while recognizing uppercase and marker-free layout documents.
 End tags embedded in attributes or comments, prefix names such as
 `</paragraph>`, unmatched leading end tags, and one closing token shared by
 multiple start tags do not count as structural evidence. This keeps detection
-linear in the source size. The detector consumes the code-fence-unwrapped view
-so a whole-page fenced HTML fragment can still be recognized. Fence stripping
-is repeated after rendering, because entity decoding or tag removal can reveal
-a new standalone fence.
+linear in the source size. The standalone token sink follows HTML5 Rawtext,
+RCDATA, ScriptData, and Plaintext state transitions, so apparent tags inside
+`script`, `style`, `title`, `textarea`, `xmp`, `iframe`, `noembed`, `noframes`,
+`noscript`, or `plaintext` content are not structural evidence. The detector
+consumes the code-fence-unwrapped view so a whole-page fenced HTML fragment can
+still be recognized. Fence stripping is repeated after rendering, because
+entity decoding or tag removal can reveal a new standalone fence.
 
 Before DOM construction, the tokenizer rejects layout input above 100,000
 tokens or 256 open elements. This bounds memory and recursive rendering depth
@@ -182,6 +185,8 @@ Regression tests cover every consolidated issue:
 - literal `<p>` and `<brutto>` plain text;
 - tag-name prefixes, end tags in attributes/comments, unmatched end tags, and
   repeated elements sharing one closer;
+- first-element closing-tag coupling and apparent layout tags inside HTML
+  Rawtext/RCDATA/ScriptData/Plaintext content;
 - uppercase and marker-free layout;
 - `>` inside quoted attributes and comments;
 - style/script/head/svg/noscript subtree removal;

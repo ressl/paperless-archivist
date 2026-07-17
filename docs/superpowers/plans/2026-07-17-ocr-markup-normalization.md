@@ -328,25 +328,37 @@ struct MarkupInspection {
     table: bool,
     recognized_elements: usize,
     explicitly_closed_elements: usize,
+    first_start_tag: Option<String>,
+    first_start_tag_matched: bool,
     limits_exceeded: bool,
 }
 
 fn inspect_markup(source: &str) -> MarkupInspection {
     // Tokenize once. Count recognized start tags and only matched end-tag
     // events. Track attributes, tables, total tokens, and an explicit stack
-    // of open non-void elements. Reject above 100,000 tokens or depth 256.
+    // of open non-void elements. Track whether the exact first start token was
+    // matched. Return RawData/Plaintext sink states for HTML raw-text elements
+    // so apparent tags in their content are never evidence. Reject above
+    // 100,000 tokens or depth 256.
     // See crates/archivist-ocr/src/markup.rs for the complete TokenSink.
 }
 
 fn looks_like_layout_markup(source: &str, inspection: &MarkupInspection) -> bool {
     let source_lower = source.to_ascii_lowercase();
-    let starts_with_layout = source_lower.trim_start().strip_prefix('<').is_some_and(|rest| {
-        let name = rest
-            .split(|ch: char| ch.is_ascii_whitespace() || ch == '>' || ch == '/')
-            .next()
-            .unwrap_or_default();
-        is_layout_element(name)
-    });
+    let starts_with_layout = source_lower
+        .trim_start()
+        .strip_prefix('<')
+        .and_then(|rest| {
+            let name = rest
+                .split(|ch: char| ch.is_ascii_whitespace() || ch == '>' || ch == '/')
+                .next()
+                .unwrap_or_default();
+            is_layout_element(name).then_some(name)
+        })
+        .is_some_and(|name| {
+            inspection.first_start_tag.as_deref() == Some(name)
+                && inspection.first_start_tag_matched
+        });
 
     inspection.marker_attribute
         || inspection.table

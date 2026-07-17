@@ -387,6 +387,25 @@ mod tests {
             "Prefix <p>one</p><!-- </div> --><div>literal",
             "Prefix <p>one<p>two</p>",
             "</p></div><p>one<div>two",
+            "<p>literal <div>closed</div>",
+        ] {
+            assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
+        }
+    }
+
+    #[test]
+    fn normalize_ocr_pages_ignores_layout_tokens_inside_raw_text() {
+        for page in [
+            "<script><table><tr><td>hidden</td></tr></table></script>",
+            "<style>.x::before { content: '<table>'; }</style>",
+            "<title><table></title>",
+            "<textarea><table></textarea>",
+            "<xmp><table></xmp>",
+            "<iframe><table></iframe>",
+            "<noembed><table></noembed>",
+            "<noframes><table></noframes>",
+            "<noscript><table></noscript>",
+            "<plaintext><table>",
         ] {
             assert_eq!(normalize_ocr_pages(&[page.to_owned()]), page);
         }

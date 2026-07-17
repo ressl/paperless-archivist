@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use html5ever::tendril::TendrilSink;
+use html5ever::tokenizer::states::{Rawtext, Rcdata, ScriptData};
 use html5ever::tokenizer::{
     BufferQueue, EndTag, StartTag, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
     TokenizerOpts,
@@ -115,7 +116,14 @@ struct MarkupInspection {
     table: bool,
     recognized_elements: usize,
     explicitly_closed_elements: usize,
+    first_start_tag: Option<String>,
+    first_start_tag_matched: bool,
     limits_exceeded: bool,
+}
+
+struct OpenElement {
+    name: String,
+    is_first_start_tag: bool,
 }
 
 #[derive(Default)]
@@ -124,7 +132,9 @@ struct MarkupInspectionSink {
     table: Cell<bool>,
     recognized_starts: RefCell<HashMap<String, usize>>,
     recognized_ends: RefCell<HashMap<String, usize>>,
-    open_elements: RefCell<Vec<String>>,
+    open_elements: RefCell<Vec<OpenElement>>,
+    first_start_tag: RefCell<Option<String>>,
+    first_start_tag_matched: Cell<bool>,
     token_count: Cell<usize>,
     limits_exceeded: Cell<bool>,
 }
@@ -139,6 +149,15 @@ impl MarkupInspectionSink {
 
     fn record_start_tag(&self, tag: &html5ever::tokenizer::Tag) {
         let name = tag.name.as_ref();
+        let is_first_start_tag = {
+            let mut first_start_tag = self.first_start_tag.borrow_mut();
+            if first_start_tag.is_none() {
+                *first_start_tag = Some(name.to_owned());
+                true
+            } else {
+                false
+            }
+        };
         Self::increment_recognized(&self.recognized_starts, name);
         if name == "table" {
             self.table.set(true);
@@ -158,15 +177,21 @@ impl MarkupInspectionSink {
             if open_elements.len() >= MAX_LAYOUT_NESTING_DEPTH {
                 self.limits_exceeded.set(true);
             } else {
-                open_elements.push(name.to_owned());
+                open_elements.push(OpenElement {
+                    name: name.to_owned(),
+                    is_first_start_tag,
+                });
             }
         }
     }
 
     fn record_end_tag(&self, name: &str) {
         let mut open_elements = self.open_elements.borrow_mut();
-        if let Some(index) = open_elements.iter().rposition(|open| open == name) {
+        if let Some(index) = open_elements.iter().rposition(|open| open.name == name) {
             Self::increment_recognized(&self.recognized_ends, name);
+            if open_elements[index].is_first_start_tag {
+                self.first_start_tag_matched.set(true);
+            }
             open_elements.truncate(index);
         }
     }
@@ -185,6 +210,8 @@ impl MarkupInspectionSink {
             table: self.table.get(),
             recognized_elements,
             explicitly_closed_elements,
+            first_start_tag: self.first_start_tag.borrow().clone(),
+            first_start_tag_matched: self.first_start_tag_matched.get(),
             limits_exceeded: self.limits_exceeded.get(),
         }
     }
@@ -202,7 +229,18 @@ impl TokenSink for MarkupInspectionSink {
 
         if let TagToken(tag) = token {
             match tag.kind {
-                StartTag => self.record_start_tag(&tag),
+                StartTag => {
+                    self.record_start_tag(&tag);
+                    return match tag.name.as_ref() {
+                        "title" | "textarea" => TokenSinkResult::RawData(Rcdata),
+                        "style" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript" => {
+                            TokenSinkResult::RawData(Rawtext)
+                        }
+                        "script" => TokenSinkResult::RawData(ScriptData),
+                        "plaintext" => TokenSinkResult::Plaintext,
+                        _ => TokenSinkResult::Continue,
+                    };
+                }
                 EndTag => self.record_end_tag(tag.name.as_ref()),
             }
         }
@@ -225,12 +263,16 @@ fn looks_like_layout_markup(source: &str, inspection: &MarkupInspection) -> bool
     let starts_with_layout = source_lower
         .trim_start()
         .strip_prefix('<')
-        .is_some_and(|rest| {
+        .and_then(|rest| {
             let name = rest
                 .split(|ch: char| ch.is_ascii_whitespace() || ch == '>' || ch == '/')
                 .next()
                 .unwrap_or_default();
-            is_layout_element(name)
+            is_layout_element(name).then_some(name)
+        })
+        .is_some_and(|name| {
+            inspection.first_start_tag.as_deref() == Some(name)
+                && inspection.first_start_tag_matched
         });
 
     inspection.marker_attribute
