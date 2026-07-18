@@ -99,6 +99,7 @@ The contracts are independently selectable:
 | `reasoning-adaptive` | `thinking_mode=adaptive` returns final content plus separated reasoning. |
 | `tool` | A specifically forced OpenAI tool call returns the closed sentinel arguments. |
 | `image` | The answer identifies the dominant colour of an embedded, metadata-free synthetic PNG and therefore cannot be copied from the prompt. |
+| `ocr` | The answer exactly transcribes a deterministic embedded PNG; the expected text is absent from the prompt. |
 
 Configuration is environment-only; there are no endpoint, model or secret
 command-line flags:
@@ -115,7 +116,7 @@ command-line flags:
 | `SGLANG_CONTRACT_TIMEOUT_MS` | Per-request timeout, default 180000. |
 | `SGLANG_CONTRACT_MAX_RESPONSE_BYTES` | Response ceiling, default 2 MiB and hard-capped at 16 MiB. |
 | `SGLANG_CONTRACT_MAX_TOKENS` | Per-completion output cap, default 1024. |
-| `SGLANG_CONTRACT_VISION_SCOPE` | `informational` by default; set `gate` only after the ADR vision gate is approved. |
+| `SGLANG_CONTRACT_VISION_SCOPE` | `gate` by default. `informational` is available only for diagnostics and is not acceptance evidence. |
 | `SGLANG_CONTRACT_REPORT_FILE` | Optional JSON report path, created mode 0600. |
 
 Run a single public-safe probe, for example:
@@ -126,19 +127,18 @@ SGLANG_CONTRACTS='models' \
 node scripts/verify/sglang_minimax_m3_contract.mjs
 ```
 
-Run the entire text-first matrix by omitting `SGLANG_CONTRACTS`. Exit code `0`
-means every release-gating contract passed; an image-only failure is recorded
-as `passed_with_informational_failure`. Exit code `1` means a live contract
-failed, and `2` means configuration was invalid. Setting
-`SGLANG_CONTRACT_VISION_SCOPE=gate` makes image failure return `1`.
+Run the entire multimodal matrix by omitting `SGLANG_CONTRACTS`. Exit code `0`
+means every release-gating contract passed. Exit code `1` means a live
+contract failed, and `2` means configuration was invalid. Setting
+`SGLANG_CONTRACT_VISION_SCOPE=informational` changes only `image` and `ocr`
+failures to `informational_failed`; such a report can diagnose a text-only
+runtime but does not accept it for M3 vision/OCR.
 
-For an operator acceptance run that excludes the informational image probe,
-select the release-gating text matrix explicitly:
+For an operator acceptance run, execute the full default matrix:
 
 ```bash
 SGLANG_CONTRACT_BASE_URL=https://sglang.example.invalid/v1 \
 SGLANG_CONTRACT_API_KEY_FILE=/run/secrets/sglang-key \
-SGLANG_CONTRACTS=models,text,schema,reasoning-disabled,reasoning-enabled,reasoning-adaptive,tool \
 node scripts/verify/sglang_minimax_m3_contract.mjs
 ```
 

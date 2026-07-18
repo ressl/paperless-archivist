@@ -10,7 +10,7 @@ production-like Docker Compose, generic Kubernetes, and local development.
 - Docker with Compose support for the recommended quick start.
 - Optional Ollama for local AI.
 - Optional OpenAI, Anthropic, Ollama Cloud, or OpenAI-compatible API key.
-- Optional SGLang for the exact text-only MiniMax M3 integration. Use the
+- Optional SGLang for the exact MiniMax M3 text and vision/OCR integration. Use the
   model/runtime pins and parser requirements in the
   [operations runbook](OPERATIONS.md#sglangminimax-m3-operations); Archivist
   does not install or manage the inference runtime.
@@ -179,7 +179,7 @@ npm --prefix frontend run generate:client
 10. Review results before enabling autopilot.
 
 For SGLang/MiniMax M3, follow the dedicated
-[Settings procedure](USER_GUIDE.md#sglang-with-minimax-m3-text-only), then run
+[Settings procedure](USER_GUIDE.md#sglang-with-minimax-m3-text-and-visionocr), then run
 the opt-in live contract before production use.
 
 ## Commercial Providers

@@ -501,9 +501,12 @@ Implications:
   Combined with the v1.5.1 num_ctx fix, the previously-dead OCR jobs
   succeed on first retry without going through the fallback path.
 
-## ADR-014: SGLang MiniMax M3 Is a Text-First OpenAI-Compatible Provider
+<a id="adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider"></a>
 
-Status: Accepted on 2026-07-17 by issue #366.
+## ADR-014: SGLang MiniMax M3 Is a Selectable Multimodal OpenAI-Compatible Provider
+
+Status: Accepted on 2026-07-17 by issue #366; amended on 2026-07-18 to
+include operator-selected vision/OCR.
 
 ### Context and pinned evidence
 
@@ -549,7 +552,10 @@ explicit capability for the exact target model identity; broad checks such as
 `contains("MiniMax-M3")` are not allowed. Other OpenAI-compatible models must
 not receive M3-only request fields.
 
-The target is text-first. M3 is supported for the following consumers:
+The target supports text plus optional vision/OCR. Selecting M3 as a vision
+model is an operator choice: normalization does not enable its provider, change
+the global default provider, add an OCR stage override, or enable the OCR
+workflow. M3 is supported for the following consumers:
 
 | Consumer | Contract | Scope |
 | --- | --- | --- |
@@ -561,8 +567,8 @@ The target is text-first. M3 is supported for the following consumers:
 | Document Chat | Text chat completion with the default text-provider tuning | Included |
 | Provider connection test | Small text chat completion using the draft/saved provider tuning | Included |
 | Model discovery | `GET /v1/models` must expose the exact served ID | Included control plane |
-| OCR and other page-image stages | MinerU or Ollama vision contract | Excluded |
-| Generic OpenAI-compatible vision request to M3 | Informational live probe only | Not a release gate |
+| OCR and other rendered page-image stages | Standard OpenAI-compatible `image_url` content with the selected vision model | Included when selected |
+| Synthetic image and OCR probes | Exact image and transcription assertions through the pinned runtime | Release gate |
 
 Provider tuning must resolve identically for worker and API consumers. #368
 owns that shared wiring; this ADR defines the behavior it must preserve.
@@ -571,7 +577,7 @@ owns that shared wiring; this ADR defines the behavior it must preserve.
 
 The official template accepts `thinking_mode` with exactly `disabled`,
 `adaptive`, or `enabled`. Archivist resolves provider tuning first and sends
-the resulting mode on every M3 request inside
+the resulting mode on every text or vision M3 request inside
 `chat_template_kwargs`; it does not send the model-card shorthand `thinking`
 and does not repurpose OpenAI's top-level `reasoning_effort` field.
 
@@ -612,31 +618,33 @@ reasoning-parser hint, not a successful empty result.
 
 #### Vision and OCR gate
 
-The target checkpoint contains a vision tower, but the M3 preset must not set a
-default vision model and must not route the OCR stage to M3. Under this
-text-first decision, #371 records the synthetic image contract as
-informational only.
+The vision gate is accepted for the exact pinned checkpoint/runtime pair. The
+checkpoint retains its BF16 vision tower and multimodal projectors. Read-only
+live probes against that pair transcribed deterministic text images exactly,
+including `M3 VISION 7429` during checkpoint validation and
+`PAPERLESS M3 OCR 18427` during the Archivist integration review.
 
-Promoting M3 vision/OCR to release scope requires all of the following:
+The public-safe live harness now sends the same base64 `image_url` shape as the
+application and gates on two independent assertions: dominant colour from a
+synthetic PNG and exact OCR of an embedded PNG containing only
+`ARCHIVIST OCR 18427`. Both default to release-gating behavior. An operator may
+set `SGLANG_CONTRACT_VISION_SCOPE=informational` for diagnostics, but such a
+report is not acceptance evidence.
 
-1. a separate decision updating this ADR and the consumer matrix;
-2. a pinned SGLang image/model live contract for the exact image payload used
-   by Archivist;
-3. successful representative OCR/vision quality and capacity evaluation;
-4. completion of OCR epic #322 through #338, with at least the data-loss and
-   table-integrity blockers #323, #324, #326, and #327 closed.
-
-This links the OCR work rather than duplicating it. MinerU/Ollama remains the
-OCR architecture until the gate is explicitly passed.
+This establishes compatibility, not universal OCR quality. Operators must
+validate representative languages, layouts, handwriting, tables, latency, and
+capacity for their archive before enabling automation. MinerU and Ollama remain
+valid selectable OCR providers and may be retained through a stage override.
 
 ### Migration and compatibility
 
 - Existing SGLang/MiniMax M2.7 providers remain valid generic
   `openai_compatible` configurations. They are not renamed or migrated
   automatically.
-- #370 adds M3 as a disabled preset/catalog choice. Operators opt in and keep
-  control of provider URL and secret references; no private endpoint belongs
-  in source defaults.
+- #370 adds M3 as a disabled preset/catalog choice. The amended preset exposes
+  the exact model independently for text and vision. Operators opt in and keep
+  control of provider URL, model choice, workflow activation, stage overrides,
+  and secret references; no private endpoint belongs in source defaults.
 - No database migration or new provider kind is needed.
 - The 2026-07-07 M2.7/MinerU design remains authoritative for the
   one-kind-per-protocol rule, MinerU OCR, structured-output fallback, and
@@ -647,9 +655,10 @@ OCR architecture until the gate is explicitly passed.
 
 - **A new `sglang` provider kind:** rejected because it duplicates the existing
   OpenAI-compatible client and confuses protocol with product.
-- **Enable M3 vision/OCR immediately:** rejected because model capability is
-  not an OCR quality/reliability proof and the linked OCR data-loss issues are
-  still open.
+- **Enable the provider or OCR workflow automatically:** rejected because
+  capability discovery is not consent to send document pages or automate
+  writes. The preset stays disabled and workflow/stage selection stays under
+  operator control.
 - **Send OpenAI `reasoning_effort`:** rejected because the reviewed M3 template
   consumes `thinking_mode`, not OpenAI's field.
 - **Use the template's adaptive default for absent tuning:** rejected because
@@ -660,7 +669,7 @@ OCR architecture until the gate is explicitly passed.
 
 ### Risks and release gates
 
-- Engine support is preview/image-specific. Digest pinning and the six-part
+- Engine support is preview/image-specific. Digest pinning and the nine-part
   live contract in #371 are mandatory until an equivalent tagged SGLang
   release is adopted deliberately.
 - Thinking plus strict JSON grammar and tool parsing can regress independently;

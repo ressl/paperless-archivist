@@ -60,22 +60,22 @@ effort, output-token cap, structured-output mode where a schema is present,
 text context, and per-request timeout; a prompt model override does not switch
 or discard that provider profile.
 
-[ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider)
+[ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-selectable-multimodal-openai-compatible-provider)
 defines the accepted MiniMax M3 integration contract. The exact target is
 `ressl/MiniMax-M3-uncensored-NVFP4` under the existing
-`openai_compatible` protocol. Its product scope is text-only:
-metadata/classification, consensus, the current text-wrapper OCR prompt test,
-the consolidated metadata prompt tester, provider testing, and Document Chat.
-The OCR prompt test does not invoke OCR or send an image. OCR itself remains on
-MinerU/Ollama; M3 image input is informational until the linked OCR and
-live-contract gates pass. `thinking_mode` and `<mm:think>` response support are
-applied on every selected M3 request, while worker stages, Prompt Tester,
-provider test, and Document Chat share the selected provider's effective
-tuning and timeout. The disabled M3 preset, live contract, and measured
-capacity profile are complete; operators should use the
-[Settings guide](USER_GUIDE.md#sglang-with-minimax-m3-text-only) and
-[operations runbook](OPERATIONS.md#sglangminimax-m3-operations). M3 vision/OCR
-still requires a separate ADR update plus the #322 through #338 gates.
+`openai_compatible` protocol. Its scope includes text consumers plus optional
+rendered-page vision/OCR. The disabled preset exposes the exact model in both
+selectors; operators may use its vision default, choose another model, or add
+an OCR-stage provider/model override. Selection does not enable the provider,
+the OCR workflow, or automatic processing. `thinking_mode` and `<mm:think>`
+response support are applied on every selected text or vision M3 request,
+while worker stages and API consumers share the selected provider's effective
+tuning and timeout. The synthetic image and exact-transcription OCR contracts
+are release gates for the pinned runtime. The OCR Prompt Tester itself remains
+a text wrapper, so operators validate real image input with the live contract
+and a manually reviewed OCR job. Use the
+[Settings guide](USER_GUIDE.md#sglang-with-minimax-m3-text-and-visionocr) and
+[operations runbook](OPERATIONS.md#sglangminimax-m3-operations).
 
 ## OCR Pipeline
 

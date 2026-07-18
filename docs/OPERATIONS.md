@@ -175,10 +175,10 @@ drop with an unrestricted namespace selector or private-network CIDR.
 ## SGLang/MiniMax M3 Operations
 
 The supported application contract is the disabled `sglang-minimax-m3`
-preset, provider kind `openai_compatible`, and exact text model
+preset, provider kind `openai_compatible`, and exact text/vision model
 `ressl/MiniMax-M3-uncensored-NVFP4`. Archivist does not deploy SGLang. Pin the
 model revision, SGLang revision, and immutable image digest recorded in
-[ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider),
+[ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-selectable-multimodal-openai-compatible-provider),
 and revalidate before changing any of them.
 
 | Reviewed identity | Required pin |
@@ -203,7 +203,7 @@ The SGLang runtime must:
   through the deployment secret workflow so API and worker resolve the same
   encrypted secret reference.
 
-Follow the [Settings procedure](USER_GUIDE.md#sglang-with-minimax-m3-text-only)
+Follow the [Settings procedure](USER_GUIDE.md#sglang-with-minimax-m3-text-and-visionocr)
 and leave the measured `1` worker / `180` seconds / `4096` tokens / `auto`
 profile unchanged for the reviewed two-slot runtime. Reasoning unset/off maps
 to `thinking_mode=disabled`, low to `adaptive`, and medium/high to `enabled`.
@@ -213,7 +213,7 @@ Reasoning tokens consume the same output cap as the final answer.
 
 1. In Settings, refresh model discovery, verify the exact model ID, save, and
    run the provider test.
-2. Run the text-first live contract from a trusted operator shell. The endpoint
+2. Run the complete live contract from a trusted operator shell. The endpoint
    variable must contain no credentials; authentication uses a readable secret
    file:
 
@@ -221,20 +221,21 @@ Reasoning tokens consume the same output cap as the final answer.
    mkdir -p target
    SGLANG_CONTRACT_BASE_URL=https://sglang.example.invalid/v1 \
    SGLANG_CONTRACT_API_KEY_FILE=/run/secrets/sglang-key \
-   SGLANG_CONTRACTS=models,text,schema,reasoning-disabled,reasoning-enabled,reasoning-adaptive,tool \
    SGLANG_CONTRACT_REPORT_FILE=target/sglang-contract.json \
    node scripts/verify/sglang_minimax_m3_contract.mjs
    ```
 
    Omit `SGLANG_CONTRACT_API_KEY_FILE` for an unauthenticated endpoint. Exit 0
-   means every selected contract passed. A successful report contains no URL,
-   credential, prompt, response, reasoning trace, or tool arguments. On
+   means all text, reasoning, tool, image, and OCR contracts passed. A
+   successful report contains no URL, credential, prompt, response, reasoning
+   trace, or tool arguments. On
    failure, `diagnostic` may contain up to 512 redacted characters derived
    from the provider error or response body. Treat a failed report as
    operator-sensitive and inspect it before sharing.
-3. Exercise one Prompt Tester call, one Document Chat request, and one worker
-   metadata job. These cover API and worker callers; do not use OCR as an M3
-   validation path.
+3. Exercise one Prompt Tester call, one Document Chat request, one worker
+   metadata job, and one manually reviewed OCR job using representative pages.
+   The synthetic contract proves wire compatibility; the manual job checks the
+   archive's language and layout quality.
 4. After changing runtime pins, scheduler slots, context, or hardware, rerun
    the [capacity harness and record a new report](performance/2026-07-17-sglang-minimax-m3-capacity.md#revalidation)
    before changing worker concurrency or timeout.
@@ -252,14 +253,17 @@ pod labels, protocol, and Service `targetPort` must match its destination.
 | Response contains reasoning but no final answer | Run the three reasoning live contracts. Confirm `--reasoning-parser auto`, the reviewed chat template, and that SGLang accepts the explicit `thinking_mode`. Increase `max_output_tokens` only if logs/metrics show the final answer was truncated, not as a parser workaround. |
 | Users see `<mm:think>` or `<think>` tags | Treat this as a runtime parser regression and verify `--reasoning-parser auto`. Archivist strips both tag families as defense in depth, but tags in final UI output mean the response shape or parser changed and the live reasoning contracts must be rerun. |
 | Strict schema returns HTTP 400 | Keep `structured_output=auto` first: Archivist retries one schema-related 400 without `response_format`. If the retry also fails, run the `schema` contract and inspect the pinned runtime grammar backend. Use `json_object` or `off` only as an explicit compatibility choice; Rust validation still rejects invalid model output. |
+| `image` or `ocr` live contract fails | Confirm the exact model is selected as the provider's vision model, the SGLang runtime loaded its vision tower/projectors, and the request size fits the proxy. Do not treat `SGLANG_CONTRACT_VISION_SCOPE=informational` as production acceptance. |
+| Synthetic OCR passes but archive OCR is poor | Keep manual review or dry-run enabled. Test representative languages, scans, handwriting, tables, and page counts; then select MinerU/Ollama or add an OCR stage override if they are a better fit. |
 | Requests reach the provider but time out | Compare provider latency, oldest queue age, model error/retry counters, and SGLang scheduler pressure with the capacity report. Keep the 180-second baseline and worker concurrency 1 until a new bounded capacity run justifies a change. A schema fallback can consume two provider timeouts; the worker lease budget accounts for this. |
 | DNS resolves but in-cluster calls time out | Inspect the custom NetworkPolicy, EndpointSlice, actual namespace/pod labels, and Service `targetPort` in the Kubernetes guide. Confirm CNI flow logs show whether API or worker traffic was dropped. Never fix this with unrestricted namespace or RFC1918 egress. |
 | Provider returns 401 or 403 | Re-enter/rotate the key through Settings, confirm the provider card still has a secret reference, and verify both API and worker can resolve it. Check provider-side scope/expiry without printing the key or putting it in the Base URL, process arguments, logs, or issue comments. |
 
-MiniMax M3 remains text-only in Archivist. OCR and page-image stages stay on
-MinerU or Ollama until ADR-014 is revised and the image/OCR gates in #322
-through #338 pass; a successful informational image contract alone does not
-enable M3 OCR.
+MiniMax M3 vision/OCR is selectable but never enabled implicitly. The preset
+stays disabled until configured, and model normalization does not change the
+global default, OCR stage override, or enabled workflow stages. Keep MinerU or
+Ollama selected whenever their OCR quality or capacity is better for the
+archive.
 
 GA support, upgrade, rollback, and large-archive sizing are documented in:
 

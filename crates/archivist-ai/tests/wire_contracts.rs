@@ -271,6 +271,7 @@ async fn mineru_vision_multipart_roundtrip() {
         }],
         temperature: 0.0,
         num_ctx: None,
+        reasoning_effort: None,
         max_output_tokens: None,
     };
 
@@ -341,7 +342,7 @@ async fn openai_vision_sends_max_tokens_on_wire() {
         .expect("client construction");
 
     let with_cap = VisionRequest {
-        model: "vision-model".to_owned(),
+        model: archivist_ai::MINIMAX_M3_MODEL.to_owned(),
         prompt: "describe".to_owned(),
         images: vec![ImageInput {
             mime_type: "image/png".to_owned(),
@@ -349,6 +350,7 @@ async fn openai_vision_sends_max_tokens_on_wire() {
         }],
         temperature: 0.0,
         num_ctx: None,
+        reasoning_effort: Some(archivist_core::ReasoningEffort::Off),
         max_output_tokens: Some(1234),
     };
     client
@@ -365,6 +367,7 @@ async fn openai_vision_sends_max_tokens_on_wire() {
         }],
         temperature: 0.0,
         num_ctx: None,
+        reasoning_effort: None,
         max_output_tokens: None,
     };
     client
@@ -375,6 +378,16 @@ async fn openai_vision_sends_max_tokens_on_wire() {
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2, "server must see exactly 2 requests");
     assert_eq!(bodies[0]["max_tokens"], json!(1234));
+    assert_eq!(
+        bodies[0]["chat_template_kwargs"]["thinking_mode"],
+        json!("disabled")
+    );
+    assert!(
+        bodies[0]["messages"][0]["content"][1]["image_url"]["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("data:image/png;base64,"))
+    );
+    assert!(bodies[1].get("chat_template_kwargs").is_none());
     assert!(
         bodies[1].get("max_tokens").is_none(),
         "omitted max_output_tokens must not appear on the wire: {:?}",

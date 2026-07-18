@@ -98,7 +98,7 @@ const sglangMinimaxM3Provider: AiProvider = {
   kind: 'openai_compatible',
   base_url: '',
   default_text_model: MINIMAX_M3_MODEL,
-  default_vision_model: null,
+  default_vision_model: MINIMAX_M3_MODEL,
   cost_per_1m_input_tokens_usd: null,
   cost_per_1m_output_tokens_usd: null,
   secret_id: null,
@@ -128,6 +128,14 @@ export function isSglangMinimaxM3Provider(provider: ProviderDescriptor) {
   return (
     provider.kind === 'openai_compatible' &&
     normalizedProviderName(provider.name) === SGLANG_MINIMAX_M3_PROVIDER_NAME
+  );
+}
+
+function isExactSglangMinimaxM3Preset(provider: AiProvider) {
+  return (
+    provider.kind === 'openai_compatible' &&
+    provider.name === SGLANG_MINIMAX_M3_PROVIDER_NAME &&
+    provider.default_text_model === MINIMAX_M3_MODEL
   );
 }
 
@@ -314,6 +322,7 @@ const openAiCompatibleTextModels: ModelOption[] = [
 
 const openAiCompatibleVisionModels: ModelOption[] = [
   { value: 'qwen2.5vl:7b', label: 'qwen2.5vl:7b', recommendation: true },
+  { value: MINIMAX_M3_MODEL, label: MINIMAX_M3_MODEL },
   { value: 'qwen2.5vl:3b', label: 'qwen2.5vl:3b' },
   { value: 'qwen2.5vl:32b', label: 'qwen2.5vl:32b' },
   { value: 'qwen2.5vl:72b', label: 'qwen2.5vl:72b' },
@@ -430,25 +439,34 @@ export function withModelDefaults(settings: RuntimeSettings): RuntimeSettings {
       : provider.default_text_model || recommendedModel(provider, 'text'),
     default_vision_model:
       provider.default_vision_model ||
-      (isSglangMinimaxM3Provider(provider) ? null : recommendedModel(provider, 'vision'))
+      (isExactSglangMinimaxM3Preset(provider)
+        ? MINIMAX_M3_MODEL
+        : isSglangMinimaxM3Provider(provider)
+          ? null
+          : recommendedModel(provider, 'vision'))
   }));
   const modelCatalog = [...(settings.ai.model_catalog ?? [])];
-  if (
-    !modelCatalog.some(
-      (entry) =>
-        entry.provider_kind === 'openai_compatible' &&
-        entry.capability === 'text' &&
-        entry.model_id === MINIMAX_M3_MODEL
-    )
-  ) {
-    modelCatalog.push({
-      provider_kind: 'openai_compatible',
-      capability: 'text',
-      model_id: MINIMAX_M3_MODEL,
-      recommended: false,
-      modality: 'text',
-      best_for: 'MiniMax M3 served by SGLang'
-    });
+  for (const capability of ['text', 'vision'] as const) {
+    if (
+      !modelCatalog.some(
+        (entry) =>
+          entry.provider_kind === 'openai_compatible' &&
+          entry.capability === capability &&
+          entry.model_id === MINIMAX_M3_MODEL
+      )
+    ) {
+      modelCatalog.push({
+        provider_kind: 'openai_compatible',
+        capability,
+        model_id: MINIMAX_M3_MODEL,
+        recommended: false,
+        modality: capability === 'vision' ? 'text+image' : 'text',
+        best_for:
+          capability === 'vision'
+            ? 'Vision and OCR with MiniMax M3 served by SGLang'
+            : 'MiniMax M3 served by SGLang'
+      });
+    }
   }
   const defaultProviderName = normalizedProviderName(settings.ai.default_provider);
   const selectedProvider =

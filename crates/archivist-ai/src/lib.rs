@@ -429,6 +429,12 @@ pub struct VisionRequest {
     /// providers ignore this field.
     #[serde(default)]
     pub num_ctx: Option<i64>,
+    /// Resolved reasoning / thinking effort for multimodal models. The exact
+    /// MiniMax M3 model requires an explicit value so SGLang receives
+    /// `chat_template_kwargs.thinking_mode` on OCR calls just as it does on
+    /// text calls. Other vision providers ignore this field.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// See [`ChatRequest::max_output_tokens`]. Added v1.17.
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
@@ -772,17 +778,7 @@ pub fn build_openai_chat_payload(request: &ChatRequest) -> Result<Value> {
         "messages": messages,
     });
     if request.model == MINIMAX_M3_MODEL {
-        let effort = request.reasoning_effort.ok_or_else(|| {
-            anyhow!(
-                "MiniMax M3 request has no resolved reasoning effort; resolve provider tuning \
-                 before building the request so chat_template_kwargs.thinking_mode is explicit"
-            )
-        })?;
-        let thinking_mode = match effort {
-            ReasoningEffort::Off => "disabled",
-            ReasoningEffort::Low => "adaptive",
-            ReasoningEffort::Medium | ReasoningEffort::High => "enabled",
-        };
+        let thinking_mode = minimax_m3_thinking_mode(request.reasoning_effort)?;
         payload
             .as_object_mut()
             .expect("payload is an object literal")
@@ -855,6 +851,20 @@ pub fn build_openai_chat_payload(request: &ChatRequest) -> Result<Value> {
     Ok(payload)
 }
 
+fn minimax_m3_thinking_mode(effort: Option<ReasoningEffort>) -> Result<&'static str> {
+    let effort = effort.ok_or_else(|| {
+        anyhow!(
+            "MiniMax M3 request has no resolved reasoning effort; resolve provider tuning \
+             before building the request so chat_template_kwargs.thinking_mode is explicit"
+        )
+    })?;
+    Ok(match effort {
+        ReasoningEffort::Off => "disabled",
+        ReasoningEffort::Low => "adaptive",
+        ReasoningEffort::Medium | ReasoningEffort::High => "enabled",
+    })
+}
+
 /// OpenAI `reasoning_effort` string for an on-level. `Off` should be filtered
 /// out before calling; it maps to "medium" defensively.
 fn reasoning_effort_str(effort: ReasoningEffort) -> &'static str {
@@ -910,6 +920,50 @@ pub fn build_ollama_vision_payload(request: &VisionRequest) -> Value {
             { "role": "user", "content": request.prompt, "images": images }
         ]
     })
+}
+
+/// Builds the JSON payload posted to an OpenAI-compatible
+/// `/chat/completions` endpoint for a vision call. Images use the standard
+/// base64 data-URI shape. The exact MiniMax M3 model additionally receives an
+/// explicit SGLang `thinking_mode`; other model identities stay generic.
+pub fn build_openai_vision_payload(request: &VisionRequest) -> Result<Value> {
+    let mut content = vec![json!({ "type": "text", "text": request.prompt })];
+    for image in &request.images {
+        content.push(json!({
+            "type": "image_url",
+            "image_url": {
+                "url": format!(
+                    "data:{};base64,{}",
+                    image.mime_type,
+                    BASE64.encode(&image.bytes)
+                )
+            }
+        }));
+    }
+    let mut payload = json!({
+        "model": request.model,
+        "temperature": request.temperature,
+        "messages": [
+            { "role": "user", "content": content }
+        ]
+    });
+    if request.model == MINIMAX_M3_MODEL {
+        let thinking_mode = minimax_m3_thinking_mode(request.reasoning_effort)?;
+        payload
+            .as_object_mut()
+            .expect("payload is an object literal")
+            .insert(
+                "chat_template_kwargs".to_owned(),
+                json!({ "thinking_mode": thinking_mode }),
+            );
+    }
+    if let Some(max_tokens) = request.max_output_tokens {
+        payload
+            .as_object_mut()
+            .expect("payload is an object literal")
+            .insert("max_tokens".to_owned(), json!(max_tokens));
+    }
+    Ok(payload)
 }
 
 #[async_trait]
@@ -1143,37 +1197,9 @@ impl VisionProvider for OpenAiCompatibleClient {
         let started = Instant::now();
         let model = request.model.clone();
         // Base64-encode page images off the async runtime; see Ollama vision. #256.
-        let payload = tokio::task::spawn_blocking(move || {
-            let mut content = vec![json!({ "type": "text", "text": request.prompt })];
-            for image in &request.images {
-                content.push(json!({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": format!(
-                            "data:{};base64,{}",
-                            image.mime_type,
-                            BASE64.encode(&image.bytes)
-                        )
-                    }
-                }));
-            }
-            let mut payload = json!({
-                "model": request.model,
-                "temperature": request.temperature,
-                "messages": [
-                    { "role": "user", "content": content }
-                ]
-            });
-            if let Some(max_tokens) = request.max_output_tokens {
-                payload
-                    .as_object_mut()
-                    .expect("payload is an object literal")
-                    .insert("max_tokens".to_owned(), json!(max_tokens));
-            }
-            payload
-        })
-        .await
-        .context("encode OpenAI-compatible vision payload")?;
+        let payload = tokio::task::spawn_blocking(move || build_openai_vision_payload(&request))
+            .await
+            .context("encode OpenAI-compatible vision payload")??;
         let response = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
@@ -3621,6 +3647,65 @@ mod tests {
     }
 
     #[test]
+    fn minimax_m3_vision_payload_maps_every_reasoning_effort_to_thinking_mode() {
+        let mut request = VisionRequest {
+            model: MINIMAX_M3_MODEL.to_owned(),
+            prompt: "Read the page".to_owned(),
+            images: vec![ImageInput {
+                mime_type: "image/png".to_owned(),
+                bytes: vec![1, 2, 3, 4],
+            }],
+            temperature: 0.0,
+            num_ctx: None,
+            reasoning_effort: Some(ReasoningEffort::Off),
+            max_output_tokens: Some(512),
+        };
+
+        for (effort, expected) in [
+            (ReasoningEffort::Off, "disabled"),
+            (ReasoningEffort::Low, "adaptive"),
+            (ReasoningEffort::Medium, "enabled"),
+            (ReasoningEffort::High, "enabled"),
+        ] {
+            request.reasoning_effort = Some(effort);
+            let payload = build_openai_vision_payload(&request).expect("valid M3 vision payload");
+            assert_eq!(
+                payload["chat_template_kwargs"]["thinking_mode"], expected,
+                "wrong vision thinking_mode for {effort:?}"
+            );
+            assert_eq!(payload["max_tokens"], 512);
+            assert!(
+                payload["messages"][0]["content"][1]["image_url"]["url"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("data:image/png;base64,"))
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_m3_vision_payload_rejects_unresolved_effort_and_is_exactly_scoped() {
+        let mut request = VisionRequest {
+            model: MINIMAX_M3_MODEL.to_owned(),
+            prompt: "OCR".to_owned(),
+            images: Vec::new(),
+            temperature: 0.0,
+            num_ctx: None,
+            reasoning_effort: None,
+            max_output_tokens: None,
+        };
+        let error = build_openai_vision_payload(&request)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("resolved reasoning effort"), "got: {error}");
+        assert!(error.contains("thinking_mode"), "got: {error}");
+
+        request.model = "other/MiniMax-M3-uncensored-NVFP4".to_owned();
+        request.reasoning_effort = Some(ReasoningEffort::High);
+        let payload = build_openai_vision_payload(&request).expect("valid non-M3 vision payload");
+        assert!(payload.get("chat_template_kwargs").is_none());
+    }
+
+    #[test]
     fn minimax_m3_fields_are_not_sent_to_lookalikes_or_other_models() {
         for model in [
             "other/MiniMax-M3-uncensored-NVFP4",
@@ -4340,6 +4425,7 @@ mod tests {
             }],
             temperature: 0.0,
             num_ctx: Some(16384),
+            reasoning_effort: None,
             max_output_tokens: None,
         };
         let payload = build_ollama_vision_payload(&request);
@@ -4364,6 +4450,7 @@ mod tests {
             images: Vec::new(),
             temperature: 0.0,
             num_ctx: None,
+            reasoning_effort: None,
             max_output_tokens: None,
         };
         let payload = build_ollama_vision_payload(&request);
@@ -4424,6 +4511,7 @@ mod tests {
             images: Vec::new(),
             temperature: 0.0,
             num_ctx: Some(32_768),
+            reasoning_effort: None,
             max_output_tokens: None,
         };
         let payload = build_ollama_vision_payload(&request);

@@ -36,21 +36,19 @@ describe('SGLang MiniMax M3 model defaults', () => {
 
     expect(options.map((option) => option.value)).toContain(MINIMAX_M3_MODEL);
     expect(recommendedModel(provider, 'text')).toBe('qwen3:8b');
-    expect(modelOptions(provider, 'vision').map((option) => option.value)).not.toContain(
+    expect(modelOptions(provider, 'vision').map((option) => option.value)).toContain(
       MINIMAX_M3_MODEL
     );
   });
 
-  it('upgrades old settings once with a disabled text-only preset and catalog entry', () => {
+  it('upgrades old settings once with a disabled multimodal preset and catalog entries', () => {
     const upgraded = withModelDefaults(withModelDefaults(oldSettings()));
     const presets = upgraded.ai.providers.filter(
       (provider) => provider.name === SGLANG_MINIMAX_M3_PROVIDER_NAME
     );
     const catalogEntries = upgraded.ai.model_catalog.filter(
       (entry) =>
-        entry.provider_kind === 'openai_compatible' &&
-        entry.capability === 'text' &&
-        entry.model_id === MINIMAX_M3_MODEL
+        entry.provider_kind === 'openai_compatible' && entry.model_id === MINIMAX_M3_MODEL
     );
 
     expect(presets).toHaveLength(1);
@@ -58,7 +56,7 @@ describe('SGLang MiniMax M3 model defaults', () => {
       kind: 'openai_compatible',
       base_url: '',
       default_text_model: MINIMAX_M3_MODEL,
-      default_vision_model: null,
+      default_vision_model: MINIMAX_M3_MODEL,
       secret_id: null,
       enabled: false,
       tuning: {
@@ -69,8 +67,9 @@ describe('SGLang MiniMax M3 model defaults', () => {
         request_timeout_seconds: 180
       }
     });
-    expect(catalogEntries).toHaveLength(1);
-    expect(catalogEntries[0].recommended).toBe(false);
+    expect(catalogEntries).toHaveLength(2);
+    expect(catalogEntries.map((entry) => entry.capability).sort()).toEqual(['text', 'vision']);
+    expect(catalogEntries.every((entry) => !entry.recommended)).toBe(true);
   });
 
   it('preserves a case-renamed operator preset and custom catalog metadata', () => {
@@ -108,8 +107,16 @@ describe('SGLang MiniMax M3 model defaults', () => {
     expect(matchingProviders).toHaveLength(1);
     expect(matchingProviders[0].base_url).toBe('https://operator.example.test/v1');
     expect(matchingProviders[0].default_text_model).toBeNull();
-    expect(matchingCatalog).toHaveLength(1);
-    expect(matchingCatalog[0].label).toBe('Operator label');
-    expect(matchingCatalog[0].context).toBe('custom context');
+    expect(matchingCatalog).toHaveLength(2);
+    const textEntry = matchingCatalog.find((entry) => entry.capability === 'text');
+    const visionEntry = matchingCatalog.find((entry) => entry.capability === 'vision');
+    expect(textEntry?.label).toBe('Operator label');
+    expect(textEntry?.context).toBe('custom context');
+    expect(visionEntry).toMatchObject({
+      provider_kind: 'openai_compatible',
+      model_id: MINIMAX_M3_MODEL,
+      recommended: false,
+      modality: 'text+image'
+    });
   });
 });
