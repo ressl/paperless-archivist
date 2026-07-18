@@ -297,6 +297,10 @@ test('OCR is a default gating contract and cannot pass by echoing its prompt', a
         requests[0].body.messages[0].content.find((part) => part.type === 'image_url').image_url.url,
         SYNTHETIC_OCR_IMAGE_DATA_URI
       );
+      assert.deepEqual(
+        requests[0].body.messages[0].content.map((part) => part.type),
+        ['text', 'image_url']
+      );
       const prompt = messageText(requests[0].body);
       assert.match(prompt, /transcribe all visible text/i);
       assert.doesNotMatch(prompt, /ARCHIVIST OCR 18427/);

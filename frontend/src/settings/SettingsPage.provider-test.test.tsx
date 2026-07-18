@@ -381,6 +381,62 @@ describe('<SettingsPage> provider draft test', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   });
 
+  it('synchronizes active default models when the selected provider card changes', async () => {
+    const fixture = settingsFixture();
+    fixture.ai.default_provider = 'sglang-minimax-m3';
+    fixture.ai.default_text_model = 'qwen3:8b';
+    fixture.ai.default_vision_model = 'qwen2.5vl:7b';
+    fixture.ai.providers.push({
+      name: 'sglang-minimax-m3',
+      kind: 'openai_compatible',
+      base_url: 'https://sglang.example.test/v1',
+      default_text_model: 'ressl/MiniMax-M3-uncensored-NVFP4',
+      default_vision_model: 'ressl/MiniMax-M3-uncensored-NVFP4',
+      cost_per_1m_input_tokens_usd: null,
+      cost_per_1m_output_tokens_usd: null,
+      secret_id: null,
+      enabled: true,
+      tuning: { ...initialTuning }
+    });
+    apiState.savedSettings = fixture;
+    const { SettingsPage } = await import('./SettingsPage');
+    render(
+      <I18nProvider>
+        <SettingsPage setError={() => undefined} />
+      </I18nProvider>
+    );
+
+    const preset = await screen.findByRole('group', { name: 'sglang-minimax-m3' });
+    const textModel = within(preset).getByRole('combobox', {
+      name: 'sglang-minimax-m3 text model'
+    });
+    const visionModel = within(preset).getByRole('combobox', {
+      name: 'sglang-minimax-m3 vision model'
+    });
+    fireEvent.change(textModel, { target: { value: 'qwen3:14b' } });
+    fireEvent.change(textModel, {
+      target: { value: 'ressl/MiniMax-M3-uncensored-NVFP4' }
+    });
+    fireEvent.change(visionModel, { target: { value: 'qwen2.5vl:32b' } });
+    fireEvent.change(visionModel, {
+      target: { value: 'ressl/MiniMax-M3-uncensored-NVFP4' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(saveSettingsMock).toHaveBeenCalledTimes(1));
+    const [saved] = saveSettingsMock.mock.calls[0];
+    expect(saved.ai).toBeDefined();
+    const savedAi = saved.ai!;
+    expect(savedAi.default_text_model).toBe('ressl/MiniMax-M3-uncensored-NVFP4');
+    expect(savedAi.default_vision_model).toBe('ressl/MiniMax-M3-uncensored-NVFP4');
+    expect(
+      savedAi.providers?.find((provider) => provider.name === 'sglang-minimax-m3')
+    ).toMatchObject({
+      default_text_model: 'ressl/MiniMax-M3-uncensored-NVFP4',
+      default_vision_model: 'ressl/MiniMax-M3-uncensored-NVFP4'
+    });
+  });
+
   it('blocks removal when a stage still references the custom provider', async () => {
     const fixture = settingsFixture();
     fixture.ai.default_provider = 'ollama-cloud';

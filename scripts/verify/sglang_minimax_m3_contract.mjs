@@ -374,13 +374,13 @@ const contracts = {
     body.messages = [{
       role: 'user',
       content: [
-        { type: 'image_url', image_url: { url: config.imageDataUri } },
         {
           type: 'text',
           text: 'Identify the dominant primary colour. Reply with exactly ' +
             'ARCHIVIST_M3_IMAGE_<COLOR>_OK, replacing <COLOR> with one uppercase ' +
             'English primary-colour word. Do not guess if the image is unavailable.'
-        }
+        },
+        { type: 'image_url', image_url: { url: config.imageDataUri } }
       ]
     }];
     assertExactFinal(
@@ -395,12 +395,12 @@ const contracts = {
     body.messages = [{
       role: 'user',
       content: [
-        { type: 'image_url', image_url: { url: config.ocrImageDataUri } },
         {
           type: 'text',
           text: 'Transcribe all visible text exactly, preserving spaces. Reply with the ' +
             'transcription only and do not describe the image.'
-        }
+        },
+        { type: 'image_url', image_url: { url: config.ocrImageDataUri } }
       ]
     }];
     assertExactFinal(messageFrom(await postChat(config, body)), 'ARCHIVIST OCR 18427');

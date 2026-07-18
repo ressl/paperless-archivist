@@ -313,7 +313,23 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         patch.name !== undefined && s.ai.default_provider === current.name
           ? patch.name
           : s.ai.default_provider;
-      return { ...s, ai: { ...s.ai, default_provider: defaultProviderName, providers } };
+      const activeDefaultProvider = s.ai.default_provider === current.name;
+      return {
+        ...s,
+        ai: {
+          ...s.ai,
+          default_provider: defaultProviderName,
+          default_text_model:
+            activeDefaultProvider && typeof patch.default_text_model === 'string'
+              ? patch.default_text_model
+              : s.ai.default_text_model,
+          default_vision_model:
+            activeDefaultProvider && typeof patch.default_vision_model === 'string'
+              ? patch.default_vision_model
+              : s.ai.default_vision_model,
+          providers
+        }
+      };
     });
   const updateProviderTuning = (index: number, patch: Partial<ProviderTuning>) =>
     update((s) => {

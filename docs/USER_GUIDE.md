@@ -244,9 +244,14 @@ Configure the preset in `Settings`:
    `Structured output = auto`, `Request timeout = 180 seconds`, and reasoning
    unset/off for the conservative default profile.
 6. Enable the provider, save, select it as `Default provider` under
-   `AI Defaults`, and run `Test`. Then test one Prompt Tester request and one
-   Document Chat request. Run the image/OCR live contract and queue one manual
-   OCR job before enabling worker automation.
+   `AI Defaults`, and confirm the effective `Fallback text model` and
+   `Fallback vision model` selectors also show the exact M3 ID. Selecting a new
+   default provider copies its provider defaults into these effective values;
+   later edits on the active provider card keep them synchronized. Existing
+   persisted settings remain visible until the operator selects a value. Run
+   `Test`, then test one Prompt Tester request and one Document Chat request.
+   Run the image/OCR live contract and queue one manual OCR job before enabling
+   worker automation.
 
 The public-safe settings shape is:
 
@@ -288,7 +293,9 @@ timeout.
 There are two ways to choose M3 for OCR:
 
 1. Select M3 as the `Vision model` on the default `sglang-minimax-m3`
-   provider. OCR uses that vision default when no OCR-stage override exists.
+   provider and confirm M3 as the effective `Fallback vision model` under
+   `AI Defaults`. OCR uses that global effective value when no OCR-stage
+   override exists.
 2. Keep another global default and add an explicit OCR stage override that
    names `sglang-minimax-m3` and the exact M3 model.
 
