@@ -81,6 +81,7 @@ fn vision_request() -> VisionRequest {
         }],
         temperature: 0.0,
         num_ctx: None,
+        reasoning_effort: None,
         max_output_tokens: Some(256),
     }
 }

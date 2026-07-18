@@ -1937,6 +1937,7 @@ async fn process_ocr(
                     .effective_tuning_for_stage(Stage::Ocr)
                     .vision_num_ctx,
             ),
+            reasoning_effort: Some(provider.reasoning_effort),
             max_output_tokens: provider.max_output_tokens,
             prompt: page_prompt,
             images: vec![ImageInput {
@@ -5635,6 +5636,7 @@ mod tests {
             model: provider.model.clone(),
             temperature: 0.0,
             num_ctx: Some(OLLAMA_VISION_NUM_CTX_FLOOR),
+            reasoning_effort: None,
             max_output_tokens: None,
             prompt: "synthetic page".to_owned(),
             images: Vec::new(),
