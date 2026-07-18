@@ -276,6 +276,113 @@ async fn inventory_upsert_guard_preserves_status_ratchet_semantics() {
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn inventory_upsert_ratchets_metadata_and_full_completion_tags() {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
+        return;
+    };
+
+    let item = inventory_item();
+    apply_inventory(&pool, &item).await;
+
+    pool.execute(
+        r#"update document_inventory
+              set ocr_status = 'failed', metadata_status = 'rejected'
+            where paperless_document_id = 42"#,
+    )
+    .await
+    .expect("seed drifted stage statuses");
+
+    let mut metadata_tagged = inventory_item();
+    metadata_tagged.has_tagging_completion_tag = true;
+    metadata_tagged
+        .current_tags
+        .push("metadata-done".to_owned());
+    metadata_tagged.current_tag_ids.push(12);
+    apply_inventory(&pool, &metadata_tagged).await;
+
+    let row = sqlx::query(
+        r#"select ocr_status, metadata_status, complete
+             from document_inventory
+            where paperless_document_id = 42"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch metadata-tagged inventory");
+    assert_eq!(
+        row.try_get::<String, _>("ocr_status").expect("ocr_status"),
+        "failed",
+        "a metadata-only completion tag must not overwrite OCR history"
+    );
+    assert_eq!(
+        row.try_get::<String, _>("metadata_status")
+            .expect("metadata_status"),
+        "succeeded",
+        "the metadata completion tag must ratchet metadata to succeeded"
+    );
+    assert!(!row.try_get::<bool, _>("complete").expect("complete"));
+
+    let mut fully_tagged = metadata_tagged;
+    fully_tagged.has_full_completion_tag = true;
+    fully_tagged.current_tags.push("ai-processed".to_owned());
+    fully_tagged.current_tag_ids.push(13);
+    apply_inventory(&pool, &fully_tagged).await;
+
+    let row = sqlx::query(
+        r#"select ocr_status, metadata_status, complete
+             from document_inventory
+            where paperless_document_id = 42"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch fully tagged inventory");
+    assert_eq!(
+        row.try_get::<String, _>("ocr_status").expect("ocr_status"),
+        "succeeded",
+        "the full completion tag must ratchet OCR to succeeded"
+    );
+    assert_eq!(
+        row.try_get::<String, _>("metadata_status")
+            .expect("metadata_status"),
+        "succeeded",
+        "the full completion tag must ratchet metadata to succeeded"
+    );
+    assert!(row.try_get::<bool, _>("complete").expect("complete"));
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn inventory_upsert_does_not_erase_known_modified_timestamp() {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
+        return;
+    };
+
+    let known_modified = DateTime::parse_from_rfc3339("2026-07-18T08:12:34.567890+00:00")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+    let mut complete_item = inventory_item();
+    complete_item.paperless_modified_at = Some(known_modified);
+    apply_inventory(&pool, &complete_item).await;
+    let before = row_version(&pool, "document_inventory", "paperless_document_id", 42).await;
+
+    let partial_item = inventory_item();
+    apply_inventory(&pool, &partial_item).await;
+
+    assert_eq!(
+        row_version(&pool, "document_inventory", "paperless_document_id", 42).await,
+        before,
+        "a sync without a modified timestamp must be a physical no-op"
+    );
+    let stored: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select paperless_modified_at from document_inventory where paperless_document_id = 42",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch modified timestamp");
+    assert_eq!(stored, Some(known_modified));
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
 async fn find_session_throttles_last_seen_at_updates() {
     let Some((_db_lock, pool)) = fresh_pool().await else {
         return;

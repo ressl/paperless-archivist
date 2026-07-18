@@ -119,7 +119,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "archivist-ai"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "anyhow",
  "archivist-core",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-api"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "anyhow",
  "archivist-ai",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-apply"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "anyhow",
  "archivist-core",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-config"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "clap",
  "secrecy",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-core"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "chrono",
  "regex",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-db"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-ocr"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-paperless"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "anyhow",
  "archivist-core",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-sqlx"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "sqlx-core",
  "sqlx-postgres",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "archivist-worker"
-version = "1.18.0"
+version = "1.18.1"
 dependencies = [
  "anyhow",
  "archivist-ai",

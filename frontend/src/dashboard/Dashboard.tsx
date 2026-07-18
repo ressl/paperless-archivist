@@ -196,7 +196,13 @@ export function Dashboard({
     setConsistency(result);
   };
   const reconcileCompletionTags = async (dryRun: boolean) => {
-    const result = await api.reconcileCompletionTags({ dry_run: dryRun });
+    const documentIds = !dryRun && reconcile?.dry_run
+      ? reconcile.planned.map((item) => item.paperless_document_id)
+      : undefined;
+    const result = await api.reconcileCompletionTags({
+      dry_run: dryRun,
+      document_ids: documentIds
+    });
     setReconcile(result);
     await Promise.all([load(), loadLive()]);
   };
