@@ -366,8 +366,12 @@ describe('<SettingsPage> provider draft test', () => {
     expect(within(preset).getByRole('combobox', { name: 'sglang-minimax-m3 text model' })).toHaveValue(
       'ressl/MiniMax-M3-uncensored-NVFP4'
     );
-    expect(within(preset).getByLabelText('Vision model')).toBeDisabled();
-    expect(within(preset).getByLabelText('Vision model')).toHaveValue('');
+    expect(
+      within(preset).getByRole('combobox', { name: 'sglang-minimax-m3 vision model' })
+    ).toBeEnabled();
+    expect(
+      within(preset).getByRole('combobox', { name: 'sglang-minimax-m3 vision model' })
+    ).toHaveValue('ressl/MiniMax-M3-uncensored-NVFP4');
     expect(within(preset).getByRole('checkbox', { name: 'Enabled' })).not.toBeChecked();
     expect(within(preset).queryByRole('button', { name: 'Remove Provider' })).not.toBeInTheDocument();
 
