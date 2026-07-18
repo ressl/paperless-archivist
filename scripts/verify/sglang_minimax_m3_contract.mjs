@@ -13,7 +13,8 @@ export const CONTRACT_NAMES = [
   'reasoning-enabled',
   'reasoning-adaptive',
   'tool',
-  'image'
+  'image',
+  'ocr'
 ];
 
 export const DEFAULT_MODEL_REVISION = '6863c5c62a892e2d1e886a69e134b3b866e0963e';
@@ -26,6 +27,12 @@ const DIAGNOSTIC_LIMIT = 512;
 // contains no text, metadata, personal data, remote URL, or dependency.
 export const SYNTHETIC_IMAGE_DATA_URI =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAd0lEQVRo3u3PQQ0AIBDAsAP/nkEEj4ZkU9CtmTM/tzWgAQ1oQAMa0IAGNKABDWhAAxrQgAY0oAENaEADGtCABjSgAQ1oQAMa0IAGNKABDWhAAxrQgAY0oAENaEADGtCABjSgAQ1oQAMa0IAGNKABDWhAAxrQgNcuUIcBf/BGfLIAAAAASUVORK5CYII=';
+
+// A generated black-on-white 640x140 PNG containing only the deterministic
+// text "ARCHIVIST OCR 18427". Keeping it embedded makes the live OCR probe
+// independent of remote fixtures and prevents document data from reaching it.
+export const SYNTHETIC_OCR_IMAGE_DATA_URI =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAACMCAMAAADbTuhDAAAABlBMVEX+/v4ODg5o52ONAAAFUElEQVR42u2Z23LjOgwExf//6a06VWdjW5jBkJItOdv9lJgXEGCLVJxtAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgNMY49vjJjNdlOQvZ/yH+PgZM75o19O+/uwn3+ouYmFD0lTAd7JZxpGex8kodqVqZW0NklVdwYSAfbeuWrWAm6rPcw9X42bdZgOSbk2WK5ttVPJr1Ss7vKZrmBKwf/xdtTYnYFWgn4+Lueu4swIG/dosF3a76NOP7+z3a5qR4oOo5SXb+PjhvsMbBXwI9hp3TsCnVtGzz3J+u3UYcw3vGsbLGFuDI5K8EydgXSH5wbqAwkDVoV5IOTxK3nywkGWw4UUPURg7ai+dDrfdlL8PULJouxO7DucIqGYealafgkuoTGoly07AISb1E9RPSxD09gegfCPxqQwxaqQzdJ3loSBOnTq3JvnOnsNZ1o3NI6SCuk4q6K39OyBgu3vTAnb7bPouCajPTf+UHRPwr3/uKwORobfUCLjdlfEj4PK3eKrHKQKmkc8TsD/m57IsWoq3nkjA5p4O0rkd/y9uXkCze+EMU9fqGwSUO9M+ZVNZFi2jPb1244tRok+8lFtwuoAz9WiOGvm4pzU9IuB5WWYFz25Xvxq5lKBWFzEe6zH3OPWJvU3A1MBAQF+VU7J8bRHDotvVLqcM+iUHYHiev9qTTm6m0DfKaATs67oq4HZUwGB1Zb3lEa8vqi7qvf17qXT7Rjt1N60IqF+Dir5rt6OMVw1czHJp2HiOWpaiFXBhJVfyeqoEFZp4DxuSeo4JAbdiNp+eWF7TtG5St+tFlyGTigT87gNQ3ICxPLIiywIWOg45eZ+eWF7TdCDLidIXU4m+ZmLp340FfFqe3+FdZd4koHwlrLfF7/eFAka1dzPVXYMlT1TgcvojR9f1DQLab7mqeN2ef0LARf/0vzq23RyJgHXYcC2XYZVqqhoKWFdKzPH46+tgFc/t+kUn4ELtq8JU0qnpTQFuLKA/017z/pCA6ll38dTOf0xAU6e0OLL67lro4t7bv/L2UIvfp/gGAbtvhZqvwM4VcC3L2EDz7D3/Hgjo/Ps2AfN3sPcLOFXMqj0Y0rVMZ5luelpedyo8jh19jLtR+pf+Y8K9jvTVElO6L7w+KeDDXPNZhgZ21Xx6CTAXlbv3v1LA5nvBl99t1gcE3A9tpVgTcDQN81lqH9za5APXCWjCpYfxRQy7yaok3XXQinKSgNGfvEcEXM8yM/AkAV2w7xOwqXx0BB4TcHsou533DAHVDu2ew8ksPyiglf3e/un/Bcn26uGbm2ELBRQytRMHKao5VZoLWUZHYCJgO8q7fm8BV/QJDPyYgK79ebIjRdCLnKiTDO1WEgno43yhgN0F2r1/7A8PG1dKkwgY/JGcadC8wXXBAodVZDNEzBB1yhdxJTrBTsBXA4drtmWRJ1m3p7s+ekxfhWKi4foEWQZHoBdQjd8vNo9wL8wT1v4JsTPw+W3ZV6ATsFJg33dUlLGSOugUDmXZvn+qIXr0TBHuL6D6fJge9YExUYFQwEOBuySLeK3Ik/s8L+DW5/OLBLQZtgIaEXyNt9ME3IaL7BYgUmonmsqyPwKL5la//fdkv0/Anxa3F6puulrl+Ey1IK7JJa6G3XjTJa5TWpxuGWX+3ybg6VyW6nlFTg7LTyT0gRgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPAv8Qd/ehQo7BsFfwAAAABJRU5ErkJggg==';
 
 class ContractFailure extends Error {}
 
@@ -81,7 +88,7 @@ export function createConfig(env = process.env) {
   if (model !== EXACT_MODEL) {
     throw new Error('SGLANG_CONTRACT_MODEL must equal the pinned MiniMax M3 model');
   }
-  const visionScope = env.SGLANG_CONTRACT_VISION_SCOPE?.trim() || 'informational';
+  const visionScope = env.SGLANG_CONTRACT_VISION_SCOPE?.trim() || 'gate';
   if (!['informational', 'gate'].includes(visionScope)) {
     throw new Error('SGLANG_CONTRACT_VISION_SCOPE must be informational or gate');
   }
@@ -108,6 +115,7 @@ export function createConfig(env = process.env) {
     }),
     visionScope,
     imageDataUri: SYNTHETIC_IMAGE_DATA_URI,
+    ocrImageDataUri: SYNTHETIC_OCR_IMAGE_DATA_URI,
     reportFile: env.SGLANG_CONTRACT_REPORT_FILE?.trim() || null
   };
 }
@@ -380,6 +388,23 @@ const contracts = {
       'ARCHIVIST_M3_IMAGE_BLUE_OK'
     );
     return { synthetic_image: 'accepted', release_scope: config.visionScope };
+  },
+
+  async ocr(config) {
+    const body = chatBody(config, 'Transcribe all visible text in the synthetic image.');
+    body.messages = [{
+      role: 'user',
+      content: [
+        { type: 'image_url', image_url: { url: config.ocrImageDataUri } },
+        {
+          type: 'text',
+          text: 'Transcribe all visible text exactly, preserving spaces. Reply with the ' +
+            'transcription only and do not describe the image.'
+        }
+      ]
+    }];
+    assertExactFinal(messageFrom(await postChat(config, body)), 'ARCHIVIST OCR 18427');
+    return { synthetic_ocr: 'accepted', release_scope: config.visionScope };
   }
 };
 
@@ -412,7 +437,8 @@ export async function runContractSuite(config) {
         details
       });
     } catch (error) {
-      const informational = name === 'image' && config.visionScope === 'informational';
+      const informational =
+        (name === 'image' || name === 'ocr') && config.visionScope === 'informational';
       results.push({
         name,
         status: informational ? 'informational_failed' : 'failed',

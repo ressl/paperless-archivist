@@ -210,15 +210,19 @@ be distinguished from a generic minimum-length failure. Pathologically deep or
 large markup is rejected as `OCR layout markup exceeded normalization limits`.
 MinerU remains opt-in.
 
-### SGLang With MiniMax M3 (Text Only)
+<a id="sglang-with-minimax-m3-text-only"></a>
+
+### SGLang With MiniMax M3 (Text and Vision/OCR)
 
 Archivist includes a disabled `sglang-minimax-m3` provider preset for the exact
 model `ressl/MiniMax-M3-uncensored-NVFP4`. It uses the existing
 `openai_compatible` protocol; there is no separate SGLang provider kind. The
-preset is deliberately text-only and has no vision model.
+preset offers the exact model independently in its `Text model` and
+`Vision model` selectors. It remains disabled until an operator configures and
+enables it.
 
 Before enabling it, the SGLang operator must pin a runtime/model pair accepted
-by [ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-text-first-openai-compatible-provider),
+by [ADR-014](ARCHITECTURE_DECISIONS.md#adr-014-sglang-minimax-m3-is-a-selectable-multimodal-openai-compatible-provider),
 serve the exact model ID through `GET /v1/models`, and launch SGLang with
 `--reasoning-parser auto` and `--tool-call-parser auto`. The parser flags are
 required for separated `reasoning_content` and standard OpenAI tool calls. A
@@ -233,12 +237,16 @@ Configure the preset in `Settings`:
    never paste a key into exported settings or documentation.
 3. Click `Refresh` and confirm the model list contains exactly
    `ressl/MiniMax-M3-uncensored-NVFP4`.
-4. Keep the preset values `Worker concurrency = 1`, `Max output tokens = 4096`,
+4. Select that exact ID under both `Text model` and `Vision model` if M3 should
+   handle both workloads. Either selector may instead use another model served
+   by the same endpoint.
+5. Keep the preset values `Worker concurrency = 1`, `Max output tokens = 4096`,
    `Structured output = auto`, `Request timeout = 180 seconds`, and reasoning
    unset/off for the conservative default profile.
-5. Enable the provider, save, select it as `Default provider` under
+6. Enable the provider, save, select it as `Default provider` under
    `AI Defaults`, and run `Test`. Then test one Prompt Tester request and one
-   Document Chat request before enabling worker automation.
+   Document Chat request. Run the image/OCR live contract and queue one manual
+   OCR job before enabling worker automation.
 
 The public-safe settings shape is:
 
@@ -247,7 +255,7 @@ The public-safe settings shape is:
 { "name": "sglang-minimax-m3", "kind": "openai_compatible",
   "base_url": "https://sglang.example.invalid/v1",
   "default_text_model": "ressl/MiniMax-M3-uncensored-NVFP4",
-  "default_vision_model": null,
+  "default_vision_model": "ressl/MiniMax-M3-uncensored-NVFP4",
   "secret_id": "secret-reference-created-by-settings",
   "enabled": true,
   "tuning": {
@@ -277,7 +285,25 @@ because the provider uses `auto`. Prompt Tester, provider test, Document Chat,
 and worker text stages all use the selected provider's effective tuning and
 timeout.
 
-For OCR, configure MinerU or Ollama separately. A common split is:
+There are two ways to choose M3 for OCR:
+
+1. Select M3 as the `Vision model` on the default `sglang-minimax-m3`
+   provider. OCR uses that vision default when no OCR-stage override exists.
+2. Keep another global default and add an explicit OCR stage override that
+   names `sglang-minimax-m3` and the exact M3 model.
+
+The second settings shape is:
+
+```jsonc
+// settings.ai.default_provider may name another enabled provider
+// settings.ai.stage_models = [
+//   { "stage": "ocr", "provider": "sglang-minimax-m3",
+//     "model": "ressl/MiniMax-M3-uncensored-NVFP4" }
+// ]
+```
+
+Alternatively, keep M3 for text and route OCR to MinerU or Ollama. A common
+split is:
 
 ```jsonc
 { "name": "mineru", "kind": "mineru",
@@ -288,16 +314,18 @@ For OCR, configure MinerU or Ollama separately. A common split is:
 ```
 
 The OCR override routes only page images to MinerU while every text consumer
-uses M3. The current Settings UI does not edit `stage_models`; an administrator
-reads the current document with `GET /api/settings`, preserves the other
+uses M3. The current Settings UI edits the provider's vision default but does
+not edit `stage_models`; an administrator reads the current document with
+`GET /api/settings`, preserves the other
 settings, and sends the added override through `PUT /api/settings` using an
 interactive administrator cookie session and its CSRF token. Bearer/API tokens
 are rejected for settings updates regardless of scope; see the
-[API reference](API_REFERENCE.md#runtime-settings). M3 vision remains outside
-release scope until ADR-014 is updated, the live image contract and OCR
-quality/capacity gates pass, and issues #322 through #338 (especially #323,
-#324, #326, and #327) are complete. The current OCR prompt tester is only a
-text wrapper around sample OCR text; it does not send an image to M3. See the
+[API reference](API_REFERENCE.md#runtime-settings). Selecting a model does not
+enable its provider, add an OCR override, or change `workflow.enabled_stages`.
+Keep manual review or dry-run enabled until representative archive pages have
+passed quality and latency checks. The OCR prompt tester remains a text wrapper
+around sample OCR text; use a queued OCR job or the live OCR contract to test
+actual image input. See the
 [operations runbook](OPERATIONS.md#sglangminimax-m3-operations) for live
 validation, NetworkPolicy, capacity, and symptom-specific troubleshooting.
 

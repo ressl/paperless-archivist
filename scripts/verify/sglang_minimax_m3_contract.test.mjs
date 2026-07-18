@@ -9,6 +9,7 @@ import {
   CONTRACT_NAMES,
   EXACT_MODEL,
   SYNTHETIC_IMAGE_DATA_URI,
+  SYNTHETIC_OCR_IMAGE_DATA_URI,
   createConfig,
   runContractSuite
 } from './sglang_minimax_m3_contract.mjs';
@@ -48,6 +49,9 @@ function successfulResponse(body) {
     });
   }
   if (Array.isArray(body.messages?.at(-1)?.content)) {
+    if (/transcribe all visible text/i.test(prompt)) {
+      return json({ choices: [{ message: { content: 'ARCHIVIST OCR 18427' } }] });
+    }
     return json({ choices: [{ message: { content: 'ARCHIVIST_M3_IMAGE_BLUE_OK' } }] });
   }
   if (prompt.includes('ARCHIVIST_M3_REASONING_DISABLED_OK')) {
@@ -250,7 +254,7 @@ test('reasoning-only output and missing forced tool call are contract failures',
   });
 });
 
-test('invalid image is informational by default and fails an explicit vision gate', async () => {
+test('invalid image gates by default and can be made explicitly informational', async () => {
   await withMockServer(async ({ body }) => {
     const imageUrl = body.messages[0].content.find((part) => part.type === 'image_url').image_url.url;
     assert.equal(imageUrl, 'data:image/png;base64,invalid');
@@ -258,21 +262,44 @@ test('invalid image is informational by default and fails an explicit vision gat
   }, async (baseUrl) => {
     const base = await configFor(baseUrl, { SGLANG_CONTRACTS: 'image' });
     try {
-      const informational = await runContractSuite({
+      const gating = await runContractSuite({
         ...base.config,
         imageDataUri: 'data:image/png;base64,invalid'
+      });
+      assert.equal(gating.exitCode, 1);
+      assert.equal(gating.report.contracts[0].status, 'failed');
+
+      const informational = await runContractSuite({
+        ...base.config,
+        imageDataUri: 'data:image/png;base64,invalid',
+        visionScope: 'informational'
       });
       assert.equal(informational.exitCode, 0);
       assert.equal(informational.report.overall_status, 'passed_with_informational_failure');
       assert.equal(informational.report.contracts[0].status, 'informational_failed');
+    } finally {
+      await base.cleanup();
+    }
+  });
+});
 
-      const gating = await runContractSuite({
-        ...base.config,
-        imageDataUri: 'data:image/png;base64,invalid',
-        visionScope: 'gate'
-      });
-      assert.equal(gating.exitCode, 1);
-      assert.equal(gating.report.contracts[0].status, 'failed');
+test('OCR is a default gating contract and cannot pass by echoing its prompt', async () => {
+  await withMockServer(async () => json({
+    choices: [{ message: { content: 'ARCHIVIST OCR UNKNOWN' } }]
+  }), async (baseUrl, requests) => {
+    const base = await configFor(baseUrl, { SGLANG_CONTRACTS: 'ocr' });
+    try {
+      const { report, exitCode } = await runContractSuite(base.config);
+      assert.equal(base.config.visionScope, 'gate');
+      assert.equal(exitCode, 1);
+      assert.equal(report.contracts[0].status, 'failed');
+      assert.equal(
+        requests[0].body.messages[0].content.find((part) => part.type === 'image_url').image_url.url,
+        SYNTHETIC_OCR_IMAGE_DATA_URI
+      );
+      const prompt = messageText(requests[0].body);
+      assert.match(prompt, /transcribe all visible text/i);
+      assert.doesNotMatch(prompt, /ARCHIVIST OCR 18427/);
     } finally {
       await base.cleanup();
     }
@@ -308,6 +335,15 @@ test('synthetic image is a small embedded PNG and contains no personal data', ()
   assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   assert.equal(png.readUInt32BE(16), 64);
   assert.equal(png.readUInt32BE(20), 64);
+});
+
+test('synthetic OCR fixture is an embedded PNG with only the contract sentinel', () => {
+  assert.match(SYNTHETIC_OCR_IMAGE_DATA_URI, /^data:image\/png;base64,[A-Za-z0-9+/=]+$/);
+  assert.ok(SYNTHETIC_OCR_IMAGE_DATA_URI.length < 32 * 1024);
+  const png = Buffer.from(SYNTHETIC_OCR_IMAGE_DATA_URI.split(',')[1], 'base64');
+  assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.ok(png.readUInt32BE(16) >= 400);
+  assert.ok(png.readUInt32BE(20) >= 100);
 });
 
 test('oversized and timed-out responses fail without unbounded output', async () => {

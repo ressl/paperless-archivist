@@ -8,7 +8,12 @@
 
 ## Unreleased
 
-_No changes yet._
+- **Selectable MiniMax M3 vision/OCR:** the disabled SGLang preset now exposes
+  `ressl/MiniMax-M3-uncensored-NVFP4` independently as a text and vision model.
+  Exact-model vision requests carry the resolved `thinking_mode`; other
+  OpenAI-compatible models remain unchanged. Operators still choose the
+  provider, vision model, OCR-stage override, and workflow state. The pinned
+  live contract now gates on both synthetic image understanding and exact OCR.
 
 ## v1.17.1 — Accurate blocked-job dashboard counts
 
