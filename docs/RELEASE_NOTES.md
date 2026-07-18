@@ -8,12 +8,37 @@
 
 ## Unreleased
 
-- **Selectable MiniMax M3 vision/OCR:** the disabled SGLang preset now exposes
-  `ressl/MiniMax-M3-uncensored-NVFP4` independently as a text and vision model.
-  Exact-model vision requests carry the resolved `thinking_mode`; other
-  OpenAI-compatible models remain unchanged. Operators still choose the
-  provider, vision model, OCR-stage override, and workflow state. The pinned
-  live contract now gates on both synthetic image understanding and exact OCR.
+_No changes yet._
+
+## v1.18.0 — Selectable MiniMax M3 vision and OCR
+
+This minor release makes the exact pinned MiniMax M3 checkpoint an optional
+multimodal provider for document vision and OCR while preserving explicit
+operator control.
+
+- **Independent text and vision capability (#379):** the disabled SGLang preset
+  now exposes `ressl/MiniMax-M3-uncensored-NVFP4` separately in both model
+  catalogs. Legacy built-in presets with no vision default are upgraded
+  idempotently; renamed providers and custom catalog metadata are preserved.
+- **Exact-model wire contract:** MiniMax M3 text and vision requests map the
+  resolved reasoning effort to `chat_template_kwargs.thinking_mode`. No
+  MiniMax-only field is sent to other OpenAI-compatible models or lookalikes.
+- **Effective UI selection:** operators can select MiniMax M3 as the active
+  provider's vision default or as the OCR stage override. Changes on the active
+  provider stay synchronized with the effective global model selectors. The
+  preset, OCR stage, and workflow remain disabled until explicitly enabled.
+- **Gating vision and OCR probes:** the live contract uses embedded synthetic
+  images and now fails by default when image understanding or exact OCR does
+  not work. The production request order, output bounds, redaction, and model
+  identity are covered by offline regressions.
+- **Upgrade:** no database or OpenAPI schema migration is required. Restart the
+  API and worker after deployment, configure the exact `/v1` SGLang endpoint,
+  then explicitly choose the provider/model and run the `image` plus `ocr`
+  contracts before enabling OCR for archive documents.
+- **Rollback:** v1.17.1 can read the persisted provider and catalog shapes.
+  Restore the previous image and select the previous vision/OCR model if the
+  older runtime must process documents; persisted MiniMax M3 catalog entries
+  may remain and can be changed later by the operator.
 
 ## v1.17.1 — Accurate blocked-job dashboard counts
 
