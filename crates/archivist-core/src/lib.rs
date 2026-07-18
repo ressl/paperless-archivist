@@ -791,7 +791,8 @@ pub struct UiSettings {
 impl RuntimeSettings {
     pub fn normalized(mut self) -> Self {
         self.ai.ensure_default_providers();
-        self.ai.ensure_minimax_m3_catalog_entry();
+        self.ai.ensure_minimax_m3_vision_default();
+        self.ai.ensure_minimax_m3_catalog_entries();
         self.security = self.security.normalized();
         self.notifications = self.notifications.normalized();
         self.workflow.rules.include_tags =
@@ -1616,6 +1617,16 @@ fn default_model_catalog() -> Vec<ModelCatalogEntry> {
         ),
         entry(
             OpenaiCompatible,
+            Vision,
+            MINIMAX_M3_MODEL,
+            false,
+            None,
+            None,
+            Some("text+image"),
+            Some("Vision and OCR with MiniMax M3 served by SGLang"),
+        ),
+        entry(
+            OpenaiCompatible,
             Text,
             "gpt-oss:120b",
             false,
@@ -1730,27 +1741,44 @@ impl AiSettings {
         AiProviderSettings::append_missing_defaults(&mut self.providers);
     }
 
-    /// Appends the MiniMax M3 picker entry to settings persisted before the
-    /// model was part of the seed catalog. Existing operator-authored catalog
-    /// metadata wins unchanged.
-    pub fn ensure_minimax_m3_catalog_entry(&mut self) {
-        let already_present = self.model_catalog.iter().any(|entry| {
-            entry.provider_kind == AiProviderKind::OpenaiCompatible
-                && entry.capability == ModelCapability::Text
-                && entry.model_id == MINIMAX_M3_MODEL
-        });
-        if already_present {
-            return;
+    /// Upgrade the exact built-in preset persisted by v1.17.0/v1.17.1. A
+    /// case-renamed or otherwise customized provider is left untouched so an
+    /// operator-authored provider is never mistaken for the built-in preset.
+    pub fn ensure_minimax_m3_vision_default(&mut self) {
+        if let Some(provider) = self.providers.iter_mut().find(|provider| {
+            provider.name == SGLANG_MINIMAX_M3_PROVIDER_NAME
+                && provider.kind == AiProviderKind::OpenaiCompatible
+                && provider.default_text_model.as_deref() == Some(MINIMAX_M3_MODEL)
+        }) {
+            if provider.default_vision_model.is_none() {
+                provider.default_vision_model = Some(MINIMAX_M3_MODEL.to_owned());
+            }
         }
-        let entry = default_model_catalog()
-            .into_iter()
-            .find(|entry| {
+    }
+
+    /// Appends the MiniMax M3 text and vision picker entries to settings
+    /// persisted before either capability was part of the seed catalog.
+    /// Existing operator-authored metadata wins independently per capability.
+    pub fn ensure_minimax_m3_catalog_entries(&mut self) {
+        for capability in [ModelCapability::Text, ModelCapability::Vision] {
+            let already_present = self.model_catalog.iter().any(|entry| {
                 entry.provider_kind == AiProviderKind::OpenaiCompatible
-                    && entry.capability == ModelCapability::Text
+                    && entry.capability == capability
                     && entry.model_id == MINIMAX_M3_MODEL
-            })
-            .expect("MiniMax M3 is part of the default catalog");
-        self.model_catalog.push(entry);
+            });
+            if already_present {
+                continue;
+            }
+            let entry = default_model_catalog()
+                .into_iter()
+                .find(|entry| {
+                    entry.provider_kind == AiProviderKind::OpenaiCompatible
+                        && entry.capability == capability
+                        && entry.model_id == MINIMAX_M3_MODEL
+                })
+                .expect("MiniMax M3 text and vision entries are part of the default catalog");
+            self.model_catalog.push(entry);
+        }
     }
 
     pub fn default_model_for_provider(
@@ -2151,7 +2179,7 @@ impl AiProviderSettings {
             kind: AiProviderKind::OpenaiCompatible,
             base_url: String::new(),
             default_text_model: Some(MINIMAX_M3_MODEL.to_owned()),
-            default_vision_model: None,
+            default_vision_model: Some(MINIMAX_M3_MODEL.to_owned()),
             cost_per_1m_input_tokens_usd: None,
             cost_per_1m_output_tokens_usd: None,
             secret_id: None,
@@ -5686,7 +5714,7 @@ mod tests {
     }
 
     #[test]
-    fn sglang_minimax_m3_preset_is_disabled_text_only_and_openai_compatible() {
+    fn sglang_minimax_m3_preset_is_disabled_multimodal_and_openai_compatible() {
         let presets = AiProviderSettings::default_providers();
         let matching = presets
             .iter()
@@ -5705,7 +5733,10 @@ mod tests {
             provider.default_text_model.as_deref(),
             Some("ressl/MiniMax-M3-uncensored-NVFP4")
         );
-        assert_eq!(provider.default_vision_model, None);
+        assert_eq!(
+            provider.default_vision_model.as_deref(),
+            Some("ressl/MiniMax-M3-uncensored-NVFP4")
+        );
         assert_eq!(provider.secret_id, None);
         assert!(!provider.enabled);
         assert_eq!(provider.tuning.worker_concurrency, Some(1));
@@ -5718,6 +5749,25 @@ mod tests {
         assert_eq!(
             provider.tuning.request_timeout_seconds,
             Some(DEFAULT_AI_REQUEST_TIMEOUT_SECS)
+        );
+
+        let mut legacy = RuntimeSettings::default();
+        legacy
+            .ai
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "sglang-minimax-m3")
+            .expect("legacy SGLang preset exists")
+            .default_vision_model = None;
+        let upgraded = legacy.normalized();
+        assert_eq!(
+            upgraded
+                .ai
+                .providers
+                .iter()
+                .find(|provider| provider.name == "sglang-minimax-m3")
+                .and_then(|provider| provider.default_vision_model.as_deref()),
+            Some("ressl/MiniMax-M3-uncensored-NVFP4")
         );
 
         let mut settings = RuntimeSettings::default();
@@ -5801,16 +5851,24 @@ mod tests {
             .iter()
             .filter(|entry| entry.model_id == MODEL)
             .collect::<Vec<_>>();
-        assert_eq!(m3_entries.len(), 1);
+        assert_eq!(m3_entries.len(), 2);
+        let text_entry = m3_entries
+            .iter()
+            .find(|entry| entry.capability == ModelCapability::Text)
+            .expect("M3 text entry");
+        let vision_entry = m3_entries
+            .iter()
+            .find(|entry| entry.capability == ModelCapability::Vision)
+            .expect("M3 vision entry");
+        assert_eq!(text_entry.provider_kind, AiProviderKind::OpenaiCompatible);
+        assert_eq!(vision_entry.provider_kind, AiProviderKind::OpenaiCompatible);
+        assert!(!text_entry.recommended);
+        assert!(!vision_entry.recommended);
+        assert_eq!(vision_entry.modality.as_deref(), Some("text+image"));
         assert_eq!(
-            m3_entries[0].provider_kind,
-            AiProviderKind::OpenaiCompatible
+            vision_entry.best_for.as_deref(),
+            Some("Vision and OCR with MiniMax M3 served by SGLang")
         );
-        assert_eq!(m3_entries[0].capability, ModelCapability::Text);
-        assert!(!m3_entries[0].recommended);
-        assert!(!upgraded.ai.model_catalog.iter().any(|entry| {
-            entry.model_id == MODEL && entry.capability == ModelCapability::Vision
-        }));
         assert_eq!(
             upgraded
                 .ai
@@ -5826,7 +5884,7 @@ mod tests {
             vec!["qwen3:8b"]
         );
 
-        let mut customized = m3_entries[0].clone();
+        let mut customized = (*text_entry).clone();
         customized.label = Some("Operator label".to_owned());
         customized.context = Some("custom context".to_owned());
         let expected = customized.clone();
@@ -5841,9 +5899,12 @@ mod tests {
             .ai
             .model_catalog
             .iter()
-            .filter(|entry| entry.model_id == MODEL)
-            .collect::<Vec<_>>();
-        assert_eq!(preserved, vec![&expected]);
+            .find(|entry| entry.model_id == MODEL && entry.capability == ModelCapability::Text)
+            .expect("custom text entry remains present");
+        assert_eq!(preserved, &expected);
+        assert!(normalized.ai.model_catalog.iter().any(|entry| {
+            entry.model_id == MODEL && entry.capability == ModelCapability::Vision
+        }));
     }
 
     #[test]
