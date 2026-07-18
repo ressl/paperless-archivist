@@ -1749,10 +1749,9 @@ impl AiSettings {
             provider.name == SGLANG_MINIMAX_M3_PROVIDER_NAME
                 && provider.kind == AiProviderKind::OpenaiCompatible
                 && provider.default_text_model.as_deref() == Some(MINIMAX_M3_MODEL)
-        }) {
-            if provider.default_vision_model.is_none() {
-                provider.default_vision_model = Some(MINIMAX_M3_MODEL.to_owned());
-            }
+        }) && provider.default_vision_model.is_none()
+        {
+            provider.default_vision_model = Some(MINIMAX_M3_MODEL.to_owned());
         }
     }
 
