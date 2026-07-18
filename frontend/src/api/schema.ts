@@ -1075,6 +1075,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Dry-run or apply the global completion tag when every enabled stage is proven terminal either by the complete set of Paperless stage tags or by the complete set of local inventory statuses. Active and review-waiting runs are excluded; status-based writes are rechecked under the per-document run lock. Pass document_ids from a dry-run plan to pin the apply set. */
         post: {
             parameters: {
                 query?: never;

@@ -10,6 +10,41 @@
 
 _No changes yet._
 
+## v1.18.1 — Consistent inventory completion status
+
+This patch release repairs drift between Paperless completion tags, the local
+inventory projection, and the dashboard without rewriting immutable processing
+history or invoking an AI provider.
+
+- **Inventory status reconciliation (#381):** migration 0052 idempotently
+  ratchets OCR and metadata to `succeeded` when the corresponding stage or
+  global Paperless completion tag already proves completion. The global tag
+  remains authoritative for the inventory `complete` flag; historical jobs,
+  runs, reviews, artifacts, and audit events are not changed.
+- **Accurate pending counts:** the dashboard treats global completion tags and
+  terminal `rejected` decisions consistently, and the automatic selector no
+  longer silently requeues a stage the operator rejected. Resolved documents
+  therefore stop appearing as pending while their review history remains
+  visible.
+- **Stable Paperless timestamps:** API and worker syncs share the same RFC3339
+  parser. A partial payload can no longer erase a previously known
+  `paperless_modified_at`, avoiding full-inventory rewrites and preserving the
+  delta-sync cursor evidence.
+- **Safe global-tag repair:** completion-tag reconciliation can now use terminal
+  local stage status when legacy stage tags are missing. Status-based writes
+  recheck eligibility under the same per-document advisory lock used by run
+  creation and hold it through the Paperless write. The dashboard applies only
+  the document IDs returned by its preceding dry-run.
+- **Upgrade:** deploy API and worker together and wait until every old worker
+  replica has been replaced before judging timestamp repair; an old worker can
+  still send a missing modified timestamp during a rolling rollout. Migration
+  0052 runs automatically. Then run completion-tag reconciliation as a dry-run
+  and apply only its returned document IDs. This repair does not require or
+  start OCR, metadata AI, SGLang, or MiniMax.
+- **Rollback:** v1.18.0 remains schema-compatible with migration 0052, which is
+  forward-only and safe to leave installed. Paperless tags already added by an
+  approved reconciliation remain authoritative and need no database rollback.
+
 ## v1.18.0 — Selectable MiniMax M3 vision and OCR
 
 This minor release makes the exact pinned MiniMax M3 checkpoint an optional

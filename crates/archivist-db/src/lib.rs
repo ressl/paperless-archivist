@@ -2624,6 +2624,15 @@ pub fn parse_paperless_document_date(created: Option<&str>) -> Option<NaiveDate>
     NaiveDate::parse_from_str(prefix, "%Y-%m-%d").ok()
 }
 
+/// Parse Paperless' RFC3339 `modified` value into the UTC instant stored by
+/// the inventory. Missing or malformed values are treated as unavailable so a
+/// partial sync can preserve the last known timestamp.
+pub fn parse_paperless_modified_at(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
 /// Sync upsert for the document inventory.
 ///
 /// No-op guard + last_seen_at semantics: see upsert_paperless_tag (#302). The
@@ -2635,7 +2644,12 @@ pub async fn upsert_inventory_item(
     tx: &mut Transaction<'_, Postgres>,
     item: &InventoryUpsert,
 ) -> Result<()> {
-    let ocr_status = if item.has_ocr_completion_tag {
+    let ocr_status = if item.has_ocr_completion_tag || item.has_full_completion_tag {
+        "succeeded"
+    } else {
+        "unknown"
+    };
+    let metadata_status = if item.has_tagging_completion_tag || item.has_full_completion_tag {
         "succeeded"
     } else {
         "unknown"
@@ -2647,9 +2661,9 @@ pub async fn upsert_inventory_item(
           paperless_document_id, title, original_file_name, current_tags, current_tag_ids,
           correspondent_id, document_type_id, document_date, paperless_modified_at,
           has_ocr_completion_tag, has_tagging_completion_tag, has_full_completion_tag,
-          ocr_status, complete, last_seen_at, updated_at
+          ocr_status, metadata_status, complete, last_seen_at, updated_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now(), now())
         on conflict (paperless_document_id)
         do update set title = excluded.title,
                       original_file_name = excluded.original_file_name,
@@ -2658,11 +2672,12 @@ pub async fn upsert_inventory_item(
                       correspondent_id = excluded.correspondent_id,
                       document_type_id = excluded.document_type_id,
                       document_date = excluded.document_date,
-                      paperless_modified_at = excluded.paperless_modified_at,
+                      paperless_modified_at = coalesce(excluded.paperless_modified_at, document_inventory.paperless_modified_at),
                       has_ocr_completion_tag = excluded.has_ocr_completion_tag,
                       has_tagging_completion_tag = excluded.has_tagging_completion_tag,
                       has_full_completion_tag = excluded.has_full_completion_tag,
-                      ocr_status = case when excluded.has_ocr_completion_tag then 'succeeded' else document_inventory.ocr_status end,
+                      ocr_status = case when excluded.has_ocr_completion_tag or excluded.has_full_completion_tag then 'succeeded' else document_inventory.ocr_status end,
+                      metadata_status = case when excluded.has_tagging_completion_tag or excluded.has_full_completion_tag then 'succeeded' else document_inventory.metadata_status end,
                       complete = excluded.has_full_completion_tag,
                       last_seen_at = now(),
                       updated_at = now()
@@ -2678,6 +2693,7 @@ pub async fn upsert_inventory_item(
                document_inventory.has_tagging_completion_tag,
                document_inventory.has_full_completion_tag,
                document_inventory.ocr_status,
+               document_inventory.metadata_status,
                document_inventory.complete)
               is distinct from
               (excluded.title,
@@ -2687,11 +2703,12 @@ pub async fn upsert_inventory_item(
                excluded.correspondent_id,
                excluded.document_type_id,
                excluded.document_date,
-               excluded.paperless_modified_at,
+               coalesce(excluded.paperless_modified_at, document_inventory.paperless_modified_at),
                excluded.has_ocr_completion_tag,
                excluded.has_tagging_completion_tag,
                excluded.has_full_completion_tag,
-               case when excluded.has_ocr_completion_tag then 'succeeded' else document_inventory.ocr_status end,
+               case when excluded.has_ocr_completion_tag or excluded.has_full_completion_tag then 'succeeded' else document_inventory.ocr_status end,
+               case when excluded.has_tagging_completion_tag or excluded.has_full_completion_tag then 'succeeded' else document_inventory.metadata_status end,
                excluded.has_full_completion_tag)
         "#,
     )
@@ -2708,6 +2725,7 @@ pub async fn upsert_inventory_item(
     .bind(item.has_tagging_completion_tag)
     .bind(item.has_full_completion_tag)
     .bind(ocr_status)
+    .bind(metadata_status)
     .bind(complete)
     .execute(&mut **tx)
     .await?;
@@ -4078,19 +4096,24 @@ async fn stage_status(pool: &DbPool) -> Result<Vec<DashboardStageStatus>> {
     let rows = sqlx::query(
         r#"
         with stage_rows as (
-          select 'ocr' as stage, ocr_status as status, current_run_status
+          select 'ocr' as stage,
+                 case when has_full_completion_tag then 'succeeded' else ocr_status end as status,
+                 current_run_status
             from document_inventory
-          union all select 'metadata', metadata_status, current_run_status
+          union all
+          select 'metadata',
+                 case when has_full_completion_tag then 'succeeded' else metadata_status end,
+                 current_run_status
             from document_inventory
         ),
         counted as (
           select
             stage,
             count(*)::bigint as total,
-            count(*) filter (where status in ('succeeded', 'skipped', 'not_needed'))::bigint as complete,
+            count(*) filter (where status in ('succeeded', 'skipped', 'not_needed', 'rejected'))::bigint as complete,
             count(*) filter (where status = 'failed')::bigint as failed,
             count(*) filter (where status = 'waiting_review' or current_run_status = 'waiting_review')::bigint as waiting_review,
-            count(*) filter (where current_run_status in ('queued', 'running', 'applying') and status not in ('succeeded', 'skipped', 'not_needed', 'failed'))::bigint as running
+            count(*) filter (where current_run_status in ('queued', 'running', 'applying') and status not in ('succeeded', 'skipped', 'not_needed', 'rejected', 'failed'))::bigint as running
           from stage_rows
           group by stage
         )
@@ -5486,6 +5509,101 @@ pub async fn queue_missing_stage(
     Ok(created)
 }
 
+/// Return documents whose enabled business stages are resolved but whose
+/// authoritative global Paperless completion tag is still missing. Active and
+/// review-waiting runs are excluded so reconciliation cannot finalize work in
+/// progress.
+pub async fn completed_document_ids_missing_full_tag(
+    pool: &DbPool,
+    enabled_stages: &[Stage],
+) -> Result<Vec<i32>> {
+    let ocr_enabled = enabled_stages.contains(&Stage::Ocr);
+    let metadata_enabled = enabled_stages.contains(&Stage::Metadata);
+    if !ocr_enabled && !metadata_enabled {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_scalar(
+        r#"
+        select paperless_document_id
+          from document_inventory
+         where not has_full_completion_tag
+           and coalesce(current_run_status, '') not in (
+                 'queued', 'running', 'applying', 'waiting_review'
+               )
+           and (
+                 not $1
+                 or ocr_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
+               )
+           and (
+                 not $2
+                 or metadata_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
+               )
+         order by paperless_document_id
+        "#,
+    )
+    .bind(ocr_enabled)
+    .bind(metadata_enabled)
+    .fetch_all(pool)
+    .await
+    .context("select documents missing the full completion tag")
+}
+
+/// Recheck status-based completion-tag eligibility while holding the same
+/// per-document advisory lock used by run creation.
+///
+/// The caller must keep the returned transaction alive until the external
+/// Paperless tag write has completed, then commit it. This closes the window
+/// where a run could become active after bulk candidate discovery but before
+/// the global completion tag is written.
+pub async fn begin_completion_tag_reconcile_guard<'a>(
+    pool: &'a DbPool,
+    paperless_document_id: i32,
+    enabled_stages: &[Stage],
+) -> Result<Option<Transaction<'a, Postgres>>> {
+    let ocr_enabled = enabled_stages.contains(&Stage::Ocr);
+    let metadata_enabled = enabled_stages.contains(&Stage::Metadata);
+    if !ocr_enabled && !metadata_enabled {
+        return Ok(None);
+    }
+
+    let mut tx = pool.begin().await?;
+    lock_active_run_document_tx(&mut tx, paperless_document_id).await?;
+    let eligible: bool = sqlx::query_scalar(
+        r#"
+        select exists (
+          select 1
+            from document_inventory
+           where paperless_document_id = $1
+             and not has_full_completion_tag
+             and coalesce(current_run_status, '') not in (
+                   'queued', 'running', 'applying', 'waiting_review'
+                 )
+             and (
+                   not $2
+                   or ocr_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
+                 )
+             and (
+                   not $3
+                   or metadata_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
+                 )
+        )
+        "#,
+    )
+    .bind(paperless_document_id)
+    .bind(ocr_enabled)
+    .bind(metadata_enabled)
+    .fetch_one(&mut *tx)
+    .await
+    .context("recheck completion-tag reconciliation eligibility")?;
+    if eligible {
+        Ok(Some(tx))
+    } else {
+        tx.rollback().await?;
+        Ok(None)
+    }
+}
+
 pub async fn queue_missing_pipeline(
     pool: &DbPool,
     enabled_stages: &[Stage],
@@ -5646,7 +5764,7 @@ fn missing_pipeline_stages_for_inventory(
 }
 
 fn stage_needs_work(status: &str) -> bool {
-    !matches!(status, "succeeded" | "skipped" | "not_needed")
+    !matches!(status, "succeeded" | "skipped" | "not_needed" | "rejected")
 }
 
 pub async fn claim_jobs(
@@ -11394,6 +11512,19 @@ mod tests {
     }
 
     #[test]
+    fn paperless_modified_timestamp_preserves_the_utc_instant() {
+        let expected = DateTime::parse_from_rfc3339("2026-07-18T06:12:34.567890Z")
+            .expect("valid expected timestamp")
+            .with_timezone(&Utc);
+        assert_eq!(
+            parse_paperless_modified_at(Some("2026-07-18T08:12:34.567890+02:00")),
+            Some(expected)
+        );
+        assert_eq!(parse_paperless_modified_at(Some("not-a-timestamp")), None);
+        assert_eq!(parse_paperless_modified_at(None), None);
+    }
+
+    #[test]
     fn live_llm_status_prefers_running_jobs() {
         let now = Utc::now();
         let job = DashboardLiveJob {
@@ -11542,5 +11673,24 @@ mod tests {
             },
         );
         assert_eq!(needs_metadata, vec![Stage::Metadata]);
+    }
+
+    #[test]
+    fn missing_pipeline_stages_skip_rejected_terminal_stage() {
+        let stages = missing_pipeline_stages_for_inventory(
+            &[Stage::Metadata],
+            InventoryStageState {
+                ocr_status: "succeeded".to_owned(),
+                metadata_status: "rejected".to_owned(),
+                has_ocr_completion_tag: true,
+                has_tagging_completion_tag: false,
+                has_full_completion_tag: false,
+            },
+        );
+
+        assert!(
+            stages.is_empty(),
+            "an explicit review rejection is resolved and must not be auto-requeued"
+        );
     }
 }

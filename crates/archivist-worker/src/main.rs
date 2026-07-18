@@ -4348,7 +4348,9 @@ async fn sync_metadata(
                 document_date: archivist_db::parse_paperless_document_date(
                     document.created.as_deref(),
                 ),
-                paperless_modified_at: None,
+                paperless_modified_at: archivist_db::parse_paperless_modified_at(
+                    document.modified.as_deref(),
+                ),
                 has_ocr_completion_tag: tag_names
                     .iter()
                     .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.completion_ocr)),

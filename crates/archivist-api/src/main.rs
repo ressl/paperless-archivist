@@ -3573,6 +3573,13 @@ async fn reconcile_completion_tags(
         .filter_map(|stage| settings.workflow.tags.completion_tag_for_stage(*stage))
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    let inventory_complete_ids = archivist_db::completed_document_ids_missing_full_tag(
+        &state.pool,
+        &settings.workflow.enabled_stages,
+    )
+    .await?
+    .into_iter()
+    .collect::<HashSet<_>>();
     let documents = client.list_documents().await?;
     let allowed_ids = request
         .document_ids
@@ -3591,11 +3598,31 @@ async fn reconcile_completion_tags(
             .filter_map(|id| tags.iter().find(|tag| tag.id == *id))
             .map(|tag| tag.name.clone())
             .collect::<Vec<_>>();
+        let stage_tags_complete = !stage_completion_tags.is_empty()
+            && stage_completion_tags
+                .iter()
+                .all(|tag| tag_names.iter().any(|name| name.eq_ignore_ascii_case(tag)));
+        let inventory_stages_complete = inventory_complete_ids.contains(&document.id);
         if completion_tag_reconcile_needed(
             &tag_names,
             &stage_completion_tags,
             &settings.workflow.tags.completion_processed,
+            inventory_stages_complete,
         ) {
+            let status_guard = if !dry_run && inventory_stages_complete && !stage_tags_complete {
+                let Some(guard) = archivist_db::begin_completion_tag_reconcile_guard(
+                    &state.pool,
+                    document.id,
+                    &settings.workflow.enabled_stages,
+                )
+                .await?
+                else {
+                    continue;
+                };
+                Some(guard)
+            } else {
+                None
+            };
             planned.push(json!({ "paperless_document_id": document.id, "add": [settings.workflow.tags.completion_processed.clone()] }));
             if !dry_run {
                 let tag = match &full_tag {
@@ -3614,6 +3641,9 @@ async fn reconcile_completion_tags(
                 client
                     .add_and_remove_tags(document.id, &[tag.id], &[])
                     .await?;
+                if let Some(guard) = status_guard {
+                    guard.commit().await?;
+                }
                 applied.push(document.id);
             }
         }
@@ -3654,11 +3684,13 @@ fn completion_tag_reconcile_needed(
     tag_names: &[String],
     stage_completion_tags: &[String],
     full_completion_tag: &str,
+    inventory_stages_complete: bool,
 ) -> bool {
     !stage_completion_tags.is_empty()
-        && stage_completion_tags
-            .iter()
-            .all(|tag| tag_names.iter().any(|name| name.eq_ignore_ascii_case(tag)))
+        && (inventory_stages_complete
+            || stage_completion_tags
+                .iter()
+                .all(|tag| tag_names.iter().any(|name| name.eq_ignore_ascii_case(tag))))
         && !tag_names
             .iter()
             .any(|name| name.eq_ignore_ascii_case(full_completion_tag))
@@ -7030,7 +7062,9 @@ async fn sync_paperless_inventory(
                 document_date: archivist_db::parse_paperless_document_date(
                     document.created.as_deref(),
                 ),
-                paperless_modified_at: parse_paperless_datetime(document.modified.as_deref()),
+                paperless_modified_at: archivist_db::parse_paperless_modified_at(
+                    document.modified.as_deref(),
+                ),
                 has_ocr_completion_tag: tag_names
                     .iter()
                     .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.completion_ocr)),
@@ -7057,12 +7091,6 @@ async fn sync_paperless_inventory(
         "custom_fields": custom_fields.len(),
         "documents": documents.len()
     }))
-}
-
-fn parse_paperless_datetime(value: Option<&str>) -> Option<DateTime<Utc>> {
-    value
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
 }
 
 async fn paperless_client_from_settings(
@@ -8690,7 +8718,8 @@ mod tests {
         assert!(completion_tag_reconcile_needed(
             &document_tags,
             &stage_tags,
-            "ai-processed"
+            "ai-processed",
+            false,
         ));
 
         let already_complete = vec![
@@ -8701,20 +8730,29 @@ mod tests {
         assert!(!completion_tag_reconcile_needed(
             &already_complete,
             &stage_tags,
-            "ai-processed"
+            "ai-processed",
+            true,
         ));
 
         let missing_stage = vec!["archivist-ocr".to_owned()];
         assert!(!completion_tag_reconcile_needed(
             &missing_stage,
             &stage_tags,
-            "ai-processed"
+            "ai-processed",
+            false,
+        ));
+        assert!(completion_tag_reconcile_needed(
+            &missing_stage,
+            &stage_tags,
+            "ai-processed",
+            true,
         ));
 
         assert!(!completion_tag_reconcile_needed(
             &document_tags,
             &[],
-            "ai-processed"
+            "ai-processed",
+            true,
         ));
     }
 

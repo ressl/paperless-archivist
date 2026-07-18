@@ -163,7 +163,7 @@ with the existing inventory/review permissions.
 | --- | --- | --- |
 | `POST` | `/api/paperless/sync-metadata` | Synchronize document metadata, tags, correspondents, document types, document dates, modified timestamps, and custom fields from Paperless. Uses configured delta sync when enabled. |
 | `GET` | `/api/paperless/consistency` | Compare the Paperless document list with Archivist inventory and report missing local rows, stale local rows, and metadata mismatches. |
-| `POST` | `/api/paperless/completion-tags/reconcile` | Dry-run or apply completion-tag reconciliation for documents that have all enabled stage completion tags but miss the full completion tag. |
+| `POST` | `/api/paperless/completion-tags/reconcile` | Dry-run or apply completion-tag reconciliation for documents that miss the full completion tag and either have all enabled stage tags or terminal local status (`succeeded`, `skipped`, `not_needed`, `rejected`) for every enabled stage. Status-based writes are rechecked under the per-document run lock; active or review-waiting runs are excluded. An optional `document_ids` list pins apply to a prior dry-run plan. |
 | `GET` | `/api/inventory?limit=100&offset=0` | List the local document inventory and per-stage status. |
 | `POST` | `/api/documents/{paperless_document_id}/trigger` | Queue selected stages for one Paperless document. |
 | `POST` | `/api/batches/ocr` | Queue OCR for documents missing OCR. |

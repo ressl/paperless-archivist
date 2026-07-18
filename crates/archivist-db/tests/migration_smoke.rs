@@ -1,5 +1,5 @@
 use archivist_db::{connect, migrate};
-use sqlx::Row;
+use sqlx::{Executor, Row};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -12,6 +12,96 @@ async fn migrations_apply_on_fresh_postgresql_18_database() {
         .expect("connect to PostgreSQL 18 test database");
 
     migrate(&pool).await.expect("apply all migrations");
+
+    let completion_reconcile_installed: bool = sqlx::query_scalar(
+        "select exists(select 1 from _sqlx_migrations where version = 52 and success)",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect migration 0052");
+    assert!(
+        completion_reconcile_installed,
+        "migration 0052 must be installed"
+    );
+
+    pool.execute(
+        r#"
+        insert into document_inventory (
+          paperless_document_id, current_tags,
+          has_ocr_completion_tag, has_tagging_completion_tag, has_full_completion_tag,
+          ocr_status, metadata_status, complete
+        ) values
+          (900001, '{}', false, false, true,  'unknown', 'unknown',  false),
+          (900002, '{}', false, true,  false, 'failed',  'rejected', false),
+          (900003, '{}', false, false, false, 'failed',  'rejected', true)
+        on conflict (paperless_document_id) do nothing
+        "#,
+    )
+    .await
+    .expect("seed pre-0052 inventory drift");
+
+    let migrations_dir =
+        std::env::var("ARCHIVIST_MIGRATIONS_DIR").unwrap_or_else(|_| "migrations".to_owned());
+    let migration_sql = std::fs::read_to_string(format!(
+        "{migrations_dir}/0052_reconcile_inventory_completion_status.sql"
+    ))
+    .expect("read migration 0052");
+    // SAFETY: this is the repository-owned, fixed migration file under test;
+    // no runtime or user input is interpolated into the SQL contents.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(migration_sql))
+        .execute(&pool)
+        .await
+        .expect("reapply idempotent migration 0052 fixture");
+
+    let full_tagged = sqlx::query(
+        "select ocr_status, metadata_status, complete from document_inventory where paperless_document_id = 900001",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch full-tagged fixture");
+    assert_eq!(
+        full_tagged.try_get::<String, _>("ocr_status").unwrap(),
+        "succeeded"
+    );
+    assert_eq!(
+        full_tagged.try_get::<String, _>("metadata_status").unwrap(),
+        "succeeded"
+    );
+    assert!(full_tagged.try_get::<bool, _>("complete").unwrap());
+
+    let metadata_tagged = sqlx::query(
+        "select ocr_status, metadata_status, complete from document_inventory where paperless_document_id = 900002",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch metadata-tagged fixture");
+    assert_eq!(
+        metadata_tagged.try_get::<String, _>("ocr_status").unwrap(),
+        "failed"
+    );
+    assert_eq!(
+        metadata_tagged
+            .try_get::<String, _>("metadata_status")
+            .unwrap(),
+        "succeeded"
+    );
+    assert!(!metadata_tagged.try_get::<bool, _>("complete").unwrap());
+
+    let untagged = sqlx::query(
+        "select ocr_status, metadata_status, complete from document_inventory where paperless_document_id = 900003",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch untagged fixture");
+    assert_eq!(
+        untagged.try_get::<String, _>("ocr_status").unwrap(),
+        "failed"
+    );
+    assert_eq!(
+        untagged.try_get::<String, _>("metadata_status").unwrap(),
+        "rejected"
+    );
+    assert!(!untagged.try_get::<bool, _>("complete").unwrap());
 
     let version_num: i32 = sqlx::query("select current_setting('server_version_num')::int")
         .fetch_one(&pool)
