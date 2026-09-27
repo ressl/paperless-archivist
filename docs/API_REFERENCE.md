@@ -154,6 +154,9 @@ audit events.
 `POST /api/prompts/test` calls the configured text provider, parses the output
 for the selected stage, runs Rust-side validation, returns raw and parsed
 output, and writes a `prompt.tested` audit event. It never patches Paperless.
+The optional `provider_name` and `model` select any configured provider/model
+for the test; the Prompts page exposes both and uses them for its side-by-side
+version comparison (two sequential test calls with the same input).
 
 ## Paperless Inventory And Jobs
 
@@ -174,12 +177,27 @@ with the existing inventory/review permissions.
 | --- | --- | --- |
 | `POST` | `/api/paperless/sync-metadata` | Synchronize document metadata, tags, correspondents, document types, document dates, modified timestamps, and custom fields from Paperless. Uses configured delta sync when enabled. |
 | `GET` | `/api/paperless/consistency` | Compare the Paperless document list with Archivist inventory and report missing local rows, stale local rows, and metadata mismatches. |
+| `GET` | `/api/paperless/correspondents` | `{items: [{id, name}], truncated}` from the local metadata mirror (no Paperless call), ordered by name, at most 5000 entries. `inventory:read`. |
+| `GET` | `/api/paperless/document-types` | Same for document types. `inventory:read`. |
 | `POST` | `/api/paperless/completion-tags/reconcile` | Dry-run or apply completion-tag reconciliation for documents that miss the full completion tag and either have all enabled stage tags or terminal local status (`succeeded`, `skipped`, `not_needed`, `rejected`) for every enabled stage. Status-based writes are rechecked under the per-document run lock; active or review-waiting runs are excluded. An optional `document_ids` list pins apply to a prior dry-run plan. |
-| `GET` | `/api/inventory?limit=100&offset=0` | List the local document inventory and per-stage status. |
+| `GET` | `/api/inventory?limit=100&offset=0` | List the local document inventory and per-stage status. Filters: `id`, `q`, `ocr_status`, `metadata_status`, `run_status`, `tag`, `not_tag`, `lang`, `date_from`, `date_to`, `has_error`, `needs_review`, `correspondent`, `document_type` (all AND-ed). |
+| `GET` | `/api/inventory/export?format=csv\|json&<filters>` | Stream every row matching the inventory filters as CSV or a JSON array. `inventory:read`; audited as `inventory.exported`; one running export per actor (`429`), 10-minute deadline. |
+| `GET` | `/api/inventory/views` | The caller's saved inventory views (`{items: [{id, name, query, created_at, updated_at}]}`). Session only. |
+| `POST` | `/api/inventory/views` | Save `{name, query}`. Session only; `409` for a duplicate name (case-insensitive) or more than 50 views. |
+| `PUT` | `/api/inventory/views/{id}` | Rename / re-point one of the caller's views. Session only. |
+| `DELETE` | `/api/inventory/views/{id}` | Delete one of the caller's views. Session only; another user's view answers `404`. |
 | `POST` | `/api/documents/{paperless_document_id}/trigger` | Queue selected stages for one Paperless document. |
 | `POST` | `/api/batches/ocr` | Queue OCR for documents missing OCR. |
 | `POST` | `/api/batches/tags` | Queue tagging for documents missing tagging. |
 | `POST` | `/api/batches/full` | Queue the configured full pipeline for open documents. |
+
+`correspondent` and `document_type` take comma-separated Paperless ids and/or
+`none` (object not set), e.g. `correspondent=12,none`; anything else (or more
+than 100 ids) is a `400`. Inventory items carry `correspondent_id`,
+`correspondent_name`, `document_type_id` and `document_type_name`, names
+resolved from the synced mirror. A saved view's `query` is validated with the
+same rules and stored canonicalised (known filter keys only, each once, fixed
+order, no `limit`/`offset`); unknown or duplicate keys are a `400`.
 
 ## Operations Recovery
 
@@ -408,6 +426,30 @@ events (`chat.session_created`, `chat.session_renamed`, `chat.session_deleted`,
 | `POST` | `/api/reviews/{id}/reject` | Reject the suggestion. |
 | `POST` | `/api/reviews/{id}/edit` | Apply a reviewer-edited patch. |
 | `POST` | `/api/reviews/batch` | Approve/apply or reject up to 100 review items. |
+| `GET` | `/api/reviews/{id}/thumbnail` | Proxied Paperless thumbnail of the review's document (WebP/PNG/JPEG, max 4 MiB). `reviews:read`. |
+| `GET` | `/api/reviews/{id}/preview` | Proxied Paperless preview (archive PDF or image, max 32 MiB), `Cache-Control: private, no-store`. `reviews:read`. |
+| `GET` | `/api/reviews/retry-options` | Enabled text providers with their metadata default model, the current metadata provider, and metadata prompt versions (without content). `reviews:write`. |
+| `POST` | `/api/reviews/{id}/retry` | Reject a pending metadata review and its pending siblings, then queue a manual-review metadata run using the given `provider_name`, `model` and `prompt_id` once. Session only. |
+
+The preview proxy is keyed by review id, so only documents in the review queue
+can be fetched with Archivist's Paperless token. The browser never contacts
+Paperless; upstream content types outside the allow-list are refused (502), a
+document missing in Paperless returns 404, and a missing Paperless connection
+409 `NotConfigured`.
+
+Retry body (every field optional; omitted fields keep the current
+configuration):
+
+```json
+{ "provider_name": "ollama", "model": "qwen3:14b", "prompt_id": "0199…" }
+```
+
+Unknown or disabled providers, OCR-only providers, non-metadata prompt versions
+and non-metadata reviews return 400. An already decided review, a sibling that
+is being applied, or another active run for the document returns 409; nothing
+changes in that case. The response carries the new `run_id` and the rejected
+review ids; audit events `review.rejected` (reason `retry`), `run.created` and
+`review.retried` are written in the same transaction.
 
 Edit body:
 
@@ -435,7 +477,8 @@ Batch review returns per-item failures for partial failures and writes a
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/audit` | List audit events. |
+| `GET` | `/api/audit` | List audit events, newest first. Filters: `actor`, `actor_type`, `document_id`, `event_type` (comma-separated), `outcome`, `from`, `to`; paging: `limit` (1–500, default 200) and `cursor`. Returns `{items, next_cursor}`. |
+| `GET` | `/api/audit/{id}` | One event with `before`/`after` snapshots (credential keys redacted) for the diff view. |
 | `GET` | `/api/audit/export.csv` | Export recent audit events as CSV. |
 | `GET` | `/api/audit/integrity` | Verify the audit hash chain. |
 | `POST` | `/api/audit/retention/apply` | Apply configured audit and AI-artifact retention. |
@@ -474,6 +517,15 @@ bodies return the usual `{"error": "..."}` body with `400`, `413`, `415` or
 `422`. A review that is already decided returns `409`, an unknown one `404`.
 `GET /api/audit/export.csv` is audited (`audit.exported`), limited to one
 concurrent export per actor (`429` otherwise) and aborted after 10 minutes.
+
+`GET /api/audit` pages by an opaque keyset cursor over `(created_at, id)`: pass
+a page's `next_cursor` as `cursor` for the next, older page (`null` on the last
+page). `actor` accepts a username (case-insensitive), a user UUID, or a raw
+actor id such as an API token name. `from` is inclusive and `to` exclusive;
+both accept RFC 3339 or `YYYY-MM-DD` (midnight UTC; a `to` date includes that
+day). Items include `actor_username` and `has_changes` (the event stored
+before/after snapshots). Each filter is backed by a keyset-shaped index
+(migration 0057), so deep pages cost the same as the first.
 
 Audit CSV exports include `prev_event_hash` and `event_hash` for events created
 after hash-chain tracking was enabled. `GET /api/audit/integrity` returns

@@ -46,6 +46,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BadGateway:
+      description: An upstream service (e.g. Paperless) failed or returned an unusable response
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
     ServiceUnavailable:
       description: Endpoint or required service is unavailable
       content:
@@ -89,6 +94,98 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
   parameters:
+    InventoryId:
+      name: id
+      in: query
+      required: false
+      schema: { type: integer }
+      description: Exact Paperless document id.
+    InventoryQ:
+      name: q
+      in: query
+      required: false
+      schema: { type: string }
+      description: Case-insensitive substring of the title or original file name.
+    InventoryOcrStatus:
+      name: ocr_status
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated OCR statuses (any of).
+    InventoryMetadataStatus:
+      name: metadata_status
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated metadata statuses (any of).
+    InventoryRunStatus:
+      name: run_status
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated current run statuses (any of).
+    InventoryTag:
+      name: tag
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated tag names that must all be present.
+    InventoryNotTag:
+      name: not_tag
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated tag names none of which may be present.
+    InventoryLang:
+      name: lang
+      in: query
+      required: false
+      schema: { type: string }
+      description: Detected language tag.
+    InventoryDateFrom:
+      name: date_from
+      in: query
+      required: false
+      schema: { type: string, format: date }
+      description: >-
+        Inclusive lower bound on document_date (YYYY-MM-DD). A present but
+        unparseable value is rejected with 400.
+    InventoryDateTo:
+      name: date_to
+      in: query
+      required: false
+      schema: { type: string, format: date }
+      description: >-
+        Inclusive upper bound on document_date (YYYY-MM-DD). A present but
+        unparseable value is rejected with 400.
+    InventoryHasError:
+      name: has_error
+      in: query
+      required: false
+      schema: { type: boolean }
+    InventoryNeedsReview:
+      name: needs_review
+      in: query
+      required: false
+      schema: { type: boolean }
+    InventoryCorrespondent:
+      name: correspondent
+      in: query
+      required: false
+      schema: { type: string, example: "12,none" }
+      description: >-
+        Comma-separated Paperless correspondent ids and/or `none` (documents
+        without a correspondent); any of them matches. At most 100 ids; any
+        other value is rejected with 400.
+    InventoryDocumentType:
+      name: document_type
+      in: query
+      required: false
+      schema: { type: string, example: "3" }
+      description: >-
+        Comma-separated Paperless document type ids and/or `none` (documents
+        without a document type); any of them matches. At most 100 ids; any
+        other value is rejected with 400.
     ConditionalCsrfToken:
       name: X-CSRF-Token
       in: header
@@ -1606,6 +1703,15 @@ components:
       type: object
       additionalProperties: true
       properties:
+        paperless_document_id: { type: integer }
+        correspondent_id: { type: [integer, "null"] }
+        correspondent_name:
+          type: [string, "null"]
+          description: Name from the synced Paperless correspondents; null when unset or not synced.
+        document_type_id: { type: [integer, "null"] }
+        document_type_name:
+          type: [string, "null"]
+          description: Name from the synced Paperless document types; null when unset or not synced.
         debug_context:
           oneOf:
             - $ref: "#/components/schemas/WorkflowDebugContext"
@@ -1693,9 +1799,83 @@ components:
             review UI can show the actual document title instead of falling
             back to "Document {id}" when the suggested_patch has no title.
         created_at: { type: string, format: date-time }
+    InventoryPage:
+      type: object
+      required: [items, total, offset, limit]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/DocumentInventoryItem" }
+        total: { type: integer, format: int64 }
+        offset: { type: integer, format: int64 }
+        limit: { type: integer, format: int64 }
+    InventoryViewRequest:
+      type: object
+      additionalProperties: false
+      required: [name, query]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        query:
+          type: string
+          maxLength: 2000
+          description: >-
+            Inventory filter query string (same keys as GET /api/inventory,
+            without limit/offset; a leading `?` is ignored).
+    InventorySavedView:
+      type: object
+      required: [id, name, query, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        query: { type: string, description: Canonical filter query string. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     AuditEvent:
       type: object
       additionalProperties: true
+      required: [id, event_type, actor_type, outcome, created_at, has_changes]
+      properties:
+        id: { type: string, format: uuid }
+        event_type: { type: string }
+        actor_type: { type: string }
+        actor_id: { type: [string, "null"] }
+        actor_username:
+          type: [string, "null"]
+          description: Username of a user actor, resolved for display.
+        paperless_document_id: { type: [integer, "null"] }
+        outcome: { type: string }
+        error_message: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        metadata: true
+        prev_event_hash: { type: [string, "null"] }
+        event_hash: { type: [string, "null"] }
+        hash_version: { type: [integer, "null"] }
+        has_changes:
+          type: boolean
+          description: True when the event stored before and/or after snapshots (see GET /api/audit/{id}).
+    AuditEventPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next (older) page; null on the last page.
+    AuditEventDetail:
+      allOf:
+        - $ref: "#/components/schemas/AuditEvent"
+        - type: object
+          properties:
+            run_id: { type: [string, "null"], format: uuid }
+            job_id: { type: [string, "null"], format: uuid }
+            before:
+              description: State before the change (credential-like keys redacted).
+            after:
+              description: State after the change (credential-like keys redacted).
+            source_ip: { type: [string, "null"] }
+            user_agent: { type: [string, "null"] }
     AuditIntegrityReport:
       type: object
       required: [ok, checked_events, legacy_events, v1_events, v2_events, legacy_precision_events]
@@ -2031,6 +2211,83 @@ components:
           type: [string, "null"]
         model:
           type: [string, "null"]
+    PaperlessNamedOption:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id: { type: integer, format: int32 }
+        name: { type: string }
+    PaperlessNamedOptionList:
+      type: object
+      additionalProperties: false
+      required: [items, truncated]
+      properties:
+        items:
+          type: array
+          maxItems: 5000
+          items: { $ref: "#/components/schemas/PaperlessNamedOption" }
+        truncated:
+          type: boolean
+          description: True when the mirror holds more than 5000 entries and the list was cut.
+    RetryProviderOption:
+      type: object
+      additionalProperties: false
+      required: [name, default_model]
+      properties:
+        name: { type: string }
+        default_model:
+          type: string
+          description: Model the metadata stage uses for this provider when no model is chosen.
+    RetryPromptOption:
+      type: object
+      additionalProperties: false
+      required: [id, name, version, active, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        version: { type: integer }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    ReviewRetryOptions:
+      type: object
+      additionalProperties: false
+      required: [providers, default_provider, prompts]
+      properties:
+        providers:
+          type: array
+          items: { $ref: "#/components/schemas/RetryProviderOption" }
+        default_provider:
+          type: string
+          description: Provider the metadata stage uses today.
+        prompts:
+          type: array
+          description: Metadata prompt versions (without content).
+          items: { $ref: "#/components/schemas/RetryPromptOption" }
+    ReviewRetryRequest:
+      type: object
+      additionalProperties: false
+      description: Every field is optional; omitted fields keep the current configuration.
+      properties:
+        provider_name:
+          type: [string, "null"]
+          description: An enabled, non-OCR-only AI provider.
+        model:
+          type: [string, "null"]
+          maxLength: 200
+        prompt_id:
+          type: [string, "null"]
+          format: uuid
+          description: A metadata prompt version (active or not).
+    ReviewRetryResponse:
+      type: object
+      additionalProperties: false
+      required: [run_id, rejected_review_ids]
+      properties:
+        run_id: { type: string, format: uuid }
+        rejected_review_ids:
+          type: array
+          items: { type: string, format: uuid }
     PromptTestParsed:
       oneOf:
         - $ref: "#/components/schemas/OcrPromptTestParsed"
@@ -2703,6 +2960,40 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PaperlessConsistencyResponse" }
         "409": { $ref: "#/components/responses/NotConfigured" }
+  /api/paperless/correspondents:
+    get:
+      x-archivist-permission: read_inventory
+      summary: Synced Paperless correspondents
+      description: >-
+        Lists `{id, name}` from the local metadata mirror (no Paperless
+        round-trip), ordered by name. Requires inventory:read.
+      operationId: listPaperlessCorrespondents
+      responses:
+        "200":
+          description: Correspondent options
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaperlessNamedOptionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/paperless/document-types:
+    get:
+      x-archivist-permission: read_inventory
+      summary: Synced Paperless document types
+      description: >-
+        Lists `{id, name}` from the local metadata mirror (no Paperless
+        round-trip), ordered by name. Requires inventory:read.
+      operationId: listPaperlessDocumentTypes
+      responses:
+        "200":
+          description: Document type options
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaperlessNamedOptionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/paperless/completion-tags/reconcile:
     post:
       x-archivist-permission: write_batches
@@ -2822,33 +3113,210 @@ paths:
               schema: { $ref: "#/components/schemas/RuntimeSettings" }
   /api/inventory:
     get:
+      summary: List inventory documents matching the filters
+      description: Requires the inventory:read permission. All filters are AND-ed.
       x-archivist-permission: read_inventory
       parameters:
         - name: limit
           in: query
-          schema: { type: integer, default: 100 }
+          schema: { type: integer, default: 100, minimum: 1, maximum: 500 }
         - name: offset
           in: query
-          schema: { type: integer, default: 0 }
-        - name: date_from
-          in: query
-          required: false
-          schema: { type: string, format: date }
-          description: >-
-            Inclusive lower bound on document_date (YYYY-MM-DD). A present but
-            unparseable value is rejected with 400.
-        - name: date_to
-          in: query
-          required: false
-          schema: { type: string, format: date }
-          description: >-
-            Inclusive upper bound on document_date (YYYY-MM-DD). A present but
-            unparseable value is rejected with 400.
+          schema: { type: integer, default: 0, minimum: 0 }
+        - { $ref: "#/components/parameters/InventoryId" }
+        - { $ref: "#/components/parameters/InventoryQ" }
+        - { $ref: "#/components/parameters/InventoryOcrStatus" }
+        - { $ref: "#/components/parameters/InventoryMetadataStatus" }
+        - { $ref: "#/components/parameters/InventoryRunStatus" }
+        - { $ref: "#/components/parameters/InventoryTag" }
+        - { $ref: "#/components/parameters/InventoryNotTag" }
+        - { $ref: "#/components/parameters/InventoryLang" }
+        - { $ref: "#/components/parameters/InventoryDateFrom" }
+        - { $ref: "#/components/parameters/InventoryDateTo" }
+        - { $ref: "#/components/parameters/InventoryHasError" }
+        - { $ref: "#/components/parameters/InventoryNeedsReview" }
+        - { $ref: "#/components/parameters/InventoryCorrespondent" }
+        - { $ref: "#/components/parameters/InventoryDocumentType" }
       responses:
         "200":
           description: Inventory page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventoryPage" }
         "400":
-          description: Unparseable date_from/date_to filter
+          description: Unparseable date_from/date_to or correspondent/document_type filter
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/inventory/export:
+    get:
+      x-archivist-permission: read_inventory
+      summary: Export the filtered inventory as CSV or JSON
+      description: >-
+        Requires the inventory:read permission and accepts the same filters as
+        GET /api/inventory (paging parameters are not accepted; the export
+        covers every matching row). The response is streamed page by page.
+        Each export is audited as `inventory.exported` with its canonical
+        filter string, is limited to one concurrent inventory export per
+        actor (and a small global cap shared with the audit export), and is
+        aborted after a fixed deadline. CSV cells that start with a formula
+        character are prefixed with a single quote.
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema: { type: string, enum: [csv, json], default: csv }
+        - { $ref: "#/components/parameters/InventoryId" }
+        - { $ref: "#/components/parameters/InventoryQ" }
+        - { $ref: "#/components/parameters/InventoryOcrStatus" }
+        - { $ref: "#/components/parameters/InventoryMetadataStatus" }
+        - { $ref: "#/components/parameters/InventoryRunStatus" }
+        - { $ref: "#/components/parameters/InventoryTag" }
+        - { $ref: "#/components/parameters/InventoryNotTag" }
+        - { $ref: "#/components/parameters/InventoryLang" }
+        - { $ref: "#/components/parameters/InventoryDateFrom" }
+        - { $ref: "#/components/parameters/InventoryDateTo" }
+        - { $ref: "#/components/parameters/InventoryHasError" }
+        - { $ref: "#/components/parameters/InventoryNeedsReview" }
+        - { $ref: "#/components/parameters/InventoryCorrespondent" }
+        - { $ref: "#/components/parameters/InventoryDocumentType" }
+      responses:
+        "200":
+          description: Matching inventory rows
+          content:
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DocumentInventoryItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/inventory/views:
+    get:
+      x-archivist-permission: read_inventory
+      security:
+        - cookieSession: []
+      summary: List the caller's saved inventory views
+      description: >-
+        Requires the inventory:read permission and a user session (API tokens
+        have no personal views). Views are private to the user who saved them.
+      responses:
+        "200":
+          description: Saved views ordered by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/InventorySavedView" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      x-archivist-permission: read_inventory
+      security:
+        - cookieSession: []
+      summary: Save the current inventory filters as a named view
+      description: >-
+        Requires the inventory:read permission and a user session. The query is
+        validated like GET /api/inventory filters and stored in canonical form.
+        At most 50 views per user; names are unique per user
+        (case-insensitive).
+      parameters:
+        - { $ref: "#/components/parameters/RequiredCsrfToken" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InventoryViewRequest" }
+      responses:
+        "200":
+          description: Created view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventorySavedView" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "409":
+          description: A view with this name exists or the per-user limit is reached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+  /api/inventory/views/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      x-archivist-permission: read_inventory
+      security:
+        - cookieSession: []
+      summary: Rename or re-point one of the caller's saved views
+      parameters:
+        - { $ref: "#/components/parameters/RequiredCsrfToken" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InventoryViewRequest" }
+      responses:
+        "200":
+          description: Updated view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventorySavedView" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "404":
+          description: No such view for this user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: A view with this name exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      x-archivist-permission: read_inventory
+      security:
+        - cookieSession: []
+      summary: Delete one of the caller's saved views
+      parameters:
+        - { $ref: "#/components/parameters/RequiredCsrfToken" }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such view for this user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
   /api/inventory/duplicates:
     get:
       x-archivist-permission: read_inventory
@@ -3351,6 +3819,123 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "500": { $ref: "#/components/responses/InternalServerError" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/reviews/retry-options:
+    get:
+      x-archivist-permission: write_reviews
+      summary: Providers and metadata prompt versions for "retry with"
+      description: Requires the reviews:write permission. Prompt content is not included.
+      operationId: getReviewRetryOptions
+      responses:
+        "200":
+          description: Retry choices
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewRetryOptions" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/reviews/{id}/retry:
+    post:
+      x-archivist-permission: write_reviews
+      summary: Reject a metadata review and re-run it with another provider/model/prompt
+      description: >-
+        Requires the reviews:write permission and an interactive user session.
+        Rejects the review and its still-pending siblings, then queues a new
+        metadata-only run in manual-review mode whose job uses the chosen
+        configuration once. Only metadata reviews can be retried (400). An
+        already decided review returns 409, as does a sibling that is being
+        applied or another active run for the document; an unknown review 404.
+      operationId: retryReview
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReviewRetryRequest" }
+      responses:
+        "200":
+          description: New run queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewRetryResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/reviews/{id}/thumbnail:
+    get:
+      x-archivist-permission: read_reviews
+      summary: Thumbnail of the review's document (proxied from Paperless)
+      description: >-
+        Requires the reviews:read permission. Archivist fetches the thumbnail
+        server-side from the configured Paperless instance; the browser never
+        contacts Paperless. Only WebP/PNG/JPEG up to 4 MiB are passed through.
+      operationId: getReviewThumbnail
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Thumbnail image
+          content:
+            image/webp:
+              schema: { type: string, format: binary }
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotConfigured" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /api/reviews/{id}/preview:
+    get:
+      x-archivist-permission: read_reviews
+      summary: Inline preview of the review's document (proxied from Paperless)
+      description: >-
+        Requires the reviews:read permission. Serves Paperless' preview
+        (archive PDF, or the original image) through Archivist with a strict
+        Content-Security-Policy and `Cache-Control: private, no-store`. Only
+        PDF/WebP/PNG/JPEG up to 32 MiB are passed through.
+      operationId: getReviewPreview
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Preview document
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotConfigured" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+        "502": { $ref: "#/components/responses/BadGateway" }
   /api/operations/recovery:
     get:
       x-archivist-permission: read_runs
@@ -3484,14 +4069,69 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/audit:
     get:
+      summary: List audit events (filtered, keyset-paginated)
+      description: >-
+        Requires the audit:read permission. Newest first. All filters are
+        AND-ed. Pass `next_cursor` of a page as `cursor` to fetch the next
+        (older) page; `next_cursor` is null on the last page.
       x-archivist-permission: read_audit
       parameters:
         - in: query
           name: limit
           required: false
-          schema: { type: integer, format: int64, minimum: 1, maximum: 500 }
+          schema: { type: integer, format: int64, minimum: 1, maximum: 500, default: 200 }
+        - in: query
+          name: actor
+          required: false
+          schema: { type: string, maxLength: 200 }
+          description: >-
+            Username (case-insensitive), user UUID, or raw actor id such as an
+            API token name.
+        - in: query
+          name: actor_type
+          required: false
+          schema: { type: string, maxLength: 200 }
+          description: Exact actor type, e.g. user, api_token, worker, system.
+        - in: query
+          name: document_id
+          required: false
+          schema: { type: integer }
+          description: Paperless document id.
+        - in: query
+          name: event_type
+          required: false
+          schema: { type: string }
+          description: Comma-separated exact event types (at most 20).
+        - in: query
+          name: outcome
+          required: false
+          schema: { type: string, maxLength: 200 }
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+          description: Inclusive lower bound; RFC 3339 timestamp or YYYY-MM-DD (midnight UTC).
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+          description: >-
+            Exclusive upper bound; RFC 3339 timestamp, or YYYY-MM-DD which
+            includes that whole day (UTC).
+        - in: query
+          name: cursor
+          required: false
+          schema: { type: string }
+          description: Opaque keyset cursor from a previous response's next_cursor.
       responses:
-        "200": { description: Audit events }
+        "200":
+          description: Audit events
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditEventPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/audit/export.csv:
     get:
       x-archivist-permission: read_audit
@@ -3508,6 +4148,28 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/audit/{id}:
+    get:
+      x-archivist-permission: read_audit
+      summary: One audit event with its before/after snapshots
+      description: >-
+        Requires the audit:read permission. Backs the before/after diff view.
+        Credential-like keys in before, after and metadata are redacted.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Audit event detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditEventDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/audit/integrity:
     get:
       x-archivist-permission: read_audit

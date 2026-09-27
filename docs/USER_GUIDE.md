@@ -371,6 +371,25 @@ Admins can also use the Paperless maintenance panel:
 Completion-tag reconcile only adds the full completion tag when all enabled
 stage completion tags already exist on the Paperless document.
 
+### Filter, Save And Export The Inventory
+
+`Advanced filters` in `Inventory` also filter by Paperless correspondent and
+document type (including "Not set" for documents without one); the names come
+from the last metadata sync and are shown under each document title. The active
+filters are part of the page URL, so a reload or a shared link keeps them.
+
+- `Save view` stores the current filters under a name. Saved views are private
+  to your user account and stored on the server, so they are available after a
+  reload and in other browsers. Pick a view to apply it, `Update view` to
+  overwrite it with the current filters, or `Delete view` (with confirmation).
+  Each user can keep up to 50 views.
+- `Export CSV` / `Export JSON` download every document matching the current
+  filters (not just the loaded page). Exports need the same permission as the
+  inventory itself, are recorded in the audit log (`inventory.exported`, with
+  the filters used), and run one at a time per user. In CSV files, cells that
+  start with `=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets do not
+  execute them.
+
 ## Dashboard
 
 Use the dashboard to understand operational state:
@@ -431,10 +450,36 @@ applied automatically.
 2. Inspect the suggested patch. Standard metadata review items show current
    value, suggested value, confidence, evidence, and warnings.
 3. Approve, reject, or edit the suggestion. For correspondent and document type
-   reviews, edit the Paperless numeric ID if the reviewer needs a different
-   existing value. For document date reviews, edit the ISO date directly.
+   reviews, pick a different existing value by name in the searchable select
+   (type to filter, arrow keys and Enter to choose, `None` to clear); the list
+   comes from the last Paperless metadata sync. For document date reviews, edit
+   the ISO date directly.
 4. Approved changes are applied through the Paperless REST API.
 5. The action writes an audit event.
+
+Each card shows a thumbnail of the document. Click it to open the full preview
+(archive PDF or image) in a new tab. Archivist fetches both from Paperless on
+the server side, so reviewers do not need Paperless access or a direct network
+path to it; previews larger than 32 MiB are not proxied.
+
+Keyboard triage (press `?` or use `Keyboard shortcuts` for the overlay):
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | Next / previous review card |
+| `a` | Approve the current card |
+| `r` | Reject the current card |
+| `e` | Move focus into the current card's edit field |
+| `?` | Show the shortcut help |
+
+Shortcuts are ignored while focus is in a text field, select or dialog and
+when Ctrl, Alt or Cmd is held.
+
+`Retry with…` (metadata reviews) rejects the suggestion, together with the
+run's other still-pending suggestions for that document, and queues a new
+metadata run with a chosen provider, model and prompt version. The choice
+applies to that one run only; runtime settings are not changed, and the result
+always comes back to the review queue, even in full-auto mode.
 
 For high-volume queues, select multiple review items and use `Approve selected`
 or `Reject selected`. Batch review reports partial failures without hiding which
@@ -498,10 +543,13 @@ activating it:
 4. Edit the prompt content. Saving creates a new immutable version; it never
    overwrites older versions.
 5. Compare the editor content with another version when tuning changes.
-6. Provide sample text or a Paperless document ID and click `Test Current
-   Editor`.
+6. Provide sample text or a Paperless document ID, optionally pick a provider
+   and model (empty uses the stage default), and click `Test Current Editor`.
 7. Review raw model output, parsed output, validation errors, warnings,
    provider/model, and duration.
+   `Test both versions` in the comparison panel runs the compared version and
+   the editor content one after the other with the same input, provider and
+   model and lists the parsed fields that differ.
 8. Activate the version only after the test result matches your archive rules.
 
 Prompt tests call the configured model provider and write audit events, but they
@@ -678,6 +726,19 @@ Use `Audit` to inspect important actions:
 
 Secrets are redacted before they are stored in audit metadata.
 Use `Export CSV` when an auditor needs the recent audit trail outside the UI.
+
+Filter the log by actor (username, user ID or API token name), event type,
+document ID, outcome and date range, then `Apply filters`. Filters are kept in
+the page URL. The newest 100 matching events are shown; `Load older events`
+continues from the last row without re-reading earlier pages, so this stays
+fast on large audit tables. Dates are interpreted in UTC; the `To` date
+includes that whole day.
+
+Events that recorded a before/after snapshot (for example metadata applied to
+Paperless, settings, roles or language detection) have a `Show changes`
+button. It opens a field-by-field comparison that lists only fields that were
+added, removed or changed, with the raw snapshots below. Credential-like fields
+are always shown as `[REDACTED]`.
 
 ## Troubleshooting
 

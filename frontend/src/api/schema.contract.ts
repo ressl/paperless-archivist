@@ -84,4 +84,14 @@ export type GeneratedRouteContract = ExpectAll<[
   HasRequiredCsrf<paths['/api/chat/sessions/{id}/messages/stream']['post']>,
   HasRequiredCsrf<paths['/api/chat/sessions/{id}']['patch']>,
   HasRequiredCsrf<paths['/api/chat/sessions/{id}']['delete']>,
+  // #447: inventory export and per-user saved views.
+  HasOperation<'/api/inventory/export', 'get'>,
+  HasOperation<'/api/inventory/views', 'get'>,
+  HasRequiredCsrf<paths['/api/inventory/views']['post']>,
+  HasRequiredCsrf<paths['/api/inventory/views/{id}']['put']>,
+  HasRequiredCsrf<paths['/api/inventory/views/{id}']['delete']>,
+  HasJsonBodyRejections<paths['/api/inventory/views']['post']>,
+  HasJsonBodyRejections<paths['/api/inventory/views/{id}']['put']>,
+  // #448: audit detail for the before/after diff view.
+  HasOperation<'/api/audit/{id}', 'get'>,
 ]>

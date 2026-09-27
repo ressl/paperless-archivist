@@ -21,6 +21,10 @@ export type Filters = {
   date_to?: string;
   has_error?: boolean;
   needs_review?: boolean;
+  /** Paperless correspondent ids and/or 'none' (#447). */
+  correspondent: string[];
+  /** Paperless document type ids and/or 'none' (#447). */
+  document_type: string[];
 };
 
 export const EMPTY_FILTERS: Filters = {
@@ -29,10 +33,17 @@ export const EMPTY_FILTERS: Filters = {
   run_status: [],
   tags_include: [],
   tags_exclude: [],
+  correspondent: [],
+  document_type: [],
 };
 
 export function parseFiltersFromUrl(): Filters {
-  const sp = new URLSearchParams(window.location.search);
+  return parseFiltersFromSearch(window.location.search);
+}
+
+/** Parse filters from a query string (the URL, or a saved view's query, #447). */
+export function parseFiltersFromSearch(search: string): Filters {
+  const sp = new URLSearchParams(search);
   const csv = (key: string) => {
     const value = sp.get(key);
     if (!value) return [];
@@ -54,6 +65,8 @@ export function parseFiltersFromUrl(): Filters {
     date_to: sp.get('date_to') ?? undefined,
     has_error: hasError === 'true' ? true : hasError === 'false' ? false : undefined,
     needs_review: needsReview === 'true' ? true : needsReview === 'false' ? false : undefined,
+    correspondent: csv('correspondent'),
+    document_type: csv('document_type'),
   };
 }
 
@@ -71,6 +84,8 @@ export function filtersToUrl(filters: Filters): string {
   if (filters.date_to) sp.set('date_to', filters.date_to);
   if (filters.has_error != null) sp.set('has_error', String(filters.has_error));
   if (filters.needs_review != null) sp.set('needs_review', String(filters.needs_review));
+  if (filters.correspondent.length) sp.set('correspondent', filters.correspondent.join(','));
+  if (filters.document_type.length) sp.set('document_type', filters.document_type.join(','));
   const qs = sp.toString();
   return qs ? `?${qs}` : '';
 }
@@ -89,6 +104,8 @@ export function filtersToParams(filters: Filters): InventoryQueryParams {
     date_to: filters.date_to,
     has_error: filters.has_error,
     needs_review: filters.needs_review,
+    correspondent: filters.correspondent.length ? filters.correspondent : undefined,
+    document_type: filters.document_type.length ? filters.document_type : undefined,
   };
 }
 
@@ -105,7 +122,9 @@ export function isFiltersEmpty(f: Filters): boolean {
     !f.date_from &&
     !f.date_to &&
     f.has_error == null &&
-    f.needs_review == null
+    f.needs_review == null &&
+    !f.correspondent.length &&
+    !f.document_type.length
   );
 }
 

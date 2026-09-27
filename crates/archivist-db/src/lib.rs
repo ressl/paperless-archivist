@@ -351,6 +351,44 @@ pub struct AuditEventRecord {
     pub prev_event_hash: Option<String>,
     pub event_hash: Option<String>,
     pub hash_version: Option<i16>,
+    /// Username of a `user` actor, resolved for display (#448).
+    #[serde(default)]
+    pub actor_username: Option<String>,
+    /// True when the event stored a before and/or after snapshot, i.e. the
+    /// detail view (`GET /api/audit/{id}`) has a diff to show (#448).
+    #[serde(default)]
+    pub has_changes: bool,
+}
+
+/// One audit event with its before/after snapshots and request origin, for
+/// the audit detail / diff view (#448).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEventDetail {
+    #[serde(flatten)]
+    pub event: AuditEventRecord,
+    pub run_id: Option<Uuid>,
+    pub job_id: Option<Uuid>,
+    pub before: Option<Value>,
+    pub after: Option<Value>,
+    pub source_ip: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+/// Server-side filters for the audit log (#448). Every field is optional and
+/// the filters are AND-ed. `before` is the keyset cursor: only events
+/// strictly older than `(created_at, id)` are returned.
+#[derive(Debug, Clone, Default)]
+pub struct AuditEventFilter {
+    pub actor_id: Option<String>,
+    pub actor_type: Option<String>,
+    pub paperless_document_id: Option<i32>,
+    pub event_types: Vec<String>,
+    pub outcome: Option<String>,
+    /// Inclusive lower bound on created_at.
+    pub from: Option<DateTime<Utc>>,
+    /// Exclusive upper bound on created_at.
+    pub to: Option<DateTime<Utc>>,
+    pub before: Option<(DateTime<Utc>, Uuid)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4803,6 +4841,50 @@ pub struct InventoryQuery {
     pub date_to: Option<NaiveDate>,
     pub has_error: Option<bool>,
     pub needs_review: Option<bool>,
+    /// Paperless correspondent filter (#447).
+    pub correspondent: InventoryIdFilter,
+    /// Paperless document type filter (#447).
+    pub document_type: InventoryIdFilter,
+}
+
+/// Match a nullable Paperless object id column against a set of ids and/or
+/// "unset" (#447). Empty matches every row; ids and `include_none` are OR-ed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InventoryIdFilter {
+    pub ids: Vec<i32>,
+    /// Also match rows whose column is null ("without correspondent").
+    pub include_none: bool,
+}
+
+impl InventoryIdFilter {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty() && !self.include_none
+    }
+}
+
+fn push_inventory_id_filter(
+    builder: &mut QueryBuilder<Postgres>,
+    column: &'static str,
+    filter: &InventoryIdFilter,
+) {
+    match (filter.ids.is_empty(), filter.include_none) {
+        (true, false) => {}
+        (true, true) => {
+            builder.push(" and ").push(column).push(" is null");
+        }
+        (false, include_none) => {
+            builder
+                .push(" and (")
+                .push(column)
+                .push(" = any(")
+                .push_bind(filter.ids.clone())
+                .push(")");
+            if include_none {
+                builder.push(" or ").push(column).push(" is null");
+            }
+            builder.push(")");
+        }
+    }
 }
 
 impl InventoryQuery {
@@ -4819,6 +4901,8 @@ impl InventoryQuery {
             && self.date_to.is_none()
             && self.has_error.is_none()
             && self.needs_review.is_none()
+            && self.correspondent.is_empty()
+            && self.document_type.is_empty()
     }
 }
 
@@ -4891,6 +4975,8 @@ fn push_inventory_filters(builder: &mut QueryBuilder<Postgres>, query: &Inventor
     if let Some(needs_review) = query.needs_review {
         builder.push(" and needs_review = ").push_bind(needs_review);
     }
+    push_inventory_id_filter(builder, "correspondent_id", &query.correspondent);
+    push_inventory_id_filter(builder, "document_type_id", &query.document_type);
 }
 
 pub async fn list_inventory(
@@ -4899,15 +4985,50 @@ pub async fn list_inventory(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<DocumentInventoryItem>> {
+    select_inventory(pool, query, None, limit, offset).await
+}
+
+/// Keyset page of the filtered inventory for the export (#447): rows with
+/// `paperless_document_id < before_id` (all rows when `None`), in the same
+/// descending id order as [`list_inventory`]. Each page is one short query,
+/// so a slow export client never pins a pool connection.
+pub async fn list_inventory_keyset(
+    pool: &DbPool,
+    query: &InventoryQuery,
+    before_id: Option<i32>,
+    limit: i64,
+) -> Result<Vec<DocumentInventoryItem>> {
+    select_inventory(pool, query, before_id, limit, 0).await
+}
+
+async fn select_inventory(
+    pool: &DbPool,
+    query: &InventoryQuery,
+    before_id: Option<i32>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<DocumentInventoryItem>> {
+    // Correspondent / document type names are resolved per returned row with
+    // scalar subqueries on the tiny, primary-keyed paperless_* tables (#447);
+    // unlike a join this keeps every filter column unambiguous.
     let mut builder = QueryBuilder::<Postgres>::new(
         "select paperless_document_id, title, original_file_name, current_tags, ocr_status, \
          metadata_status, current_run_status, \
          last_run_id, last_error, next_required_stage, needs_review, complete, \
          document_date, detected_language, detected_language_confidence, \
-         detected_language_source, last_seen_at \
+         detected_language_source, last_seen_at, correspondent_id, document_type_id, \
+         (select c.name from paperless_correspondents c \
+           where c.id = document_inventory.correspondent_id) as correspondent_name, \
+         (select t.name from paperless_document_types t \
+           where t.id = document_inventory.document_type_id) as document_type_name \
          from document_inventory where 1=1",
     );
     push_inventory_filters(&mut builder, query);
+    if let Some(before_id) = before_id {
+        builder
+            .push(" and paperless_document_id < ")
+            .push_bind(before_id);
+    }
     builder
         .push(" order by paperless_document_id desc limit ")
         .push_bind(limit)
@@ -4935,6 +5056,10 @@ pub async fn list_inventory(
                 detected_language_confidence: row.try_get("detected_language_confidence")?,
                 detected_language_source: row.try_get("detected_language_source")?,
                 last_seen_at: row.try_get("last_seen_at")?,
+                correspondent_id: row.try_get("correspondent_id")?,
+                correspondent_name: row.try_get("correspondent_name")?,
+                document_type_id: row.try_get("document_type_id")?,
+                document_type_name: row.try_get("document_type_name")?,
             })
         })
         .collect()
@@ -4958,6 +5083,147 @@ pub async fn count_inventory(pool: &DbPool, query: &InventoryQuery) -> Result<i6
     push_inventory_filters(&mut builder, query);
     let count: i64 = builder.build_query_scalar().fetch_one(pool).await?;
     Ok(count)
+}
+
+/// A named inventory filter, private to the user who saved it (#447).
+/// `query` is the canonical `/api/inventory` filter query string (no
+/// leading `?`), validated by the API before it is stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventorySavedView {
+    pub id: Uuid,
+    pub name: String,
+    pub query: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Maximum saved views per user (#447).
+pub const INVENTORY_SAVED_VIEW_LIMIT: i64 = 50;
+
+/// Expected, client-caused outcomes of saved-view writes (#447).
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+pub enum InventoryViewError {
+    #[error("saved view not found")]
+    NotFound,
+    #[error("a saved view with this name already exists")]
+    DuplicateName,
+    #[error("saved view limit reached")]
+    LimitReached,
+}
+
+fn saved_view_from_row(row: &PgRow) -> Result<InventorySavedView> {
+    Ok(InventorySavedView {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        query: row.try_get("query")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn map_saved_view_unique_violation(error: sqlx::Error) -> anyhow::Error {
+    match &error {
+        sqlx::Error::Database(db)
+            if db.code().as_deref() == Some("23505")
+                && db.constraint() == Some("inventory_saved_views_user_name_idx") =>
+        {
+            anyhow::Error::new(InventoryViewError::DuplicateName)
+        }
+        _ => error.into(),
+    }
+}
+
+pub async fn list_inventory_views(pool: &DbPool, user_id: Uuid) -> Result<Vec<InventorySavedView>> {
+    let rows = sqlx::query(
+        "select id, name, query, created_at, updated_at from inventory_saved_views \
+         where user_id = $1 order by lower(name), id",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(saved_view_from_row).collect()
+}
+
+/// Insert a view unless the user already has [`INVENTORY_SAVED_VIEW_LIMIT`]
+/// views. A per-user transaction-scoped advisory lock serialises concurrent
+/// saves, so the count check cannot be raced past the limit.
+pub async fn create_inventory_view(
+    pool: &DbPool,
+    user_id: Uuid,
+    name: &str,
+    query: &str,
+) -> Result<InventorySavedView> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "select pg_advisory_xact_lock(hashtextextended('inventory_saved_views:' || $1::text, 0))",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    let row = sqlx::query(
+        r#"
+        insert into inventory_saved_views (user_id, name, query)
+        select $1, $2, $3
+         where (select count(*) from inventory_saved_views where user_id = $1) < $4
+        returning id, name, query, created_at, updated_at
+        "#,
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(query)
+    .bind(INVENTORY_SAVED_VIEW_LIMIT)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_saved_view_unique_violation)?;
+    let Some(row) = row else {
+        return Err(InventoryViewError::LimitReached.into());
+    };
+    let view = saved_view_from_row(&row)?;
+    tx.commit().await?;
+    Ok(view)
+}
+
+/// Rename and/or re-point one of the user's own views. Another user's view
+/// id answers NotFound, never revealing that it exists.
+pub async fn update_inventory_view(
+    pool: &DbPool,
+    user_id: Uuid,
+    view_id: Uuid,
+    name: &str,
+    query: &str,
+) -> Result<InventorySavedView> {
+    let row = sqlx::query(
+        r#"
+        update inventory_saved_views
+           set name = $3, query = $4, updated_at = now()
+         where id = $1 and user_id = $2
+        returning id, name, query, created_at, updated_at
+        "#,
+    )
+    .bind(view_id)
+    .bind(user_id)
+    .bind(name)
+    .bind(query)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_saved_view_unique_violation)?;
+    match row {
+        Some(row) => saved_view_from_row(&row),
+        None => Err(InventoryViewError::NotFound.into()),
+    }
+}
+
+pub async fn delete_inventory_view(pool: &DbPool, user_id: Uuid, view_id: Uuid) -> Result<()> {
+    let deleted = sqlx::query("delete from inventory_saved_views where id = $1 and user_id = $2")
+        .bind(view_id)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Err(InventoryViewError::NotFound.into());
+    }
+    Ok(())
 }
 
 pub async fn create_document_chat_session(
@@ -7016,6 +7282,279 @@ pub async fn count_reviews(pool: &DbPool, status: Option<&str>) -> Result<i64> {
             .await?
     };
     Ok(count)
+}
+
+/// One `{id, name}` entry of a synced Paperless metadata mirror table. #420
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaperlessNamedOption {
+    pub id: i32,
+    pub name: String,
+}
+
+/// Synced correspondents (local mirror, no Paperless round-trip), ordered by
+/// name. Returns at most `limit` rows. #420
+pub async fn list_paperless_correspondent_options(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<PaperlessNamedOption>> {
+    list_paperless_named_options(
+        pool,
+        "select id, name from paperless_correspondents order by lower(name), id limit $1",
+        limit,
+    )
+    .await
+}
+
+/// Synced document types (local mirror), ordered by name. #420
+pub async fn list_paperless_document_type_options(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<PaperlessNamedOption>> {
+    list_paperless_named_options(
+        pool,
+        "select id, name from paperless_document_types order by lower(name), id limit $1",
+        limit,
+    )
+    .await
+}
+
+async fn list_paperless_named_options(
+    pool: &DbPool,
+    sql: &'static str,
+    limit: i64,
+) -> Result<Vec<PaperlessNamedOption>> {
+    let rows = sqlx::query(sql).bind(limit.max(1)).fetch_all(pool).await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(PaperlessNamedOption {
+                id: row.try_get("id")?,
+                name: row.try_get("name")?,
+            })
+        })
+        .collect()
+}
+
+/// Load one prompt version by id (any activation state). #445
+pub async fn get_prompt_by_id(pool: &DbPool, prompt_id: Uuid) -> Result<Option<PromptRecord>> {
+    let row = sqlx::query(
+        r#"
+        select id, stage, name, version, content, output_schema, active, created_at
+          from prompts
+         where id = $1
+        "#,
+    )
+    .bind(prompt_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(prompt_from_row).transpose()
+}
+
+/// Paperless document id a review item belongs to (any status). The preview
+/// proxy is keyed by review id so only documents that are in the review queue
+/// can be fetched through Archivist's Paperless token. #445
+pub async fn review_document_id(pool: &DbPool, review_id: Uuid) -> Result<Option<i32>> {
+    Ok(
+        sqlx::query_scalar("select paperless_document_id from review_items where id = $1")
+            .bind(review_id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+/// Result of [`retry_review_with_overrides`]. The non-`Queued` variants are
+/// expected client-visible states, reported without side effects. #445
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewRetryOutcome {
+    Queued {
+        run_id: Uuid,
+        rejected_review_ids: Vec<Uuid>,
+    },
+    /// Only metadata-stage reviews can be regenerated with another model/prompt.
+    UnsupportedStage,
+    /// A sibling review of the same job is approved/edited/applying; the
+    /// original run cannot be closed without racing that apply.
+    SiblingInFlight,
+    /// Closing the reviews left an active run for the document (e.g. a later
+    /// stage still queued), so a fresh run cannot be created.
+    ActiveRun,
+}
+
+/// "Retry with ...": reject every still-pending review of the same job and
+/// queue a new metadata-only run whose job payload carries `overrides`
+/// (see `archivist_core::MetadataRetryOverrides`). Everything happens in one
+/// transaction, so a conflict leaves the reviews untouched. #445
+pub async fn retry_review_with_overrides(
+    pool: &DbPool,
+    review_id: Uuid,
+    actor_id: Uuid,
+    overrides: &Value,
+) -> Result<ReviewRetryOutcome> {
+    let mut tx = pool.begin().await?;
+    let Some(review) = sqlx::query(
+        "select job_id, paperless_document_id, stage, status from review_items where id = $1",
+    )
+    .bind(review_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Err(ReviewDecisionError::NotFound.into());
+    };
+    let status: String = review.try_get("status")?;
+    if status != "pending" {
+        tx.rollback().await?;
+        return Err(ReviewDecisionError::NotPending.into());
+    }
+    let stage: String = review.try_get("stage")?;
+    if stage != Stage::Metadata.to_string() {
+        tx.rollback().await?;
+        return Ok(ReviewRetryOutcome::UnsupportedStage);
+    }
+    let document_id: i32 = review.try_get("paperless_document_id")?;
+    let job_id: Option<Uuid> = review.try_get("job_id")?;
+
+    // Same lock order as run creation: the document lock first, audit last.
+    lock_active_run_document_tx(&mut tx, document_id).await?;
+
+    // Siblings share the job; a job-less (legacy) review is its own aggregate.
+    let siblings =
+        sqlx::query("select id, status from review_items where job_id = $1 or id = $2 for update")
+            .bind(job_id)
+            .bind(review_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let mut pending = Vec::new();
+    for sibling in &siblings {
+        let id: Uuid = sibling.try_get("id")?;
+        let sibling_status: String = sibling.try_get("status")?;
+        match sibling_status.as_str() {
+            "pending" => pending.push(id),
+            "rejected" | "applied" => {}
+            _ => {
+                tx.rollback().await?;
+                return Ok(ReviewRetryOutcome::SiblingInFlight);
+            }
+        }
+    }
+    // The row lock above may have waited on a concurrent decision.
+    if !pending.contains(&review_id) {
+        tx.rollback().await?;
+        return Err(ReviewDecisionError::NotPending.into());
+    }
+
+    let rejected = sqlx::query(
+        r#"
+        update review_items
+           set status = 'rejected',
+               reviewed_by = $2,
+               reviewed_at = now(),
+               conflict_fields = '[]'::jsonb,
+               conflicted_at = null
+         where id = any($1) and status = 'pending'
+        returning id, run_id, suggested_patch
+        "#,
+    )
+    .bind(&pending)
+    .bind(actor_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if let Some(job_id) = job_id {
+        finalize_review_aggregate_tx(
+            &mut tx,
+            job_id,
+            review_id,
+            "user",
+            Some(actor_id.to_string()),
+        )
+        .await?;
+    }
+
+    let prepared = prepare_run_with_jobs_on_tx(
+        &mut tx,
+        document_id,
+        &[Stage::Metadata],
+        ProcessingMode::ManualReview,
+        "review-retry",
+        "user",
+        Some(0),
+    )
+    .await?;
+    let Some(run_created) = prepared.audit_event else {
+        // Reused an existing active run: never attach overrides to it.
+        tx.rollback().await?;
+        return Ok(ReviewRetryOutcome::ActiveRun);
+    };
+    sqlx::query(
+        r#"
+        update jobs
+           set payload = payload || jsonb_build_object($2::text, $3::jsonb)
+         where run_id = $1 and stage = 'metadata'
+        "#,
+    )
+    .bind(prepared.run_id)
+    .bind(archivist_core::METADATA_RETRY_OVERRIDES_KEY)
+    .bind(overrides)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut rejected_review_ids = Vec::with_capacity(rejected.len());
+    for row in rejected {
+        let id: Uuid = row.try_get("id")?;
+        rejected_review_ids.push(id);
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "review.rejected".to_owned(),
+                actor_type: "user".to_owned(),
+                actor_id: Some(actor_id.to_string()),
+                run_id: row.try_get("run_id")?,
+                job_id,
+                paperless_document_id: Some(document_id),
+                before: Some(row.try_get("suggested_patch")?),
+                after: None,
+                metadata: Some(json!({
+                    "review_id": id,
+                    "stage": stage,
+                    "reason": "retry",
+                    "retry_run_id": prepared.run_id
+                })),
+                outcome: "success".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+    append_audit_tx(&mut tx, run_created).await?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "review.retried".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: Some(prepared.run_id),
+            job_id: None,
+            paperless_document_id: Some(document_id),
+            before: None,
+            after: None,
+            metadata: Some(json!({
+                "review_id": review_id,
+                "rejected_reviews": rejected_review_ids.len(),
+                "overrides": overrides
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(ReviewRetryOutcome::Queued {
+        run_id: prepared.run_id,
+        rejected_review_ids,
+    })
 }
 
 pub async fn review_decision(
@@ -9468,38 +10007,150 @@ fn verify_audit_event_hash(
     Some(AuditHashVerification::Mismatch)
 }
 
-pub async fn list_audit_events(pool: &DbPool, limit: i64) -> Result<Vec<AuditEventRecord>> {
-    let rows = sqlx::query(
-        r#"
-        select id, event_type, actor_type, actor_id, paperless_document_id,
-               outcome, error_message, created_at, metadata, prev_event_hash, event_hash,
-               hash_version
-          from audit_events
-         order by created_at desc
-         limit $1
-        "#,
-    )
-    .bind(limit)
-    .fetch_all(pool)
+const AUDIT_EVENT_COLUMNS: &str = "a.id, a.event_type, a.actor_type, a.actor_id, \
+     a.paperless_document_id, a.outcome, a.error_message, a.created_at, a.metadata, \
+     a.prev_event_hash, a.event_hash, a.hash_version, \
+     (a.before is not null or a.after is not null) as has_changes, \
+     (select u.username from users u \
+       where a.actor_type = 'user' \
+         and u.id = case when a.actor_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+                         then a.actor_id::uuid end) as actor_username";
+
+/// Build the filtered, keyset-ordered audit list query (#448), prefixed with
+/// `prefix` (empty for the real query; tests pass `explain ...` to assert the
+/// plan). The ORDER BY matches the `(created_at desc, id desc)` trailing
+/// columns of the 0057 keyset indexes, so every single-dimension filter is
+/// served by one index scan with no sort.
+pub fn audit_events_query_builder(
+    prefix: &str,
+    filter: &AuditEventFilter,
+    limit: i64,
+) -> QueryBuilder<Postgres> {
+    let mut builder = QueryBuilder::<Postgres>::new(format!(
+        "{prefix}select {AUDIT_EVENT_COLUMNS} from audit_events a where true"
+    ));
+    if let Some(actor_id) = &filter.actor_id {
+        builder
+            .push(" and a.actor_id = ")
+            .push_bind(actor_id.as_str());
+    }
+    if let Some(actor_type) = &filter.actor_type {
+        builder
+            .push(" and a.actor_type = ")
+            .push_bind(actor_type.as_str());
+    }
+    if let Some(document_id) = filter.paperless_document_id {
+        builder
+            .push(" and a.paperless_document_id = ")
+            .push_bind(document_id);
+    }
+    match filter.event_types.as_slice() {
+        [] => {}
+        // `=` (not `= any`) keeps the (event_type, created_at, id) index
+        // ordered for the common single-type filter.
+        [single] => {
+            builder
+                .push(" and a.event_type = ")
+                .push_bind(single.as_str());
+        }
+        many => {
+            builder
+                .push(" and a.event_type = any(")
+                .push_bind(many.to_vec())
+                .push(")");
+        }
+    }
+    if let Some(outcome) = &filter.outcome {
+        builder
+            .push(" and a.outcome = ")
+            .push_bind(outcome.as_str());
+    }
+    if let Some(from) = filter.from {
+        builder.push(" and a.created_at >= ").push_bind(from);
+    }
+    if let Some(to) = filter.to {
+        builder.push(" and a.created_at < ").push_bind(to);
+    }
+    if let Some((created_at, id)) = filter.before {
+        builder
+            .push(" and (a.created_at, a.id) < (")
+            .push_bind(created_at)
+            .push(", ")
+            .push_bind(id)
+            .push(")");
+    }
+    builder
+        .push(" order by a.created_at desc, a.id desc limit ")
+        .push_bind(limit);
+    builder
+}
+
+fn audit_event_record_from_row(row: &PgRow) -> Result<AuditEventRecord> {
+    Ok(AuditEventRecord {
+        id: row.try_get("id")?,
+        event_type: row.try_get("event_type")?,
+        actor_type: row.try_get("actor_type")?,
+        actor_id: row.try_get("actor_id")?,
+        paperless_document_id: row.try_get("paperless_document_id")?,
+        outcome: row.try_get("outcome")?,
+        error_message: row.try_get("error_message")?,
+        created_at: row.try_get("created_at")?,
+        metadata: row.try_get("metadata")?,
+        prev_event_hash: row.try_get("prev_event_hash")?,
+        event_hash: row.try_get("event_hash")?,
+        hash_version: row.try_get("hash_version")?,
+        actor_username: row.try_get("actor_username")?,
+        has_changes: row.try_get("has_changes")?,
+    })
+}
+
+/// Newest-first page of the audit log matching `filter` (#448).
+pub async fn list_audit_events(
+    pool: &DbPool,
+    filter: &AuditEventFilter,
+    limit: i64,
+) -> Result<Vec<AuditEventRecord>> {
+    let rows = audit_events_query_builder("", filter, limit)
+        .build()
+        .fetch_all(pool)
+        .await?;
+    rows.iter().map(audit_event_record_from_row).collect()
+}
+
+/// One audit event including before/after snapshots (#448). The snapshots
+/// are returned as stored; the API redacts credential-like keys.
+pub async fn get_audit_event(pool: &DbPool, id: Uuid) -> Result<Option<AuditEventDetail>> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "select {AUDIT_EVENT_COLUMNS}, a.run_id, a.job_id, a.before, a.after, \
+         a.source_ip, a.user_agent from audit_events a where a.id = $1"
+    )))
+    .bind(id)
+    .fetch_optional(pool)
     .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(AuditEventRecord {
-                id: row.try_get("id")?,
-                event_type: row.try_get("event_type")?,
-                actor_type: row.try_get("actor_type")?,
-                actor_id: row.try_get("actor_id")?,
-                paperless_document_id: row.try_get("paperless_document_id")?,
-                outcome: row.try_get("outcome")?,
-                error_message: row.try_get("error_message")?,
-                created_at: row.try_get("created_at")?,
-                metadata: row.try_get("metadata")?,
-                prev_event_hash: row.try_get("prev_event_hash")?,
-                event_hash: row.try_get("event_hash")?,
-                hash_version: row.try_get("hash_version")?,
-            })
-        })
-        .collect()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some(AuditEventDetail {
+        event: audit_event_record_from_row(&row)?,
+        run_id: row.try_get("run_id")?,
+        job_id: row.try_get("job_id")?,
+        before: row.try_get("before")?,
+        after: row.try_get("after")?,
+        source_ip: row.try_get("source_ip")?,
+        user_agent: row.try_get("user_agent")?,
+    }))
+}
+
+/// Resolve an audit actor filter given as a username to the `actor_id` the
+/// audit trail stores for users (their UUID). Case-insensitive; None when no
+/// such user exists (#448).
+pub async fn find_user_id_by_username(pool: &DbPool, username: &str) -> Result<Option<Uuid>> {
+    Ok(
+        sqlx::query_scalar("select id from users where lower(username) = lower($1) limit 1")
+            .bind(username)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 async fn verify_audit_integrity_tx(

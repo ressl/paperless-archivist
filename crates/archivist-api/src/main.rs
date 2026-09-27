@@ -376,6 +376,14 @@ fn router(state: AppState) -> Router {
         .route("/paperless/sync-metadata", post(sync_paperless))
         .route("/paperless/consistency", get(paperless_consistency))
         .route(
+            "/paperless/correspondents",
+            get(paperless_correspondent_options),
+        )
+        .route(
+            "/paperless/document-types",
+            get(paperless_document_type_options),
+        )
+        .route(
             "/paperless/completion-tags/reconcile",
             post(reconcile_completion_tags),
         )
@@ -386,6 +394,15 @@ fn router(state: AppState) -> Router {
         .route("/workflow/controls", patch(update_workflow_controls))
         .route("/inventory", get(inventory))
         .route("/inventory/duplicates", get(inventory_duplicates))
+        .route("/inventory/export", get(inventory_export))
+        .route(
+            "/inventory/views",
+            get(inventory_views).post(create_inventory_view_endpoint),
+        )
+        .route(
+            "/inventory/views/{id}",
+            put(update_inventory_view_endpoint).delete(delete_inventory_view_endpoint),
+        )
         .route(
             "/inventory/{document_id}/metadata-trace",
             get(inventory_metadata_trace),
@@ -424,6 +441,10 @@ fn router(state: AppState) -> Router {
         .route("/reviews/{id}/reject", post(reject_review))
         .route("/reviews/{id}/edit", post(edit_review))
         .route("/reviews/{id}/auto-fix", post(auto_fix_single))
+        .route("/reviews/retry-options", get(review_retry_options))
+        .route("/reviews/{id}/retry", post(retry_review))
+        .route("/reviews/{id}/thumbnail", get(review_thumbnail))
+        .route("/reviews/{id}/preview", get(review_document_preview))
         .route("/operations/recovery", get(recovery_status))
         .route(
             "/operations/recovery/stale-leases",
@@ -449,6 +470,7 @@ fn router(state: AppState) -> Router {
         .route("/audit", get(audit_events))
         .route("/audit/export.csv", get(audit_export))
         .route("/audit/integrity", get(audit_integrity))
+        .route("/audit/{id}", get(audit_event_detail))
         .route("/audit/retention/apply", post(apply_audit_retention))
         .route("/users", get(users).post(create_user))
         .route("/users/{id}/enable", post(enable_user))
@@ -4762,6 +4784,10 @@ struct InventoryQueryParams {
     date_to: Option<String>,
     has_error: Option<bool>,
     needs_review: Option<bool>,
+    /// Comma-separated Paperless correspondent ids and/or `none` (#447).
+    correspondent: Option<String>,
+    /// Comma-separated Paperless document type ids and/or `none` (#447).
+    document_type: Option<String>,
 }
 
 fn split_csv(value: Option<String>) -> Vec<String> {
@@ -4799,20 +4825,7 @@ async fn inventory(
 ) -> ApiResult<Json<Value>> {
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let offset = query.offset.unwrap_or(0).max(0);
-    let inventory_query = archivist_db::InventoryQuery {
-        id: query.id,
-        q: query.q,
-        ocr_status: split_csv(query.ocr_status),
-        metadata_status: split_csv(query.metadata_status),
-        run_status: split_csv(query.run_status),
-        tags_include: split_csv(query.tag),
-        tags_exclude: split_csv(query.not_tag),
-        language: query.lang.filter(|s| !s.is_empty()),
-        date_from: parse_inventory_date_filter("date_from", query.date_from.as_deref())?,
-        date_to: parse_inventory_date_filter("date_to", query.date_to.as_deref())?,
-        has_error: query.has_error,
-        needs_review: query.needs_review,
-    };
+    let inventory_query = inventory_query_from_params(query)?;
     let settings = get_runtime_settings(&state.pool).await?;
     let (items, total) = tokio::try_join!(
         async {
@@ -4830,6 +4843,482 @@ async fn inventory(
         "offset": offset,
         "limit": limit,
     })))
+}
+
+/// Maximum ids per `correspondent` / `document_type` filter (#447).
+const INVENTORY_ID_FILTER_MAX: usize = 100;
+
+/// Parse a `correspondent` / `document_type` filter (#447): comma-separated
+/// positive Paperless ids and/or the literal `none` (object unset). Anything
+/// else is rejected with 400 rather than silently ignored.
+fn parse_inventory_id_filter(
+    name: &str,
+    raw: Option<String>,
+) -> Result<archivist_db::InventoryIdFilter, ApiError> {
+    let mut filter = archivist_db::InventoryIdFilter::default();
+    for part in split_csv(raw) {
+        if part.eq_ignore_ascii_case("none") {
+            filter.include_none = true;
+            continue;
+        }
+        let id = part
+            .parse::<i32>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "'{name}' must be comma-separated Paperless ids or 'none'"
+                ))
+            })?;
+        if !filter.ids.contains(&id) {
+            filter.ids.push(id);
+        }
+    }
+    if filter.ids.len() > INVENTORY_ID_FILTER_MAX {
+        return Err(ApiError::bad_request(format!(
+            "'{name}' accepts at most {INVENTORY_ID_FILTER_MAX} ids"
+        )));
+    }
+    Ok(filter)
+}
+
+/// Translate the `/api/inventory` query parameters into the SQL-layer filter.
+/// Shared by the list, the export and saved-view validation (#447), so all
+/// three accept and reject exactly the same filters.
+fn inventory_query_from_params(
+    query: InventoryQueryParams,
+) -> Result<archivist_db::InventoryQuery, ApiError> {
+    Ok(archivist_db::InventoryQuery {
+        id: query.id,
+        q: query.q,
+        ocr_status: split_csv(query.ocr_status),
+        metadata_status: split_csv(query.metadata_status),
+        run_status: split_csv(query.run_status),
+        tags_include: split_csv(query.tag),
+        tags_exclude: split_csv(query.not_tag),
+        language: query.lang.filter(|s| !s.is_empty()),
+        date_from: parse_inventory_date_filter("date_from", query.date_from.as_deref())?,
+        date_to: parse_inventory_date_filter("date_to", query.date_to.as_deref())?,
+        has_error: query.has_error,
+        needs_review: query.needs_review,
+        correspondent: parse_inventory_id_filter("correspondent", query.correspondent)?,
+        document_type: parse_inventory_id_filter("document_type", query.document_type)?,
+    })
+}
+
+/// Filter keys a saved view / export may carry, in canonical order (#447).
+/// Paging (`limit`, `offset`) is deliberately not part of a view.
+const INVENTORY_FILTER_KEYS: [&str; 14] = [
+    "id",
+    "q",
+    "ocr_status",
+    "metadata_status",
+    "run_status",
+    "tag",
+    "not_tag",
+    "lang",
+    "date_from",
+    "date_to",
+    "has_error",
+    "needs_review",
+    "correspondent",
+    "document_type",
+];
+
+/// Maximum length of a stored / exported filter query string (#447); matches
+/// the `inventory_saved_views.query` CHECK in migration 0056.
+const INVENTORY_FILTER_QUERY_MAX_BYTES: usize = 2000;
+
+/// Validate an inventory filter query string and return it in canonical form
+/// (known keys only, each at most once, empty values dropped, fixed key
+/// order) together with the parsed filter (#447). The canonical string is
+/// what saved views store and what the export audit event records.
+fn canonical_inventory_filter_query(
+    raw: &str,
+) -> Result<(String, archivist_db::InventoryQuery), ApiError> {
+    let raw = raw.trim().trim_start_matches('?');
+    if raw.len() > INVENTORY_FILTER_QUERY_MAX_BYTES {
+        return Err(ApiError::bad_request("inventory filter query is too long"));
+    }
+    let mut pairs: Vec<(usize, String, String)> = Vec::new();
+    for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+        let Some(position) = INVENTORY_FILTER_KEYS.iter().position(|known| *known == key) else {
+            return Err(ApiError::bad_request(format!(
+                "unknown inventory filter '{key}'"
+            )));
+        };
+        if pairs.iter().any(|(existing, _, _)| *existing == position) {
+            return Err(ApiError::bad_request(format!(
+                "inventory filter '{key}' given more than once"
+            )));
+        }
+        let value = value.trim();
+        if !value.is_empty() {
+            pairs.push((position, key.into_owned(), value.to_owned()));
+        }
+    }
+    pairs.sort_by_key(|(position, _, _)| *position);
+    let canonical = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs.iter().map(|(_, key, value)| (key, value)))
+        .finish();
+    if canonical.len() > INVENTORY_FILTER_QUERY_MAX_BYTES {
+        return Err(ApiError::bad_request("inventory filter query is too long"));
+    }
+    let uri: axum::http::Uri = format!("/?{canonical}")
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid inventory filter query"))?;
+    let Query(params) = Query::<InventoryQueryParams>::try_from_uri(&uri)
+        .map_err(|error| ApiError::bad_request(format!("invalid inventory filter: {error}")))?;
+    Ok((canonical, inventory_query_from_params(params)?))
+}
+
+#[derive(Debug, Deserialize)]
+struct InventoryViewRequest {
+    name: String,
+    query: String,
+}
+
+/// Validate a saved-view write (#447): a trimmed 1..=80 character name
+/// without control characters and a canonicalised filter query.
+fn validate_inventory_view(request: &InventoryViewRequest) -> Result<(String, String), ApiError> {
+    let name = request.name.trim();
+    let length = name.chars().count();
+    if length == 0 || length > 80 || name.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "view name must be 1 to 80 characters without control characters",
+        ));
+    }
+    let (query, _) = canonical_inventory_filter_query(&request.query)?;
+    Ok((name.to_owned(), query))
+}
+
+/// Map the expected saved-view outcomes to 404/409; everything else stays a
+/// server error (#447).
+fn inventory_view_error(error: anyhow::Error) -> ApiError {
+    match error.downcast_ref::<archivist_db::InventoryViewError>() {
+        Some(archivist_db::InventoryViewError::NotFound) => {
+            ApiError::not_found("saved view not found")
+        }
+        Some(view_error @ archivist_db::InventoryViewError::DuplicateName)
+        | Some(view_error @ archivist_db::InventoryViewError::LimitReached) => {
+            ApiError::conflict(view_error.to_string())
+        }
+        None => ApiError::from(error),
+    }
+}
+
+// Saved inventory views (#447) are UI state private to one user: the route
+// table admits them for sessions only (an API token has no personal views)
+// with inventory:read.
+async fn inventory_views(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    let user_id = auth.session_user_id()?;
+    Ok(Json(json!({
+        "items": archivist_db::list_inventory_views(&state.pool, user_id).await?
+    })))
+}
+
+async fn create_inventory_view_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<InventoryViewRequest>,
+) -> ApiResult<Json<Value>> {
+    let user_id = auth.session_user_id()?;
+    let (name, query) = validate_inventory_view(&request)?;
+    let view = archivist_db::create_inventory_view(&state.pool, user_id, &name, &query)
+        .await
+        .map_err(inventory_view_error)?;
+    Ok(Json(json!(view)))
+}
+
+async fn update_inventory_view_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+    Json(request): Json<InventoryViewRequest>,
+) -> ApiResult<Json<Value>> {
+    let user_id = auth.session_user_id()?;
+    let (name, query) = validate_inventory_view(&request)?;
+    let view = archivist_db::update_inventory_view(&state.pool, user_id, id, &name, &query)
+        .await
+        .map_err(inventory_view_error)?;
+    Ok(Json(json!(view)))
+}
+
+async fn delete_inventory_view_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let user_id = auth.session_user_id()?;
+    archivist_db::delete_inventory_view(&state.pool, user_id, id)
+        .await
+        .map_err(inventory_view_error)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InventoryExportFormat {
+    Csv,
+    Json,
+}
+
+impl InventoryExportFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+        }
+    }
+}
+
+/// Hard wall-clock budget for one inventory export (#447, same policy as the
+/// audit export #394).
+const INVENTORY_EXPORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Rows per keyset page of the inventory export (#447).
+const INVENTORY_EXPORT_PAGE_SIZE: i64 = 500;
+
+// `GET /api/inventory/export?format=csv|json&<filters>` (#447)
+//
+// Streams every inventory row matching the same filters as `/api/inventory`
+// (inventory:read, like the list). Bounded like the audit export (#394):
+// keyset pages that release their pool connection between pages, a bounded
+// channel for backpressure, one running export per actor (sharing the global
+// export slot cap) and a hard deadline. Each export is itself audited
+// (`inventory.exported`, with the canonical filter string).
+async fn inventory_export(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+) -> ApiResult<Response> {
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    let (format, canonical, inventory_query) =
+        parse_inventory_export_query(raw_query.as_deref().unwrap_or_default())?;
+
+    let actor = format!(
+        "inventory:{}:{}",
+        auth.0.actor_type,
+        auth.0.actor_id.as_deref().unwrap_or_default()
+    );
+    // The audit export's slot registry doubles as the global export cap; the
+    // "inventory:" key prefix keeps one inventory and one audit export per
+    // actor independent of each other.
+    let slot = AuditExportSlot::acquire(actor).ok_or_else(|| {
+        ApiError::too_many_requests(
+            "an inventory export is already running; retry when it finishes",
+        )
+    })?;
+    append_audit(
+        &state.pool,
+        AuditEventInput {
+            event_type: "inventory.exported".to_owned(),
+            actor_type: auth.0.actor_type.clone(),
+            actor_id: auth.0.actor_id.clone(),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: None,
+            metadata: Some(json!({ "format": format.as_str(), "filters": canonical })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+
+    let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        let _slot = slot;
+        run_inventory_export(
+            &pool,
+            inventory_query,
+            format,
+            tx,
+            INVENTORY_EXPORT_DEADLINE,
+        )
+        .await;
+    });
+
+    let (content_type, disposition) = match format {
+        InventoryExportFormat::Csv => (
+            "text/csv; charset=utf-8",
+            "attachment; filename=\"paperless-archivist-inventory.csv\"",
+        ),
+        InventoryExportFormat::Json => (
+            "application/json",
+            "attachment; filename=\"paperless-archivist-inventory.json\"",
+        ),
+    };
+    let mut response = Response::new(Body::from_stream(ReceiverStream::new(rx)));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(disposition),
+    );
+    Ok(response)
+}
+
+/// Split the export query into its `format` and the canonicalised filters
+/// (#447). Kept synchronous: the form-urlencoded serializer is not `Send`
+/// and must not live across an await in the handler.
+fn parse_inventory_export_query(
+    raw_query: &str,
+) -> Result<(InventoryExportFormat, String, archivist_db::InventoryQuery), ApiError> {
+    let mut format = InventoryExportFormat::Csv;
+    let mut filters = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if key == "format" {
+            format = match value.as_ref() {
+                "csv" => InventoryExportFormat::Csv,
+                "json" => InventoryExportFormat::Json,
+                _ => return Err(ApiError::bad_request("'format' must be csv or json")),
+            };
+        } else {
+            filters.append_pair(&key, &value);
+        }
+    }
+    let (canonical, query) = canonical_inventory_filter_query(&filters.finish())?;
+    Ok((format, canonical, query))
+}
+
+/// Stream the inventory export into `tx` until done, the client disconnects
+/// or `deadline` elapses; a deadline ends the stream with an error so the
+/// client sees a truncated download rather than a silent cut (#447).
+async fn run_inventory_export(
+    pool: &DbPool,
+    query: archivist_db::InventoryQuery,
+    format: InventoryExportFormat,
+    tx: AuditExportSender,
+    deadline: std::time::Duration,
+) {
+    let error_tx = tx.clone();
+    if tokio::time::timeout(deadline, write_inventory_export(pool, &query, format, tx))
+        .await
+        .is_err()
+    {
+        warn!(
+            deadline_seconds = deadline.as_secs(),
+            "inventory export aborted at its deadline"
+        );
+        let _ = error_tx.try_send(Err(std::io::Error::other(
+            "inventory export exceeded its time limit",
+        )));
+    }
+}
+
+const INVENTORY_CSV_HEADER: &str = "paperless_document_id,title,original_file_name,correspondent_id,correspondent,document_type_id,document_type,document_date,tags,ocr_status,metadata_status,run_status,needs_review,complete,detected_language,last_error,last_seen_at\n";
+
+async fn write_inventory_export(
+    pool: &DbPool,
+    query: &archivist_db::InventoryQuery,
+    format: InventoryExportFormat,
+    tx: AuditExportSender,
+) {
+    use bytes::Bytes;
+
+    let opening: &'static str = match format {
+        InventoryExportFormat::Csv => INVENTORY_CSV_HEADER,
+        InventoryExportFormat::Json => "[",
+    };
+    if tx
+        .send(Ok(Bytes::from_static(opening.as_bytes())))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut before_id: Option<i32> = None;
+    let mut first = true;
+    loop {
+        let rows = match archivist_db::list_inventory_keyset(
+            pool,
+            query,
+            before_id,
+            INVENTORY_EXPORT_PAGE_SIZE,
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                let _ = tx
+                    .send(Err(std::io::Error::other(format!(
+                        "stream inventory: {error}"
+                    ))))
+                    .await;
+                return;
+            }
+        };
+        for item in &rows {
+            let chunk = match format {
+                InventoryExportFormat::Csv => inventory_csv_row(item),
+                InventoryExportFormat::Json => match serde_json::to_string(item) {
+                    Ok(json) => format!("{}\n{json}", if first { "" } else { "," }),
+                    Err(error) => {
+                        let _ = tx
+                            .send(Err(std::io::Error::other(format!(
+                                "encode inventory row: {error}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                },
+            };
+            first = false;
+            if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+                return;
+            }
+        }
+        before_id = rows.last().map(|item| item.paperless_document_id);
+        if (rows.len() as i64) < INVENTORY_EXPORT_PAGE_SIZE {
+            break;
+        }
+    }
+    if format == InventoryExportFormat::Json {
+        let _ = tx.send(Ok(Bytes::from_static(b"\n]\n"))).await;
+    }
+}
+
+fn inventory_csv_row(item: &DocumentInventoryItem) -> String {
+    let optional_id = |id: Option<i32>| id.map(|id| id.to_string()).unwrap_or_default();
+    let cells = [
+        item.paperless_document_id.to_string(),
+        item.title.clone().unwrap_or_default(),
+        item.original_file_name.clone().unwrap_or_default(),
+        optional_id(item.correspondent_id),
+        item.correspondent_name.clone().unwrap_or_default(),
+        optional_id(item.document_type_id),
+        item.document_type_name.clone().unwrap_or_default(),
+        item.document_date
+            .map(|date| date.to_string())
+            .unwrap_or_default(),
+        item.current_tags.join("; "),
+        item.ocr_status.clone(),
+        item.metadata_status.clone(),
+        item.current_run_status.clone().unwrap_or_default(),
+        item.needs_review.to_string(),
+        item.complete.to_string(),
+        item.detected_language.clone().unwrap_or_default(),
+        item.last_error.clone().unwrap_or_default(),
+        item.last_seen_at.to_rfc3339(),
+    ];
+    let mut out = String::with_capacity(256);
+    for (i, cell) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&csv_escape(cell));
+    }
+    out.push('\n');
+    out
 }
 
 // `GET /api/inventory/duplicates`
@@ -6350,6 +6839,246 @@ async fn reviews(
     })))
 }
 
+/// Upper bound for one metadata option list. Archives with more entries get
+/// `truncated: true`; the review select then still offers the first page. #420
+const MAX_METADATA_OPTIONS: usize = 5000;
+
+fn metadata_options_body(mut items: Vec<archivist_db::PaperlessNamedOption>) -> Json<Value> {
+    let truncated = items.len() > MAX_METADATA_OPTIONS;
+    items.truncate(MAX_METADATA_OPTIONS);
+    Json(json!({ "items": items, "truncated": truncated }))
+}
+
+/// Synced Paperless correspondents `{id, name}` from the local mirror, for
+/// the review edit select. No Paperless round-trip. #420
+async fn paperless_correspondent_options(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    let items = archivist_db::list_paperless_correspondent_options(
+        &state.pool,
+        MAX_METADATA_OPTIONS as i64 + 1,
+    )
+    .await?;
+    Ok(metadata_options_body(items))
+}
+
+/// Synced Paperless document types `{id, name}` from the local mirror. #420
+async fn paperless_document_type_options(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    let items = archivist_db::list_paperless_document_type_options(
+        &state.pool,
+        MAX_METADATA_OPTIONS as i64 + 1,
+    )
+    .await?;
+    Ok(metadata_options_body(items))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewPreviewKind {
+    Thumbnail,
+    Document,
+}
+
+/// Content-Security-Policy for proxied preview bytes. Stricter than the SPA
+/// policy (no scripts, no connections); `object-src 'self'` keeps the
+/// browser's built-in PDF viewer working for the top-level PDF tab. #445
+const REVIEW_PREVIEW_CSP: &str = "default-src 'none'; object-src 'self'; img-src 'self'; \
+     style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// Proxy the Paperless thumbnail of a review's document. The browser never
+/// talks to Paperless: Archivist fetches with its server-side token from the
+/// configured (SSRF-validated) base URL, keyed by review id so only documents
+/// in the review queue are reachable. #445
+async fn review_thumbnail(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Response> {
+    review_preview_response(&state, id, ReviewPreviewKind::Thumbnail).await
+}
+
+/// Proxy the inline Paperless preview (archive PDF or image). #445
+async fn review_document_preview(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Response> {
+    review_preview_response(&state, id, ReviewPreviewKind::Document).await
+}
+
+async fn review_preview_response(
+    state: &AppState,
+    review_id: Uuid,
+    kind: ReviewPreviewKind,
+) -> ApiResult<Response> {
+    let document_id = archivist_db::review_document_id(&state.pool, review_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("review item does not exist"))?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    // Missing token/profile -> 409 NotConfigured like every Paperless route.
+    let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
+    let fetched = match kind {
+        ReviewPreviewKind::Thumbnail => client.download_thumbnail(document_id).await,
+        ReviewPreviewKind::Document => client.download_preview(document_id).await,
+    };
+    let preview = fetched.map_err(|error| review_preview_upstream_error(document_id, error))?;
+    let extension = match preview.content_type {
+        "application/pdf" => "pdf",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        _ => "webp",
+    };
+    let disposition = format!("inline; filename=\"document-{document_id}.{extension}\"");
+    let cache_control = match kind {
+        // Thumbnails are re-requested while triaging; the document is not.
+        ReviewPreviewKind::Thumbnail => "private, max-age=300",
+        ReviewPreviewKind::Document => "private, no-store",
+    };
+    let mut response = (StatusCode::OK, preview.bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(preview.content_type),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(REVIEW_PREVIEW_CSP),
+    );
+    if let Ok(value) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, value);
+    }
+    Ok(response)
+}
+
+/// Map a failed Paperless preview fetch without leaking upstream text. #445
+fn review_preview_upstream_error(document_id: i32, error: anyhow::Error) -> ApiError {
+    if let Some(archivist_paperless::PaperlessError::Client { status: 404, .. }) =
+        error.downcast_ref::<archivist_paperless::PaperlessError>()
+    {
+        return ApiError::not_found("document not found in Paperless");
+    }
+    warn!(document_id, error = %error, "review preview: Paperless fetch failed");
+    ApiError {
+        status: StatusCode::BAD_GATEWAY,
+        message: "could not load the preview from Paperless".to_owned(),
+    }
+}
+
+/// Choices for "retry with ...": enabled text providers (with the model the
+/// metadata stage would use) and the metadata prompt versions, without prompt
+/// content, so reviewers without settings access can pick one. #445
+async fn review_retry_options(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    let settings = get_runtime_settings(&state.pool).await?;
+    let default_provider = settings
+        .ai
+        .stage_models
+        .iter()
+        .find(|entry| entry.stage == Stage::Metadata)
+        .map(|entry| entry.provider.clone())
+        .unwrap_or_else(|| settings.ai.default_provider.clone());
+    let prompts: Vec<Value> = list_prompts(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|prompt| prompt.stage == Stage::Metadata)
+        .map(|prompt| {
+            json!({
+                "id": prompt.id,
+                "name": prompt.name,
+                "version": prompt.version,
+                "active": prompt.active,
+                "created_at": prompt.created_at
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "providers": settings.ai.metadata_retry_providers(),
+        "default_provider": default_provider,
+        "prompts": prompts
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetryReviewRequest {
+    #[serde(default)]
+    provider_name: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    prompt_id: Option<Uuid>,
+}
+
+/// "Retry with provider/model/prompt": reject the pending metadata review
+/// (and its pending siblings) and queue a new metadata run whose job uses the
+/// chosen configuration once. Requires a reviewer session like every other
+/// review decision. #445
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(review_id = %id, user_id = tracing::field::Empty)
+)]
+async fn retry_review(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RetryReviewRequest>,
+) -> ApiResult<Json<Value>> {
+    let actor_id = auth.session_user_id()?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
+    let overrides = archivist_core::MetadataRetryOverrides {
+        provider_name: request.provider_name,
+        model: request.model,
+        prompt_id: request.prompt_id,
+    }
+    .normalized();
+    let settings = get_runtime_settings(&state.pool).await?;
+    overrides
+        .validate(&settings.ai)
+        .map_err(ApiError::bad_request)?;
+    if let Some(prompt_id) = overrides.prompt_id {
+        match archivist_db::get_prompt_by_id(&state.pool, prompt_id).await? {
+            Some(prompt) if prompt.stage == Stage::Metadata => {}
+            _ => {
+                return Err(ApiError::bad_request(
+                    "prompt_id must reference a metadata prompt version",
+                ));
+            }
+        }
+    }
+    let payload = serde_json::to_value(&overrides)
+        .map_err(|_| ApiError::internal("could not encode retry overrides"))?;
+    match archivist_db::retry_review_with_overrides(&state.pool, id, actor_id, &payload).await? {
+        archivist_db::ReviewRetryOutcome::Queued {
+            run_id,
+            rejected_review_ids,
+        } => {
+            info!(review_id = %id, %run_id, "review retried with overrides");
+            Ok(Json(json!({
+                "run_id": run_id,
+                "rejected_review_ids": rejected_review_ids
+            })))
+        }
+        archivist_db::ReviewRetryOutcome::UnsupportedStage => Err(ApiError::bad_request(
+            "only metadata reviews can be retried with another model or prompt",
+        )),
+        archivist_db::ReviewRetryOutcome::SiblingInFlight => Err(ApiError::conflict(
+            "another suggestion for this document is being applied; retry once it has finished",
+        )),
+        archivist_db::ReviewRetryOutcome::ActiveRun => {
+            Err(ApiError::conflict("the document already has an active run"))
+        }
+    }
+}
+
 fn review_with_debug(review: ReviewItemRecord, settings: &RuntimeSettings) -> Result<Value> {
     let mut value = serde_json::to_value(review)?;
     if let Some(object) = value.as_object_mut() {
@@ -7102,8 +7831,94 @@ async fn release_scheduled_retries_endpoint(
 #[derive(Debug, Deserialize)]
 struct AuditQuery {
     limit: Option<i64>,
+    /// Username, user UUID or raw actor id (e.g. an API token name). #448
+    actor: Option<String>,
+    actor_type: Option<String>,
+    document_id: Option<i32>,
+    /// Comma-separated exact event types. #448
+    event_type: Option<String>,
+    outcome: Option<String>,
+    /// Inclusive lower bound (RFC 3339 or YYYY-MM-DD). #448
+    from: Option<String>,
+    /// Exclusive upper bound (RFC 3339); a YYYY-MM-DD date includes that whole day. #448
+    to: Option<String>,
+    /// Opaque keyset cursor from a previous page's `next_cursor`. #448
+    cursor: Option<String>,
 }
 
+/// Maximum event types per audit filter (#448).
+const AUDIT_EVENT_TYPE_FILTER_MAX: usize = 20;
+/// Maximum length of any single free-text audit filter value (#448).
+const AUDIT_FILTER_VALUE_MAX_CHARS: usize = 200;
+
+fn audit_filter_text(name: &str, raw: Option<String>) -> Result<Option<String>, ApiError> {
+    match raw.map(|value| value.trim().to_owned()) {
+        Some(value) if value.is_empty() => Ok(None),
+        Some(value) if value.chars().count() > AUDIT_FILTER_VALUE_MAX_CHARS => {
+            Err(ApiError::bad_request(format!("'{name}' is too long")))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Parse an audit time bound (#448): RFC 3339, or a plain `YYYY-MM-DD` date
+/// meaning midnight UTC of that day (`end_of_day` moves a date `to` bound to
+/// the next midnight so the named day is included).
+fn parse_audit_time_bound(
+    name: &str,
+    raw: Option<&str>,
+    end_of_day: bool,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(instant) = DateTime::parse_from_rfc3339(value) {
+        return Ok(Some(instant.with_timezone(&Utc)));
+    }
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        ApiError::bad_request(format!(
+            "'{name}' must be an RFC 3339 timestamp or a YYYY-MM-DD date"
+        ))
+    })?;
+    let date = if end_of_day {
+        date.succ_opt()
+            .ok_or_else(|| ApiError::bad_request(format!("'{name}' is out of range")))?
+    } else {
+        date
+    };
+    Ok(Some(date.and_time(chrono::NaiveTime::MIN).and_utc()))
+}
+
+/// Encode the keyset position of the last returned audit event (#448). The
+/// cursor is opaque to clients: base64url of `<created_at micros>|<id>`.
+fn encode_audit_cursor(created_at: DateTime<Utc>, id: Uuid) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(
+        "{}|{id}",
+        created_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+    ))
+}
+
+fn decode_audit_cursor(raw: &str) -> Result<(DateTime<Utc>, Uuid), ApiError> {
+    use base64::Engine as _;
+    let invalid = || ApiError::bad_request("invalid audit cursor");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw.trim())
+        .map_err(|_| invalid())?;
+    let text = String::from_utf8(bytes).map_err(|_| invalid())?;
+    let (created_at, id) = text.split_once('|').ok_or_else(invalid)?;
+    let created_at = DateTime::parse_from_rfc3339(created_at)
+        .map_err(|_| invalid())?
+        .with_timezone(&Utc);
+    let id = Uuid::parse_str(id).map_err(|_| invalid())?;
+    Ok((created_at, id))
+}
+
+// `GET /api/audit` (#448): newest-first audit events with server-side
+// filters (actor, actor type, document, event types, outcome, time range)
+// and keyset pagination over (created_at, id). Every single-dimension filter
+// is backed by a keyset-shaped index (migration 0057), so deep pages cost the
+// same as the first one.
 async fn audit_events(
     State(state): State<AppState>,
     _auth: Authenticated,
@@ -7112,9 +7927,80 @@ async fn audit_events(
     // Clamp so a caller that only needs a handful of rows (the debug console)
     // doesn't pull the full 200, and a large value can't be requested. (#277)
     let limit = query.limit.unwrap_or(200).clamp(1, 500);
-    Ok(Json(
-        json!({ "items": list_audit_events(&state.pool, limit).await? }),
-    ))
+    let actor_id = match audit_filter_text("actor", query.actor)? {
+        None => None,
+        // User events store the user's UUID as actor_id; accept a username
+        // too so the UI can filter by the name it displays. Other actors
+        // (API tokens, the worker) are matched by their raw actor id.
+        Some(actor) if Uuid::parse_str(&actor).is_ok() => Some(actor.to_lowercase()),
+        Some(actor) => Some(
+            match archivist_db::find_user_id_by_username(&state.pool, &actor).await? {
+                Some(user_id) => user_id.to_string(),
+                None => actor,
+            },
+        ),
+    };
+    let event_types = split_csv(query.event_type);
+    if event_types.len() > AUDIT_EVENT_TYPE_FILTER_MAX
+        || event_types
+            .iter()
+            .any(|value| value.chars().count() > AUDIT_FILTER_VALUE_MAX_CHARS)
+    {
+        return Err(ApiError::bad_request(format!(
+            "'event_type' accepts at most {AUDIT_EVENT_TYPE_FILTER_MAX} event types"
+        )));
+    }
+    let filter = archivist_db::AuditEventFilter {
+        actor_id,
+        actor_type: audit_filter_text("actor_type", query.actor_type)?,
+        paperless_document_id: query.document_id,
+        event_types,
+        outcome: audit_filter_text("outcome", query.outcome)?,
+        from: parse_audit_time_bound("from", query.from.as_deref(), false)?,
+        to: parse_audit_time_bound("to", query.to.as_deref(), true)?,
+        before: query
+            .cursor
+            .as_deref()
+            .filter(|cursor| !cursor.trim().is_empty())
+            .map(decode_audit_cursor)
+            .transpose()?,
+    };
+    // One extra row tells whether another page exists without a count query.
+    let mut items = list_audit_events(&state.pool, &filter, limit + 1).await?;
+    let next_cursor = if items.len() as i64 > limit {
+        items.truncate(limit as usize);
+        items
+            .last()
+            .map(|last| encode_audit_cursor(last.created_at, last.id))
+    } else {
+        None
+    };
+    Ok(Json(json!({ "items": items, "next_cursor": next_cursor })))
+}
+
+// `GET /api/audit/{id}` (#448): one event with its before/after snapshots
+// for the diff view. `append_audit` already redacts credential-like keys on
+// write; redacting again on read (same rules) also covers rows written before
+// that, so a snapshot can never surface a secret.
+async fn audit_event_detail(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let Some(mut detail) = archivist_db::get_audit_event(&state.pool, id).await? else {
+        return Err(ApiError::not_found("audit event not found"));
+    };
+    for value in [
+        detail.before.as_mut(),
+        detail.after.as_mut(),
+        detail.event.metadata.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        archivist_core::redact_sensitive_json(value);
+    }
+    Ok(Json(json!(detail)))
 }
 
 /// Hard wall-clock budget for one CSV export. A client that stops reading
@@ -11908,6 +12794,298 @@ mod tests {
         handle.abort();
     }
 
+    /// Session cookie + CSRF pair for a fresh user with `roles`.
+    async fn session_for_roles(pool: &DbPool, label: &str, roles: &[Role]) -> (String, String) {
+        let suffix = Uuid::now_v7().simple().to_string();
+        let user = create_user_with_roles(
+            pool,
+            &format!("{label}-{suffix}"),
+            None,
+            "hash",
+            roles,
+            None,
+        )
+        .await
+        .expect("user");
+        let session_token = random_token();
+        let csrf_token = random_token();
+        create_session(
+            pool,
+            user,
+            &hash_token(&session_token),
+            &hash_token(&csrf_token),
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .expect("session");
+        (session_token, csrf_token)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn review_metadata_options_retry_and_preview_proxy_follow_permissions() {
+        // #420 / #445
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        sqlx::query("delete from settings where key = 'runtime'")
+            .execute(&pool)
+            .await
+            .expect("reset settings");
+        sqlx::query("truncate paperless_correspondents, paperless_document_types")
+            .execute(&pool)
+            .await
+            .expect("truncate mirrors");
+        sqlx::query(
+            "insert into paperless_correspondents (id, name) values (4, 'ACME'), (2, 'bank')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed correspondents");
+        sqlx::query("insert into paperless_document_types (id, name) values (5, 'Invoice')")
+            .execute(&pool)
+            .await
+            .expect("seed document types");
+
+        let (reviewer, reviewer_csrf) =
+            session_for_roles(&pool, "retry-reviewer", &[Role::Reviewer]).await;
+        let (viewer, _) = session_for_roles(&pool, "retry-viewer", &[Role::Viewer]).await;
+        let (auditor, _) = session_for_roles(&pool, "retry-auditor", &[Role::Auditor]).await;
+
+        // Mock Paperless serving a thumbnail and a PDF preview for any id.
+        let paperless = Router::new()
+            .route(
+                "/api/documents/{id}/thumb/",
+                get(|| async { ([(header::CONTENT_TYPE, "image/webp")], "webp-bytes") }),
+            )
+            .route(
+                "/api/documents/{id}/preview/",
+                get(|| async { ([(header::CONTENT_TYPE, "application/pdf")], "%PDF-1.7") }),
+            );
+        let paperless_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let paperless_addr = paperless_listener.local_addr().unwrap();
+        let paperless_handle = tokio::spawn(async move {
+            axum::serve(paperless_listener, paperless).await.ok();
+        });
+
+        let (base, handle) = spawn_api_router(state.clone()).await;
+        let client = no_redirect_client();
+        let get_as = |session: &str, path: &str| {
+            client.get(format!("{base}{path}")).header(
+                reqwest::header::COOKIE,
+                format!("{SESSION_COOKIE}={session}"),
+            )
+        };
+
+        // #420: reviewers and viewers read the mirror; auditors cannot.
+        for session in [&reviewer, &viewer] {
+            let response = get_as(session, "/api/paperless/correspondents")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(
+                body["items"],
+                json!([{ "id": 4, "name": "ACME" }, { "id": 2, "name": "bank" }])
+            );
+            assert_eq!(body["truncated"], false);
+        }
+        let types: Value = get_as(&reviewer, "/api/paperless/document-types")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(types["items"], json!([{ "id": 5, "name": "Invoice" }]));
+        for path in [
+            "/api/paperless/correspondents",
+            "/api/paperless/document-types",
+        ] {
+            let response = get_as(&auditor, path).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+
+        // #445 preview proxy: 404 for unknown reviews, 503 while Paperless is
+        // not configured, vetted bytes once it is.
+        let review = seed_pending_review(&pool).await;
+        let unknown = get_as(
+            &reviewer,
+            &format!("/api/reviews/{}/thumbnail", Uuid::now_v7()),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let unconfigured = get_as(&reviewer, &format!("/api/reviews/{review}/thumbnail"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unconfigured.status(), StatusCode::CONFLICT);
+        let viewer_preview = get_as(&viewer, &format!("/api/reviews/{review}/preview"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(viewer_preview.status(), StatusCode::FORBIDDEN);
+
+        let actor = create_user_with_roles(
+            &pool,
+            &format!("retry-settings-{}", Uuid::now_v7().simple()),
+            None,
+            "hash",
+            &[Role::Admin],
+            None,
+        )
+        .await
+        .expect("settings actor");
+        let secret_id = upsert_encrypted_secret(
+            &pool,
+            &state.config.secret_key,
+            "paperless-api-token",
+            &SecretString::from("paperless-token".to_owned()),
+            actor,
+        )
+        .await
+        .expect("secret");
+        let mut settings = RuntimeSettings::default();
+        settings.paperless.base_url = format!("http://{paperless_addr}");
+        settings.paperless.token_secret_id = Some(secret_id);
+        let settings = settings.normalized();
+        update_runtime_settings(&pool, &settings, actor)
+            .await
+            .expect("store settings");
+
+        let thumb = get_as(&reviewer, &format!("/api/reviews/{review}/thumbnail"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(thumb.status(), StatusCode::OK);
+        assert_eq!(thumb.headers()[reqwest::header::CONTENT_TYPE], "image/webp");
+        assert!(
+            thumb.headers()[reqwest::header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .starts_with("default-src 'none'")
+        );
+        assert_eq!(thumb.bytes().await.unwrap().as_ref(), b"webp-bytes");
+        let pdf = get_as(&reviewer, &format!("/api/reviews/{review}/preview"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pdf.status(), StatusCode::OK);
+        assert_eq!(
+            pdf.headers()[reqwest::header::CONTENT_TYPE],
+            "application/pdf"
+        );
+        assert_eq!(
+            pdf.headers()[reqwest::header::CACHE_CONTROL],
+            "private, no-store"
+        );
+
+        // #445 retry: options for reviewers, validated overrides, one new run.
+        let options: Value = get_as(&reviewer, "/api/reviews/retry-options")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            options["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|provider| provider["name"] == "ollama"),
+            "{options}"
+        );
+        let viewer_options = get_as(&viewer, "/api/reviews/retry-options")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(viewer_options.status(), StatusCode::FORBIDDEN);
+
+        // Retries need a job-backed review (the sibling aggregate closes the
+        // original run before the new one is created).
+        archivist_db::create_run_with_jobs_with_priority(
+            &pool,
+            44_501,
+            &[Stage::Metadata],
+            ProcessingMode::ManualReview,
+            "test",
+            "test",
+            Some(0),
+        )
+        .await
+        .expect("metadata run");
+        let job = archivist_db::claim_jobs(&pool, 1, "retry-test-worker", 300)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("metadata job");
+        let retry_target = archivist_db::create_review_item(
+            &pool,
+            &job,
+            json!({ "correspondent": 4 }),
+            json!([]),
+            json!({}),
+            "retry-test-worker",
+        )
+        .await
+        .expect("review")
+        .expect("review id");
+        let post_retry = |body: Value| {
+            client
+                .post(format!("{base}/api/reviews/{retry_target}/retry"))
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("{SESSION_COOKIE}={reviewer}"),
+                )
+                .header("x-csrf-token", &reviewer_csrf)
+                .json(&body)
+        };
+        let bad_provider = post_retry(json!({ "provider_name": "does-not-exist" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_provider.status(), StatusCode::BAD_REQUEST);
+        let bad_prompt = post_retry(json!({ "prompt_id": Uuid::now_v7() }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_prompt.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(review_status_of(&pool, retry_target).await, "pending");
+
+        let retried = post_retry(json!({ "provider_name": "ollama", "model": "qwen3:14b" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retried.status(), StatusCode::OK);
+        let body: Value = retried.json().await.unwrap();
+        let run_id: Uuid = body["run_id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(review_status_of(&pool, retry_target).await, "rejected");
+        let payload: Value = sqlx::query_scalar("select payload from jobs where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("retry job");
+        assert_eq!(
+            payload["retry_overrides"],
+            json!({ "provider_name": "ollama", "model": "qwen3:14b" })
+        );
+        let again = post_retry(json!({})).send().await.unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+
+        sqlx::query("delete from settings where key = 'runtime'")
+            .execute(&pool)
+            .await
+            .expect("restore default settings");
+        handle.abort();
+        paperless_handle.abort();
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
     async fn audit_export_is_audited_and_its_deadline_frees_the_pool() {
@@ -12585,6 +13763,472 @@ mod tests {
             json!([{ "paperless_document_id": 440002, "fields": ["title"] }])
         );
         assert_eq!(response.body["ok"], false);
+    }
+
+    // ----- #447 inventory filters / views / export, #448 audit log --------
+
+    #[test]
+    fn inventory_id_filters_accept_ids_and_none_only() {
+        let filter = parse_inventory_id_filter("correspondent", Some("7, none,7,12".to_owned()))
+            .expect("valid filter");
+        assert_eq!(filter.ids, vec![7, 12]);
+        assert!(filter.include_none);
+        assert!(
+            parse_inventory_id_filter("correspondent", None)
+                .unwrap()
+                .is_empty()
+        );
+        for bad in ["abc", "0", "-3", "7;8"] {
+            let error =
+                parse_inventory_id_filter("document_type", Some(bad.to_owned())).expect_err(bad);
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let too_many = (1..=101)
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_inventory_id_filter("correspondent", Some(too_many)).is_err());
+    }
+
+    #[test]
+    fn inventory_filter_queries_are_validated_and_canonicalised() {
+        let (canonical, query) =
+            canonical_inventory_filter_query("?tag=inbox&q=&ocr_status=failed&correspondent=none")
+                .expect("valid");
+        assert_eq!(canonical, "ocr_status=failed&tag=inbox&correspondent=none");
+        assert_eq!(query.tags_include, vec!["inbox".to_owned()]);
+        assert!(query.correspondent.include_none);
+        assert_eq!(canonical_inventory_filter_query("").unwrap().0, "");
+        for bad in [
+            "limit=10",
+            "unknown=1",
+            "tag=a&tag=b",
+            "date_from=27.09.2026",
+            "has_error=maybe",
+            "document_type=x",
+        ] {
+            let error = canonical_inventory_filter_query(bad).expect_err(bad);
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let long = format!("q={}", "x".repeat(INVENTORY_FILTER_QUERY_MAX_BYTES));
+        assert!(canonical_inventory_filter_query(&long).is_err());
+
+        let (format, canonical, _) =
+            parse_inventory_export_query("format=json&document_type=3").expect("export query");
+        assert_eq!(format, InventoryExportFormat::Json);
+        assert_eq!(canonical, "document_type=3");
+        assert_eq!(
+            parse_inventory_export_query("").unwrap().0,
+            InventoryExportFormat::Csv
+        );
+        assert!(parse_inventory_export_query("format=xml").is_err());
+        assert!(parse_inventory_export_query("offset=5").is_err());
+
+        let view = validate_inventory_view(&InventoryViewRequest {
+            name: "  Inbox  ".to_owned(),
+            query: "tag=inbox".to_owned(),
+        })
+        .expect("valid view");
+        assert_eq!(view, ("Inbox".to_owned(), "tag=inbox".to_owned()));
+        for name in ["", "   ", "tab\tname", &"n".repeat(81)] {
+            assert!(
+                validate_inventory_view(&InventoryViewRequest {
+                    name: name.to_owned(),
+                    query: String::new(),
+                })
+                .is_err(),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_csv_rows_guard_formulas_and_escape() {
+        let item = DocumentInventoryItem {
+            paperless_document_id: 5,
+            title: Some("=HYPERLINK(\"x\")".to_owned()),
+            original_file_name: Some("a,b.pdf".to_owned()),
+            current_tags: vec!["inbox".to_owned(), "tax".to_owned()],
+            ocr_status: "succeeded".to_owned(),
+            metadata_status: "queued".to_owned(),
+            current_run_status: None,
+            last_run_id: None,
+            last_error: None,
+            next_required_stage: None,
+            needs_review: false,
+            complete: false,
+            document_date: chrono::NaiveDate::from_ymd_opt(2026, 9, 27),
+            detected_language: None,
+            detected_language_confidence: None,
+            detected_language_source: None,
+            last_seen_at: Utc::now(),
+            correspondent_id: Some(7),
+            correspondent_name: Some("ACME".to_owned()),
+            document_type_id: None,
+            document_type_name: None,
+        };
+        let row = inventory_csv_row(&item);
+        assert!(row.starts_with(
+            "5,\"'=HYPERLINK(\"\"x\"\")\",\"a,b.pdf\",7,ACME,,,2026-09-27,inbox; tax,"
+        ));
+        assert!(row.ends_with('\n'));
+    }
+
+    #[test]
+    fn audit_cursor_and_time_bounds_round_trip() {
+        let created_at = Utc::now();
+        let id = Uuid::now_v7();
+        let cursor = encode_audit_cursor(created_at, id);
+        let (decoded_at, decoded_id) = decode_audit_cursor(&cursor).expect("decode");
+        assert_eq!(decoded_id, id);
+        assert_eq!(decoded_at.timestamp_micros(), created_at.timestamp_micros());
+        for bad in ["", "not base64!", "Zm9v"] {
+            assert_eq!(
+                decode_audit_cursor(bad).expect_err(bad).status,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let from = parse_audit_time_bound("from", Some("2026-09-27"), false)
+            .unwrap()
+            .unwrap();
+        let to = parse_audit_time_bound("to", Some("2026-09-27"), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(to - from, Duration::days(1));
+        assert_eq!(
+            parse_audit_time_bound("to", Some("2026-09-27T10:00:00+02:00"), true)
+                .unwrap()
+                .unwrap()
+                .to_rfc3339(),
+            "2026-09-27T08:00:00+00:00"
+        );
+        assert!(parse_audit_time_bound("from", Some("yesterday"), false).is_err());
+        assert!(
+            parse_audit_time_bound("from", Some("  "), false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn inventory_filters_views_and_export_through_the_router() {
+        // #447
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        sqlx::query(
+            "delete from document_inventory where paperless_document_id between 447000 and 447999",
+        )
+        .execute(&pool)
+        .await
+        .expect("clear fixtures");
+        sqlx::query(
+            r#"
+            insert into paperless_correspondents (id, name) values (44701, 'ACME Bank')
+              on conflict (id) do update set name = excluded.name;
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("correspondent");
+        sqlx::query(
+            r#"
+            insert into document_inventory (paperless_document_id, title, correspondent_id)
+            values (447001, '=SUM(A1)', 44701), (447002, 'Letter', 44701), (447003, 'Other', null)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("inventory fixtures");
+        let (viewer, viewer_session) = harness_user(&pool, "inv-viewer", &[Role::Viewer]).await;
+        let (_, other_session) = harness_user(&pool, "inv-other", &[Role::Viewer]).await;
+        let token = harness_token(&pool, viewer, &["inventory:read"]).await;
+        let api = TestApi::new(state);
+
+        let list = api
+            .send(
+                Method::GET,
+                "/api/inventory?correspondent=44701",
+                &viewer_session,
+                None,
+            )
+            .await;
+        assert_eq!(list.status, StatusCode::OK, "{}", list.body);
+        assert_eq!(list.body["total"], 2);
+        assert_eq!(list.body["items"][0]["correspondent_name"], "ACME Bank");
+        let rejected = api
+            .send(
+                Method::GET,
+                "/api/inventory?correspondent=acme",
+                &viewer_session,
+                None,
+            )
+            .await;
+        assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+
+        // CSV: header + the two matching rows, formula neutralised.
+        let csv = api
+            .send(
+                Method::GET,
+                "/api/inventory/export?correspondent=44701",
+                &viewer_session,
+                None,
+            )
+            .await;
+        assert_eq!(csv.status, StatusCode::OK);
+        assert!(
+            csv.headers[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/csv")
+        );
+        let text = csv.body.as_str().expect("csv text");
+        assert_eq!(text.lines().count(), 3, "{text}");
+        assert!(text.contains("447001,'=SUM(A1),"), "{text}");
+        assert!(!text.contains("447003"));
+
+        // JSON via an API token with inventory:read.
+        let json_export = api
+            .send(
+                Method::GET,
+                "/api/inventory/export?format=json&correspondent=none&q=Other",
+                &token,
+                None,
+            )
+            .await;
+        assert_eq!(json_export.status, StatusCode::OK);
+        let rows = json_export.body.as_array().expect("json array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["paperless_document_id"], 447003);
+        let bad_format = api
+            .send(
+                Method::GET,
+                "/api/inventory/export?format=xlsx",
+                &token,
+                None,
+            )
+            .await;
+        assert_eq!(bad_format.status, StatusCode::BAD_REQUEST);
+
+        let exported: Vec<Value> = sqlx::query_scalar(
+            "select metadata from audit_events where event_type = 'inventory.exported' order by created_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("export audit");
+        assert_eq!(
+            exported,
+            vec![
+                json!({ "format": "csv", "filters": "correspondent=44701" }),
+                json!({ "format": "json", "filters": "q=Other&correspondent=none" }),
+            ]
+        );
+
+        // Saved views: canonicalised, private, unique per user.
+        let created = api
+            .send(
+                Method::POST,
+                "/api/inventory/views",
+                &viewer_session,
+                Some(json!({ "name": "ACME", "query": "?correspondent=44701&ocr_status=failed" })),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+        assert_eq!(
+            created.body["query"],
+            "ocr_status=failed&correspondent=44701"
+        );
+        let view_id = created.body["id"].as_str().unwrap().to_owned();
+        let duplicate = api
+            .send(
+                Method::POST,
+                "/api/inventory/views",
+                &viewer_session,
+                Some(json!({ "name": "acme", "query": "" })),
+            )
+            .await;
+        assert_eq!(duplicate.status, StatusCode::CONFLICT);
+        let invalid = api
+            .send(
+                Method::POST,
+                "/api/inventory/views",
+                &viewer_session,
+                Some(json!({ "name": "Bad", "query": "limit=5" })),
+            )
+            .await;
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+        let others = api
+            .send(Method::GET, "/api/inventory/views", &other_session, None)
+            .await;
+        assert_eq!(others.body["items"], json!([]));
+        let foreign = api
+            .send(
+                Method::DELETE,
+                &format!("/api/inventory/views/{view_id}"),
+                &other_session,
+                None,
+            )
+            .await;
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        let renamed = api
+            .send(
+                Method::PUT,
+                &format!("/api/inventory/views/{view_id}"),
+                &viewer_session,
+                Some(json!({ "name": "ACME failures", "query": "correspondent=44701" })),
+            )
+            .await;
+        assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+        let listed = api
+            .send(Method::GET, "/api/inventory/views", &viewer_session, None)
+            .await;
+        assert_eq!(listed.body["items"][0]["name"], "ACME failures");
+        let deleted = api
+            .send(
+                Method::DELETE,
+                &format!("/api/inventory/views/{view_id}"),
+                &viewer_session,
+                None,
+            )
+            .await;
+        assert_eq!(deleted.status, StatusCode::OK);
+        let token_views = api
+            .send(Method::GET, "/api/inventory/views", &token, None)
+            .await;
+        assert_eq!(token_views.status, StatusCode::FORBIDDEN);
+
+        sqlx::query(
+            "delete from document_inventory where paperless_document_id between 447000 and 447999",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean fixtures");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn audit_log_filters_pages_and_redacts_details_through_the_router() {
+        // #448
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        let (auditor, auditor_session) = harness_user(&pool, "auditor", &[Role::Auditor]).await;
+        let (_, viewer_session) = harness_user(&pool, "audit-viewer", &[Role::Viewer]).await;
+        for index in 0..3 {
+            append_audit(
+                &pool,
+                AuditEventInput {
+                    event_type: "document.patch_confirmed".to_owned(),
+                    actor_type: "user".to_owned(),
+                    actor_id: Some(auditor.to_string()),
+                    run_id: None,
+                    job_id: None,
+                    paperless_document_id: Some(448000 + index),
+                    before: Some(json!({ "title": "old", "password": "hunter2" })),
+                    after: Some(json!({ "title": format!("new {index}") })),
+                    metadata: None,
+                    outcome: "success".to_owned(),
+                    error_message: None,
+                    source_ip: None,
+                    user_agent: None,
+                },
+            )
+            .await
+            .expect("fixture");
+        }
+        let api = TestApi::new(state);
+
+        let denied = api
+            .send(
+                Method::GET,
+                "/api/audit?document_id=448001",
+                &viewer_session,
+                None,
+            )
+            .await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+
+        let one = api
+            .send(
+                Method::GET,
+                "/api/audit?document_id=448001",
+                &auditor_session,
+                None,
+            )
+            .await;
+        assert_eq!(one.status, StatusCode::OK, "{}", one.body);
+        assert_eq!(one.body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(one.body["items"][0]["has_changes"], true);
+        assert_eq!(one.body["next_cursor"], Value::Null);
+
+        // Two pages of the actor's events.
+        let first = api
+            .send(
+                Method::GET,
+                &format!("/api/audit?actor={auditor}&event_type=document.patch_confirmed&limit=2"),
+                &auditor_session,
+                None,
+            )
+            .await;
+        assert_eq!(first.body["items"].as_array().unwrap().len(), 2);
+        let cursor = first.body["next_cursor"]
+            .as_str()
+            .expect("cursor")
+            .to_owned();
+        let second = api
+            .send(
+                Method::GET,
+                &format!(
+                    "/api/audit?actor={auditor}&event_type=document.patch_confirmed&limit=2&cursor={cursor}"
+                ),
+                &auditor_session,
+                None,
+            )
+            .await;
+        let second_items = second.body["items"].as_array().unwrap();
+        assert_eq!(second_items.len(), 1);
+        assert_eq!(second_items[0]["paperless_document_id"], 448000);
+        assert_eq!(second.body["next_cursor"], Value::Null);
+
+        let bad_cursor = api
+            .send(
+                Method::GET,
+                "/api/audit?cursor=nope",
+                &auditor_session,
+                None,
+            )
+            .await;
+        assert_eq!(bad_cursor.status, StatusCode::BAD_REQUEST);
+        let bad_from = api
+            .send(Method::GET, "/api/audit?from=soon", &auditor_session, None)
+            .await;
+        assert_eq!(bad_from.status, StatusCode::BAD_REQUEST);
+
+        let id = one.body["items"][0]["id"].as_str().unwrap().to_owned();
+        let detail = api
+            .send(
+                Method::GET,
+                &format!("/api/audit/{id}"),
+                &auditor_session,
+                None,
+            )
+            .await;
+        assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+        assert_eq!(detail.body["before"]["title"], "old");
+        assert_eq!(detail.body["before"]["password"], "[REDACTED]");
+        assert_eq!(detail.body["after"]["title"], "new 1");
+        let missing = api
+            .send(
+                Method::GET,
+                &format!("/api/audit/{}", Uuid::now_v7()),
+                &auditor_session,
+                None,
+            )
+            .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
     }
 }
 

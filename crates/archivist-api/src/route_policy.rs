@@ -95,6 +95,9 @@ const CHAT_SESSION: AuthKinds = SessionOnly("document chat requires a user sessi
 const USER_SESSION: AuthKinds = SessionOnly("user management requires a user session");
 const PROMPT_SESSION: AuthKinds = SessionOnly("prompt management requires a user session");
 const RECOVERY_SESSION: AuthKinds = SessionOnly("recovery requires a user session");
+/// Saved inventory views are private per user (#447).
+const INVENTORY_VIEW_SESSION: AuthKinds =
+    SessionOnly("saved inventory views require a user session");
 
 /// The route table. Paths are the full request paths (as `MatchedPath`
 /// reports them and OpenAPI documents them). Session-only messages are the
@@ -139,6 +142,9 @@ pub(crate) const ROUTE_POLICIES: &[RoutePolicy] = &[
     // Paperless sync and consistency.
     route(Post, "/api/paperless/sync-metadata", Require(WriteBatches), SessionOrToken),
     route(Get, "/api/paperless/consistency", Require(ReadInventory), SessionOrToken),
+    // #420: synced correspondent / document type names for the review edit select.
+    route(Get, "/api/paperless/correspondents", Require(ReadInventory), SessionOrToken),
+    route(Get, "/api/paperless/document-types", Require(ReadInventory), SessionOrToken),
     route(Post, "/api/paperless/completion-tags/reconcile", Require(WriteBatches), SessionOrToken),
     // Dashboard, statistics, inventory.
     route(Get, "/api/dashboard", Require(ReadDashboard), SessionOrToken),
@@ -146,6 +152,11 @@ pub(crate) const ROUTE_POLICIES: &[RoutePolicy] = &[
     route(Get, "/api/statistics", Require(ReadDashboard), SessionOrToken),
     route(Get, "/api/inventory", Require(ReadInventory), SessionOrToken),
     route(Get, "/api/inventory/duplicates", Require(ReadInventory), SessionOrToken),
+    route(Get, "/api/inventory/export", Require(ReadInventory), SessionOrToken),
+    route(Get, "/api/inventory/views", Require(ReadInventory), INVENTORY_VIEW_SESSION),
+    route(Post, "/api/inventory/views", Require(ReadInventory), INVENTORY_VIEW_SESSION),
+    route(Put, "/api/inventory/views/{id}", Require(ReadInventory), INVENTORY_VIEW_SESSION),
+    route(Delete, "/api/inventory/views/{id}", Require(ReadInventory), INVENTORY_VIEW_SESSION),
     route(Get, "/api/inventory/{document_id}/metadata-trace", Require(ReadInventory), SessionOrToken),
     // Document chat is always per person.
     route(Get, "/api/chat/sessions", Require(UseChat), CHAT_SESSION),
@@ -172,6 +183,11 @@ pub(crate) const ROUTE_POLICIES: &[RoutePolicy] = &[
     route(Post, "/api/reviews/{id}/reject", Require(WriteReviews), REVIEW_SESSION),
     route(Post, "/api/reviews/{id}/edit", Require(WriteReviews), REVIEW_SESSION),
     route(Post, "/api/reviews/{id}/auto-fix", Require(WriteReviews), REVIEW_SESSION),
+    // #445: retry with provider/model/prompt, document preview proxy.
+    route(Get, "/api/reviews/retry-options", Require(WriteReviews), SessionOrToken),
+    route(Post, "/api/reviews/{id}/retry", Require(WriteReviews), REVIEW_SESSION),
+    route(Get, "/api/reviews/{id}/thumbnail", Require(ReadReviews), SessionOrToken),
+    route(Get, "/api/reviews/{id}/preview", Require(ReadReviews), SessionOrToken),
     // Operations.
     route(Get, "/api/operations/recovery", Require(ReadRuns), SessionOrToken),
     route(Post, "/api/operations/recovery/stale-leases", Require(WriteRuns), RECOVERY_SESSION),
@@ -184,6 +200,7 @@ pub(crate) const ROUTE_POLICIES: &[RoutePolicy] = &[
     route(Get, "/api/audit", Require(ReadAudit), SessionOrToken),
     route(Get, "/api/audit/export.csv", Require(ReadAudit), SessionOrToken),
     route(Get, "/api/audit/integrity", Require(ReadAudit), SessionOrToken),
+    route(Get, "/api/audit/{id}", Require(ReadAudit), SessionOrToken),
     route(Post, "/api/audit/retention/apply", Require(WriteSettings), SessionOnly("audit retention requires a user session")),
     // Users and API tokens.
     route(Get, "/api/users", Require(ManageUsers), USER_SESSION),

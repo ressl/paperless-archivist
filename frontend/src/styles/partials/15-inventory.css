@@ -97,3 +97,25 @@
   color: var(--muted);
   font-style: italic;
 }
+
+/* #447: saved views + export toolbar. */
+.inventory-views-bar {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.inventory-views-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.inventory-views-form {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.inventory-row-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}

@@ -1,3 +1,4 @@
+import type { PaperlessNamedOption } from '../api/client';
 import type { languageOptions } from '../data/worldLanguages';
 import { useI18n } from '../i18n/I18nProvider';
 import { CommaListInput, FormField } from '../lib/ui';
@@ -7,9 +8,50 @@ type AdvancedPanelProps = {
   filters: Filters;
   setFilters: React.Dispatch<React.SetStateAction<Filters>>;
   languages: ReturnType<typeof languageOptions>;
+  /** Correspondent / document type vocabularies (#447); null while loading or unavailable. */
+  facets: InventoryFacets | null;
 };
 
-export function AdvancedPanel({ filters, setFilters, languages }: AdvancedPanelProps) {
+/** Synced Paperless vocabularies offered by the correspondent / document type pickers (#447). */
+export type InventoryFacets = {
+  correspondents: PaperlessNamedOption[];
+  document_types: PaperlessNamedOption[];
+};
+
+/**
+ * Single-choice picker for a Paperless object filter (#447). The API accepts a
+ * list (ids and/or `none`); the panel offers one value, but a multi-value
+ * filter from a URL or saved view is still shown and preserved until changed.
+ */
+function FacetSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string[];
+  options: PaperlessNamedOption[];
+  onChange: (value: string[]) => void;
+}) {
+  const { t } = useI18n();
+  const current = value.join(',');
+  const known = current === '' || current === 'none' || options.some((option) => String(option.id) === current);
+  return (
+    <FormField label={label}>
+      <select value={current} onChange={(event) => onChange(event.target.value ? event.target.value.split(',') : [])}>
+        <option value="">{t('inventory.filter.any')}</option>
+        <option value="none">{t('inventory.filter.not_set')}</option>
+        {!known && <option value={current}>{current}</option>}
+        {options.map((option) => (
+          <option key={option.id} value={String(option.id)}>{option.name}</option>
+        ))}
+      </select>
+    </FormField>
+  );
+}
+
+export function AdvancedPanel({ filters, setFilters, languages, facets }: AdvancedPanelProps) {
   const { t } = useI18n();
   const toggleStatus = (group: 'ocr_status' | 'metadata_status' | 'run_status', value: string) => {
     setFilters((f) => {
@@ -77,6 +119,18 @@ export function AdvancedPanel({ filters, setFilters, languages }: AdvancedPanelP
           onCommit={(tags_exclude) => setFilters((f) => ({ ...f, tags_exclude }))}
         />
       </FormField>
+      <FacetSelect
+        label={t('inventory.filter.correspondent')}
+        value={filters.correspondent}
+        options={facets?.correspondents ?? []}
+        onChange={(correspondent) => setFilters((f) => ({ ...f, correspondent }))}
+      />
+      <FacetSelect
+        label={t('inventory.filter.document_type')}
+        value={filters.document_type}
+        options={facets?.document_types ?? []}
+        onChange={(document_type) => setFilters((f) => ({ ...f, document_type }))}
+      />
       <FormField label={t('inventory.filter.language')}>
         <select
           value={filters.language ?? ''}

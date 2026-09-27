@@ -39,7 +39,15 @@ export const InventoryRow = memo(
           />
         </td>
         <td>{item.paperless_document_id}</td>
-        <td>{item.title || item.original_file_name || t('inventory.untitled')}</td>
+        <td>
+          {item.title || item.original_file_name || t('inventory.untitled')}
+          {/* #447: Paperless correspondent / document type under the title. */}
+          {(item.correspondent_name || item.document_type_name) && (
+            <small className="inventory-row-meta">
+              {[item.correspondent_name, item.document_type_name].filter(Boolean).join(' · ')}
+            </small>
+          )}
+        </td>
         <td><Status value={item.ocr_status} /></td>
         <td><Status value={item.metadata_status} /></td>
         <td>{formatLanguageDetection(item, languages)}</td>
@@ -113,6 +121,8 @@ export const InventoryRow = memo(
       a.current_run_status === b.current_run_status &&
       a.detected_language === b.detected_language &&
       a.detected_language_confidence === b.detected_language_confidence &&
+      a.correspondent_name === b.correspondent_name &&
+      a.document_type_name === b.document_type_name &&
       a.debug_context === b.debug_context
     );
   }

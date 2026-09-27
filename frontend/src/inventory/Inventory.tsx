@@ -12,12 +12,14 @@ import { replaceLocation } from '../lib/router';
 import { useI18n } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
 import { useConfirm } from '../lib/ConfirmDialog';
-import { AdvancedPanel } from './AdvancedPanel';
+import { useResource } from '../lib/useResource';
+import { AdvancedPanel, type InventoryFacets } from './AdvancedPanel';
 import { DiagnoseDrawer } from './DiagnoseDrawer';
 import { DuplicatesPanel } from './DuplicatesPanel';
 import { InventoryFiltersBar } from './InventoryFiltersBar';
 import { InventoryPagination } from './InventoryPagination';
 import { InventoryTable } from './InventoryTable';
+import { SavedViewsBar } from './SavedViewsBar';
 import {
   PAGE_SIZE,
   RERUN_STAGES,
@@ -66,6 +68,25 @@ export function Inventory({
   const [pendingRows, setPendingRows] = useState<ReadonlySet<number>>(() => new Set());
   const { confirm, dialog: confirmDialog } = useConfirm();
   const languages = useMemo(() => languageOptions(locale), [locale]);
+  // #447: correspondent / document type vocabularies for the filter pickers,
+  // from the synced Paperless mirror. Optional: on failure the pickers just
+  // offer "any" / "not set".
+  const facets = useResource(
+    (signal): Promise<InventoryFacets> =>
+      Promise.all([api.paperlessCorrespondents({ signal }), api.paperlessDocumentTypes({ signal })]).then(
+        ([correspondents, documentTypes]) => ({
+          correspondents: correspondents.items,
+          document_types: documentTypes.items
+        })
+      ),
+    []
+  );
+
+  // #447: apply a saved view — replace the filters and the search box text.
+  const applyFilters = useCallback((next: Filters) => {
+    setSearchText(next.id != null ? String(next.id) : (next.q ?? ''));
+    setFilters(next);
+  }, []);
 
   const visibleDocumentIds = useMemo(
     () => new Set(items.map((item) => item.paperless_document_id)),
@@ -346,8 +367,10 @@ export function Inventory({
         setDuplicatesOpen={setDuplicatesOpen}
       />
 
+      <SavedViewsBar filters={filters} applyFilters={applyFilters} setError={setError} />
+
       {advancedOpen && (
-        <AdvancedPanel filters={filters} setFilters={setFilters} languages={languages} />
+        <AdvancedPanel filters={filters} setFilters={setFilters} languages={languages} facets={facets.data ?? null} />
       )}
 
       {duplicatesOpen && <DuplicatesPanel setError={setError} />}

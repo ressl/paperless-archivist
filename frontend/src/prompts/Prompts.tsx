@@ -8,7 +8,14 @@ import { ConfirmDialog, useConfirm } from '../lib/ConfirmDialog';
 import { useUnsavedChangesGuard } from '../lib/unsavedChanges';
 import { formatMs } from '../lib/format';
 import { lineDiffStats } from './lineDiff';
+import { diffOutputs } from './outputDiff';
 import { useResource } from '../lib/useResource';
+
+/** Provider choice for the prompt test runner (#446). */
+type TestProviderOption = { name: string; defaultModel: string };
+
+/** One side of the side-by-side version test (#446). */
+type CompareOutcome = { ok: true; result: PromptTestResponse } | { ok: false; error: string };
 
 type PendingPromptSelection =
   | { kind: 'stage'; stage: Stage }
@@ -49,6 +56,29 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const [sampleDocumentId, setSampleDocumentId] = useState('');
   const [testResult, setTestResult] = useState<PromptTestResponse | null>(null);
   const [testing, setTesting] = useState(false);
+  // #446: provider/model for the test runner ('' = stage default) and the
+  // side-by-side run of two versions against the same input.
+  const [testProvider, setTestProvider] = useState('');
+  const [testModel, setTestModel] = useState('');
+  const [compareTesting, setCompareTesting] = useState(false);
+  const [compareOutcome, setCompareOutcome] = useState<{ left: CompareOutcome; right: CompareOutcome } | null>(null);
+  // Enabled text providers from the settings (the page already requires
+  // settings:read); without them the runner keeps the stage default.
+  const providerResource = useResource<TestProviderOption[]>(
+    async (signal) => {
+      try {
+        const settings = await api.settings({ signal });
+        return settings.ai.providers
+          .filter((provider) => provider.enabled && provider.kind !== 'mineru')
+          .map((provider) => ({ name: provider.name, defaultModel: provider.default_text_model ?? '' }));
+      } catch {
+        return [];
+      }
+    },
+    []
+  );
+  const testProviders = providerResource.data ?? [];
+  const testProviderDefaultModel = testProviders.find((provider) => provider.name === testProvider)?.defaultModel ?? '';
   const [saving, setSaving] = useState(false);
   const [activating, setActivating] = useState(false);
   const [pendingSelection, setPendingSelection] = useState<PendingPromptSelection | null>(null);
@@ -133,7 +163,43 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
       return stagePrompts.find((prompt) => prompt.id !== selectedPrompt?.id)?.id ?? null;
     });
     setTestResult(null);
+    setCompareOutcome(null);
   }, [activePrompt, selectedPrompt?.id, stagePrompts]);
+
+  // Same stage, input, provider and model for the single and the compare run.
+  const buildTestInput = (content: string) => {
+    const documentId = sampleDocumentId.trim() ? Number(sampleDocumentId) : null;
+    return {
+      stage: selectedStage,
+      content,
+      sample_text: sampleText.trim() || undefined,
+      paperless_document_id: documentId && Number.isFinite(documentId) ? documentId : null,
+      ...(testProvider ? { provider_name: testProvider } : {}),
+      ...(testModel.trim() ? { model: testModel.trim() } : {})
+    };
+  };
+
+  // #446: run the compared version and the editor one after the other (a
+  // local model serves one request at a time) and keep each side's outcome.
+  const runComparison = async () => {
+    if (!comparePrompt) return;
+    setCompareTesting(true);
+    setCompareOutcome(null);
+    const runOne = async (content: string): Promise<CompareOutcome> => {
+      try {
+        return { ok: true, result: await api.testPrompt(buildTestInput(content)) };
+      } catch (err) {
+        return { ok: false, error: localizedErrorMessage(err, t) };
+      }
+    };
+    try {
+      const left = await runOne(comparePrompt.content);
+      const right = await runOne(editorContent);
+      setCompareOutcome({ left, right });
+    } finally {
+      setCompareTesting(false);
+    }
+  };
 
   const applySelection = (selection: PendingPromptSelection) => {
     if (selection.kind === 'stage') {
@@ -390,6 +456,26 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
               {t('prompts.test_document_id')}
               <input value={sampleDocumentId} onChange={(event) => setSampleDocumentId(event.target.value)} placeholder={t('prompts.optional')} />
             </label>
+            <label>
+              {t('prompts.test_provider')}
+              <select value={testProvider} onChange={(event) => setTestProvider(event.target.value)}>
+                <option value="">{t('prompts.test_provider_default')}</option>
+                {testProviders.map((provider) => (
+                  <option key={provider.name} value={provider.name}>
+                    {provider.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              {t('prompts.test_model')}
+              <input
+                value={testModel}
+                maxLength={200}
+                onChange={(event) => setTestModel(event.target.value)}
+                placeholder={testProviderDefaultModel || t('prompts.test_model_placeholder')}
+              />
+            </label>
             <label className="wide">
               {t('prompts.test_sample_text')}
               <textarea
@@ -405,13 +491,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
             icon={<Play size={16} />}
             disabled={testing || !editorContent.trim()}
             onClick={() => run(setTesting, setError, async () => {
-              const documentId = sampleDocumentId.trim() ? Number(sampleDocumentId) : null;
-              const result = await api.testPrompt({
-                stage: selectedStage,
-                content: editorContent,
-                sample_text: sampleText.trim() || undefined,
-                paperless_document_id: documentId && Number.isFinite(documentId) ? documentId : null
-              });
+              const result = await api.testPrompt(buildTestInput(editorContent));
               setTestResult(result);
             }, t)}
           >
@@ -452,7 +532,13 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
           </header>
           <label>
             {t('prompts.compare_against')}
-            <select value={comparePromptId ?? ''} onChange={(event) => setComparePromptId(event.target.value || null)}>
+            <select
+              value={comparePromptId ?? ''}
+              onChange={(event) => {
+                setComparePromptId(event.target.value || null);
+                setCompareOutcome(null);
+              }}
+            >
               <option value="">{t('prompts.no_comparison')}</option>
               {stagePrompts
                 .filter((prompt) => prompt.id !== selectedPrompt?.id)
@@ -478,6 +564,24 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   <pre>{editorContent}</pre>
                 </div>
               </div>
+              <p className="field-hint">{t('prompts.compare_hint')}</p>
+              <Button
+                variant="secondary"
+                type="button"
+                icon={<Play size={16} />}
+                disabled={compareTesting || testing || !editorContent.trim() || !comparePrompt}
+                onClick={() => void runComparison()}
+              >
+                {compareTesting ? t('prompts.compare_running') : t('prompts.compare_run')}
+              </Button>
+              {compareOutcome && comparePrompt && (
+                <PromptCompareResults
+                  leftLabel={`${comparePrompt.name} v${comparePrompt.version}`}
+                  rightLabel={t('prompts.current_editor')}
+                  outcome={compareOutcome}
+                  t={t}
+                />
+              )}
             </>
           ) : (
             <p className="field-hint">{t('prompts.compare_empty')}</p>
@@ -534,6 +638,68 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
         />
       )}
       {confirmDialog}
+    </section>
+  );
+}
+
+/** Side-by-side results of one version comparison with a field diff (#446). */
+function PromptCompareResults({
+  leftLabel,
+  rightLabel,
+  outcome,
+  t
+}: {
+  leftLabel: string;
+  rightLabel: string;
+  outcome: { left: CompareOutcome; right: CompareOutcome };
+  t: TFunction;
+}) {
+  const rows =
+    outcome.left.ok && outcome.right.ok ? diffOutputs(outcome.left.result.parsed, outcome.right.result.parsed) : null;
+  const side = (label: string, entry: CompareOutcome) => (
+    <div>
+      <strong>{label}</strong>
+      {entry.ok ? (
+        <>
+          <small>
+            {entry.result.provider} / {entry.result.model} · {formatMs(entry.result.duration_ms)}
+          </small>
+          <Status value={entry.result.validation_errors.length === 0 ? 'valid' : 'failed'} />
+          <pre>{JSON.stringify(entry.result.parsed ?? null, null, 2)}</pre>
+        </>
+      ) : (
+        <p role="alert">{t('prompts.compare_failed', { error: entry.error })}</p>
+      )}
+    </div>
+  );
+  return (
+    <section className="prompt-compare-results" aria-label={t('prompts.compare_results')}>
+      <div className="prompt-diff">
+        {side(leftLabel, outcome.left)}
+        {side(rightLabel, outcome.right)}
+      </div>
+      {rows && rows.length === 0 && <p className="field-hint" role="status">{t('prompts.compare_identical')}</p>}
+      {rows && rows.length > 0 && (
+        <table className="prompt-experiment-table">
+          <caption>{t('prompts.compare_differences', { count: rows.length })}</caption>
+          <thead>
+            <tr>
+              <th scope="col">{t('prompts.compare_field')}</th>
+              <th scope="col">{leftLabel}</th>
+              <th scope="col">{rightLabel}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.path}>
+                <td><code>{row.path}</code></td>
+                <td>{row.left ?? '—'}</td>
+                <td>{row.right ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </section>
   );
 }

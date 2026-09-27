@@ -1074,6 +1074,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/paperless/correspondents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Synced Paperless correspondents
+         * @description Lists `{id, name}` from the local metadata mirror (no Paperless round-trip), ordered by name. Requires inventory:read.
+         */
+        get: operations["listPaperlessCorrespondents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/paperless/document-types": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Synced Paperless document types
+         * @description Lists `{id, name}` from the local metadata mirror (no Paperless round-trip), ordered by name. Requires inventory:read.
+         */
+        get: operations["listPaperlessDocumentTypes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/paperless/completion-tags/reconcile": {
         parameters: {
             query?: never;
@@ -1322,15 +1362,41 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * List inventory documents matching the filters
+         * @description Requires the inventory:read permission. All filters are AND-ed.
+         */
         get: {
             parameters: {
                 query?: {
                     limit?: number;
                     offset?: number;
+                    /** @description Exact Paperless document id. */
+                    id?: components["parameters"]["InventoryId"];
+                    /** @description Case-insensitive substring of the title or original file name. */
+                    q?: components["parameters"]["InventoryQ"];
+                    /** @description Comma-separated OCR statuses (any of). */
+                    ocr_status?: components["parameters"]["InventoryOcrStatus"];
+                    /** @description Comma-separated metadata statuses (any of). */
+                    metadata_status?: components["parameters"]["InventoryMetadataStatus"];
+                    /** @description Comma-separated current run statuses (any of). */
+                    run_status?: components["parameters"]["InventoryRunStatus"];
+                    /** @description Comma-separated tag names that must all be present. */
+                    tag?: components["parameters"]["InventoryTag"];
+                    /** @description Comma-separated tag names none of which may be present. */
+                    not_tag?: components["parameters"]["InventoryNotTag"];
+                    /** @description Detected language tag. */
+                    lang?: components["parameters"]["InventoryLang"];
                     /** @description Inclusive lower bound on document_date (YYYY-MM-DD). A present but unparseable value is rejected with 400. */
-                    date_from?: string;
+                    date_from?: components["parameters"]["InventoryDateFrom"];
                     /** @description Inclusive upper bound on document_date (YYYY-MM-DD). A present but unparseable value is rejected with 400. */
-                    date_to?: string;
+                    date_to?: components["parameters"]["InventoryDateTo"];
+                    has_error?: components["parameters"]["InventoryHasError"];
+                    needs_review?: components["parameters"]["InventoryNeedsReview"];
+                    /** @description Comma-separated Paperless correspondent ids and/or `none` (documents without a correspondent); any of them matches. At most 100 ids; any other value is rejected with 400. */
+                    correspondent?: components["parameters"]["InventoryCorrespondent"];
+                    /** @description Comma-separated Paperless document type ids and/or `none` (documents without a document type); any of them matches. At most 100 ids; any other value is rejected with 400. */
+                    document_type?: components["parameters"]["InventoryDocumentType"];
                 };
                 header?: never;
                 path?: never;
@@ -1343,20 +1409,295 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["InventoryPage"];
+                    };
                 };
-                /** @description Unparseable date_from/date_to filter */
+                /** @description Unparseable date_from/date_to or correspondent/document_type filter */
                 400: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
                 };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
             };
         };
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/inventory/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export the filtered inventory as CSV or JSON
+         * @description Requires the inventory:read permission and accepts the same filters as GET /api/inventory (paging parameters are not accepted; the export covers every matching row). The response is streamed page by page. Each export is audited as `inventory.exported` with its canonical filter string, is limited to one concurrent inventory export per actor (and a small global cap shared with the audit export), and is aborted after a fixed deadline. CSV cells that start with a formula character are prefixed with a single quote.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    format?: "csv" | "json";
+                    /** @description Exact Paperless document id. */
+                    id?: components["parameters"]["InventoryId"];
+                    /** @description Case-insensitive substring of the title or original file name. */
+                    q?: components["parameters"]["InventoryQ"];
+                    /** @description Comma-separated OCR statuses (any of). */
+                    ocr_status?: components["parameters"]["InventoryOcrStatus"];
+                    /** @description Comma-separated metadata statuses (any of). */
+                    metadata_status?: components["parameters"]["InventoryMetadataStatus"];
+                    /** @description Comma-separated current run statuses (any of). */
+                    run_status?: components["parameters"]["InventoryRunStatus"];
+                    /** @description Comma-separated tag names that must all be present. */
+                    tag?: components["parameters"]["InventoryTag"];
+                    /** @description Comma-separated tag names none of which may be present. */
+                    not_tag?: components["parameters"]["InventoryNotTag"];
+                    /** @description Detected language tag. */
+                    lang?: components["parameters"]["InventoryLang"];
+                    /** @description Inclusive lower bound on document_date (YYYY-MM-DD). A present but unparseable value is rejected with 400. */
+                    date_from?: components["parameters"]["InventoryDateFrom"];
+                    /** @description Inclusive upper bound on document_date (YYYY-MM-DD). A present but unparseable value is rejected with 400. */
+                    date_to?: components["parameters"]["InventoryDateTo"];
+                    has_error?: components["parameters"]["InventoryHasError"];
+                    needs_review?: components["parameters"]["InventoryNeedsReview"];
+                    /** @description Comma-separated Paperless correspondent ids and/or `none` (documents without a correspondent); any of them matches. At most 100 ids; any other value is rejected with 400. */
+                    correspondent?: components["parameters"]["InventoryCorrespondent"];
+                    /** @description Comma-separated Paperless document type ids and/or `none` (documents without a document type); any of them matches. At most 100 ids; any other value is rejected with 400. */
+                    document_type?: components["parameters"]["InventoryDocumentType"];
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Matching inventory rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                        "application/json": components["schemas"]["DocumentInventoryItem"][];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                429: components["responses"]["TooManyRequests"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/inventory/views": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the caller's saved inventory views
+         * @description Requires the inventory:read permission and a user session (API tokens have no personal views). Views are private to the user who saved them.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Saved views ordered by name */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventorySavedView"][];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /**
+         * Save the current inventory filters as a named view
+         * @description Requires the inventory:read permission and a user session. The query is validated like GET /api/inventory filters and stored in canonical form. At most 50 views per user; names are unique per user (case-insensitive).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["InventoryViewRequest"];
+                };
+            };
+            responses: {
+                /** @description Created view */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["InventorySavedView"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description A view with this name exists or the per-user limit is reached */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/inventory/views/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Rename or re-point one of the caller's saved views */
+        put: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["InventoryViewRequest"];
+                };
+            };
+            responses: {
+                /** @description Updated view */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["InventorySavedView"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description No such view for this user */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description A view with this name exists */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                413: components["responses"]["PayloadTooLarge"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+            };
+        };
+        post?: never;
+        /** Delete one of the caller's saved views */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description No such view for this user */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -2352,6 +2693,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/reviews/retry-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Providers and metadata prompt versions for "retry with"
+         * @description Requires the reviews:write permission. Prompt content is not included.
+         */
+        get: operations["getReviewRetryOptions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject a metadata review and re-run it with another provider/model/prompt
+         * @description Requires the reviews:write permission and an interactive user session. Rejects the review and its still-pending siblings, then queues a new metadata-only run in manual-review mode whose job uses the chosen configuration once. Only metadata reviews can be retried (400). An already decided review returns 409, as does a sibling that is being applied or another active run for the document; an unknown review 404.
+         */
+        post: operations["retryReview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{id}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Thumbnail of the review's document (proxied from Paperless)
+         * @description Requires the reviews:read permission. Archivist fetches the thumbnail server-side from the configured Paperless instance; the browser never contacts Paperless. Only WebP/PNG/JPEG up to 4 MiB are passed through.
+         */
+        get: operations["getReviewThumbnail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Inline preview of the review's document (proxied from Paperless)
+         * @description Requires the reviews:read permission. Serves Paperless' preview (archive PDF, or the original image) through Archivist with a strict Content-Security-Policy and `Cache-Control: private, no-store`. Only PDF/WebP/PNG/JPEG up to 32 MiB are passed through.
+         */
+        get: operations["getReviewPreview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/operations/recovery": {
         parameters: {
             query?: never;
@@ -2667,10 +3088,29 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * List audit events (filtered, keyset-paginated)
+         * @description Requires the audit:read permission. Newest first. All filters are AND-ed. Pass `next_cursor` of a page as `cursor` to fetch the next (older) page; `next_cursor` is null on the last page.
+         */
         get: {
             parameters: {
                 query?: {
                     limit?: number;
+                    /** @description Username (case-insensitive), user UUID, or raw actor id such as an API token name. */
+                    actor?: string;
+                    /** @description Exact actor type, e.g. user, api_token, worker, system. */
+                    actor_type?: string;
+                    /** @description Paperless document id. */
+                    document_id?: number;
+                    /** @description Comma-separated exact event types (at most 20). */
+                    event_type?: string;
+                    outcome?: string;
+                    /** @description Inclusive lower bound; RFC 3339 timestamp or YYYY-MM-DD (midnight UTC). */
+                    from?: string;
+                    /** @description Exclusive upper bound; RFC 3339 timestamp, or YYYY-MM-DD which includes that whole day (UTC). */
+                    to?: string;
+                    /** @description Opaque keyset cursor from a previous response's next_cursor. */
+                    cursor?: string;
                 };
                 header?: never;
                 path?: never;
@@ -2683,8 +3123,13 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["AuditEventPage"];
+                    };
                 };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
             };
         };
         put?: never;
@@ -2724,6 +3169,51 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 429: components["responses"]["TooManyRequests"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/audit/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One audit event with its before/after snapshots
+         * @description Requires the audit:read permission. Backs the before/after diff view. Credential-like keys in before, after and metadata are redacted.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Audit event detail */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AuditEventDetail"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
             };
         };
         put?: never;
@@ -4291,6 +4781,13 @@ export interface components {
             by_stage: components["schemas"]["StatisticsBreakdownRow"][];
         };
         DocumentInventoryItem: {
+            paperless_document_id?: number;
+            correspondent_id?: number | null;
+            /** @description Name from the synced Paperless correspondents; null when unset or not synced. */
+            correspondent_name?: string | null;
+            document_type_id?: number | null;
+            /** @description Name from the synced Paperless document types; null when unset or not synced. */
+            document_type_name?: string | null;
             debug_context?: components["schemas"]["WorkflowDebugContext"] | null;
         } & {
             [key: string]: unknown;
@@ -4347,8 +4844,69 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        InventoryPage: {
+            items: components["schemas"]["DocumentInventoryItem"][];
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            offset: number;
+            /** Format: int64 */
+            limit: number;
+        };
+        InventoryViewRequest: {
+            name: string;
+            /** @description Inventory filter query string (same keys as GET /api/inventory, without limit/offset; a leading `?` is ignored). */
+            query: string;
+        };
+        InventorySavedView: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @description Canonical filter query string. */
+            query: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         AuditEvent: {
+            /** Format: uuid */
+            id: string;
+            event_type: string;
+            actor_type: string;
+            actor_id?: string | null;
+            /** @description Username of a user actor, resolved for display. */
+            actor_username?: string | null;
+            paperless_document_id?: number | null;
+            outcome: string;
+            error_message?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            metadata?: unknown;
+            prev_event_hash?: string | null;
+            event_hash?: string | null;
+            hash_version?: number | null;
+            /** @description True when the event stored before and/or after snapshots (see GET /api/audit/{id}). */
+            has_changes: boolean;
+        } & {
             [key: string]: unknown;
+        };
+        AuditEventPage: {
+            items: components["schemas"]["AuditEvent"][];
+            /** @description Cursor for the next (older) page; null on the last page. */
+            next_cursor: string | null;
+        };
+        AuditEventDetail: components["schemas"]["AuditEvent"] & {
+            /** Format: uuid */
+            run_id?: string | null;
+            /** Format: uuid */
+            job_id?: string | null;
+            /** @description State before the change (credential-like keys redacted). */
+            before?: unknown;
+            /** @description State after the change (credential-like keys redacted). */
+            after?: unknown;
+            source_ip?: string | null;
+            user_agent?: string | null;
         };
         AuditIntegrityReport: {
             ok: boolean;
@@ -4590,6 +5148,53 @@ export interface components {
             provider_name?: string | null;
             model?: string | null;
         };
+        PaperlessNamedOption: {
+            /** Format: int32 */
+            id: number;
+            name: string;
+        };
+        PaperlessNamedOptionList: {
+            items: components["schemas"]["PaperlessNamedOption"][];
+            /** @description True when the mirror holds more than 5000 entries and the list was cut. */
+            truncated: boolean;
+        };
+        RetryProviderOption: {
+            name: string;
+            /** @description Model the metadata stage uses for this provider when no model is chosen. */
+            default_model: string;
+        };
+        RetryPromptOption: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            version: number;
+            active: boolean;
+            /** Format: date-time */
+            created_at: string;
+        };
+        ReviewRetryOptions: {
+            providers: components["schemas"]["RetryProviderOption"][];
+            /** @description Provider the metadata stage uses today. */
+            default_provider: string;
+            /** @description Metadata prompt versions (without content). */
+            prompts: components["schemas"]["RetryPromptOption"][];
+        };
+        /** @description Every field is optional; omitted fields keep the current configuration. */
+        ReviewRetryRequest: {
+            /** @description An enabled, non-OCR-only AI provider. */
+            provider_name?: string | null;
+            model?: string | null;
+            /**
+             * Format: uuid
+             * @description A metadata prompt version (active or not).
+             */
+            prompt_id?: string | null;
+        };
+        ReviewRetryResponse: {
+            /** Format: uuid */
+            run_id: string;
+            rejected_review_ids: string[];
+        };
         PromptTestParsed: components["schemas"]["OcrPromptTestParsed"] | components["schemas"]["MetadataPromptTestParsed"];
         OcrPromptTestParsed: {
             content: string;
@@ -4819,6 +5424,15 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description An upstream service (e.g. Paperless) failed or returned an unusable response */
+        BadGateway: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description Endpoint or required service is unavailable */
         ServiceUnavailable: {
             headers: {
@@ -4893,6 +5507,32 @@ export interface components {
         };
     };
     parameters: {
+        /** @description Exact Paperless document id. */
+        InventoryId: number;
+        /** @description Case-insensitive substring of the title or original file name. */
+        InventoryQ: string;
+        /** @description Comma-separated OCR statuses (any of). */
+        InventoryOcrStatus: string;
+        /** @description Comma-separated metadata statuses (any of). */
+        InventoryMetadataStatus: string;
+        /** @description Comma-separated current run statuses (any of). */
+        InventoryRunStatus: string;
+        /** @description Comma-separated tag names that must all be present. */
+        InventoryTag: string;
+        /** @description Comma-separated tag names none of which may be present. */
+        InventoryNotTag: string;
+        /** @description Detected language tag. */
+        InventoryLang: string;
+        /** @description Inclusive lower bound on document_date (YYYY-MM-DD). A present but unparseable value is rejected with 400. */
+        InventoryDateFrom: string;
+        /** @description Inclusive upper bound on document_date (YYYY-MM-DD). A present but unparseable value is rejected with 400. */
+        InventoryDateTo: string;
+        InventoryHasError: boolean;
+        InventoryNeedsReview: boolean;
+        /** @description Comma-separated Paperless correspondent ids and/or `none` (documents without a correspondent); any of them matches. At most 100 ids; any other value is rejected with 400. */
+        InventoryCorrespondent: string;
+        /** @description Comma-separated Paperless document type ids and/or `none` (documents without a document type); any of them matches. At most 100 ids; any other value is rejected with 400. */
+        InventoryDocumentType: string;
         /** @description Required for cookieSession authentication; omit when bearerToken is used. */
         ConditionalCsrfToken: string;
         /** @description CSRF token paired with the interactive pa_session cookie. */
@@ -4903,4 +5543,172 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    listPaperlessCorrespondents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Correspondent options */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperlessNamedOptionList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    listPaperlessDocumentTypes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Document type options */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperlessNamedOptionList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    getReviewRetryOptions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retry choices */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewRetryOptions"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    retryReview: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description CSRF token paired with the interactive pa_session cookie. */
+                "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewRetryRequest"];
+            };
+        };
+        responses: {
+            /** @description New run queued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewRetryResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            415: components["responses"]["UnsupportedMediaType"];
+            422: components["responses"]["UnprocessableEntity"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    getReviewThumbnail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Thumbnail image */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/webp": string;
+                    "image/png": string;
+                    "image/jpeg": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["NotConfigured"];
+            500: components["responses"]["InternalServerError"];
+            502: components["responses"]["BadGateway"];
+        };
+    };
+    getReviewPreview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Preview document */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": string;
+                    "image/webp": string;
+                    "image/png": string;
+                    "image/jpeg": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["NotConfigured"];
+            500: components["responses"]["InternalServerError"];
+            502: components["responses"]["BadGateway"];
+        };
+    };
+}

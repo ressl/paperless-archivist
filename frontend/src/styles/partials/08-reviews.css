@@ -150,3 +150,125 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
+
+/* #445: current card of the keyboard triage (j/k). */
+.review-item--active {
+  border-color: var(--info);
+}
+
+/* #445: proxied document thumbnail; opens the full preview in a new tab. */
+.review-preview {
+  display: inline-grid;
+  justify-items: start;
+  gap: var(--space-1);
+  width: fit-content;
+  color: var(--info);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.review-preview img {
+  display: block;
+  max-width: 160px;
+  max-height: 220px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.review-preview-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.review-preview-fallback {
+  padding: var(--space-2) var(--space-3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+}
+
+/* #445: shortcut help and retry dialog content. */
+.review-dialog {
+  max-width: 520px;
+}
+
+.review-shortcut-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.review-shortcut-list div {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.review-shortcut-list dd {
+  margin: 0;
+}
+
+.review-shortcut-list kbd {
+  display: inline-block;
+  min-width: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+}
+
+.review-retry-form {
+  display: grid;
+  gap: var(--space-2);
+}
+
+/* #420: searchable correspondent / document type select. */
+.searchable-select {
+  position: relative;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.searchable-select-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 240px;
+  margin: 2px 0 0;
+  padding: var(--space-1) 0;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(23 35 49 / 12%);
+}
+
+.searchable-select-list li {
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.searchable-select-list li.active {
+  background: var(--info-soft);
+  color: var(--ink);
+}
+
+.searchable-select-list li[aria-selected='true'] {
+  font-weight: 700;
+}
+
+.searchable-select-list li.searchable-select-empty {
+  cursor: default;
+  color: var(--muted);
+  font-size: 12px;
+}

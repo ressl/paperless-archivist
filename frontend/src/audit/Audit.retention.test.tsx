@@ -13,6 +13,7 @@ vi.mock('../api/client', async () => {
     api: {
       ...actual.api,
       audit: vi.fn(async () => ({ items: [] })),
+      auditSearch: vi.fn(async () => ({ items: [], next_cursor: null })),
       auditIntegrity: vi.fn(async () => ({
         ok: true,
         checked_events: 0,
