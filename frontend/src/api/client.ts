@@ -326,7 +326,36 @@ export type InventoryQueryParams = {
   date_to?: string;
   has_error?: boolean;
   needs_review?: boolean;
+  /** Paperless correspondent ids and/or `'none'` (#447). */
+  correspondent?: string[];
+  /** Paperless document type ids and/or `'none'` (#447). */
+  document_type?: string[];
 };
+
+/** Filter-only query string for `/api/inventory` and its export (#447). */
+export function inventoryFilterSearchParams(params: InventoryQueryParams): URLSearchParams {
+  const qs = new URLSearchParams();
+  if (params.id != null) qs.set('id', String(params.id));
+  if (params.q) qs.set('q', params.q);
+  if (params.ocr_status && params.ocr_status.length) qs.set('ocr_status', params.ocr_status.join(','));
+  if (params.metadata_status && params.metadata_status.length) qs.set('metadata_status', params.metadata_status.join(','));
+  if (params.run_status && params.run_status.length) qs.set('run_status', params.run_status.join(','));
+  if (params.tag && params.tag.length) qs.set('tag', params.tag.join(','));
+  if (params.not_tag && params.not_tag.length) qs.set('not_tag', params.not_tag.join(','));
+  if (params.lang) qs.set('lang', params.lang);
+  if (params.date_from) qs.set('date_from', params.date_from);
+  if (params.date_to) qs.set('date_to', params.date_to);
+  if (params.has_error != null) qs.set('has_error', String(params.has_error));
+  if (params.needs_review != null) qs.set('needs_review', String(params.needs_review));
+  if (params.correspondent && params.correspondent.length) qs.set('correspondent', params.correspondent.join(','));
+  if (params.document_type && params.document_type.length) qs.set('document_type', params.document_type.join(','));
+  return qs;
+}
+
+export type InventoryFacetValue = components['schemas']['InventoryFacetValue'];
+export type InventoryFacets = components['schemas']['InventoryFacets'];
+export type InventorySavedView = components['schemas']['InventorySavedView'];
+export type InventoryExportFormat = 'csv' | 'json';
 
 export type InventoryItem = {
   paperless_document_id: number;
@@ -345,6 +374,10 @@ export type InventoryItem = {
   detected_language_confidence?: number | null;
   detected_language_source?: string | null;
   debug_context?: WorkflowDebugContext | null;
+  correspondent_id?: number | null;
+  correspondent_name?: string | null;
+  document_type_id?: number | null;
+  document_type_name?: string | null;
 };
 
 export type DuplicateDocument = {
@@ -453,6 +486,34 @@ export type AuditEvent = {
   prev_event_hash?: string | null;
   event_hash?: string | null;
   hash_version?: number | null;
+  /** Username of a user actor (#448). */
+  actor_username?: string | null;
+  /** The event stored before/after snapshots; see `api.auditEvent` (#448). */
+  has_changes?: boolean;
+};
+
+export type AuditEventPage = { items: AuditEvent[]; next_cursor?: string | null };
+
+export type AuditEventDetail = AuditEvent & {
+  run_id?: string | null;
+  job_id?: string | null;
+  before?: unknown;
+  after?: unknown;
+  source_ip?: string | null;
+  user_agent?: string | null;
+};
+
+/** Server-side audit filters (#448); see GET /api/audit. */
+export type AuditQueryParams = {
+  limit?: number;
+  actor?: string;
+  actor_type?: string;
+  document_id?: number | string;
+  event_type?: string;
+  outcome?: string;
+  from?: string;
+  to?: string;
+  cursor?: string;
 };
 
 export type ApiToken = {
@@ -785,22 +846,32 @@ export const api = {
     const qs = new URLSearchParams();
     qs.set('limit', String(params.limit ?? 500));
     qs.set('offset', String(params.offset ?? 0));
-    if (params.id != null) qs.set('id', String(params.id));
-    if (params.q) qs.set('q', params.q);
-    if (params.ocr_status && params.ocr_status.length) qs.set('ocr_status', params.ocr_status.join(','));
-    if (params.metadata_status && params.metadata_status.length) qs.set('metadata_status', params.metadata_status.join(','));
-    if (params.run_status && params.run_status.length) qs.set('run_status', params.run_status.join(','));
-    if (params.tag && params.tag.length) qs.set('tag', params.tag.join(','));
-    if (params.not_tag && params.not_tag.length) qs.set('not_tag', params.not_tag.join(','));
-    if (params.lang) qs.set('lang', params.lang);
-    if (params.date_from) qs.set('date_from', params.date_from);
-    if (params.date_to) qs.set('date_to', params.date_to);
-    if (params.has_error != null) qs.set('has_error', String(params.has_error));
-    if (params.needs_review != null) qs.set('needs_review', String(params.needs_review));
+    inventoryFilterSearchParams(params).forEach((value, key) => qs.set(key, value));
     return request<{ items: InventoryItem[]; total: number; offset: number; limit: number }>(
       `/api/inventory?${qs.toString()}`, options
     );
   },
+  inventoryFacets: (options?: RequestOptions) => request<InventoryFacets>('/api/inventory/facets', options),
+  /** Download URL of the filtered inventory export (#447); a plain link, like the audit CSV. */
+  inventoryExportUrl: (params: InventoryQueryParams, format: InventoryExportFormat) => {
+    const qs = inventoryFilterSearchParams(params);
+    qs.set('format', format);
+    return `/api/inventory/export?${qs.toString()}`;
+  },
+  inventoryViews: (options?: RequestOptions) =>
+    request<{ items: InventorySavedView[] }>('/api/inventory/views', options),
+  createInventoryView: (name: string, query: string) =>
+    request<InventorySavedView>('/api/inventory/views', {
+      method: 'POST',
+      body: JSON.stringify({ name, query })
+    }),
+  updateInventoryView: (id: string, name: string, query: string) =>
+    request<InventorySavedView>(`/api/inventory/views/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name, query })
+    }),
+  deleteInventoryView: (id: string) =>
+    request<{ ok: boolean }>(`/api/inventory/views/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   inventoryDuplicates: () =>
     request<{ groups: DuplicateGroup[]; paperless_base: string }>('/api/inventory/duplicates'),
   inventoryMetadataTrace: (documentId: number, options?: RequestOptions) =>
@@ -905,9 +976,20 @@ export const api = {
       body: JSON.stringify({}),
     }),
   audit: (limit?: number, options?: RequestOptions) =>
-    request<{ items: AuditEvent[] }>(
+    request<AuditEventPage>(
       limit ? `/api/audit?limit=${encodeURIComponent(limit)}` : '/api/audit', options
     ),
+  /** Filtered, keyset-paginated audit log (#448). Empty filter values are omitted. */
+  auditSearch: (params: AuditQueryParams, options?: RequestOptions) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value != null && String(value).trim() !== '') qs.set(key, String(value).trim());
+    }
+    const query = qs.toString();
+    return request<AuditEventPage>(`/api/audit${query ? `?${query}` : ''}`, options);
+  },
+  auditEvent: (id: string, options?: RequestOptions) =>
+    request<AuditEventDetail>(`/api/audit/${encodeURIComponent(id)}`, options),
   auditIntegrity: (options?: RequestOptions) => request<AuditIntegrityReport>('/api/audit/integrity', options),
   applyAuditRetention: () => request<RetentionResult>('/api/audit/retention/apply', { method: 'POST' }),
   prompts: (options?: RequestOptions) => request<{ items: Prompt[] }>('/api/prompts', options),

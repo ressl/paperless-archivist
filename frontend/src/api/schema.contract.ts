@@ -79,4 +79,15 @@ export type GeneratedRouteContract = ExpectAll<[
   HasRequiredCsrf<paths['/api/reviews/{id}/approve']['post']>,
   HasRequiredCsrf<paths['/api/reviews/{id}/reject']['post']>,
   HasRequiredCsrf<paths['/api/reviews/{id}/edit']['post']>,
+  // #447: inventory facets, export and per-user saved views.
+  HasOperation<'/api/inventory/facets', 'get'>,
+  HasOperation<'/api/inventory/export', 'get'>,
+  HasOperation<'/api/inventory/views', 'get'>,
+  HasRequiredCsrf<paths['/api/inventory/views']['post']>,
+  HasRequiredCsrf<paths['/api/inventory/views/{id}']['put']>,
+  HasRequiredCsrf<paths['/api/inventory/views/{id}']['delete']>,
+  HasJsonBodyRejections<paths['/api/inventory/views']['post']>,
+  HasJsonBodyRejections<paths['/api/inventory/views/{id}']['put']>,
+  // #448: audit detail for the before/after diff view.
+  HasOperation<'/api/audit/{id}', 'get'>,
 ]>
