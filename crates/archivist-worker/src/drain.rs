@@ -20,7 +20,7 @@ use serde_json::json;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
-use crate::audit_custom_fields_dropped;
+use crate::apply::audit_custom_fields_dropped;
 use crate::paperless::paperless_client;
 
 /// Tick wrapper for the autopilot review drain.
