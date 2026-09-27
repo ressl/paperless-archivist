@@ -2018,6 +2018,295 @@ pub struct StageModelOverride {
     pub model: String,
 }
 
+/// Job-payload key carrying [`MetadataRetryOverrides`] for a review retry. #445
+pub const METADATA_RETRY_OVERRIDES_KEY: &str = "retry_overrides";
+
+/// Longest model identifier a review retry may request. Real model ids are
+/// far shorter; the cap only bounds what lands in job payloads and audits.
+pub const MAX_RETRY_MODEL_CHARS: usize = 200;
+
+/// Provider / model / prompt-version choice for a "retry with ..." review
+/// action (#445). Stored in the metadata job payload under
+/// [`METADATA_RETRY_OVERRIDES_KEY`] and honoured only by that one job; the
+/// runtime settings stay untouched.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataRetryOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<Uuid>,
+}
+
+/// A provider a metadata retry may target, with the model it would use by
+/// default for the metadata stage. #445
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryProviderOption {
+    pub name: String,
+    pub default_model: String,
+}
+
+impl MetadataRetryOverrides {
+    /// Trim blank strings to `None` so "" never overrides anything.
+    pub fn normalized(self) -> Self {
+        let clean = |value: Option<String>| {
+            value
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        Self {
+            provider_name: clean(self.provider_name),
+            model: clean(self.model),
+            prompt_id: self.prompt_id,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.provider_name.is_none() && self.model.is_none() && self.prompt_id.is_none()
+    }
+
+    /// Read the overrides from a job payload; absent or malformed → `None`.
+    pub fn from_job_payload(payload: &Value) -> Option<Self> {
+        let raw = payload.get(METADATA_RETRY_OVERRIDES_KEY)?;
+        let parsed: Self = serde_json::from_value(raw.clone()).ok()?;
+        let parsed = parsed.normalized();
+        (!parsed.is_empty()).then_some(parsed)
+    }
+
+    /// Validate provider and model against the runtime settings: the provider
+    /// must be one the metadata stage could use today (enabled, not the
+    /// OCR-only MinerU kind), and the model a bounded, printable identifier.
+    pub fn validate(&self, ai: &AiSettings) -> std::result::Result<(), String> {
+        if let Some(name) = self.provider_name.as_deref()
+            && !ai
+                .metadata_retry_providers()
+                .iter()
+                .any(|option| option.name == name)
+        {
+            return Err(format!(
+                "AI provider '{name}' is not an enabled text provider"
+            ));
+        }
+        if let Some(model) = self.model.as_deref()
+            && (model.chars().count() > MAX_RETRY_MODEL_CHARS
+                || model.chars().any(|character| character.is_control()))
+        {
+            return Err(format!(
+                "model must be a printable identifier of at most {MAX_RETRY_MODEL_CHARS} characters"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Settings copy the worker uses for the retried metadata job: the chosen
+    /// provider/model become the metadata stage override, and the mode is
+    /// forced to manual review so the retried result returns to the reviewer
+    /// who asked for it instead of being auto-applied.
+    pub fn apply_to_settings(&self, settings: &RuntimeSettings) -> RuntimeSettings {
+        let mut settings = settings.clone();
+        settings.workflow.mode = ProcessingMode::ManualReview;
+        if self.provider_name.is_none() && self.model.is_none() {
+            return settings;
+        }
+        let current = settings
+            .ai
+            .stage_models
+            .iter()
+            .find(|entry| entry.stage == Stage::Metadata)
+            .cloned();
+        let provider = self
+            .provider_name
+            .clone()
+            .or_else(|| current.as_ref().map(|entry| entry.provider.clone()))
+            .unwrap_or_else(|| settings.ai.default_provider.clone());
+        // A provider switch without an explicit model uses that provider's
+        // default; keeping the old stage model would pair it with the wrong
+        // provider.
+        let model = match (&self.model, &self.provider_name) {
+            (Some(model), _) => model.clone(),
+            (None, Some(_)) => String::new(),
+            (None, None) => current.map(|entry| entry.model).unwrap_or_default(),
+        };
+        settings
+            .ai
+            .stage_models
+            .retain(|entry| entry.stage != Stage::Metadata);
+        settings.ai.stage_models.push(StageModelOverride {
+            stage: Stage::Metadata,
+            provider,
+            model,
+        });
+        settings
+    }
+}
+
+impl AiSettings {
+    /// Providers a metadata review retry may choose (#445): every enabled,
+    /// non-OCR-only provider, plus the implicit local Ollama default when no
+    /// provider named `ollama` is configured (mirrors the worker fallback).
+    pub fn metadata_retry_providers(&self) -> Vec<RetryProviderOption> {
+        let mut options: Vec<RetryProviderOption> = self
+            .providers
+            .iter()
+            .filter(|provider| provider.enabled && provider.kind != AiProviderKind::Mineru)
+            .map(|provider| RetryProviderOption {
+                name: provider.name.clone(),
+                default_model: self.model_for_stage_provider(provider, Stage::Metadata, false),
+            })
+            .collect();
+        let has_configured_ollama = self
+            .providers
+            .iter()
+            .any(|provider| provider.name.eq_ignore_ascii_case("ollama"));
+        if !has_configured_ollama {
+            let ollama = AiProviderSettings::ollama_default();
+            options.push(RetryProviderOption {
+                default_model: self.model_for_stage_provider(&ollama, Stage::Metadata, false),
+                name: ollama.name,
+            });
+        }
+        options
+    }
+}
+
+#[cfg(test)]
+mod metadata_retry_override_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn provider(name: &str, kind: AiProviderKind, enabled: bool) -> AiProviderSettings {
+        AiProviderSettings {
+            name: name.to_owned(),
+            kind,
+            base_url: "http://provider.invalid".to_owned(),
+            default_text_model: Some(format!("{name}-text")),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: None,
+            enabled,
+            tuning: ProviderTuning::default(),
+        }
+    }
+
+    fn settings() -> RuntimeSettings {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![
+            provider("ollama", AiProviderKind::Ollama, true),
+            provider("cloud", AiProviderKind::Openai, true),
+            provider("off", AiProviderKind::Openai, false),
+            provider("mineru", AiProviderKind::Mineru, true),
+        ];
+        settings.workflow.mode = ProcessingMode::FullAuto;
+        settings
+    }
+
+    #[test]
+    fn retry_providers_list_only_enabled_text_providers() {
+        let names: Vec<String> = settings()
+            .ai
+            .metadata_retry_providers()
+            .into_iter()
+            .map(|option| option.name)
+            .collect();
+        assert_eq!(names, vec!["ollama".to_owned(), "cloud".to_owned()]);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_disabled_and_ocr_only_providers_and_bad_models() {
+        let ai = settings().ai;
+        for name in ["missing", "off", "mineru"] {
+            let overrides = MetadataRetryOverrides {
+                provider_name: Some(name.to_owned()),
+                ..Default::default()
+            };
+            assert!(overrides.validate(&ai).is_err(), "{name}");
+        }
+        let control = MetadataRetryOverrides {
+            model: Some("model\nX-Injected: 1".to_owned()),
+            ..Default::default()
+        };
+        assert!(control.validate(&ai).is_err());
+        let long = MetadataRetryOverrides {
+            model: Some("m".repeat(MAX_RETRY_MODEL_CHARS + 1)),
+            ..Default::default()
+        };
+        assert!(long.validate(&ai).is_err());
+        let ok = MetadataRetryOverrides {
+            provider_name: Some("cloud".to_owned()),
+            model: Some("gpt-x".to_owned()),
+            prompt_id: None,
+        };
+        assert!(ok.validate(&ai).is_ok());
+    }
+
+    #[test]
+    fn payload_round_trip_ignores_blank_and_malformed_values() {
+        assert_eq!(MetadataRetryOverrides::from_job_payload(&json!({})), None);
+        assert_eq!(
+            MetadataRetryOverrides::from_job_payload(&json!({ "retry_overrides": "nope" })),
+            None
+        );
+        assert_eq!(
+            MetadataRetryOverrides::from_job_payload(
+                &json!({ "retry_overrides": { "provider_name": " ", "model": "" } })
+            ),
+            None
+        );
+        let parsed = MetadataRetryOverrides::from_job_payload(
+            &json!({ "retry_overrides": { "provider_name": " cloud ", "model": "m1" } }),
+        )
+        .expect("overrides");
+        assert_eq!(parsed.provider_name.as_deref(), Some("cloud"));
+        assert_eq!(parsed.model.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn apply_to_settings_overrides_metadata_stage_and_forces_manual_review() {
+        let base = settings();
+        let overrides = MetadataRetryOverrides {
+            provider_name: Some("cloud".to_owned()),
+            model: None,
+            prompt_id: None,
+        };
+        let applied = overrides.apply_to_settings(&base);
+        assert_eq!(applied.workflow.mode, ProcessingMode::ManualReview);
+        let entry = applied
+            .ai
+            .stage_models
+            .iter()
+            .find(|entry| entry.stage == Stage::Metadata)
+            .expect("metadata override");
+        assert_eq!(entry.provider, "cloud");
+        let cloud = &applied.ai.providers[1];
+        assert_eq!(
+            applied
+                .ai
+                .model_for_stage_provider(cloud, Stage::Metadata, false),
+            "cloud-text",
+            "provider switch without a model uses the provider default"
+        );
+
+        let model_only = MetadataRetryOverrides {
+            model: Some("custom".to_owned()),
+            ..Default::default()
+        }
+        .apply_to_settings(&base);
+        let entry = model_only
+            .ai
+            .stage_models
+            .iter()
+            .find(|entry| entry.stage == Stage::Metadata)
+            .expect("metadata override");
+        assert_eq!(entry.provider, base.ai.default_provider);
+        assert_eq!(entry.model, "custom");
+        // The base settings are never mutated.
+        assert!(base.ai.stage_models.is_empty());
+        assert_eq!(base.workflow.mode, ProcessingMode::FullAuto);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiProviderSettings {
     pub name: String,

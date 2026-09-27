@@ -46,6 +46,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BadGateway:
+      description: An upstream service (e.g. Paperless) failed or returned an unusable response
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
     ServiceUnavailable:
       description: Endpoint or required service is unavailable
       content:
@@ -1980,6 +1985,83 @@ components:
           type: [string, "null"]
         model:
           type: [string, "null"]
+    PaperlessNamedOption:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id: { type: integer, format: int32 }
+        name: { type: string }
+    PaperlessNamedOptionList:
+      type: object
+      additionalProperties: false
+      required: [items, truncated]
+      properties:
+        items:
+          type: array
+          maxItems: 5000
+          items: { $ref: "#/components/schemas/PaperlessNamedOption" }
+        truncated:
+          type: boolean
+          description: True when the mirror holds more than 5000 entries and the list was cut.
+    RetryProviderOption:
+      type: object
+      additionalProperties: false
+      required: [name, default_model]
+      properties:
+        name: { type: string }
+        default_model:
+          type: string
+          description: Model the metadata stage uses for this provider when no model is chosen.
+    RetryPromptOption:
+      type: object
+      additionalProperties: false
+      required: [id, name, version, active, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        version: { type: integer }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    ReviewRetryOptions:
+      type: object
+      additionalProperties: false
+      required: [providers, default_provider, prompts]
+      properties:
+        providers:
+          type: array
+          items: { $ref: "#/components/schemas/RetryProviderOption" }
+        default_provider:
+          type: string
+          description: Provider the metadata stage uses today.
+        prompts:
+          type: array
+          description: Metadata prompt versions (without content).
+          items: { $ref: "#/components/schemas/RetryPromptOption" }
+    ReviewRetryRequest:
+      type: object
+      additionalProperties: false
+      description: Every field is optional; omitted fields keep the current configuration.
+      properties:
+        provider_name:
+          type: [string, "null"]
+          description: An enabled, non-OCR-only AI provider.
+        model:
+          type: [string, "null"]
+          maxLength: 200
+        prompt_id:
+          type: [string, "null"]
+          format: uuid
+          description: A metadata prompt version (active or not).
+    ReviewRetryResponse:
+      type: object
+      additionalProperties: false
+      required: [run_id, rejected_review_ids]
+      properties:
+        run_id: { type: string, format: uuid }
+        rejected_review_ids:
+          type: array
+          items: { type: string, format: uuid }
     PromptTestParsed:
       oneOf:
         - $ref: "#/components/schemas/OcrPromptTestParsed"
@@ -2598,6 +2680,38 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PaperlessConsistencyResponse" }
+  /api/paperless/correspondents:
+    get:
+      summary: Synced Paperless correspondents
+      description: >-
+        Lists `{id, name}` from the local metadata mirror (no Paperless
+        round-trip), ordered by name. Requires reviews:read or inventory:read.
+      operationId: listPaperlessCorrespondents
+      responses:
+        "200":
+          description: Correspondent options
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaperlessNamedOptionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/paperless/document-types:
+    get:
+      summary: Synced Paperless document types
+      description: >-
+        Lists `{id, name}` from the local metadata mirror (no Paperless
+        round-trip), ordered by name. Requires reviews:read or inventory:read.
+      operationId: listPaperlessDocumentTypes
+      responses:
+        "200":
+          description: Document type options
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaperlessNamedOptionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/paperless/completion-tags/reconcile:
     post:
       description: >-
@@ -3094,6 +3208,119 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/reviews/retry-options:
+    get:
+      summary: Providers and metadata prompt versions for "retry with"
+      description: Requires the reviews:write permission. Prompt content is not included.
+      operationId: getReviewRetryOptions
+      responses:
+        "200":
+          description: Retry choices
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewRetryOptions" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/reviews/{id}/retry:
+    post:
+      summary: Reject a metadata review and re-run it with another provider/model/prompt
+      description: >-
+        Requires the reviews:write permission and an interactive user session.
+        Rejects the review and its still-pending siblings, then queues a new
+        metadata-only run in manual-review mode whose job uses the chosen
+        configuration once. Only metadata reviews can be retried (400). An
+        already decided review returns 409, as does a sibling that is being
+        applied or another active run for the document; an unknown review 404.
+      operationId: retryReview
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReviewRetryRequest" }
+      responses:
+        "200":
+          description: New run queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewRetryResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+  /api/reviews/{id}/thumbnail:
+    get:
+      summary: Thumbnail of the review's document (proxied from Paperless)
+      description: >-
+        Requires the reviews:read permission. Archivist fetches the thumbnail
+        server-side from the configured Paperless instance; the browser never
+        contacts Paperless. Only WebP/PNG/JPEG up to 4 MiB are passed through.
+      operationId: getReviewThumbnail
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Thumbnail image
+          content:
+            image/webp:
+              schema: { type: string, format: binary }
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/reviews/{id}/preview:
+    get:
+      summary: Inline preview of the review's document (proxied from Paperless)
+      description: >-
+        Requires the reviews:read permission. Serves Paperless' preview
+        (archive PDF, or the original image) through Archivist with a strict
+        Content-Security-Policy and `Cache-Control: private, no-store`. Only
+        PDF/WebP/PNG/JPEG up to 32 MiB are passed through.
+      operationId: getReviewPreview
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Preview document
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /api/operations/recovery:
     get:
       parameters:

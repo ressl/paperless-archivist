@@ -1070,6 +1070,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/paperless/correspondents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Synced Paperless correspondents
+         * @description Lists `{id, name}` from the local metadata mirror (no Paperless round-trip), ordered by name. Requires reviews:read or inventory:read.
+         */
+        get: operations["listPaperlessCorrespondents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/paperless/document-types": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Synced Paperless document types
+         * @description Lists `{id, name}` from the local metadata mirror (no Paperless round-trip), ordered by name. Requires reviews:read or inventory:read.
+         */
+        get: operations["listPaperlessDocumentTypes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/paperless/completion-tags/reconcile": {
         parameters: {
             query?: never;
@@ -2212,6 +2252,86 @@ export interface paths {
                 500: components["responses"]["InternalServerError"];
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/retry-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Providers and metadata prompt versions for "retry with"
+         * @description Requires the reviews:write permission. Prompt content is not included.
+         */
+        get: operations["getReviewRetryOptions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject a metadata review and re-run it with another provider/model/prompt
+         * @description Requires the reviews:write permission and an interactive user session. Rejects the review and its still-pending siblings, then queues a new metadata-only run in manual-review mode whose job uses the chosen configuration once. Only metadata reviews can be retried (400). An already decided review returns 409, as does a sibling that is being applied or another active run for the document; an unknown review 404.
+         */
+        post: operations["retryReview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{id}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Thumbnail of the review's document (proxied from Paperless)
+         * @description Requires the reviews:read permission. Archivist fetches the thumbnail server-side from the configured Paperless instance; the browser never contacts Paperless. Only WebP/PNG/JPEG up to 4 MiB are passed through.
+         */
+        get: operations["getReviewThumbnail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Inline preview of the review's document (proxied from Paperless)
+         * @description Requires the reviews:read permission. Serves Paperless' preview (archive PDF, or the original image) through Archivist with a strict Content-Security-Policy and `Cache-Control: private, no-store`. Only PDF/WebP/PNG/JPEG up to 32 MiB are passed through.
+         */
+        get: operations["getReviewPreview"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4423,6 +4543,53 @@ export interface components {
             provider_name?: string | null;
             model?: string | null;
         };
+        PaperlessNamedOption: {
+            /** Format: int32 */
+            id: number;
+            name: string;
+        };
+        PaperlessNamedOptionList: {
+            items: components["schemas"]["PaperlessNamedOption"][];
+            /** @description True when the mirror holds more than 5000 entries and the list was cut. */
+            truncated: boolean;
+        };
+        RetryProviderOption: {
+            name: string;
+            /** @description Model the metadata stage uses for this provider when no model is chosen. */
+            default_model: string;
+        };
+        RetryPromptOption: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            version: number;
+            active: boolean;
+            /** Format: date-time */
+            created_at: string;
+        };
+        ReviewRetryOptions: {
+            providers: components["schemas"]["RetryProviderOption"][];
+            /** @description Provider the metadata stage uses today. */
+            default_provider: string;
+            /** @description Metadata prompt versions (without content). */
+            prompts: components["schemas"]["RetryPromptOption"][];
+        };
+        /** @description Every field is optional; omitted fields keep the current configuration. */
+        ReviewRetryRequest: {
+            /** @description An enabled, non-OCR-only AI provider. */
+            provider_name?: string | null;
+            model?: string | null;
+            /**
+             * Format: uuid
+             * @description A metadata prompt version (active or not).
+             */
+            prompt_id?: string | null;
+        };
+        ReviewRetryResponse: {
+            /** Format: uuid */
+            run_id: string;
+            rejected_review_ids: string[];
+        };
         PromptTestParsed: components["schemas"]["OcrPromptTestParsed"] | components["schemas"]["MetadataPromptTestParsed"];
         OcrPromptTestParsed: {
             content: string;
@@ -4649,6 +4816,15 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description An upstream service (e.g. Paperless) failed or returned an unusable response */
+        BadGateway: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description Endpoint or required service is unavailable */
         ServiceUnavailable: {
             headers: {
@@ -4724,4 +4900,172 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    listPaperlessCorrespondents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Correspondent options */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperlessNamedOptionList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    listPaperlessDocumentTypes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Document type options */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperlessNamedOptionList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    getReviewRetryOptions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retry choices */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewRetryOptions"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    retryReview: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description CSRF token paired with the interactive pa_session cookie. */
+                "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewRetryRequest"];
+            };
+        };
+        responses: {
+            /** @description New run queued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewRetryResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            415: components["responses"]["UnsupportedMediaType"];
+            422: components["responses"]["UnprocessableEntity"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    getReviewThumbnail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Thumbnail image */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/webp": string;
+                    "image/png": string;
+                    "image/jpeg": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getReviewPreview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Preview document */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": string;
+                    "image/webp": string;
+                    "image/png": string;
+                    "image/jpeg": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+}

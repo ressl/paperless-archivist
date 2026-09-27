@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use archivist_core::DocumentPatch;
 use bytes::Bytes;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -125,6 +125,36 @@ const DOCUMENT_SUMMARY_FIELDS: &str =
 /// the OCR per-job memory peak within a 1 GiB worker at concurrency 2 (see the
 /// calibration note in archivist-ocr). #283
 const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Cap for a proxied thumbnail. Paperless thumbnails are small WebP/PNG
+/// renders (tens of KB); anything bigger is not a thumbnail. #445
+pub const MAX_THUMBNAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Cap for a proxied inline preview. The API buffers the body per request, so
+/// this stays far below the worker's OCR download cap. #445
+pub const MAX_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A binary preview fetched from Paperless with a vetted content type. #445
+#[derive(Debug, Clone)]
+pub struct PaperlessPreview {
+    pub bytes: Bytes,
+    /// One of the allow-listed media types from [`preview_content_type`].
+    pub content_type: &'static str,
+}
+
+/// Map an upstream Content-Type onto a fixed allow-list, so the proxy never
+/// reflects an arbitrary (e.g. `text/html`) type into the Archivist origin.
+/// Parameters and case are ignored. `allow_pdf` is false for thumbnails. #445
+pub fn preview_content_type(raw: Option<&str>, allow_pdf: bool) -> Option<&'static str> {
+    let essence = raw?.split(';').next()?.trim().to_ascii_lowercase();
+    match essence.as_str() {
+        "image/webp" => Some("image/webp"),
+        "image/png" => Some("image/png"),
+        "image/jpeg" => Some("image/jpeg"),
+        "application/pdf" if allow_pdf => Some("application/pdf"),
+        _ => None,
+    }
+}
 
 /// Accumulate a streamed download chunk against the byte cap, returning the
 /// updated running total or an error. Extracted so the bound is unit-testable
@@ -296,6 +326,62 @@ impl PaperlessClient {
     /// `original_file_name`; OCR classifies inputs by magic bytes. #405
     pub async fn download_original(&self, id: i32) -> Result<Bytes> {
         let url = self.url(&format!("api/documents/{id}/download/"))?;
+        let (bytes, _) = self
+            .download_capped(url, MAX_DOWNLOAD_BYTES, "original")
+            .await?;
+        Ok(bytes)
+    }
+
+    /// Fetch the Paperless thumbnail (`/thumb/`) for the review preview proxy.
+    /// Capped at [`MAX_THUMBNAIL_BYTES`]; only allow-listed raster image
+    /// types pass. #445
+    pub async fn download_thumbnail(&self, id: i32) -> Result<PaperlessPreview> {
+        let url = self.url(&format!("api/documents/{id}/thumb/"))?;
+        let (bytes, content_type) = self
+            .download_capped(url, MAX_THUMBNAIL_BYTES, "thumbnail")
+            .await?;
+        let content_type =
+            preview_content_type(content_type.as_deref(), false).ok_or_else(|| {
+                PaperlessError::Protocol(
+                    "Paperless thumbnail has an unexpected content type".to_owned(),
+                )
+            })?;
+        Ok(PaperlessPreview {
+            bytes,
+            content_type,
+        })
+    }
+
+    /// Fetch the inline preview (`/preview/`: archive PDF, or the original
+    /// when there is none) for the review preview proxy. Capped at
+    /// [`MAX_PREVIEW_BYTES`], well below the OCR download cap, because the
+    /// API buffers it per request. Only PDF and raster images pass. #445
+    pub async fn download_preview(&self, id: i32) -> Result<PaperlessPreview> {
+        let url = self.url(&format!("api/documents/{id}/preview/"))?;
+        let (bytes, content_type) = self
+            .download_capped(url, MAX_PREVIEW_BYTES, "preview")
+            .await?;
+        let content_type =
+            preview_content_type(content_type.as_deref(), true).ok_or_else(|| {
+                PaperlessError::Protocol(
+                    "Paperless preview has an unsupported content type".to_owned(),
+                )
+            })?;
+        Ok(PaperlessPreview {
+            bytes,
+            content_type,
+        })
+    }
+
+    /// Stream a binary document endpoint into memory, enforcing `cap` both on
+    /// the advertised Content-Length and on the bytes actually received, and
+    /// return the upstream Content-Type alongside.
+    async fn download_capped(
+        &self,
+        url: Url,
+        cap: u64,
+        label: &str,
+    ) -> Result<(Bytes, Option<String>)> {
         // Override the JSON-tuned client timeout with a larger budget so big
         // originals streamed over slow links are not aborted prematurely.
         let response = self
@@ -312,22 +398,27 @@ impl PaperlessClient {
         }
         // Reject early on an advertised oversize body, then stream and enforce
         // the cap as bytes arrive (Content-Length may be absent or lie), so we
-        // never buffer an unbounded original in memory.
+        // never buffer an unbounded body in memory.
         if let Some(len) = response.content_length()
-            && len > MAX_DOWNLOAD_BYTES
+            && len > cap
         {
             return Err(anyhow!(
-                "Paperless original is {len} bytes, exceeding the {MAX_DOWNLOAD_BYTES}-byte download cap"
+                "Paperless {label} is {len} bytes, exceeding the {cap}-byte download cap"
             ));
         }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let mut buffer: Vec<u8> = Vec::new();
         let mut total: u64 = 0;
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(PaperlessError::from)? {
-            total = accumulate_download_size(total, chunk.len() as u64, MAX_DOWNLOAD_BYTES)?;
+            total = accumulate_download_size(total, chunk.len() as u64, cap)?;
             buffer.extend_from_slice(&chunk);
         }
-        Ok(Bytes::from(buffer))
+        Ok((Bytes::from(buffer), content_type))
     }
 
     pub async fn patch_document(

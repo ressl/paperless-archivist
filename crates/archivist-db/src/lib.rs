@@ -6971,6 +6971,279 @@ pub async fn count_reviews(pool: &DbPool, status: Option<&str>) -> Result<i64> {
     Ok(count)
 }
 
+/// One `{id, name}` entry of a synced Paperless metadata mirror table. #420
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaperlessNamedOption {
+    pub id: i32,
+    pub name: String,
+}
+
+/// Synced correspondents (local mirror, no Paperless round-trip), ordered by
+/// name. Returns at most `limit` rows. #420
+pub async fn list_paperless_correspondent_options(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<PaperlessNamedOption>> {
+    list_paperless_named_options(
+        pool,
+        "select id, name from paperless_correspondents order by lower(name), id limit $1",
+        limit,
+    )
+    .await
+}
+
+/// Synced document types (local mirror), ordered by name. #420
+pub async fn list_paperless_document_type_options(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<PaperlessNamedOption>> {
+    list_paperless_named_options(
+        pool,
+        "select id, name from paperless_document_types order by lower(name), id limit $1",
+        limit,
+    )
+    .await
+}
+
+async fn list_paperless_named_options(
+    pool: &DbPool,
+    sql: &'static str,
+    limit: i64,
+) -> Result<Vec<PaperlessNamedOption>> {
+    let rows = sqlx::query(sql).bind(limit.max(1)).fetch_all(pool).await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(PaperlessNamedOption {
+                id: row.try_get("id")?,
+                name: row.try_get("name")?,
+            })
+        })
+        .collect()
+}
+
+/// Load one prompt version by id (any activation state). #445
+pub async fn get_prompt_by_id(pool: &DbPool, prompt_id: Uuid) -> Result<Option<PromptRecord>> {
+    let row = sqlx::query(
+        r#"
+        select id, stage, name, version, content, output_schema, active, created_at
+          from prompts
+         where id = $1
+        "#,
+    )
+    .bind(prompt_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(prompt_from_row).transpose()
+}
+
+/// Paperless document id a review item belongs to (any status). The preview
+/// proxy is keyed by review id so only documents that are in the review queue
+/// can be fetched through Archivist's Paperless token. #445
+pub async fn review_document_id(pool: &DbPool, review_id: Uuid) -> Result<Option<i32>> {
+    Ok(
+        sqlx::query_scalar("select paperless_document_id from review_items where id = $1")
+            .bind(review_id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+/// Result of [`retry_review_with_overrides`]. The non-`Queued` variants are
+/// expected client-visible states, reported without side effects. #445
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewRetryOutcome {
+    Queued {
+        run_id: Uuid,
+        rejected_review_ids: Vec<Uuid>,
+    },
+    /// Only metadata-stage reviews can be regenerated with another model/prompt.
+    UnsupportedStage,
+    /// A sibling review of the same job is approved/edited/applying; the
+    /// original run cannot be closed without racing that apply.
+    SiblingInFlight,
+    /// Closing the reviews left an active run for the document (e.g. a later
+    /// stage still queued), so a fresh run cannot be created.
+    ActiveRun,
+}
+
+/// "Retry with ...": reject every still-pending review of the same job and
+/// queue a new metadata-only run whose job payload carries `overrides`
+/// (see `archivist_core::MetadataRetryOverrides`). Everything happens in one
+/// transaction, so a conflict leaves the reviews untouched. #445
+pub async fn retry_review_with_overrides(
+    pool: &DbPool,
+    review_id: Uuid,
+    actor_id: Uuid,
+    overrides: &Value,
+) -> Result<ReviewRetryOutcome> {
+    let mut tx = pool.begin().await?;
+    let Some(review) = sqlx::query(
+        "select job_id, paperless_document_id, stage, status from review_items where id = $1",
+    )
+    .bind(review_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Err(ReviewDecisionError::NotFound.into());
+    };
+    let status: String = review.try_get("status")?;
+    if status != "pending" {
+        tx.rollback().await?;
+        return Err(ReviewDecisionError::NotPending.into());
+    }
+    let stage: String = review.try_get("stage")?;
+    if stage != Stage::Metadata.to_string() {
+        tx.rollback().await?;
+        return Ok(ReviewRetryOutcome::UnsupportedStage);
+    }
+    let document_id: i32 = review.try_get("paperless_document_id")?;
+    let job_id: Option<Uuid> = review.try_get("job_id")?;
+
+    // Same lock order as run creation: the document lock first, audit last.
+    lock_active_run_document_tx(&mut tx, document_id).await?;
+
+    // Siblings share the job; a job-less (legacy) review is its own aggregate.
+    let siblings =
+        sqlx::query("select id, status from review_items where job_id = $1 or id = $2 for update")
+            .bind(job_id)
+            .bind(review_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let mut pending = Vec::new();
+    for sibling in &siblings {
+        let id: Uuid = sibling.try_get("id")?;
+        let sibling_status: String = sibling.try_get("status")?;
+        match sibling_status.as_str() {
+            "pending" => pending.push(id),
+            "rejected" | "applied" => {}
+            _ => {
+                tx.rollback().await?;
+                return Ok(ReviewRetryOutcome::SiblingInFlight);
+            }
+        }
+    }
+    // The row lock above may have waited on a concurrent decision.
+    if !pending.contains(&review_id) {
+        tx.rollback().await?;
+        return Err(ReviewDecisionError::NotPending.into());
+    }
+
+    let rejected = sqlx::query(
+        r#"
+        update review_items
+           set status = 'rejected',
+               reviewed_by = $2,
+               reviewed_at = now(),
+               conflict_fields = '[]'::jsonb,
+               conflicted_at = null
+         where id = any($1) and status = 'pending'
+        returning id, run_id, suggested_patch
+        "#,
+    )
+    .bind(&pending)
+    .bind(actor_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if let Some(job_id) = job_id {
+        finalize_review_aggregate_tx(
+            &mut tx,
+            job_id,
+            review_id,
+            "user",
+            Some(actor_id.to_string()),
+        )
+        .await?;
+    }
+
+    let prepared = prepare_run_with_jobs_on_tx(
+        &mut tx,
+        document_id,
+        &[Stage::Metadata],
+        ProcessingMode::ManualReview,
+        "review-retry",
+        "user",
+        Some(0),
+    )
+    .await?;
+    let Some(run_created) = prepared.audit_event else {
+        // Reused an existing active run: never attach overrides to it.
+        tx.rollback().await?;
+        return Ok(ReviewRetryOutcome::ActiveRun);
+    };
+    sqlx::query(
+        r#"
+        update jobs
+           set payload = payload || jsonb_build_object($2::text, $3::jsonb)
+         where run_id = $1 and stage = 'metadata'
+        "#,
+    )
+    .bind(prepared.run_id)
+    .bind(archivist_core::METADATA_RETRY_OVERRIDES_KEY)
+    .bind(overrides)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut rejected_review_ids = Vec::with_capacity(rejected.len());
+    for row in rejected {
+        let id: Uuid = row.try_get("id")?;
+        rejected_review_ids.push(id);
+        append_audit_tx(
+            &mut tx,
+            AuditEventInput {
+                event_type: "review.rejected".to_owned(),
+                actor_type: "user".to_owned(),
+                actor_id: Some(actor_id.to_string()),
+                run_id: row.try_get("run_id")?,
+                job_id,
+                paperless_document_id: Some(document_id),
+                before: Some(row.try_get("suggested_patch")?),
+                after: None,
+                metadata: Some(json!({
+                    "review_id": id,
+                    "stage": stage,
+                    "reason": "retry",
+                    "retry_run_id": prepared.run_id
+                })),
+                outcome: "success".to_owned(),
+                error_message: None,
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+    append_audit_tx(&mut tx, run_created).await?;
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "review.retried".to_owned(),
+            actor_type: "user".to_owned(),
+            actor_id: Some(actor_id.to_string()),
+            run_id: Some(prepared.run_id),
+            job_id: None,
+            paperless_document_id: Some(document_id),
+            before: None,
+            after: None,
+            metadata: Some(json!({
+                "review_id": review_id,
+                "rejected_reviews": rejected_review_ids.len(),
+                "overrides": overrides
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(ReviewRetryOutcome::Queued {
+        run_id: prepared.run_id,
+        rejected_review_ids,
+    })
+}
+
 pub async fn review_decision(
     pool: &DbPool,
     review_id: Uuid,
