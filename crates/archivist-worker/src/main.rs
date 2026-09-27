@@ -19,7 +19,7 @@ use archivist_apply::{
 use archivist_config::AppConfig;
 use archivist_core::{
     AiProviderKind, AuditEventInput, DocumentPatch, LanguageDetection, MetadataFieldFlags,
-    MetadataSuggestion, OldTagStrategy, ProcessingMode, ReasoningEffort, RuntimeSettings, Stage,
+    MetadataSuggestion, OldTagStrategy, ReasoningEffort, RuntimeSettings, Stage,
     StructuredOutputMode, detect_document_language, validate_choice_suggestion,
     validate_document_date_suggestion, validate_field_suggestion, validate_tag_suggestion,
     validate_title_suggestion,
@@ -27,12 +27,11 @@ use archivist_core::{
 use archivist_db::{
     AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, StartupRepair, append_audit,
     backfill_metadata_stage_for_ocr_only_runs, bump_text_num_ctx_if_too_small,
-    bump_vision_num_ctx_if_too_small, claim_jobs, claim_notification_delivery,
-    claim_pending_review_for_autopilot_drain, complete_job, connect, create_review_item,
-    create_run_with_jobs_with_priority, custom_field_ids_for_names, fail_job, get_active_prompt,
-    get_backlog_counts, get_dashboard_live_status, get_runtime_settings,
-    get_workflow_safety_status, increment_metric_counter, insert_ai_artifact, is_last_active_job,
-    list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
+    bump_vision_num_ctx_if_too_small, claim_jobs, claim_pending_review_for_autopilot_drain,
+    complete_job, connect, create_review_item, create_run_with_jobs_with_priority,
+    custom_field_ids_for_names, fail_job, get_active_prompt, get_backlog_counts,
+    get_runtime_settings, get_workflow_safety_status, increment_metric_counter, insert_ai_artifact,
+    is_last_active_job, list_allowed_named_entities, list_allowed_tag_names, list_custom_fields,
     list_pending_review_items_for_autopilot_drain, mark_review_apply_conflict,
     mark_review_auto_applied, named_entity_id_for_name, paperless_sync_cursor,
     queue_missing_pipeline, rebalance_backfilled_metadata_priorities, record_dashboard_snapshot,
@@ -48,7 +47,6 @@ use archivist_paperless::{
     PaperlessTag,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use reqwest::Client as HttpClient;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -62,9 +60,11 @@ use job_supervisor::{
     InFlightGuard, JobSupervisor, WatchdogVerdict, catch_job_panic, watch_job_lease,
     with_lease_keepalive,
 };
+use notifications::send_operational_notifications;
 use startup::{run_startup_repair, run_startup_vision_crash_requeue};
 
 mod job_supervisor;
+mod notifications;
 mod startup;
 
 #[tokio::main]
@@ -1029,116 +1029,6 @@ fn env_concurrency_cap(config: &AppConfig) -> u32 {
 fn resolve_target_concurrency(env_cap: u32, settings: &RuntimeSettings) -> u32 {
     let desired = settings.effective_tuning().worker_concurrency;
     desired.min(env_cap).max(1)
-}
-
-async fn send_operational_notifications(pool: &DbPool, config: &AppConfig) -> Result<()> {
-    let settings = get_runtime_settings(pool).await?;
-    if !settings.notifications.enabled {
-        return Ok(());
-    }
-    let Some(webhook_secret_id) = settings.notifications.webhook_url_secret_id else {
-        return Ok(());
-    };
-    let Some(webhook_url) = resolve_secret(pool, &config.secret_key, webhook_secret_id).await?
-    else {
-        return Ok(());
-    };
-    let cooldown = settings.notifications.cooldown_minutes as i32;
-    let counts = get_backlog_counts(pool).await?;
-    if counts.waiting_review >= settings.notifications.review_queue_threshold
-        && claim_notification_delivery(pool, "review_queue_backlog", cooldown).await?
-    {
-        send_notification_webhook(
-            &webhook_url,
-            json!({
-                "app": "paperless-archivist",
-                "event": "review_queue_backlog",
-                "severity": "warning",
-                "title": "Review queue needs attention",
-                "description": "Paperless Archivist has documents waiting for human review.",
-                "metadata": {
-                    "waiting_review": counts.waiting_review,
-                    "threshold": settings.notifications.review_queue_threshold
-                }
-            }),
-        )
-        .await?;
-    }
-
-    let live = get_dashboard_live_status(pool, &settings).await?;
-    let hard_failures = live
-        .recent_failures
-        .iter()
-        .filter(|failure| failure.status == "failed" || failure.failure_kind == "failed")
-        .count() as i64;
-    if hard_failures >= settings.notifications.repeated_failure_threshold
-        && claim_notification_delivery(pool, "repeated_processing_failures", cooldown).await?
-    {
-        send_notification_webhook(
-            &webhook_url,
-            json!({
-                "app": "paperless-archivist",
-                "event": "repeated_processing_failures",
-                "severity": "error",
-                "title": "Repeated processing failures",
-                "description": "Recent Paperless Archivist jobs are failing. Check the dashboard live status and worker logs.",
-                "metadata": {
-                    "recent_failure_count": hard_failures,
-                    "threshold": settings.notifications.repeated_failure_threshold
-                }
-            }),
-        )
-        .await?;
-    }
-
-    if settings.workflow.mode == ProcessingMode::FullAuto
-        && settings.workflow.paused
-        && claim_notification_delivery(pool, "paused_full_auto", cooldown).await?
-    {
-        send_notification_webhook(
-            &webhook_url,
-            json!({
-                "app": "paperless-archivist",
-                "event": "paused_full_auto",
-                "severity": "warning",
-                "title": "Full autopilot is paused",
-                "description": "Full autopilot is configured but processing is paused.",
-                "metadata": {
-                    "workflow_mode": "full_auto",
-                    "paused": true
-                }
-            }),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-async fn send_notification_webhook(
-    webhook_url: &SecretString,
-    payload: serde_json::Value,
-) -> Result<()> {
-    let response = HttpClient::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        // No connect-time IP-pinning: the DNS-rebinding TOCTOU is an accepted
-        // residual risk for this operator-configured webhook host (see #183).
-        .build()?
-        .post(webhook_url.expose_secret())
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "notification webhook request failed: {}",
-                error.without_url()
-            )
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(anyhow!("notification webhook returned {status}"));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5268,6 +5158,7 @@ fn hash_bytes(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use archivist_core::ProcessingMode;
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
