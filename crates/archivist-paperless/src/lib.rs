@@ -136,6 +136,30 @@ fn accumulate_download_size(running_total: u64, chunk_len: u64, cap: u64) -> Res
     Ok(total)
 }
 
+/// Resolve a pagination `next` link against the configured base URL. Only
+/// the path and query are taken from `next`; scheme, host and port always come
+/// from the configured base, because Paperless behind a TLS-terminating proxy
+/// commonly advertises `http://internal-host/...` links. The path must stay
+/// under the configured `<base>/api/` prefix, so a `next` link can never steer
+/// the (token-bearing) client to another endpoint or host. #398
+fn rebase_next_page_url(base_url: &Url, next: &str) -> Result<Url> {
+    let parsed = Url::parse(next)
+        .or_else(|_| base_url.join(next))
+        .context("parse Paperless next page URL")?;
+    let api_prefix = format!("{}/api/", base_url.path().trim_end_matches('/'));
+    if !parsed.path().starts_with(&api_prefix) {
+        return Err(PaperlessError::Protocol(format!(
+            "Paperless pagination next URL left the API prefix {api_prefix}"
+        ))
+        .into());
+    }
+    let mut rebased = base_url.clone();
+    rebased.set_path(parsed.path());
+    rebased.set_query(parsed.query());
+    rebased.set_fragment(None);
+    Ok(rebased)
+}
+
 #[derive(Clone)]
 pub struct PaperlessClient {
     base_url: Url,
@@ -478,15 +502,7 @@ impl PaperlessClient {
             let Some(next) = page.next else {
                 return Ok(items);
             };
-            let next_url = Url::parse(&next)
-                .or_else(|_| self.base_url.join(&next))
-                .context("parse Paperless next page URL")?;
-            if next_url.origin() != self.base_url.origin() {
-                return Err(PaperlessError::Protocol(
-                    "Paperless pagination next URL changed origin".to_owned(),
-                )
-                .into());
-            }
+            let next_url = rebase_next_page_url(&self.base_url, &next)?;
             // Guard against a non-advancing cursor that would otherwise loop
             // forever while `items` grows without bound.
             if next_url == url {
@@ -669,6 +685,51 @@ pub struct PaperlessDocumentDetail {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn next_page_url_is_rebased_onto_the_configured_origin() {
+        // #398: TLS-terminating proxy advertises http + internal host.
+        let base = Url::parse("https://paperless.example.com/").unwrap();
+        let next = rebase_next_page_url(
+            &base,
+            "http://paperless-internal:8000/api/documents/?page=2&page_size=100",
+        )
+        .expect("scheme/host drift is tolerated");
+        assert_eq!(
+            next.as_str(),
+            "https://paperless.example.com/api/documents/?page=2&page_size=100"
+        );
+
+        let prefixed = Url::parse("https://proxy.example.com/paperless/").unwrap();
+        let next = rebase_next_page_url(&prefixed, "http://10.0.0.5/paperless/api/tags/?page=3")
+            .expect("sub-path deployment keeps its prefix");
+        assert_eq!(
+            next.as_str(),
+            "https://proxy.example.com/paperless/api/tags/?page=3"
+        );
+
+        let relative = rebase_next_page_url(&base, "/api/tags/?page=2").expect("relative link");
+        assert_eq!(
+            relative.as_str(),
+            "https://paperless.example.com/api/tags/?page=2"
+        );
+    }
+
+    #[test]
+    fn next_page_url_outside_the_api_prefix_is_rejected() {
+        let base = Url::parse("https://paperless.example.com/paperless/").unwrap();
+        for next in [
+            "https://attacker.example/admin/?page=2",
+            "https://paperless.example.com/api/documents/?page=2",
+            "https://paperless.example.com/paperless/api/../admin/",
+            "/paperless/other/?page=2",
+        ] {
+            assert!(
+                rebase_next_page_url(&base, next).is_err(),
+                "{next} must be rejected"
+            );
+        }
+    }
 
     fn reconciliation_document() -> PaperlessDocumentDetail {
         PaperlessDocumentDetail {

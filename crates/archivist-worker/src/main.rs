@@ -4373,19 +4373,11 @@ async fn paperless_client(
     config: &AppConfig,
     settings: &RuntimeSettings,
 ) -> Result<PaperlessClient> {
-    let active_profile = settings.paperless.archive_profiles.iter().find(|profile| {
-        profile.enabled
-            && profile
-                .name
-                .eq_ignore_ascii_case(&settings.paperless.active_archive)
-    });
-    let base_url = active_profile
-        .map(|profile| profile.base_url.as_str())
-        .unwrap_or(&settings.paperless.base_url);
-    let secret_id = active_profile
-        .and_then(|profile| profile.token_secret_id)
-        .or(settings.paperless.token_secret_id)
-        .ok_or_else(|| anyhow!("Paperless token is not configured"))?;
+    // The global token is only inherited by a same-origin profile. #396
+    let (base_url, secret_id) = settings.paperless.active_connection();
+    let secret_id = secret_id.ok_or_else(|| {
+        anyhow!("Paperless token is not configured for the active archive profile")
+    })?;
     let token = resolve_secret(pool, &config.secret_key, secret_id)
         .await?
         .ok_or_else(|| anyhow!("Paperless token secret reference does not exist"))?;
