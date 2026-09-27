@@ -18,7 +18,7 @@ use archivist_db::{
     get_review_status, list_recoverable_review_apply_intents, mark_apply_intent_confirmed,
     mark_apply_intent_in_flight, mark_review_applied, mark_review_auto_applied,
     prepare_apply_intent, reconcile_apply_intent, release_transient_apply_intent,
-    revert_review_from_applying, revert_review_to_pending_after_failed_drain,
+    revert_review_from_applying,
 };
 use archivist_paperless::{
     PaperlessClient, PaperlessDocumentDetail, PaperlessError, document_matches_patch,
@@ -780,22 +780,17 @@ async fn settle_failed_review(pool: &DbPool, intent: &ApplyIntentRecord) -> Resu
     let current_status = get_review_status(pool, review_id)
         .await?
         .ok_or_else(|| anyhow!("review apply intent references a missing review"))?;
-    match intent.source.as_str() {
-        "human_review" => {
-            let status = intent
-                .review_revert_status
-                .as_deref()
-                .ok_or_else(|| anyhow!("failed human review intent has no safe revert status"))?;
-            if current_status == "applying" {
-                revert_review_from_applying(pool, review_id, status).await?;
-            }
-        }
-        "autopilot_drain" => {
-            if current_status == "applying" {
-                revert_review_to_pending_after_failed_drain(pool, review_id).await?;
-            }
-        }
+    // #439: one revert transition for both owners; only the target differs.
+    let revert_to = match intent.source.as_str() {
+        "human_review" => intent
+            .review_revert_status
+            .as_deref()
+            .ok_or_else(|| anyhow!("failed human review intent has no safe revert status"))?,
+        "autopilot_drain" => "pending",
         source => return Err(anyhow!("unknown review apply source {source}")),
+    };
+    if current_status == "applying" {
+        revert_review_from_applying(pool, review_id, revert_to).await?;
     }
     let expected = intent.review_revert_status.as_deref().unwrap_or("pending");
     let status = get_review_status(pool, review_id).await?;
