@@ -3,12 +3,16 @@ import { type InventoryItem } from '../api/client';
 import type { languageOptions } from '../data/worldLanguages';
 import { useI18n } from '../i18n/I18nProvider';
 import { InventoryRow } from './InventoryRow';
+import { EmptyState, ErrorState, LoadingState } from '../lib/states';
 
 const COLUMN_COUNT = 11;
 
 type InventoryTableProps = {
   items: InventoryItem[];
   loading: boolean;
+  loadError?: string | null;
+  onRetry?: () => void;
+  pendingRows?: ReadonlySet<number>;
   selected: Set<number>;
   allOnPageSelected: boolean;
   onToggleSelect: (documentId: number) => void;
@@ -23,6 +27,9 @@ type InventoryTableProps = {
 export function InventoryTable({
   items,
   loading,
+  loadError = null,
+  onRetry,
+  pendingRows,
   selected,
   allOnPageSelected,
   onToggleSelect,
@@ -76,7 +83,13 @@ export function InventoryTable({
           {items.length === 0 ? (
             <tr>
               <td colSpan={COLUMN_COUNT} className="empty-row">
-                {loading ? t('generic.loading') : t('inventory.no_results')}
+                {loading ? (
+                  <LoadingState compact label={t('inventory.loading')} />
+                ) : loadError ? (
+                  <ErrorState compact title={t('inventory.load_error')} detail={loadError} onRetry={onRetry} />
+                ) : (
+                  <EmptyState compact message={t('inventory.no_results')} />
+                )}
               </td>
             </tr>
           ) : (
@@ -85,6 +98,7 @@ export function InventoryTable({
                 key={item.paperless_document_id}
                 item={item}
                 selected={selected.has(item.paperless_document_id)}
+                pending={pendingRows?.has(item.paperless_document_id) ?? false}
                 onToggleSelect={onToggleSelect}
                 languages={languages}
                 t={t}

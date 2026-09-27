@@ -4,10 +4,12 @@ import {
   api,
   type InventoryItem,
   type MetadataTrace,
+  type Stage,
 } from '../api/client';
 import { languageOptions } from '../data/worldLanguages';
 import { useI18n } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
+import { useConfirm } from '../lib/ConfirmDialog';
 import { AdvancedPanel } from './AdvancedPanel';
 import { DiagnoseDrawer } from './DiagnoseDrawer';
 import { DuplicatesPanel } from './DuplicatesPanel';
@@ -45,6 +47,12 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
   const [diagnoseMissing, setDiagnoseMissing] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [notice, setNotice] = useState<string | null>(null);
+  // #429: a failed first-page load is shown as an error state, not "no results".
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // #426: per-row pending state; the ref blocks a double click synchronously.
+  const rowActionsInFlight = useRef(new Set<number>());
+  const [pendingRows, setPendingRows] = useState<ReadonlySet<number>>(() => new Set());
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const languages = useMemo(() => languageOptions(locale), [locale]);
 
   const visibleDocumentIds = useMemo(
@@ -80,6 +88,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
     setItems([]);
     setTotal(0);
     setLoading(true);
+    setLoadError(null);
     return api
       .inventory({ ...filtersToParams(filters), offset: 0, limit: PAGE_SIZE })
       .then((data) => {
@@ -92,7 +101,9 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
       })
       .catch((err) => {
         if (requestId !== requestIdRef.current) return;
-        setError(localizedErrorMessage(err, t));
+        const message = localizedErrorMessage(err, t);
+        setLoadError(message);
+        setError(message);
       })
       .finally(() => {
         // Only the newest in-flight request may clear the loading flag, so a
@@ -148,31 +159,49 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
     }
   }, [searchText]);
 
-  const triggerOcr = useCallback(
-    (documentId: number) =>
-      api
-        .triggerDocument(documentId, ['ocr'], 'manual_review')
-        .then(loadFirst)
-        .catch((err) => setError(localizedErrorMessage(err, t))),
-    [loadFirst, setError, t]
+  // Re-fetch just one document and patch it into the loaded list, keeping
+  // every loaded page, the selection and the scroll position (#426).
+  const refreshRow = useCallback(async (documentId: number) => {
+    const contextId = requestIdRef.current;
+    try {
+      const data = await api.inventory({ id: documentId, offset: 0, limit: 1 });
+      // A query change in the meantime replaced the list; do not patch it.
+      if (contextId !== requestIdRef.current) return;
+      const fresh = data.items.find((item) => item.paperless_document_id === documentId);
+      if (!fresh) return;
+      setItems((current) =>
+        current.map((item) => (item.paperless_document_id === documentId ? fresh : item))
+      );
+    } catch {
+      // The trigger itself succeeded; a failed row refresh keeps the old row.
+    }
+  }, []);
+
+  const triggerRow = useCallback(
+    async (documentId: number, stages: Stage[]) => {
+      if (rowActionsInFlight.current.has(documentId)) return;
+      rowActionsInFlight.current.add(documentId);
+      setPendingRows(new Set(rowActionsInFlight.current));
+      setNotice(null);
+      try {
+        await api.triggerDocument(documentId, stages, 'manual_review');
+        setNotice(t('inventory.trigger_queued', { id: documentId }));
+        await refreshRow(documentId);
+      } catch (err) {
+        setError(localizedErrorMessage(err, t));
+      } finally {
+        rowActionsInFlight.current.delete(documentId);
+        setPendingRows(new Set(rowActionsInFlight.current));
+      }
+    },
+    [refreshRow, setError, t]
   );
 
-  const triggerMetadata = useCallback(
-    (documentId: number) =>
-      api
-        .triggerDocument(documentId, ['metadata'], 'manual_review')
-        .then(loadFirst)
-        .catch((err) => setError(localizedErrorMessage(err, t))),
-    [loadFirst, setError, t]
-  );
-
+  const triggerOcr = useCallback((documentId: number) => void triggerRow(documentId, ['ocr']), [triggerRow]);
+  const triggerMetadata = useCallback((documentId: number) => void triggerRow(documentId, ['metadata']), [triggerRow]);
   const triggerPipeline = useCallback(
-    (documentId: number) =>
-      api
-        .triggerDocument(documentId, ['ocr', 'metadata'], 'manual_review')
-        .then(loadFirst)
-        .catch((err) => setError(localizedErrorMessage(err, t))),
-    [loadFirst, setError, t]
+    (documentId: number) => void triggerRow(documentId, ['ocr', 'metadata']),
+    [triggerRow]
   );
 
   const toggleSelect = useCallback((documentId: number) => {
@@ -203,21 +232,44 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
     });
   }, [items]);
 
-  const rerunSelected = useCallback(() => {
+  // Refresh the rows that are already loaded in place (same range), without
+  // emptying the list first, so pages and scroll position survive (#426).
+  const refreshLoaded = useCallback(() => {
+    const requestId = ++requestIdRef.current;
+    return api
+      .inventory({ ...filtersToParams(filters), offset: 0, limit: Math.max(items.length, PAGE_SIZE) })
+      .then((data) => {
+        if (requestId !== requestIdRef.current) return;
+        setItems(data.items);
+        setTotal(data.total);
+      })
+      .catch((err) => {
+        if (requestId !== requestIdRef.current) return;
+        setError(localizedErrorMessage(err, t));
+      });
+  }, [filters, items.length, setError, t]);
+
+  const rerunSelected = useCallback(async () => {
     // Only IDs in the rendered result may reach the bulk endpoint, even if a
     // future state-management regression leaves a hidden ID in `selected`.
     const ids = Array.from(visibleSelected);
-    if (ids.length === 0) return Promise.resolve();
+    if (ids.length === 0) return;
+    // #417: bulk re-run queues AI work for every selected document.
+    const confirmed = await confirm({
+      title: t('inventory.rerun_confirm.title', { count: ids.length }),
+      description: t('inventory.rerun_confirm.description', { count: ids.length }),
+      confirmLabel: t('inventory.rerun_selected'),
+      tone: 'default'
+    });
+    if (!confirmed) return;
     setNotice(null);
-    return api
-      .bulkRerun(ids, RERUN_STAGES)
-      .then((result) => {
-        setSelected(new Set());
-        setNotice(t('inventory.rerun_done', { count: result.queued }));
-        return loadFirst();
-      })
-      .catch((err) => setError(localizedErrorMessage(err, t)));
-  }, [visibleSelected, loadFirst, setError, t]);
+    await run(setBusy, setError, async () => {
+      const result = await api.bulkRerun(ids, RERUN_STAGES);
+      setSelected(new Set());
+      setNotice(t('inventory.rerun_done', { count: result.queued }));
+      await refreshLoaded();
+    }, t);
+  }, [visibleSelected, confirm, refreshLoaded, setError, t]);
 
   const openDiagnose = useCallback(
     async (documentId: number) => {
@@ -291,7 +343,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
         <button
           className="primary-button"
           disabled={busy || visibleSelected.size === 0}
-          onClick={() => run(setBusy, setError, rerunSelected, t)}
+          onClick={() => void rerunSelected()}
         >
           <RotateCcw size={16} /> {t('inventory.rerun_selected')}
         </button>
@@ -301,12 +353,15 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
             <X size={14} /> {t('inventory.clear_selection')}
           </button>
         )}
-        {notice && <small className="field-hint">{notice}</small>}
+        <small className="field-hint inline-notice" role="status" aria-live="polite">{notice}</small>
       </div>
 
       <InventoryTable
         items={items}
         loading={loading}
+        loadError={loadError}
+        onRetry={() => void loadFirst()}
+        pendingRows={pendingRows}
         selected={visibleSelected}
         allOnPageSelected={allOnPageSelected}
         onToggleSelect={toggleSelect}
@@ -335,6 +390,7 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
           onClose={closeDiagnose}
         />
       )}
+      {confirmDialog}
     </section>
   );
 }

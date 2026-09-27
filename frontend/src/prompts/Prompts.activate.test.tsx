@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { axe, toHaveNoViolations } from 'jest-axe';
 import { I18nProvider } from '../i18n/I18nProvider';
 import type { Prompt } from '../api/client';
 
@@ -8,6 +9,8 @@ import type { Prompt } from '../api/client';
 // `load()` returns fresh array identities with changed content — exactly the
 // reload that used to wipe unsaved editor state (#314).
 let prompts: Prompt[];
+
+expect.extend(toHaveNoViolations);
 
 function seedPrompts() {
   prompts = [
@@ -86,11 +89,38 @@ describe('<Prompts> activate keeps unsaved edits', () => {
     // its (localized) option label. The button also disables while the
     // request is in flight, so it cannot serve as the reload signal.
     fireEvent.click(screen.getByRole('button', { name: /Activate Selected/i }));
+    // #417: activation is confirmed with the exact version first.
+    const dialog = await screen.findByRole('alertdialog', { name: 'Activate prompt version?' });
+    expect(dialog).toHaveTextContent('default v1');
+    fireEvent.click(within(dialog).getByRole('button', { name: /Activate Selected/i }));
     await waitFor(() => {
       expect(screen.getByRole('option', { name: 'default v1 (active)' })).toBeInTheDocument();
     });
     expect(versionSelect.value).toBe('p1');
     expect(contentField.value).toBe('edited draft content');
     expect(screen.getByText('unsaved edits')).toBeInTheDocument();
+  });
+
+  it('does not activate when the confirmation is cancelled (#417)', async () => {
+    const { api } = await import('../api/client');
+    const { Prompts } = await import('./Prompts');
+    vi.mocked(api.activatePrompt).mockClear();
+    render(
+      <I18nProvider>
+        <Prompts setError={() => undefined} />
+      </I18nProvider>
+    );
+    const versionSelect = (await screen.findByRole('combobox', { name: 'Version' })) as HTMLSelectElement;
+    await waitFor(() => expect(versionSelect.value).toBe('p2'));
+    fireEvent.change(versionSelect, { target: { value: 'p1' } });
+    await waitFor(() => expect(versionSelect.value).toBe('p1'));
+
+    fireEvent.click(screen.getByRole('button', { name: /Activate Selected/i }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Activate prompt version?' });
+    expect(await axe(dialog)).toHaveNoViolations();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(api.activatePrompt).not.toHaveBeenCalled();
   });
 });

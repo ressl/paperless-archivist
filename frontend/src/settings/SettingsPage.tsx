@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Save, UserPlus } from 'lucide-react';
 import {
   api,
@@ -18,6 +18,8 @@ import {
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { ActionButton, PageHeader, errorToString, localizedErrorMessage, run } from '../lib/ui';
 import { LanguageSelector } from '../lib/LanguageSelector';
+import { useConfirm } from '../lib/ConfirmDialog';
+import { useUnsavedChangesGuard } from '../lib/unsavedChanges';
 import { AiDefaultsSection } from './sections/AiDefaultsSection';
 import { CompletionTagsSection } from './sections/CompletionTagsSection';
 import { FieldsSection } from './sections/FieldsSection';
@@ -193,6 +195,21 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const providerStateGeneration = useRef(0);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+
+  // #423: the form is dirty when the draft differs from the last saved/loaded
+  // settings or any write-only secret field holds typed input. Registered with
+  // the navigation guard so a tab switch or reload asks before dropping it.
+  const settingsChanged = useMemo(
+    () => Boolean(settings && savedSettings && JSON.stringify(settings) !== JSON.stringify(savedSettings)),
+    [settings, savedSettings]
+  );
+  const dirty =
+    settingsChanged ||
+    token.trim() !== '' ||
+    notificationWebhook.trim() !== '' ||
+    Object.values(providerSecrets).some((secret) => secret.trim() !== '');
+  useUnsavedChangesGuard(dirty);
 
   const loadOllamaModels = (index: number, providerName: string) => {
     const generation = providerStateGeneration.current;
@@ -404,7 +421,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
 
   const providerKeys = syncProviderKeys(providerKeyState.current, settings.ai.providers.length);
 
-  const removeProvider = (index: number) => {
+  const removeProvider = async (index: number) => {
     const provider = settings.ai.providers[index];
     if (!provider || providerBuiltIns[index]) return;
     const references: string[] = [];
@@ -429,13 +446,12 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       }));
       return;
     }
-    if (
-      !window.confirm(
-        t('settings.provider.remove_confirm', { provider: provider.name.trim() })
-      )
-    ) {
-      return;
-    }
+    const confirmed = await confirm({
+      title: t('settings.provider.remove_dialog_title', { provider: provider.name.trim() }),
+      description: t('settings.provider.remove_confirm', { provider: provider.name.trim() }),
+      confirmLabel: t('settings.provider.remove')
+    });
+    if (!confirmed) return;
 
     const interruptedLoads = settings.ai.providers.flatMap((entry, providerIndex) =>
       providerIndex !== index && ollamaModels[providerIndex]?.loading
@@ -688,7 +704,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
             errors={providerValidation.providerErrors[index]}
             builtIn={providerBuiltIns[index] ?? false}
             removalError={providerRemovalErrors[index]}
-            onRemove={() => removeProvider(index)}
+            onRemove={() => void removeProvider(index)}
           />
         ))}
       </div>
@@ -697,6 +713,19 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         <button title={t('settings.provider.add')} onClick={addProvider}>
           <UserPlus size={16} /> {t('settings.provider.add')}
         </button>
+      </div>
+      {/* #423: sticky save bar so Save is always reachable on this long page,
+          with a dirty indicator announced politely when it changes. */}
+      <div className="toolbar settings-save-bar" role="region" aria-label={t('settings.save_bar')}>
+        <span className="settings-save-state" role="status" aria-live="polite">
+          {dirty ? (
+            <span className="dirty-pill">{t('settings.unsaved_changes')}</span>
+          ) : result ? (
+            <span className="result">{result}</span>
+          ) : (
+            <span className="field-hint">{t('settings.all_saved')}</span>
+          )}
+        </span>
         <ActionButton
           icon={<Save />}
           label={t('generic.save')}
@@ -704,7 +733,6 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           disabled={providerValidation.hasErrors}
           onClick={saveSettings}
         />
-        {result && <span className="result">{result}</span>}
         {providerValidation.hasErrors && (
           <div className="settings-validation-summary" role="alert">
             <span>{t('settings.provider.validation.save_blocked')}</span>
@@ -718,6 +746,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
           </div>
         )}
       </div>
+      {confirmDialog}
     </section>
   );
 }
