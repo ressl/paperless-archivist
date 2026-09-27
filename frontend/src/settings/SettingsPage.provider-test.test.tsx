@@ -480,6 +480,26 @@ describe('<SettingsPage> provider draft test', () => {
     ).toBeInTheDocument();
   });
 
+  it('keeps the provider name input mounted and focused while renaming (#416)', async () => {
+    const { SettingsPage } = await import('./SettingsPage');
+    render(
+      <I18nProvider>
+        <SettingsPage setError={() => undefined} />
+      </I18nProvider>
+    );
+
+    const card = await screen.findByRole('group', { name: 'draft-provider' });
+    const name = within(card).getByRole('textbox', { name: 'Name' });
+    name.focus();
+    fireEvent.change(name, { target: { value: 'draft-provider-renamed' } });
+    fireEvent.change(name, { target: { value: 'draft-provider-renamed-again' } });
+
+    const renamed = screen.getByRole('group', { name: 'draft-provider-renamed-again' });
+    const renamedInput = within(renamed).getByRole('textbox', { name: 'Name' });
+    expect(renamedInput).toBe(name);
+    expect(renamedInput).toHaveFocus();
+  });
+
   it('restarts an unaffected in-flight model load when another provider is removed', async () => {
     const fixture = settingsFixture();
     fixture.ai.providers[0].kind = 'ollama';

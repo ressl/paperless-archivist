@@ -261,6 +261,12 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       .catch((err) => setError(localizedErrorMessage(err, t)));
   }, [setError]);
 
+  // Stable React keys for the provider cards. The name is edited in place,
+  // so a name-based key remounted the card (and dropped focus) on every
+  // keystroke. Keys grow with the list and shift on removal like the other
+  // index-addressed provider state. #416
+  const providerKeyState = useRef({ next: 0, keys: [] as string[] });
+
   if (!settings) {
     return (
       <section className="page">
@@ -396,6 +402,8 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
     }));
   };
 
+  const providerKeys = syncProviderKeys(providerKeyState.current, settings.ai.providers.length);
+
   const removeProvider = (index: number) => {
     const provider = settings.ai.providers[index];
     if (!provider || providerBuiltIns[index]) return;
@@ -440,6 +448,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
         : []
     );
     providerStateGeneration.current += 1;
+    providerKeyState.current.keys.splice(index, 1);
     setProviderBuiltIns((current) => current.filter((_, providerIndex) => providerIndex !== index));
     setProviderSecrets((current) => shiftIndexedProviderState(current, index));
     setOllamaModels((current) => shiftIndexedProviderState(current, index));
@@ -662,7 +671,7 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       <div className="card-grid card-grid--default">
         {settings.ai.providers.map((provider, index) => (
           <ProviderCard
-            key={`${provider.name}-${index}`}
+            key={providerKeys[index]}
             provider={provider}
             catalog={settings.ai.model_catalog}
             globals={settings}
@@ -711,4 +720,13 @@ export function SettingsPage({ setError }: { setError: (error: string | null) =>
       </div>
     </section>
   );
+}
+
+function syncProviderKeys(state: { next: number; keys: string[] }, count: number): string[] {
+  while (state.keys.length < count) {
+    state.keys.push(`provider-card-${state.next}`);
+    state.next += 1;
+  }
+  if (state.keys.length > count) state.keys.length = count;
+  return state.keys;
 }

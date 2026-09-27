@@ -694,7 +694,7 @@ impl WorkflowTags {
     pub fn is_workflow_tag(&self, tag_name: &str) -> bool {
         self.all()
             .iter()
-            .any(|tag| tag.eq_ignore_ascii_case(tag_name))
+            .any(|tag| catalog_names_equal(tag, tag_name))
     }
 
     pub fn completion_tag_for_stage(&self, stage: Stage) -> Option<&str> {
@@ -2726,7 +2726,7 @@ pub fn validate_tag_suggestion(
     let mut warnings = Vec::new();
     let allowed: HashSet<String> = allowed_tags
         .iter()
-        .map(|tag| tag.to_ascii_lowercase())
+        .map(|tag| fold_catalog_name(tag))
         .collect();
     let mut seen = HashSet::new();
     let mut tags = Vec::new();
@@ -2736,7 +2736,7 @@ pub fn validate_tag_suggestion(
         if normalized.is_empty() {
             continue;
         }
-        let key = normalized.to_ascii_lowercase();
+        let key = fold_catalog_name(normalized);
         if !seen.insert(key.clone()) {
             continue;
         }
@@ -3537,6 +3537,20 @@ pub struct ValidatedFieldSuggestion {
     pub warnings: Vec<String>,
 }
 
+/// Case-fold a Paperless catalog name (tag, custom field, correspondent,
+/// document type) for comparison. Uses full Unicode lowercasing: ASCII-only
+/// folding left "Ärzte" and "ärzte" distinct, so the model's spelling failed
+/// validation or silently lost its id. Keep every catalog-name comparison on
+/// this helper; the SQL lookups fold with `lower()` on both sides. #409
+pub fn fold_catalog_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// Case-insensitive catalog name equality, see [`fold_catalog_name`].
+pub fn catalog_names_equal(left: &str, right: &str) -> bool {
+    left == right || fold_catalog_name(left) == fold_catalog_name(right)
+}
+
 pub fn validate_field_suggestion(
     suggestion: FieldSuggestion,
     allowed_field_names: &[String],
@@ -3545,7 +3559,7 @@ pub fn validate_field_suggestion(
 ) -> Result<ValidatedFieldSuggestion, Vec<ValidationError>> {
     let allowed: HashSet<String> = allowed_field_names
         .iter()
-        .map(|name| name.to_ascii_lowercase())
+        .map(|name| fold_catalog_name(name))
         .collect();
     let mut errors = Vec::new();
     let mut seen = HashSet::new();
@@ -3553,10 +3567,10 @@ pub fn validate_field_suggestion(
 
     for field in suggestion.fields {
         let name = field.name.trim();
-        if name.is_empty() || !seen.insert(name.to_ascii_lowercase()) {
+        if name.is_empty() || !seen.insert(fold_catalog_name(name)) {
             continue;
         }
-        if !allowed.contains(&name.to_ascii_lowercase()) {
+        if !allowed.contains(&fold_catalog_name(name)) {
             errors.push(ValidationError::UnknownChoice(name.to_owned()));
             continue;
         }
@@ -3615,7 +3629,7 @@ pub fn validate_choice_suggestion(
 ) -> Result<ChoiceSuggestion, Vec<ValidationError>> {
     let allowed: HashSet<String> = allowed_names
         .iter()
-        .map(|name| name.to_ascii_lowercase())
+        .map(|name| fold_catalog_name(name))
         .collect();
     let normalized = suggestion.name.trim();
     let mut errors = Vec::new();
@@ -3623,7 +3637,7 @@ pub fn validate_choice_suggestion(
     if normalized.is_empty() {
         errors.push(ValidationError::EmptyOutput);
     }
-    if !allowed.contains(&normalized.to_ascii_lowercase()) {
+    if !allowed.contains(&fold_catalog_name(normalized)) {
         errors.push(ValidationError::UnknownChoice(normalized.to_owned()));
     }
     if suggestion.confidence.unwrap_or(0.0) < confidence_threshold {
@@ -4805,6 +4819,54 @@ mod tests {
         // Without the metadata stage, no metadata fields are requested.
         let none = MetadataFieldFlags::from_enabled_stages(&[Stage::Ocr]);
         assert!(!none.any());
+    }
+
+    #[test]
+    fn catalog_name_validation_folds_non_ascii_capitals() {
+        // #409: "ärzte" must match the catalog's "Ärzte" like "rechnung"
+        // matches "Rechnung", and dedupe against it.
+        assert!(catalog_names_equal("Ärzte", "ärzte"));
+        assert!(!catalog_names_equal("Ärzte", "Aerzte"));
+
+        let validated = validate_tag_suggestion(
+            TagSuggestion {
+                tags: vec!["ärzte".to_owned(), "ÄRZTE".to_owned()],
+                new_tags: Vec::new(),
+                confidence: Some(0.9),
+            },
+            &["Ärzte".to_owned()],
+            &WorkflowTags::default(),
+            &TaggingSettings::default(),
+        )
+        .expect("non-ASCII tag in a different case is known");
+        assert_eq!(validated.tags.len(), 1, "case variants are deduplicated");
+
+        validate_choice_suggestion(
+            ChoiceSuggestion {
+                name: "ärztekammer".to_owned(),
+                confidence: Some(0.9),
+                evidence: None,
+            },
+            &["Ärztekammer".to_owned()],
+            0.5,
+        )
+        .expect("non-ASCII correspondent in a different case is known");
+
+        let fields = validate_field_suggestion(
+            FieldSuggestion {
+                fields: vec![FieldValueSuggestion {
+                    name: "größe".to_owned(),
+                    value: serde_json::json!("A4"),
+                    confidence: Some(0.9),
+                }],
+                confidence: Some(0.9),
+            },
+            &["Größe".to_owned()],
+            5,
+            0.5,
+        )
+        .expect("non-ASCII custom field in a different case is known");
+        assert_eq!(fields.fields.len(), 1);
     }
 
     #[test]

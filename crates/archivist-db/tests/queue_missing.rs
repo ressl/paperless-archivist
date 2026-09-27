@@ -218,3 +218,49 @@ async fn custom_field_ids_for_names_is_case_insensitive_and_skips_unknown() {
     assert_eq!(pairs.len(), 1);
     assert_eq!(pairs[0].1, 1);
 }
+
+/// Non-ASCII capitals must fold like ASCII ones, independent of the database
+/// locale: "Ärzte" was never matched by "ärzte" because the lookup lowercased
+/// the requested names with Rust's ASCII-only folding. #409
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn catalog_lookups_fold_non_ascii_capitals() {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
+        return;
+    };
+    sqlx::query("insert into paperless_tags (id, name) values (21, 'Ärzte'), (22, 'Übersetzung')")
+        .execute(&pool)
+        .await
+        .expect("seed paperless_tags");
+    sqlx::query(
+        "insert into paperless_custom_fields (id, name, data_type) values (5, 'Größe', 'string')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed paperless_custom_fields");
+
+    let requested = vec!["ärzte".to_owned(), "ÜBERSETZUNG".to_owned()];
+    let mut pairs = tag_id_pairs_for_names(&pool, &requested)
+        .await
+        .expect("tag_id_pairs_for_names");
+    pairs.sort_by_key(|(_, id)| *id);
+    assert_eq!(
+        pairs,
+        vec![("Ärzte".to_owned(), 21), ("Übersetzung".to_owned(), 22)]
+    );
+    let mut ids = archivist_db::tag_ids_for_names(&pool, &requested)
+        .await
+        .expect("tag_ids_for_names");
+    ids.sort_unstable();
+    assert_eq!(ids, vec![21, 22]);
+
+    let fields = custom_field_ids_for_names(&pool, &["GRÖSSE".to_owned(), "größe".to_owned()])
+        .await
+        .expect("custom_field_ids_for_names");
+    assert_eq!(
+        fields.len(),
+        1,
+        "only the lowercase spelling matches 'Größe'"
+    );
+    assert_eq!(fields[0].1, 5);
+}
