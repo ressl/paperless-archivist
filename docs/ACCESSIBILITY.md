@@ -63,5 +63,7 @@ Before a GA release:
 - Data-heavy tables are horizontally scrollable on small screens; mobile
   operation is supported for administration, but desktop remains the primary
   layout for bulk review.
-- The static guard cannot calculate color contrast dynamically. Color changes
-  should be checked manually before release.
+- The static guard checks the text colour tokens (`--text`, `--ink`, `--ink-2`,
+  `--muted`) against `--base`, `--surface` and `--surface-2` for WCAG AA
+  (4.5:1), but it cannot see one-off colours or rendered combinations. Other
+  color changes should be checked manually before release.

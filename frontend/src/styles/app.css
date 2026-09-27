@@ -3,7 +3,7 @@
   --ink: #172331;
   --ink-2: #263545;
   --text: #1e2933;
-  --muted: #687789;
+  --muted: #566474; /* >= 4.5:1 on base, surfaces and tone-soft fills (#430) */
   --line: #d8e0e6;
   --line-strong: #b9c4ce;
   --surface: #ffffff;
