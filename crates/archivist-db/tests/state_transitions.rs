@@ -11,8 +11,9 @@
 
 use archivist_core::{ProcessingMode, Stage};
 use archivist_db::{
-    DbPool, claim_jobs, claim_review_for_apply, complete_job, connect, create_review_item,
-    create_run_with_jobs, mark_review_apply_conflict, migrate, revert_review_from_applying,
+    DbPool, StartupRepair, claim_jobs, claim_review_for_apply, complete_job, connect,
+    create_review_item, create_run_with_jobs, mark_review_apply_conflict, migrate,
+    record_startup_repair, revert_review_from_applying, startup_repair_applied,
 };
 use serde_json::json;
 use sqlx::{Executor, Row};
@@ -29,7 +30,7 @@ async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, DbPool)> {
     pool.execute(
         r#"
         truncate paperless_apply_intents, review_items, jobs, pipeline_runs,
-                 document_inventory, audit_events, metrics_counters
+                 document_inventory, audit_events, metrics_counters, startup_repairs
           restart identity cascade;
         "#,
     )
@@ -189,4 +190,63 @@ async fn review_creation_mirrors_waiting_review_onto_the_badge() {
         .await
         .expect("idempotent revert");
     assert_eq!(review_status(&pool, review_id).await, "pending");
+}
+
+/// #443: a startup repair is recorded once per (name, version), with an
+/// audit event, and a newer version is tracked independently.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn startup_repair_markers_are_recorded_once_per_version() {
+    let Some((_db_lock, pool)) = fresh_pool().await else {
+        return;
+    };
+    let repair = StartupRepair::METADATA_STAGE_BACKFILL;
+    assert!(!startup_repair_applied(&pool, repair).await.expect("lookup"));
+    assert!(
+        record_startup_repair(&pool, repair, "9.9.9", json!({"runs_updated": 3}))
+            .await
+            .expect("record")
+    );
+    assert!(startup_repair_applied(&pool, repair).await.expect("lookup"));
+    assert!(
+        !record_startup_repair(&pool, repair, "9.9.9", json!({"runs_updated": 0}))
+            .await
+            .expect("second record"),
+        "a second replica must not record the marker twice"
+    );
+    let bumped = StartupRepair {
+        version: repair.version + 1,
+        ..repair
+    };
+    assert!(!startup_repair_applied(&pool, bumped).await.expect("lookup"));
+
+    let row = sqlx::query(
+        "select details, app_version from startup_repairs where name = $1 and version = $2",
+    )
+    .bind(repair.name)
+    .bind(repair.version)
+    .fetch_one(&pool)
+    .await
+    .expect("marker row");
+    let details: serde_json::Value = row.get("details");
+    let app_version: String = row.get("app_version");
+    assert_eq!(details, json!({"runs_updated": 3}));
+    assert_eq!(app_version, "9.9.9");
+    let audits: i64 = sqlx::query_scalar(
+        "select count(*) from audit_events where event_type = 'worker.startup_repair_applied'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("audit count");
+    assert_eq!(audits, 1);
+
+    let names: std::collections::HashSet<_> = StartupRepair::ALL
+        .iter()
+        .map(|repair| repair.name)
+        .collect();
+    assert_eq!(
+        names.len(),
+        StartupRepair::ALL.len(),
+        "repair names are unique"
+    );
 }

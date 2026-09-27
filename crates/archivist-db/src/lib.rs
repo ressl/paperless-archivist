@@ -9868,6 +9868,130 @@ fn status_column_for_stage(stage: Stage) -> Result<&'static str> {
         .ok_or_else(|| anyhow!("stage does not map to inventory status: {stage}"))
 }
 
+/// A one-shot worker startup repair, identified by `name` and `version`
+/// (#443). The worker runs a repair at most once per (name, version): the
+/// marker in `startup_repairs` (migration 0054) is written after a
+/// successful pass. Bump `version` when a repair's logic changes and it has
+/// to run once more (e.g. a raised num_ctx floor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupRepair {
+    pub name: &'static str,
+    pub version: i32,
+}
+
+impl StartupRepair {
+    /// `bump_vision_num_ctx_if_too_small`.
+    pub const VISION_NUM_CTX_FLOOR: StartupRepair = StartupRepair {
+        name: "ollama_vision_num_ctx_floor",
+        version: 1,
+    };
+    /// `bump_text_num_ctx_if_too_small`.
+    pub const TEXT_NUM_CTX_FLOOR: StartupRepair = StartupRepair {
+        name: "ollama_text_num_ctx_floor",
+        version: 1,
+    };
+    /// `requeue_vision_crashed_jobs` (only recorded while the runtime
+    /// setting `requeue_vision_crashes_on_startup` enables it).
+    pub const VISION_CRASH_REQUEUE: StartupRepair = StartupRepair {
+        name: "vision_crash_requeue",
+        version: 1,
+    };
+    /// `backfill_metadata_stage_for_ocr_only_runs`.
+    pub const METADATA_STAGE_BACKFILL: StartupRepair = StartupRepair {
+        name: "metadata_stage_backfill",
+        version: 1,
+    };
+    /// `rebalance_backfilled_metadata_priorities`.
+    pub const METADATA_PRIORITY_REBALANCE: StartupRepair = StartupRepair {
+        name: "metadata_priority_rebalance",
+        version: 1,
+    };
+    /// `reset_stuck_running_pipeline_runs`.
+    pub const STUCK_RUNNING_RUNS_RESET: StartupRepair = StartupRepair {
+        name: "stuck_running_runs_reset",
+        version: 1,
+    };
+
+    pub const ALL: &'static [StartupRepair] = &[
+        StartupRepair::VISION_NUM_CTX_FLOOR,
+        StartupRepair::TEXT_NUM_CTX_FLOOR,
+        StartupRepair::VISION_CRASH_REQUEUE,
+        StartupRepair::METADATA_STAGE_BACKFILL,
+        StartupRepair::METADATA_PRIORITY_REBALANCE,
+        StartupRepair::STUCK_RUNNING_RUNS_RESET,
+    ];
+}
+
+/// Whether `repair` already ran at its current version. #443
+pub async fn startup_repair_applied(pool: &DbPool, repair: StartupRepair) -> Result<bool> {
+    sqlx::query_scalar(
+        "select exists (select 1 from startup_repairs where name = $1 and version = $2)",
+    )
+    .bind(repair.name)
+    .bind(repair.version)
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Record that `repair` ran successfully, with the running `app_version` and
+/// the repair's summary as `details`, plus a `worker.startup_repair_applied`
+/// audit event in the same transaction. Returns `false` when another replica
+/// recorded the marker first (both passes are idempotent, so a concurrent
+/// double run is harmless). #443
+pub async fn record_startup_repair(
+    pool: &DbPool,
+    repair: StartupRepair,
+    app_version: &str,
+    details: Value,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query(
+        r#"
+        insert into startup_repairs (name, version, app_version, details)
+        values ($1, $2, $3, $4)
+        on conflict (name, version) do nothing
+        "#,
+    )
+    .bind(repair.name)
+    .bind(repair.version)
+    .bind(app_version)
+    .bind(&details)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "worker.startup_repair_applied".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(details),
+            metadata: Some(json!({
+                "repair": repair.name,
+                "version": repair.version,
+                "app_version": app_version,
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// SQL `ilike` patterns matching the vision-runtime-crash error-message
 /// signatures (`GGML_ASSERT(...)`, "runner process no longer running", "signal
 /// arrived during cgo execution"). Kept in sync with
