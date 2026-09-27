@@ -97,8 +97,10 @@ export function App() {
     );
 
   const canReadDashboard = me.permissions.read_dashboard;
-  const canUseChat = me.roles.some((role) => role === 'admin' || role === 'reviewer' || role === 'operator');
-  const canManageSettings = me.roles.some((role) => role === 'admin');
+  // Every gate reads the server-computed permissions, never role names, so the
+  // UI cannot drift from the backend's role→permission mapping. (#433)
+  const canUseChat = me.permissions.use_chat;
+  const canManageSettings = me.permissions.write_settings;
   const canReadSettings = me.permissions.read_settings;
   const canReadAudit = me.permissions.read_audit;
   const canManageUsers = me.permissions.manage_users;
