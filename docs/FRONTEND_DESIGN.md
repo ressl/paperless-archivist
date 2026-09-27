@@ -59,7 +59,12 @@ Recommended:
 - TanStack Table for backlog, audit, runs, jobs
 - React Hook Form for forms
 - Zod for client-side schema validation
-- React Router or TanStack Router for routing
+- Routing: a small in-house History-API router (`frontend/src/lib/router.ts`)
+  maps pathnames to tabs (`/`, `/inventory`, `/reviews/<id>`, `/settings`, ...),
+  keeps back/forward and reloads working (the API serves `index.html` for
+  unknown non-API paths) and exposes `registerBeforeNavigate` /
+  `useBeforeNavigate` so features can veto navigation (unsaved changes).
+  Revisit React Router / TanStack Router if nested routes or loaders are needed.
 - Monaco editor later for advanced prompt editing if needed
 
 Styling:

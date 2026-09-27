@@ -17,6 +17,9 @@ const esMessages: Record<MessageKey, string> = {
   'nav.group.system': 'Sistema',
 
   'nav.logout': 'Cerrar sesión',
+  'nav.skip_to_content': 'Saltar al contenido principal',
+  'nav.menu': 'Menú',
+  'nav.main_label': 'Navegación principal',
   'debug.title': 'Consola de debug',
   'debug.pause': 'Pausar',
   'debug.resume': 'Reanudar',
@@ -346,6 +349,7 @@ const esMessages: Record<MessageKey, string> = {
   'review.approve_selected': 'Aprobar selección',
   'review.reject_selected': 'Rechazar selección',
   'review.document': 'Documento {id}',
+  'review.deep_link_missing': 'La revisión enlazada no está en la cola pendiente (puede que ya se haya decidido).',
   'review.current': 'Actual: {value}',
   'review.suggestion': 'Sugerencia: {value}',
   'review.confidence': 'Confianza: {value}',

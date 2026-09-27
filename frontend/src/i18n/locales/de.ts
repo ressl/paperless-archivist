@@ -17,6 +17,9 @@ const deMessages: Record<MessageKey, string> = {
   'nav.group.system': 'System',
 
   'nav.logout': 'Abmelden',
+  'nav.skip_to_content': 'Zum Hauptinhalt springen',
+  'nav.menu': 'Menü',
+  'nav.main_label': 'Hauptnavigation',
   'debug.title': 'Debug-Konsole',
   'debug.pause': 'Pausieren',
   'debug.resume': 'Fortsetzen',
@@ -346,6 +349,7 @@ const deMessages: Record<MessageKey, string> = {
   'review.approve_selected': 'Auswahl genehmigen',
   'review.reject_selected': 'Auswahl ablehnen',
   'review.document': 'Dokument {id}',
+  'review.deep_link_missing': 'Das verlinkte Review ist nicht in der offenen Warteschlange (es wurde eventuell bereits entschieden).',
   'review.current': 'Aktuell: {value}',
   'review.suggestion': 'Vorschlag: {value}',
   'review.confidence': 'Konfidenz: {value}',

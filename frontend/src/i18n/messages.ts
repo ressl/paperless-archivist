@@ -15,6 +15,9 @@ export const enMessages = {
   'nav.group.system': 'System',
 
   'nav.logout': 'Logout',
+  'nav.skip_to_content': 'Skip to main content',
+  'nav.menu': 'Menu',
+  'nav.main_label': 'Main navigation',
   'debug.title': 'Debug Console',
   'debug.pause': 'Pause',
   'debug.resume': 'Resume',
@@ -344,6 +347,7 @@ export const enMessages = {
   'review.approve_selected': 'Approve selected',
   'review.reject_selected': 'Reject selected',
   'review.document': 'Document {id}',
+  'review.deep_link_missing': 'The linked review is not in the pending queue (it may already have been decided).',
   'review.current': 'Current: {value}',
   'review.suggestion': 'Suggestion: {value}',
   'review.confidence': 'Confidence: {value}',

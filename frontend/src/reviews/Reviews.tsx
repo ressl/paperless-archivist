@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Check, ChevronDown, ListChecks, Save, Wrench, X } from 'lucide-react';
 import { api, ReviewItem, Stage } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
@@ -22,7 +22,21 @@ export type ReviewEditState = {
 const REVIEW_PAGE_SIZE = 100;
 const REVIEW_MAX_LIMIT = 500;
 
-export function Reviews({ setError, setSuccess }: { setError: (error: string | null) => void; setSuccess: (message: string | null) => void }) {
+/** DOM id of a review card; the target of `/reviews/<id>` deep links. */
+function reviewAnchorId(id: string): string {
+  return `review-${id}`;
+}
+
+export function Reviews({
+  setError,
+  setSuccess,
+  focusReviewId
+}: {
+  setError: (error: string | null) => void;
+  setSuccess: (message: string | null) => void;
+  /** Review to scroll to and focus, from a `/reviews/<id>` deep link (#424). */
+  focusReviewId?: string;
+}) {
   const { t } = useI18n();
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -30,6 +44,7 @@ export function Reviews({ setError, setSuccess }: { setError: (error: string | n
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [limit, setLimit] = useState(REVIEW_PAGE_SIZE);
+  const [loaded, setLoaded] = useState(false);
   const load = useCallback(
     () =>
       api
@@ -38,6 +53,7 @@ export function Reviews({ setError, setSuccess }: { setError: (error: string | n
           setItems(data.items);
           setTotal(data.total);
           setServerHasMore(data.has_more);
+          setLoaded(true);
         })
         .catch((err) => setError(localizedErrorMessage(err, t))),
     [limit, setError, t]
@@ -46,6 +62,19 @@ export function Reviews({ setError, setSuccess }: { setError: (error: string | n
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Deep link: once the queue has loaded, bring the linked review into view
+  // and move focus to it (once per id, so reloads don't steal focus).
+  const focusedOnce = useRef<string | null>(null);
+  useEffect(() => {
+    if (!loaded || !focusReviewId || focusedOnce.current === focusReviewId) return;
+    const card = document.getElementById(reviewAnchorId(focusReviewId));
+    if (!card) return;
+    focusedOnce.current = focusReviewId;
+    card.scrollIntoView?.({ block: 'start' });
+    card.focus();
+  }, [loaded, focusReviewId, items]);
+  const focusMissing = loaded && Boolean(focusReviewId) && !items.some((item) => item.id === focusReviewId);
 
   // The server reports whether more pending items exist beyond this page; we can
   // only keep loading until we hit the backend's hard cap on `limit`.
@@ -128,12 +157,18 @@ export function Reviews({ setError, setSuccess }: { setError: (error: string | n
         </button>
         <small className="field-hint">{t('reviews.count', { shown: items.length, total })}</small>
       </div>
+      {focusMissing && (
+        <p className="field-hint" role="status">
+          {t('review.deep_link_missing')}
+        </p>
+      )}
       <div className="review-list">
         {items.map((item) => (
           <ReviewCardMemo
             key={item.id}
             item={item}
             selected={selected.includes(item.id)}
+            focused={item.id === focusReviewId}
             onSelect={toggleSelected}
             onReload={load}
             onAutoFix={autoFixOne}
@@ -156,6 +191,7 @@ export function Reviews({ setError, setSuccess }: { setError: (error: string | n
 type ReviewCardProps = {
   item: ReviewItem;
   selected: boolean;
+  focused: boolean;
   onSelect: (id: string) => void;
   onReload: () => void;
   onAutoFix: (id: string) => void;
@@ -163,7 +199,7 @@ type ReviewCardProps = {
   t: TFunction;
 };
 
-function ReviewCard({ item, selected, onSelect, onReload, onAutoFix, setError, t }: ReviewCardProps) {
+function ReviewCard({ item, selected, focused, onSelect, onReload, onAutoFix, setError, t }: ReviewCardProps) {
   const patch = asReviewPatch(item.suggested_patch);
   const metadata = asReviewPatch(patch?.standard_metadata);
   const [edit, setEdit] = useState<ReviewEditState>(() => reviewEditStateFromPatch(patch));
@@ -217,7 +253,7 @@ function ReviewCard({ item, selected, onSelect, onReload, onAutoFix, setError, t
   const rows = standardMetadataRows(item.stage, patch, metadata, t);
 
   return (
-    <article className="review-item">
+    <article id={reviewAnchorId(item.id)} tabIndex={-1} className={focused ? 'review-item review-item--focused' : 'review-item'}>
       <header>
         <label className="inline">
           <input type="checkbox" checked={selected} onChange={handleSelect} />
@@ -303,6 +339,7 @@ const ReviewCardMemo = memo(
   (prev, next) => {
     if (prev.t !== next.t) return false;
     if (prev.selected !== next.selected) return false;
+    if (prev.focused !== next.focused) return false;
     if (prev.onSelect !== next.onSelect) return false;
     if (prev.onReload !== next.onReload) return false;
     if (prev.onAutoFix !== next.onAutoFix) return false;

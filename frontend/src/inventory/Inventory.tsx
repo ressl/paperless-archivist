@@ -7,6 +7,7 @@ import {
   type MetadataTrace,
 } from '../api/client';
 import { languageOptions } from '../data/worldLanguages';
+import { replaceLocation } from '../lib/router';
 import { useI18n } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
 import { AdvancedPanel } from './AdvancedPanel';
@@ -64,7 +65,8 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
     const next = filtersToUrl(filters);
     const current = window.location.search;
     if (next !== current) {
-      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`);
+      // Through the router so the app shell sees the new query string. (#424)
+      replaceLocation(`${window.location.pathname}${next}`);
     }
   }, [filters]);
 

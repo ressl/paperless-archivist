@@ -17,6 +17,9 @@ const frMessages: Record<MessageKey, string> = {
   'nav.group.system': 'Système',
 
   'nav.logout': 'Déconnexion',
+  'nav.skip_to_content': 'Aller au contenu principal',
+  'nav.menu': 'Menu',
+  'nav.main_label': 'Navigation principale',
   'debug.title': 'Console de debug',
   'debug.pause': 'Pause',
   'debug.resume': 'Reprendre',
@@ -346,6 +349,7 @@ const frMessages: Record<MessageKey, string> = {
   'review.approve_selected': 'Approuver la sélection',
   'review.reject_selected': 'Rejeter la sélection',
   'review.document': 'Document {id}',
+  'review.deep_link_missing': 'La revue liée n\'est pas dans la file en attente (elle a peut-être déjà été traitée).',
   'review.current': 'Actuel : {value}',
   'review.suggestion': 'Suggestion : {value}',
   'review.confidence': 'Confiance : {value}',

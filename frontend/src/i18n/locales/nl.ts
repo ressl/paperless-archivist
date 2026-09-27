@@ -17,6 +17,9 @@ const nlMessages: Record<MessageKey, string> = {
   'nav.group.system': 'Systeem',
 
   'nav.logout': 'Uitloggen',
+  'nav.skip_to_content': 'Direct naar de hoofdinhoud',
+  'nav.menu': 'Menu',
+  'nav.main_label': 'Hoofdnavigatie',
   'debug.title': 'Debug-console',
   'debug.pause': 'Pauzeren',
   'debug.resume': 'Hervatten',
@@ -346,6 +349,7 @@ const nlMessages: Record<MessageKey, string> = {
   'review.approve_selected': 'Selectie goedkeuren',
   'review.reject_selected': 'Selectie afwijzen',
   'review.document': 'Document {id}',
+  'review.deep_link_missing': 'De gelinkte review staat niet in de openstaande wachtrij (mogelijk is er al over beslist).',
   'review.current': 'Huidig: {value}',
   'review.suggestion': 'Voorstel: {value}',
   'review.confidence': 'Vertrouwen: {value}',

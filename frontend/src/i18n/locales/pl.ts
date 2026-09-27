@@ -17,6 +17,9 @@ const plMessages: Record<MessageKey, string> = {
   'nav.group.system': 'System',
 
   'nav.logout': 'Wyloguj',
+  'nav.skip_to_content': 'Przejdź do treści głównej',
+  'nav.menu': 'Menu',
+  'nav.main_label': 'Nawigacja główna',
   'debug.title': 'Konsola debug',
   'debug.pause': 'Wstrzymaj',
   'debug.resume': 'Wznów',
@@ -346,6 +349,7 @@ const plMessages: Record<MessageKey, string> = {
   'review.approve_selected': 'Zaakceptuj zaznaczone',
   'review.reject_selected': 'Odrzuć zaznaczone',
   'review.document': 'Dokument {id}',
+  'review.deep_link_missing': 'Powiązanej recenzji nie ma w kolejce oczekujących (mogła zostać już rozpatrzona).',
   'review.current': 'Obecnie: {value}',
   'review.suggestion': 'Sugestia: {value}',
   'review.confidence': 'Pewność: {value}',

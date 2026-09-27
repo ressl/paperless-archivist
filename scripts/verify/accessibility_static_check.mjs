@@ -78,9 +78,13 @@ const inAnySource = (needle) =>
   || settings.includes(needle);
 
 const checks = [
-  ['workspace main landmark', app.includes('<main className="workspace">')],
+  ['workspace main landmark is the skip-link target', app.includes('<main className="workspace" id={MAIN_CONTENT_ID} tabIndex={-1}>')],
   ['login main landmark', app.includes('<main className="login">')],
-  ['sidebar navigation landmark', app.includes('<nav>')],
+  ['sidebar navigation landmark is labelled', app.includes("<nav aria-label={t('nav.main_label')}>")],
+  // #431: skip link, current-page marker and collapsible mobile navigation.
+  ['skip link to main content', app.includes('className="skip-link" href={`#${MAIN_CONTENT_ID}`}') && css.includes('.skip-link:focus')],
+  ['active nav entry sets aria-current', app.includes("aria-current={active ? 'page' : undefined}")],
+  ['mobile nav toggle exposes expanded state', app.includes('aria-expanded={menuOpen}') && app.includes('aria-controls={SIDEBAR_PANEL_ID}') && css.includes('.sidebar--open .sidebar-panel')],
   ['dashboard range group label', inAnySource("aria-label={t('dashboard.range_label')}")],
   ['workflow mode button group label', inAnySource("aria-label={t('dashboard.auto.processing_mode')}")],
   ['dashboard tablist has role and label', dashboard.includes('role="tablist"') && dashboard.includes("aria-label={t('dashboard.title')}")],

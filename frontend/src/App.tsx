@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import {
   Activity,
   Archive,
@@ -8,17 +8,20 @@ import {
   KeyRound,
   ListChecks,
   LogOut,
+  Menu,
   MessageSquare,
   Settings,
   Shield,
-  UserPlus
+  UserPlus,
+  X
 } from 'lucide-react';
-import { api, Me, OidcConfig, setUnauthorizedHandler } from './api/client';
+import { api, Me, OidcConfig, setUnauthorizedHandler, type Permissions } from './api/client';
 import { buildInfo, buildInfoLabel } from './buildInfo';
 import { useI18n } from './i18n/I18nProvider';
 import { ErrorBoundary } from './lib/ErrorBoundary';
 import { Banner, PageHeader, localizedErrorMessage } from './lib/ui';
 import { LanguageSelector } from './lib/LanguageSelector';
+import { isTab, navigate, parseRoute, replaceLocation, routePath, useLocation, type Route, type Tab } from './lib/router';
 
 // Dashboard pulls in Recharts; keep it (and the other tab pages) out of the
 // critical shell/login chunk by loading them lazily on first navigation.
@@ -33,16 +36,54 @@ const Users = lazy(() => import('./users/Users').then((mod) => ({ default: mod.U
 const DocumentChat = lazy(() => import('./chat/DocumentChat').then((mod) => ({ default: mod.DocumentChat })));
 const DebugConsole = lazy(() => import('./debug/DebugConsole').then((mod) => ({ default: mod.DebugConsole })));
 
-type Tab = 'dashboard' | 'statistics' | 'inventory' | 'chat' | 'reviews' | 'settings' | 'prompts' | 'audit' | 'users' | 'debug';
+const MAIN_CONTENT_ID = 'main-content';
+const SIDEBAR_PANEL_ID = 'sidebar-panel';
+
+/**
+ * Which tabs the signed-in user may render. Every gate reads the
+ * server-computed permissions, never role names, so the UI cannot drift from
+ * the backend's role→permission mapping (#433). `debugConsoleEnabled` is null
+ * while /api/settings is still loading.
+ */
+function viewableTabs(permissions: Permissions, debugConsoleEnabled: boolean | null): Record<Tab, boolean> {
+  return {
+    // dashboard, inventory, reviews are ungated for any signed-in user.
+    dashboard: true,
+    inventory: true,
+    reviews: true,
+    statistics: permissions.read_dashboard,
+    chat: permissions.use_chat,
+    settings: permissions.read_settings,
+    prompts: permissions.read_settings,
+    audit: permissions.read_audit,
+    users: permissions.manage_users,
+    debug: debugConsoleEnabled === true && permissions.read_audit
+  };
+}
+
+/**
+ * The tab to render for `route`: the requested one if visible, else the
+ * dashboard. null while the requested tab's gate is still loading (Debug waits
+ * on /api/settings), so a /debug deep link is not bounced to the dashboard.
+ */
+function resolveActiveTab(route: Route, viewable: Record<Tab, boolean>, debugConsoleEnabled: boolean | null): Tab | null {
+  if (!route.known) return 'dashboard';
+  if (viewable[route.tab]) return route.tab;
+  if (route.tab === 'debug' && debugConsoleEnabled === null) return null;
+  return 'dashboard';
+}
 
 export function App() {
   const { t } = useI18n();
+  // The URL is the source of truth for the current page, so reload, back /
+  // forward and deep links all work (#424).
+  const route = parseRoute(useLocation().pathname);
   const [me, setMe] = useState<Me | null>(null);
-  const [tab, setTab] = useState<Tab>('dashboard');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [debugConsoleEnabled, setDebugConsoleEnabled] = useState(false);
+  const [debugConsoleEnabled, setDebugConsoleEnabled] = useState<boolean | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     // When any request sees a 401 (expired session), drop back to the login
@@ -81,8 +122,34 @@ export function App() {
     };
   }, [me]);
 
+  const viewable = useMemo(() => (me ? viewableTabs(me.permissions, debugConsoleEnabled) : null), [me, debugConsoleEnabled]);
+  const activeTab = viewable ? resolveActiveTab(route, viewable, debugConsoleEnabled) : null;
+
+  // Canonicalise the URL once the gates are known: unknown paths and tabs the
+  // user can't see fall back to the dashboard (#296), and `/inventory/<id>`
+  // becomes the inventory page filtered to that document.
+  useEffect(() => {
+    if (!viewable || activeTab === null) return;
+    if (route.tab === 'inventory' && route.id !== undefined) {
+      const documentId = Number(route.id);
+      replaceLocation(
+        Number.isInteger(documentId) && documentId > 0 ? `${routePath('inventory')}?id=${documentId}` : routePath('inventory')
+      );
+      return;
+    }
+    if (activeTab !== route.tab || !route.known) replaceLocation(routePath('dashboard'));
+  }, [viewable, activeTab, route.tab, route.id, route.known]);
+
+  // A new page starts without the previous page's banners and with the mobile
+  // menu collapsed — also on browser back/forward.
+  useEffect(() => {
+    setError(null);
+    setSuccess(null);
+    setMenuOpen(false);
+  }, [activeTab]);
+
   if (loading) return <div className="boot">{t('app.loading')}</div>;
-  if (!me)
+  if (!me || !viewable)
     return (
       <Login
         onLogin={(loggedIn) => {
@@ -96,45 +163,19 @@ export function App() {
       />
     );
 
-  const canReadDashboard = me.permissions.read_dashboard;
-  // Every gate reads the server-computed permissions, never role names, so the
-  // UI cannot drift from the backend's role→permission mapping. (#433)
-  const canUseChat = me.permissions.use_chat;
   const canManageSettings = me.permissions.write_settings;
-  const canReadSettings = me.permissions.read_settings;
-  const canReadAudit = me.permissions.read_audit;
-  const canManageUsers = me.permissions.manage_users;
 
-  // Mirror the render gates below: a cross-tab navigation (e.g. from a
-  // dashboard alert) to a tab the user can't render would otherwise drop them
-  // on a blank workspace. (#296)
-  const canViewTab = (candidate: Tab): boolean => {
-    switch (candidate) {
-      case 'statistics':
-        return canReadDashboard;
-      case 'chat':
-        return canUseChat;
-      case 'settings':
-      case 'prompts':
-        return canReadSettings;
-      case 'audit':
-        return canReadAudit;
-      case 'users':
-        return canManageUsers;
-      case 'debug':
-        return debugConsoleEnabled && canReadAudit;
-      default:
-        // dashboard, inventory, reviews are ungated for any signed-in user.
-        return true;
+  // Switch tabs through the router so the URL, history and any registered
+  // beforeNavigate guard (e.g. unsaved changes) all see the navigation. A tab
+  // the user can't render falls back to the dashboard (#296). `search` carries
+  // cross-tab state such as inventory filters.
+  const selectTab = (next: Tab, search = '') => {
+    const target = viewable[next] ? next : 'dashboard';
+    if (navigate(`${routePath(target)}${search}`)) {
+      setError(null);
+      setSuccess(null);
+      setMenuOpen(false);
     }
-  };
-
-  // Switch tabs and drop any stale global error so a banner from one tab does
-  // not bleed into the next one.
-  const selectTab = (next: Tab) => {
-    setError(null);
-    setSuccess(null);
-    setTab(next);
   };
 
   const lazyFallback = (
@@ -143,40 +184,66 @@ export function App() {
     </section>
   );
 
+  const page = (tab: Tab, content: ReactNode) =>
+    activeTab === tab && (
+      <ErrorBoundary>
+        <Suspense fallback={lazyFallback}>{content}</Suspense>
+      </ErrorBoundary>
+    );
+
+  const navItem = (tab: Tab, icon: ReactNode, label: string) =>
+    viewable[tab] && <NavLink tab={tab} icon={icon} label={label} active={activeTab === tab} onSelect={selectTab} />;
+
   return (
     <ErrorBoundary>
     <div className="app-shell">
-      <aside className="sidebar">
+      <a className="skip-link" href={`#${MAIN_CONTENT_ID}`} onClick={focusMainContent}>
+        {t('nav.skip_to_content')}
+      </a>
+      <aside className={menuOpen ? 'sidebar sidebar--open' : 'sidebar'}>
         <div className="brand">
           <img src="/assets/brand/paperless-archivist-logo.png" alt="" />
           <div>
             <strong>{t('app.name')}</strong>
             <span>{me.username}</span>
           </div>
+          {/* Only displayed on narrow screens, where the navigation collapses
+              so the page content is reachable without scrolling past it (#431). */}
+          <button
+            type="button"
+            className="ghost-button sidebar-toggle"
+            aria-expanded={menuOpen}
+            aria-controls={SIDEBAR_PANEL_ID}
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            {menuOpen ? <X size={18} aria-hidden="true" /> : <Menu size={18} aria-hidden="true" />}
+            {t('nav.menu')}
+          </button>
         </div>
-        <nav>
+        <div className="sidebar-panel" id={SIDEBAR_PANEL_ID}>
+        <nav aria-label={t('nav.main_label')}>
           {/* Fixed-order, labelled groups so nav positions never shift by role (#235). */}
           <div className="nav-group" role="group" aria-label={t('nav.group.operations')}>
             <span className="nav-group-label" aria-hidden="true">{t('nav.group.operations')}</span>
-            <NavButton icon={<Activity />} label={t('nav.dashboard')} active={tab === 'dashboard'} onClick={() => selectTab('dashboard')} />
-            {canReadDashboard && <NavButton icon={<BarChart3 />} label={t('nav.statistics')} active={tab === 'statistics'} onClick={() => selectTab('statistics')} />}
-            <NavButton icon={<Archive />} label={t('nav.inventory')} active={tab === 'inventory'} onClick={() => selectTab('inventory')} />
-            <NavButton icon={<ListChecks />} label={t('nav.review')} active={tab === 'reviews'} onClick={() => selectTab('reviews')} />
-            {canUseChat && <NavButton icon={<MessageSquare />} label={t('nav.chat')} active={tab === 'chat'} onClick={() => selectTab('chat')} />}
+            {navItem('dashboard', <Activity />, t('nav.dashboard'))}
+            {navItem('statistics', <BarChart3 />, t('nav.statistics'))}
+            {navItem('inventory', <Archive />, t('nav.inventory'))}
+            {navItem('reviews', <ListChecks />, t('nav.review'))}
+            {navItem('chat', <MessageSquare />, t('nav.chat'))}
           </div>
-          {(canReadSettings || canManageUsers) && (
+          {(viewable.settings || viewable.users) && (
             <div className="nav-group" role="group" aria-label={t('nav.group.configuration')}>
               <span className="nav-group-label" aria-hidden="true">{t('nav.group.configuration')}</span>
-              {canReadSettings && <NavButton icon={<Settings />} label={t('nav.settings')} active={tab === 'settings'} onClick={() => selectTab('settings')} />}
-              {canReadSettings && <NavButton icon={<ClipboardList />} label={t('nav.prompts')} active={tab === 'prompts'} onClick={() => selectTab('prompts')} />}
-              {canManageUsers && <NavButton icon={<UserPlus />} label={t('nav.users')} active={tab === 'users'} onClick={() => selectTab('users')} />}
+              {navItem('settings', <Settings />, t('nav.settings'))}
+              {navItem('prompts', <ClipboardList />, t('nav.prompts'))}
+              {navItem('users', <UserPlus />, t('nav.users'))}
             </div>
           )}
-          {(canReadAudit || debugConsoleEnabled) && (
+          {(viewable.audit || viewable.debug) && (
             <div className="nav-group" role="group" aria-label={t('nav.group.system')}>
               <span className="nav-group-label" aria-hidden="true">{t('nav.group.system')}</span>
-              {canReadAudit && <NavButton icon={<Shield />} label={t('nav.audit')} active={tab === 'audit'} onClick={() => selectTab('audit')} />}
-              {debugConsoleEnabled && canReadAudit && <NavButton icon={<Bug />} label={t('nav.debug')} active={tab === 'debug'} onClick={() => selectTab('debug')} />}
+              {navItem('audit', <Shield />, t('nav.audit'))}
+              {navItem('debug', <Bug />, t('nav.debug'))}
             </div>
           )}
         </nav>
@@ -206,116 +273,50 @@ export function App() {
         >
           <LogOut size={18} /> {t('nav.logout')}
         </button>
+        </div>
       </aside>
 
-      <main className="workspace">
+      <main className="workspace" id={MAIN_CONTENT_ID} tabIndex={-1}>
         {error && <Banner tone="error" message={error} onDismiss={() => setError(null)} />}
         {success && <Banner tone="success" message={success} onDismiss={() => setSuccess(null)} />}
-        {tab === 'dashboard' && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-            <Dashboard
-              setError={setError}
-              setSuccess={setSuccess}
-              canManageSettings={canManageSettings}
-              permissions={me.permissions}
-              onNavigate={(nextTab, search) => {
-                // Cross-tab navigation. Push the optional query-string into
-                // window.history before switching tabs so the destination
-                // component (e.g. Inventory) reads its filter state from
-                // window.location.search on mount. If no search is provided,
-                // wipe any stale query string so the destination tab starts
-                // clean.
-                const nextSearch = search ?? '';
-                window.history.replaceState(
-                  null,
-                  '',
-                  `${window.location.pathname}${nextSearch}${window.location.hash}`
-                );
-                if (
-                  nextTab === 'dashboard' || nextTab === 'statistics' ||
-                  nextTab === 'inventory' ||
-                  nextTab === 'chat' || nextTab === 'reviews' ||
-                  nextTab === 'settings' || nextTab === 'prompts' ||
-                  nextTab === 'audit' || nextTab === 'users' ||
-                  nextTab === 'debug'
-                ) {
-                  // Fall back to the dashboard rather than a blank workspace if
-                  // the target tab isn't visible for this role. (#296)
-                  setTab(canViewTab(nextTab) ? nextTab : 'dashboard');
-                }
-              }}
-            />
-            </Suspense>
-          </ErrorBoundary>
+        {activeTab === null && lazyFallback}
+        {page(
+          'dashboard',
+          <Dashboard
+            setError={setError}
+            setSuccess={setSuccess}
+            canManageSettings={canManageSettings}
+            permissions={me.permissions}
+            onNavigate={(nextTab, search) => {
+              // Cross-tab navigation (dashboard alerts, stage matrix). The
+              // optional query string travels in the URL, so the destination
+              // (e.g. Inventory filters) reads it on mount and Back returns
+              // to the dashboard.
+              if (isTab(nextTab)) selectTab(nextTab, search ?? '');
+            }}
+          />
         )}
-        {tab === 'statistics' && canReadDashboard && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <Statistics setError={setError} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-        {tab === 'inventory' && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <Inventory setError={setError} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-        {tab === 'chat' && canUseChat && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <DocumentChat setError={setError} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-        {tab === 'reviews' && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <Reviews setError={setError} setSuccess={setSuccess} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-        {tab === 'settings' && canReadSettings && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <SettingsPage setError={setError} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-        {tab === 'prompts' && canReadSettings && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <Prompts setError={setError} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-        {tab === 'audit' && canReadAudit && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <Audit setError={setError} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-        {tab === 'users' && canManageUsers && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <Users setError={setError} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-        {tab === 'debug' && debugConsoleEnabled && canReadAudit && (
-          <ErrorBoundary>
-            <Suspense fallback={lazyFallback}>
-              <DebugConsole setError={setError} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
+        {page('statistics', <Statistics setError={setError} />)}
+        {page('inventory', <Inventory setError={setError} />)}
+        {page('chat', <DocumentChat setError={setError} />)}
+        {page('reviews', <Reviews setError={setError} setSuccess={setSuccess} focusReviewId={route.tab === 'reviews' ? route.id : undefined} />)}
+        {page('settings', <SettingsPage setError={setError} />)}
+        {page('prompts', <Prompts setError={setError} />)}
+        {page('audit', <Audit setError={setError} />)}
+        {page('users', <Users setError={setError} />)}
+        {page('debug', <DebugConsole setError={setError} />)}
       </main>
     </div>
     </ErrorBoundary>
   );
+}
+
+/** Skip link target: move focus to the main landmark without touching the URL. */
+function focusMainContent(event: MouseEvent<HTMLAnchorElement>) {
+  const main = document.getElementById(MAIN_CONTENT_ID);
+  if (!main) return;
+  event.preventDefault();
+  main.focus();
 }
 
 function Login({ onLogin }: { onLogin: (me: Me) => void }) {
@@ -391,6 +392,38 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   );
 }
 
-function NavButton({ icon, label, active, onClick }: { icon: ReactNode; label: string; active: boolean; onClick: () => void }) {
-  return <button className={active ? 'active' : ''} onClick={onClick}>{icon}{label}</button>;
+/**
+ * Sidebar entry. A real link (so it can be opened in a new tab or copied) whose
+ * plain left-click is routed in-app; the current page carries
+ * `aria-current="page"` (#431).
+ */
+function NavLink({
+  tab,
+  icon,
+  label,
+  active,
+  onSelect
+}: {
+  tab: Tab;
+  icon: ReactNode;
+  label: string;
+  active: boolean;
+  onSelect: (tab: Tab) => void;
+}) {
+  return (
+    <a
+      href={routePath(tab)}
+      className={active ? 'nav-link active' : 'nav-link'}
+      aria-current={active ? 'page' : undefined}
+      onClick={(event) => {
+        // Let the browser handle new-tab / new-window / download gestures.
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        onSelect(tab);
+      }}
+    >
+      {icon}
+      {label}
+    </a>
+  );
 }

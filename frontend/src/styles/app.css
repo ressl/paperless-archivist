@@ -364,7 +364,26 @@ th {
   color: rgb(220 231 233 / 55%);
 }
 
+/* Sidebar entries are links (<a class="nav-link">, #424/#431); give them the
+   shared button box so they look exactly like the former nav buttons. */
+.sidebar nav .nav-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  text-decoration: none;
+}
+
+.sidebar nav .nav-link:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
 .sidebar nav button,
+.sidebar nav .nav-link,
 .ghost-button {
   justify-content: flex-start;
   width: 100%;
@@ -375,6 +394,8 @@ th {
 
 .sidebar nav button.active,
 .sidebar nav button:hover,
+.sidebar nav .nav-link.active,
+.sidebar nav .nav-link:hover,
 .ghost-button:hover {
   background: rgb(255 255 255 / 9%);
 }
@@ -382,11 +403,50 @@ th {
 /* Current-section affordance: a left accent rail so the active page reads at a
    glance, not only by a faint background. box-sizing:border-box (global) means
    the 2px border eats content width rather than shifting the row. */
-.sidebar nav button {
+.sidebar nav button,
+.sidebar nav .nav-link {
   border-left: 2px solid transparent;
 }
-.sidebar nav button.active {
+.sidebar nav button.active,
+.sidebar nav .nav-link.active {
   border-left-color: var(--teal);
+}
+
+/* Desktop: the collapsible panel is layout-transparent, so nav / language /
+   version / logout stay direct rows of the sidebar grid. It only becomes a
+   real, collapsible box on narrow screens (see @media 860px). */
+.sidebar-panel {
+  display: contents;
+}
+
+.sidebar-toggle {
+  display: none;
+}
+
+/* Skip link (#431): first focusable element, visible only while focused. */
+.skip-link {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: 1000;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-md);
+  font-weight: 600;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: none;
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.workspace:focus {
+  outline: none;
 }
 
 .sidebar-version {
@@ -2247,6 +2307,17 @@ th {
   background: var(--surface);
 }
 
+/* Target of a /reviews/<id> deep link (#424). */
+.review-item--focused {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px var(--teal-soft);
+}
+
+.review-item:focus {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
 .review-item header,
 .review-item footer {
   display: flex;
@@ -3422,7 +3493,27 @@ legend {
   .sidebar {
     position: static;
     height: auto;
-    grid-template-rows: auto auto auto auto;
+    grid-template-rows: auto;
+    gap: 0;
+  }
+
+  /* Collapsed by default so the page content starts right below the brand
+     bar; the Menu toggle expands the navigation in place (#431). */
+  .sidebar-toggle {
+    display: inline-flex;
+    width: auto;
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+
+  .sidebar-panel {
+    display: none;
+  }
+
+  .sidebar--open .sidebar-panel {
+    display: grid;
+    gap: 18px;
+    padding-top: 18px;
   }
 
   .sidebar nav {

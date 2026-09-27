@@ -29,6 +29,11 @@ core workflows.
 - Admin user and API token forms no longer rely only on placeholders.
 - Tooltip components support hover, focus, tap, Escape, and outside click/tap.
 - Connection-test feedback uses `aria-live="polite"` and status/alert roles.
+- A "Skip to main content" link is the first focusable element and moves focus
+  to the `<main>` landmark; sidebar entries are links and the current page
+  carries `aria-current="page"`.
+- Below 860px the sidebar navigation collapses behind a Menu toggle
+  (`aria-expanded`), so page content is reachable without scrolling past it.
 
 ## Automated Check
 

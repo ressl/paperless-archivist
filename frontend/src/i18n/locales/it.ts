@@ -17,6 +17,9 @@ const itMessages: Record<MessageKey, string> = {
   'nav.group.system': 'Sistema',
 
   'nav.logout': 'Esci',
+  'nav.skip_to_content': 'Vai al contenuto principale',
+  'nav.menu': 'Menu',
+  'nav.main_label': 'Navigazione principale',
   'debug.title': 'Console di debug',
   'debug.pause': 'Pausa',
   'debug.resume': 'Riprendi',
@@ -346,6 +349,7 @@ const itMessages: Record<MessageKey, string> = {
   'review.approve_selected': 'Approva selezione',
   'review.reject_selected': 'Rifiuta selezione',
   'review.document': 'Documento {id}',
+  'review.deep_link_missing': 'La revisione collegata non è nella coda in sospeso (potrebbe essere già stata decisa).',
   'review.current': 'Attuale: {value}',
   'review.suggestion': 'Suggerimento: {value}',
   'review.confidence': 'Confidenza: {value}',
