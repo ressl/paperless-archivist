@@ -48,7 +48,10 @@ use archivist_paperless::{
     PaperlessTag,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use futures::stream::{FuturesUnordered, StreamExt};
+use job_supervisor::{
+    InFlightGuard, JobSupervisor, WatchdogVerdict, catch_job_panic, watch_job_lease,
+    with_lease_keepalive,
+};
 use reqwest::Client as HttpClient;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
@@ -58,6 +61,8 @@ use tokio::time::{sleep, timeout};
 use tracing::{Instrument, error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+mod job_supervisor;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -120,6 +125,9 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     // `process_available_jobs().await` until the whole batch finished, so
     // those maintenance checks fired far less often than the intended 5s.
     let job_processing_running = Arc::new(AtomicBool::new(false));
+    // #407: in-flight job registry + progress tracking for continuous
+    // claiming, the per-job watchdog and the liveness heartbeat.
+    let supervisor = Arc::new(JobSupervisor::new(Utc::now().timestamp()));
 
     // Write a fresh dashboard snapshot near startup so the read path has something current
     // before the periodic tick fires (snapshots used to be written on every /dashboard read).
@@ -267,12 +275,14 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 // in-flight job on deploy.
                 let drain_deadline = std::time::Instant::now() + Duration::from_secs(25);
                 while (job_processing_running.load(Ordering::Acquire)
+                    || supervisor.in_flight() > 0
                     || autopilot_drain_running.load(Ordering::Acquire))
                     && std::time::Instant::now() < drain_deadline
                 {
                     sleep(Duration::from_millis(250)).await;
                 }
                 if job_processing_running.load(Ordering::Acquire)
+                    || supervisor.in_flight() > 0
                     || autopilot_drain_running.load(Ordering::Acquire)
                 {
                     warn!(
@@ -295,6 +305,7 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                     let worker_id = worker_id.clone();
                     let last_observed_concurrency = Arc::clone(&last_observed_concurrency);
                     let job_processing_running = Arc::clone(&job_processing_running);
+                    let supervisor = Arc::clone(&supervisor);
                     tokio::spawn(async move {
                         let _guard = ReentryGuard(job_processing_running);
                         if let Err(error) = process_available_jobs(
@@ -302,11 +313,15 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                             &config,
                             &worker_id,
                             &last_observed_concurrency,
+                            &supervisor,
                         )
                         .await
                         {
                             error!(error = %error, "job processing tick failed");
                         }
+                        // #407: a completed claim cycle (even a failed or
+                        // empty one) proves the claim loop is not wedged.
+                        supervisor.claim_cycle_completed(Utc::now().timestamp());
                     });
                 }
                 if tick % 12 == 3
@@ -416,7 +431,18 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 // server, so the Kubernetes livenessProbe checks the staleness of
                 // this file — a hung tick-loop (which keeps the binary present)
                 // stops updating it and is restarted. Cheap and non-fatal.
-                write_liveness_heartbeat().await;
+                // #407: only while work progresses — the claim loop completed
+                // recently and every in-flight job renewed its lease (or was
+                // aborted by its watchdog) in time. A job stuck where even the
+                // watchdog cannot abort it now fails liveness.
+                if supervisor.is_healthy(Utc::now().timestamp(), CLAIM_LOOP_STALL_LIMIT_SECONDS) {
+                    write_liveness_heartbeat().await;
+                } else {
+                    warn!(
+                        in_flight = supervisor.in_flight(),
+                        "job processing made no progress; withholding liveness heartbeat"
+                    );
+                }
             }
         }
     }
@@ -597,11 +623,23 @@ where
     Ok(Some(call.await))
 }
 
+/// Renewal cadence for [`with_lease_keepalive`]: a third of the lease window,
+/// so even a renewal that itself stalls for a while lands before expiry. #413
+fn lease_keepalive_interval(lease_seconds: i64) -> Duration {
+    Duration::from_secs((lease_seconds / 3).max(1) as u64)
+}
+
+/// Free job slots for the next claim cycle. #407
+fn claim_capacity(target_concurrency: u32, in_flight: usize) -> usize {
+    (target_concurrency as usize).saturating_sub(in_flight)
+}
+
 async fn process_available_jobs(
     pool: &DbPool,
     config: &Arc<AppConfig>,
     worker_id: &str,
     last_observed_concurrency: &AtomicU32,
+    supervisor: &Arc<JobSupervisor>,
 ) -> Result<()> {
     // v1.6.2 issue #127: per-cycle live-reload of worker pool size.
     //
@@ -611,10 +649,10 @@ async fn process_available_jobs(
     // emit `workflow.concurrency_changed` with both `from` and `to` so the
     // audit log shows when the pool resized and why.
     //
-    // Per-tick spawn-and-join semantics: tasks claimed in this tick run to
-    // completion before the next tick (we await the FuturesUnordered below).
-    // Pool downscale therefore never aborts in-flight work — surplus tasks
-    // are simply not spawned next tick. Pool upscale starts immediately.
+    // Continuous-claim semantics (#407): claimed jobs run detached and each
+    // tick only claims into free slots (`target - in_flight`). Pool downscale
+    // therefore never aborts in-flight work — surplus slots are simply not
+    // refilled. Pool upscale starts on the next tick.
     let settings = match get_runtime_settings(pool).await {
         Ok(settings) => Arc::new(settings),
         Err(error) => {
@@ -661,13 +699,20 @@ async fn process_available_jobs(
     if target_concurrency == 0 {
         // Defensive — the resolver clamps to ≥1, but if some operator
         // pinned concurrency to 0 the right behaviour is to skip the tick
-        // entirely rather than block on an empty FuturesUnordered.
+        // entirely rather than issue an empty claim.
         return Ok(());
     }
 
+    // #407: continuous claiming — only top up the slots that are free right
+    // now. Jobs still running from earlier cycles keep their slots; a
+    // downscale simply claims nothing until enough of them finish.
+    let free_slots = claim_capacity(target_concurrency, supervisor.in_flight());
+    if free_slots == 0 {
+        return Ok(());
+    }
     let jobs = claim_jobs(
         pool,
-        target_concurrency as i64,
+        free_slots as i64,
         worker_id,
         job_lease_seconds(&settings),
     )
@@ -692,9 +737,9 @@ async fn process_available_jobs(
         }
     };
 
-    let mut pending = FuturesUnordered::new();
+    let lease_seconds = job_lease_seconds(&settings);
     for job in jobs {
-        let pool = pool.clone();
+        let job_pool = pool.clone();
         let config = Arc::clone(config);
         let settings = Arc::clone(&settings);
         let paperless = Arc::clone(&paperless);
@@ -709,17 +754,31 @@ async fn process_available_jobs(
             stage = %job.stage,
             attempt = job.attempts
         );
-        pending.push(tokio::spawn(
+        // #407: register before spawning so the next claim cycle already sees
+        // this slot as occupied; the guard inside the task frees it on
+        // completion, panic or abort.
+        supervisor.touch(job.id, job_progress_deadline(lease_seconds));
+        let task_supervisor = Arc::clone(supervisor);
+        let watchdog_job = job.clone();
+        let handle = tokio::spawn(
             async move {
+                let _in_flight = InFlightGuard {
+                    supervisor: &task_supervisor,
+                    job_id: job.id,
+                };
+                let pool = job_pool;
                 let started = std::time::Instant::now();
-                let result = process_job(
+                // #402: a panic becomes an ordinary error so the failure path
+                // below records it via `fail_job` instead of losing it as a
+                // JoinError and leaving the lease to expire.
+                let result = catch_job_panic(process_job(
                     &pool,
                     &config,
                     settings.as_ref(),
                     paperless.as_ref(),
                     &job,
                     &lease_owner,
-                )
+                ))
                 .await;
                 if let Err(error) = &result {
                     let failure_class = classify_processing_failure(error);
@@ -837,15 +896,77 @@ async fn process_available_jobs(
                 result
             }
             .instrument(span),
-        ));
+        );
+        spawn_job_watchdog(
+            pool.clone(),
+            Arc::clone(supervisor),
+            watchdog_job,
+            worker_id.to_owned(),
+            lease_seconds,
+            handle.abort_handle(),
+        );
     }
-
-    while let Some(result) = pending.next().await {
-        if let Err(error) = result {
-            warn!(error = %error, "worker task join failed");
-        }
-    }
+    // #407: jobs run detached; the next 5s tick claims into whatever slots are
+    // free, so one long job no longer holds the other slots idle.
     Ok(())
+}
+
+/// Interval at which the no-progress watchdog inspects a job's lease. #407
+const JOB_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
+/// Slack past `lease_until` before a job counts as hung, covering a renewal
+/// that is in flight right at the lease boundary. #407
+const JOB_WATCHDOG_GRACE_SECONDS: i64 = 60;
+/// The liveness heartbeat stops when the claim loop has not completed for
+/// this long. #407
+const CLAIM_LOOP_STALL_LIMIT_SECONDS: i64 = 600;
+
+/// Deadline (unix seconds) by which a job must show progress again: one lease
+/// window plus the watchdog grace and two watchdog intervals, i.e. strictly
+/// after the watchdog would have aborted a hung job. #407
+fn job_progress_deadline(lease_seconds: i64) -> i64 {
+    Utc::now().timestamp()
+        + lease_seconds
+        + JOB_WATCHDOG_GRACE_SECONDS
+        + 2 * JOB_WATCHDOG_INTERVAL.as_secs() as i64
+}
+
+/// Watch one in-flight job's lease. Lease renewals are the job's progress
+/// signal; a job whose lease lapsed (plus grace) while we still own it hung
+/// somewhere without its own bound, so abort the task and fail the job
+/// (retryable, bounded by `max_attempts`). A lost lease needs no action here:
+/// the job's own fencing stops it. #407
+fn spawn_job_watchdog(
+    pool: DbPool,
+    supervisor: Arc<JobSupervisor>,
+    job: JobRecord,
+    lease_owner: String,
+    lease_seconds: i64,
+    job_task: tokio::task::AbortHandle,
+) -> tokio::task::JoinHandle<()> {
+    let span = info_span!("archivist_job_watchdog", job_id = %job.id, run_id = %job.run_id);
+    tokio::spawn(
+        async move {
+        let verdict = watch_job_lease(
+            || archivist_db::job_lease_until(&pool, job.id, &lease_owner),
+            || job_task.is_finished(),
+            || supervisor.touch(job.id, job_progress_deadline(lease_seconds)),
+            JOB_WATCHDOG_INTERVAL,
+            ChronoDuration::seconds(JOB_WATCHDOG_GRACE_SECONDS),
+        )
+        .await;
+        if verdict == WatchdogVerdict::Stalled {
+            job_task.abort();
+            let message = format!(
+                "job made no progress within its {lease_seconds}s lease window and was aborted by the worker watchdog"
+            );
+            warn!(job_id = %job.id, "{message}");
+            if let Err(error) = fail_job(&pool, &job, &lease_owner, &message, true, None).await {
+                warn!(error = %error, job_id = %job.id, "failed to record watchdog abort");
+            }
+        }
+        }
+        .instrument(span),
+    )
 }
 
 /// Hard upper cap from `ARCHIVIST_WORKER_CONCURRENCY`. The settings-supplied
@@ -1829,20 +1950,43 @@ async fn process_ocr(
     job: &JobRecord,
     lease_owner: &str,
 ) -> Result<()> {
-    // Independent GETs — fetch the original bytes and the document detail
-    // concurrently instead of serially.
-    let (original, document) = tokio::try_join!(
-        paperless.download_original(job.paperless_document_id),
-        paperless.get_document(job.paperless_document_id),
-    )?;
-    let pages = render_document_pages(
-        &original,
-        document.original_file_name.as_deref(),
-        settings
-            .effective_tuning_for_stage(Stage::Ocr)
-            .ocr_page_limit,
+    // #413: download (up to 10x the Paperless timeout) plus pdfinfo/pdftoppm
+    // rendering (30s + 10s/page) used to run before the first lease renewal
+    // and could outlive the 300s default lease, letting another replica
+    // reclaim the job mid-render. Keep the lease alive every third of a lease
+    // window for the whole pre-page setup.
+    let lease_seconds = job_lease_seconds(settings);
+    let setup = with_lease_keepalive(
+        async {
+            // Independent GETs — fetch the document bytes and the document
+            // detail concurrently instead of serially.
+            let (original, document) = tokio::try_join!(
+                paperless.download_original(job.paperless_document_id),
+                paperless.get_document(job.paperless_document_id),
+            )?;
+            let pages = render_document_pages(
+                &original,
+                document.original_file_name.as_deref(),
+                settings
+                    .effective_tuning_for_stage(Stage::Ocr)
+                    .ocr_page_limit,
+            )
+            .await?;
+            anyhow::Ok((original, pages))
+        },
+        || archivist_db::bump_job_lease(pool, job.id, lease_owner, lease_seconds),
+        lease_keepalive_interval(lease_seconds),
     )
     .await?;
+    let Some(setup) = setup else {
+        warn!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            "OCR lease lost during download/render; stopping so a replica isn't double-applied"
+        );
+        return Ok(());
+    };
+    let (original, pages) = setup?;
     // The original download bytes (up to the download cap) are only needed for
     // rendering and the artifact input hash. Compute the hash now and drop the
     // bytes so they aren't held in memory for the whole per-page vision loop —
@@ -4898,6 +5042,31 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn ocr_setup_lease_keepalive_renews_well_within_the_lease() {
+        // #413: every pre-page phase runs under the keepalive, so the longest
+        // unrenewed stretch is one keepalive interval — a third of the lease —
+        // regardless of the download (10x HTTP timeout) or render budget.
+        for lease in [BASE_JOB_LEASE_SECONDS, 420, 3600] {
+            let interval = lease_keepalive_interval(lease).as_secs() as i64;
+            assert!(interval * 3 <= lease && interval >= 1, "lease {lease}");
+        }
+        // The #407 watchdog only fires after a full lease window plus grace
+        // without renewal, so it never races a working keepalive.
+        let lease = job_lease_seconds(&RuntimeSettings::default());
+        assert!((lease_keepalive_interval(lease).as_secs() as i64) < lease);
+    }
+
+    #[test]
+    fn continuous_claim_only_fills_free_slots() {
+        // #407: long-running jobs keep their slots; the rest are claimable.
+        assert_eq!(claim_capacity(4, 0), 4);
+        assert_eq!(claim_capacity(4, 1), 3);
+        assert_eq!(claim_capacity(4, 4), 0);
+        // Downscale below the in-flight count claims nothing, aborts nothing.
+        assert_eq!(claim_capacity(2, 5), 0);
     }
 
     #[test]
