@@ -10,6 +10,164 @@
 
 _No changes yet._
 
+## v1.19.0 — Audit 2026-09: safer pipeline, review workflow, and UI overhaul
+
+This minor release implements the full 2026-09 code audit (milestone
+"Audit 2026-09", #385–#450): security fixes, an end to several endless
+reprocessing loops, a consolidated run/review state machine, new review,
+inventory, audit and chat features, and a reworked, accessible UI.
+
+### Security
+
+- **Auth rate limiter works again (#385):** the per-IP limiter on
+  `/api/auth/*` never ran because the nested router strips the prefix. Login,
+  Paperless login and OIDC login are now limited and return `429` with
+  `Retry-After`.
+- **OIDC login CSRF (#387):** the OIDC `state` is bound to the browser with a
+  short-lived `HttpOnly` cookie and compared in constant time.
+- **API tokens follow their creator (#392):** token scopes are intersected with
+  the creator's current permissions; `last_used_at` is throttled.
+- **Session-only review decisions (#393):** approve, reject and edit require a
+  browser session, so automation can no longer act in an admin's name.
+- **Secrets stay on their origin (#396, #397):** archive profiles inherit the
+  global Paperless token only for the same origin; stored provider, Paperless
+  and webhook secrets cannot be re-targeted to another URL without re-entering
+  them.
+- **No Paperless objects before review (#404):** model output can no longer
+  create tags or correspondents before apply or in dry-run; creation happens at
+  apply time with limits (≤ 5 new tags, name length/control-character checks).
+- **Declarative route permissions (#442):** every route declares its
+  permission and allowed auth kinds in one table, enforced centrally and checked
+  against OpenAPI in CI. The scopes `chat:write`, `settings:write` and
+  `users:manage` never authorized anything and can no longer be issued.
+
+### Pipeline reliability and data integrity
+
+- **No more endless reprocessing (#400, #401, #402):** trigger tags are
+  retired on skip and permanent failure (with `ai-failed*` markers), the trigger
+  poll skips unchanged documents whose last run is terminal, the auto-selector
+  backs off failed documents (1h → 8h, stops after 5 failures), and jobs whose
+  worker crashed after their last attempt are failed instead of reclaimed.
+  Panics become normal job failures.
+- **Approving tag reviews keeps existing tags (#403):** failed-validation tag
+  reviews carry `current ∪ suggested` minus workflow tags; the autopilot drain
+  skips items with validation errors.
+- **Tag strategies behave as named (#411):** `keep_existing`,
+  `replace_ai_managed` and `remove_all_business` are implemented as documented,
+  and validated `new_tags` are applied.
+- **OCR input type from file bytes (#405):** PDF/PNG/JPEG/WEBP/TIFF are detected
+  from magic bytes instead of the original file name.
+- **Non-ASCII tag and field names (#409):** names such as "Ärzte" are matched
+  case-insensitively, independent of the database locale.
+- **Review and apply recovery (#388, #389):** failed human applies return the
+  review to `pending`; transient Paperless 5xx/network failures keep the same
+  patch retryable; the drain no longer loops on a terminally failed apply.
+- **Hung jobs no longer stall the worker (#407, #413):** `pdfinfo` has a
+  timeout, jobs are claimed into free slots continuously, a lease watchdog
+  aborts jobs that stop renewing, the liveness heartbeat reflects progress, and
+  long OCR setup renews its lease.
+- **Cheaper sync (#408):** document lists no longer download OCR text; the
+  inventory is upserted in 500-row transactions in a deadlock-free order.
+- **Consistent completion state (#406, #410, #414, #415):** `complete` equals
+  the global completion tag everywhere, `rejected` counts as done everywhere,
+  completion-tag reconciliation no longer holds locks across HTTP and audits
+  partial failures, stale runs cannot overwrite the current run's status, and
+  NUL characters in model output are stored safely.
+- **Central state machine (#439):** run, review and inventory status changes go
+  through one transition model with an explicit, tested transition table.
+- **Startup repairs run once per version (#443)** and are recorded and audited.
+- **Faster job claiming (#412)** via ordered index scans.
+
+### API
+
+- **Correct status codes (#386, #391, #399, #441):** the Paperless consistency
+  check no longer fails with 500; decided/missing reviews return 409/404;
+  unknown `/api/*` paths and body rejections return JSON errors; missing
+  configuration returns 409. Audit events automatically carry source IP and
+  user agent.
+- **Bounded operations (#390, #394, #395):** reruns are capped at 500 IDs and
+  committed in chunks; audit CSV export pages its reads, has a deadline and a
+  per-actor limit and is audited; auto-fix finds reviews of any age.
+- **Paperless behind TLS proxies (#398):** pagination `next` links with a
+  different scheme/host are rebased onto the configured origin.
+- **HTTP-level test harness (#440)** with an all-routes permission matrix.
+
+### Features
+
+- **Reviews (#420, #445):** pick correspondent and document type by name,
+  document thumbnail and preview through the backend, keyboard triage
+  (`j`/`k`/`a`/`r`/`e`/`?`), and "retry with provider/model/prompt version".
+- **Prompts (#446):** choose provider and model in the test runner and compare
+  two versions side by side.
+- **Inventory (#447):** filter by correspondent and document type, per-user
+  saved views, and CSV/JSON export (bounded, audited).
+- **Audit log (#448):** filters by actor, document, event type, outcome and
+  time range, cursor pagination, and a before/after change view.
+- **Chat (#449):** streamed answers (SSE), safe Markdown rendering, clickable
+  Paperless sources, rename/delete sessions, and "Ask in chat" from Inventory.
+- **UI (#450):** notification stack, monthly AI cost budget with dashboard
+  warnings, and dark mode (System/Light/Dark).
+
+### Frontend quality and accessibility
+
+- URL routing with working reload, back/forward and deep links (#424); skip
+  link, `aria-current`, collapsible mobile navigation (#431); AA contrast for
+  muted text, checked for light and dark themes (#430); status badges are no
+  longer live regions (#425).
+- Shared accessible confirmation dialog for every destructive or costly action
+  (#417); unsaved-changes guard with sticky Settings save bar (#423).
+- Fixes for stale review selections, out-of-order responses, auto-fix counts,
+  user management races and self-lockout, inventory row actions, dashboard
+  polling errors, chat feedback and loading/empty/error states (#416, #418,
+  #419, #421, #422, #426–#429).
+- `ApiError` with HTTP status, abortable requests, permission-based UI gates,
+  localization fixes, a real line diff for prompts, a shared `useResource`
+  hook, and the stylesheet split into partials (#432–#435, #444).
+
+### Operations and maintenance
+
+- The OpenAPI lint gate pins its Redocly rules in `redocly.yaml`, and three
+  structural spec errors were fixed.
+- Kubernetes base manifests resolve a logical image whose tag tracks the
+  release, enforced by a contract test (#436). Serial DB integration tests are
+  documented (#437).
+- The largest source files were split into modules without behaviour change
+  (#438).
+- Dependency updates for published advisories: rustls 0.23.45
+  (RUSTSEC-2026-0285), event-listener, chacha20, and frontend tooling
+  (postcss/nanoid, undici, brace-expansion, js-yaml).
+
+### Upgrade notes
+
+- **Migrations 0053–0057 run automatically:** claim-retry index, startup repair
+  markers, inventory saved views and filter support, and audit filter indexes.
+  0057 replaces an `audit_events` index inside the migration transaction; on a
+  very large audit table writes are briefly blocked while it builds. Deploy the
+  API and worker together.
+- **Behaviour changes to review before upgrading:**
+  - Changing a user's password now also revokes the API tokens that user
+    created.
+  - API tokens can no longer approve, reject or edit reviews; use a browser
+    session. Tokens keep `reviews:write` only for the auto-fix preview.
+  - Tokens holding `chat:write`, `settings:write` or `users:manage` keep
+    working; those scopes simply grant nothing (they never did).
+  - After changing a provider's, Paperless's or a webhook's URL, re-enter its
+    secret; saving without it returns 400.
+  - Rejected metadata now counts as done: such documents receive the global
+    processed tag and are no longer selected automatically (manual rerun still
+    works).
+  - Documents that fail permanently lose their trigger tags and receive the
+    `ai-failed` markers instead of being retried every minute.
+  - `GET /api/audit` now returns `{ items, next_cursor }` and accepts filters.
+  - Unknown `/api/*` paths return a JSON 404 instead of the SPA.
+- **Startup repairs:** on the first boot after upgrading, each startup repair
+  runs once more and is then recorded; to force a repair again, a later release
+  bumps its version.
+- **Rollback:** migrations are forward-only. v1.18.1 ignores the new tables,
+  columns and indexes, so they can stay installed; restore the previous image
+  for API and worker together. Paperless tags written by this version (trigger
+  retirement, failure markers, completion tags) remain valid.
+
 ## v1.18.1 — Consistent inventory completion status
 
 This patch release repairs drift between Paperless completion tags, the local

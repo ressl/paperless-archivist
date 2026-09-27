@@ -17,4 +17,4 @@ resources:
 images:
   - name: paperless-archivist
     newName: ghcr.io/example/paperless-archivist
-    newTag: "1.18.1"
+    newTag: "1.19.0"
