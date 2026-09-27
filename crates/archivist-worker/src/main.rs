@@ -38,7 +38,7 @@ use archivist_db::{
     queue_missing_pipeline, rebalance_backfilled_metadata_priorities, record_dashboard_snapshot,
     record_document_language, release_job_lease_for_cooldown, requeue_vision_crashed_jobs,
     reset_stale_applying_reviews, reset_stuck_running_pipeline_runs, resolve_secret,
-    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_id_pairs_for_names,
+    revert_review_from_applying, selector_document_budget, tag_id_pairs_for_names,
     tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
@@ -4191,7 +4191,7 @@ async fn apply_one_autopilot_drain_review(
             match archivist_db::review_has_nonterminal_apply_intent(pool, claimed.id).await {
                 Ok(false) => {
                     if let Err(revert_error) =
-                        revert_review_to_pending_after_failed_drain(pool, claimed.id).await
+                        revert_review_from_applying(pool, claimed.id, "pending").await
                     {
                         warn!(
                             review_id = %claimed.id,
