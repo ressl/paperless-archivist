@@ -8372,6 +8372,10 @@ pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Re
     let (input_tokens, output_tokens) = ai_response_token_usage(input.response.as_ref());
     let request = prepare_ai_artifact_value(input.request, input.storage_mode);
     let response = prepare_ai_artifact_value(input.response, input.storage_mode);
+    let normalized_output = input.normalized_output.map(|mut value| {
+        replace_nul_in_json(&mut value);
+        value
+    });
 
     let id = sqlx::query(
         r#"
@@ -8392,7 +8396,7 @@ pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Re
     .bind(input.input_hash)
     .bind(request)
     .bind(response)
-    .bind(input.normalized_output)
+    .bind(normalized_output)
     .bind(input.duration_ms)
     .bind(input_tokens)
     .bind(output_tokens)
@@ -8402,12 +8406,39 @@ pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Re
     Ok(id)
 }
 
+/// Replace every U+0000 in JSON strings and object keys with U+FFFD, which
+/// PostgreSQL `jsonb`/`text` can store. #415
+pub fn replace_nul_in_json(value: &mut Value) {
+    const NUL: char = '\u{0}';
+    const REPLACEMENT: &str = "\u{FFFD}";
+    match value {
+        Value::String(text) if text.contains(NUL) => {
+            *text = text.replace(NUL, REPLACEMENT);
+        }
+        Value::Array(items) => items.iter_mut().for_each(replace_nul_in_json),
+        Value::Object(map) => {
+            if map.keys().any(|key| key.contains(NUL)) {
+                let entries = std::mem::take(map);
+                *map = entries
+                    .into_iter()
+                    .map(|(key, value)| (key.replace(NUL, REPLACEMENT), value))
+                    .collect();
+            }
+            map.values_mut().for_each(replace_nul_in_json);
+        }
+        _ => {}
+    }
+}
+
 fn prepare_ai_artifact_value(
     value: Option<Value>,
     storage_mode: AiArtifactStorageMode,
 ) -> Option<Value> {
     let mut value = value?;
     redact_sensitive_json(&mut value);
+    // #415: PostgreSQL rejects U+0000 in jsonb; model output occasionally
+    // contains it, which failed the insert in `Full` mode.
+    replace_nul_in_json(&mut value);
     match storage_mode {
         AiArtifactStorageMode::Full => Some(value),
         AiArtifactStorageMode::Redacted => {
