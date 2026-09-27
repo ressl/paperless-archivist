@@ -82,6 +82,98 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
   parameters:
+    InventoryId:
+      name: id
+      in: query
+      required: false
+      schema: { type: integer }
+      description: Exact Paperless document id.
+    InventoryQ:
+      name: q
+      in: query
+      required: false
+      schema: { type: string }
+      description: Case-insensitive substring of the title or original file name.
+    InventoryOcrStatus:
+      name: ocr_status
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated OCR statuses (any of).
+    InventoryMetadataStatus:
+      name: metadata_status
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated metadata statuses (any of).
+    InventoryRunStatus:
+      name: run_status
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated current run statuses (any of).
+    InventoryTag:
+      name: tag
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated tag names that must all be present.
+    InventoryNotTag:
+      name: not_tag
+      in: query
+      required: false
+      schema: { type: string }
+      description: Comma-separated tag names none of which may be present.
+    InventoryLang:
+      name: lang
+      in: query
+      required: false
+      schema: { type: string }
+      description: Detected language tag.
+    InventoryDateFrom:
+      name: date_from
+      in: query
+      required: false
+      schema: { type: string, format: date }
+      description: >-
+        Inclusive lower bound on document_date (YYYY-MM-DD). A present but
+        unparseable value is rejected with 400.
+    InventoryDateTo:
+      name: date_to
+      in: query
+      required: false
+      schema: { type: string, format: date }
+      description: >-
+        Inclusive upper bound on document_date (YYYY-MM-DD). A present but
+        unparseable value is rejected with 400.
+    InventoryHasError:
+      name: has_error
+      in: query
+      required: false
+      schema: { type: boolean }
+    InventoryNeedsReview:
+      name: needs_review
+      in: query
+      required: false
+      schema: { type: boolean }
+    InventoryCorrespondent:
+      name: correspondent
+      in: query
+      required: false
+      schema: { type: string, example: "12,none" }
+      description: >-
+        Comma-separated Paperless correspondent ids and/or `none` (documents
+        without a correspondent); any of them matches. At most 100 ids; any
+        other value is rejected with 400.
+    InventoryDocumentType:
+      name: document_type
+      in: query
+      required: false
+      schema: { type: string, example: "3" }
+      description: >-
+        Comma-separated Paperless document type ids and/or `none` (documents
+        without a document type); any of them matches. At most 100 ids; any
+        other value is rejected with 400.
     ConditionalCsrfToken:
       name: X-CSRF-Token
       in: header
@@ -1555,6 +1647,15 @@ components:
       type: object
       additionalProperties: true
       properties:
+        paperless_document_id: { type: integer }
+        correspondent_id: { type: [integer, "null"] }
+        correspondent_name:
+          type: [string, "null"]
+          description: Name from the synced Paperless correspondents; null when unset or not synced.
+        document_type_id: { type: [integer, "null"] }
+        document_type_name:
+          type: [string, "null"]
+          description: Name from the synced Paperless document types; null when unset or not synced.
         debug_context:
           oneOf:
             - $ref: "#/components/schemas/WorkflowDebugContext"
@@ -1642,9 +1743,99 @@ components:
             review UI can show the actual document title instead of falling
             back to "Document {id}" when the suggested_patch has no title.
         created_at: { type: string, format: date-time }
+    InventoryPage:
+      type: object
+      required: [items, total, offset, limit]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/DocumentInventoryItem" }
+        total: { type: integer, format: int64 }
+        offset: { type: integer, format: int64 }
+        limit: { type: integer, format: int64 }
+    InventoryFacetValue:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+    InventoryFacets:
+      type: object
+      required: [correspondents, document_types]
+      properties:
+        correspondents:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryFacetValue" }
+        document_types:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryFacetValue" }
+    InventoryViewRequest:
+      type: object
+      additionalProperties: false
+      required: [name, query]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        query:
+          type: string
+          maxLength: 2000
+          description: >-
+            Inventory filter query string (same keys as GET /api/inventory,
+            without limit/offset; a leading `?` is ignored).
+    InventorySavedView:
+      type: object
+      required: [id, name, query, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        query: { type: string, description: Canonical filter query string. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     AuditEvent:
       type: object
       additionalProperties: true
+      required: [id, event_type, actor_type, outcome, created_at, has_changes]
+      properties:
+        id: { type: string, format: uuid }
+        event_type: { type: string }
+        actor_type: { type: string }
+        actor_id: { type: [string, "null"] }
+        actor_username:
+          type: [string, "null"]
+          description: Username of a user actor, resolved for display.
+        paperless_document_id: { type: [integer, "null"] }
+        outcome: { type: string }
+        error_message: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        metadata: true
+        prev_event_hash: { type: [string, "null"] }
+        event_hash: { type: [string, "null"] }
+        hash_version: { type: [integer, "null"] }
+        has_changes:
+          type: boolean
+          description: True when the event stored before and/or after snapshots (see GET /api/audit/{id}).
+    AuditEventPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next (older) page; null on the last page.
+    AuditEventDetail:
+      allOf:
+        - $ref: "#/components/schemas/AuditEvent"
+        - type: object
+          properties:
+            run_id: { type: [string, "null"], format: uuid }
+            job_id: { type: [string, "null"], format: uuid }
+            before:
+              description: State before the change (credential-like keys redacted).
+            after:
+              description: State after the change (credential-like keys redacted).
+            source_ip: { type: [string, "null"] }
+            user_agent: { type: [string, "null"] }
     AuditIntegrityReport:
       type: object
       required: [ok, checked_events, legacy_events, v1_events, v2_events, legacy_precision_events]
@@ -2706,32 +2897,211 @@ paths:
               schema: { $ref: "#/components/schemas/RuntimeSettings" }
   /api/inventory:
     get:
+      summary: List inventory documents matching the filters
+      description: Requires the inventory:read permission. All filters are AND-ed.
       parameters:
         - name: limit
           in: query
-          schema: { type: integer, default: 100 }
+          schema: { type: integer, default: 100, minimum: 1, maximum: 500 }
         - name: offset
           in: query
-          schema: { type: integer, default: 0 }
-        - name: date_from
-          in: query
-          required: false
-          schema: { type: string, format: date }
-          description: >-
-            Inclusive lower bound on document_date (YYYY-MM-DD). A present but
-            unparseable value is rejected with 400.
-        - name: date_to
-          in: query
-          required: false
-          schema: { type: string, format: date }
-          description: >-
-            Inclusive upper bound on document_date (YYYY-MM-DD). A present but
-            unparseable value is rejected with 400.
+          schema: { type: integer, default: 0, minimum: 0 }
+        - { $ref: "#/components/parameters/InventoryId" }
+        - { $ref: "#/components/parameters/InventoryQ" }
+        - { $ref: "#/components/parameters/InventoryOcrStatus" }
+        - { $ref: "#/components/parameters/InventoryMetadataStatus" }
+        - { $ref: "#/components/parameters/InventoryRunStatus" }
+        - { $ref: "#/components/parameters/InventoryTag" }
+        - { $ref: "#/components/parameters/InventoryNotTag" }
+        - { $ref: "#/components/parameters/InventoryLang" }
+        - { $ref: "#/components/parameters/InventoryDateFrom" }
+        - { $ref: "#/components/parameters/InventoryDateTo" }
+        - { $ref: "#/components/parameters/InventoryHasError" }
+        - { $ref: "#/components/parameters/InventoryNeedsReview" }
+        - { $ref: "#/components/parameters/InventoryCorrespondent" }
+        - { $ref: "#/components/parameters/InventoryDocumentType" }
       responses:
         "200":
           description: Inventory page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventoryPage" }
         "400":
-          description: Unparseable date_from/date_to filter
+          description: Unparseable date_from/date_to or correspondent/document_type filter
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/inventory/facets:
+    get:
+      summary: Filter vocabularies for the inventory
+      description: >-
+        Requires the inventory:read permission. Lists the synced Paperless
+        correspondents and document types (id and name, ordered by name,
+        at most 5000 each) for the correspondent/document_type filters.
+      responses:
+        "200":
+          description: Correspondents and document types
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventoryFacets" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/inventory/export:
+    get:
+      summary: Export the filtered inventory as CSV or JSON
+      description: >-
+        Requires the inventory:read permission and accepts the same filters as
+        GET /api/inventory (paging parameters are not accepted; the export
+        covers every matching row). The response is streamed page by page.
+        Each export is audited as `inventory.exported` with its canonical
+        filter string, is limited to one concurrent inventory export per
+        actor (and a small global cap shared with the audit export), and is
+        aborted after a fixed deadline. CSV cells that start with a formula
+        character are prefixed with a single quote.
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema: { type: string, enum: [csv, json], default: csv }
+        - { $ref: "#/components/parameters/InventoryId" }
+        - { $ref: "#/components/parameters/InventoryQ" }
+        - { $ref: "#/components/parameters/InventoryOcrStatus" }
+        - { $ref: "#/components/parameters/InventoryMetadataStatus" }
+        - { $ref: "#/components/parameters/InventoryRunStatus" }
+        - { $ref: "#/components/parameters/InventoryTag" }
+        - { $ref: "#/components/parameters/InventoryNotTag" }
+        - { $ref: "#/components/parameters/InventoryLang" }
+        - { $ref: "#/components/parameters/InventoryDateFrom" }
+        - { $ref: "#/components/parameters/InventoryDateTo" }
+        - { $ref: "#/components/parameters/InventoryHasError" }
+        - { $ref: "#/components/parameters/InventoryNeedsReview" }
+        - { $ref: "#/components/parameters/InventoryCorrespondent" }
+        - { $ref: "#/components/parameters/InventoryDocumentType" }
+      responses:
+        "200":
+          description: Matching inventory rows
+          content:
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DocumentInventoryItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/inventory/views:
+    get:
+      summary: List the caller's saved inventory views
+      description: >-
+        Requires the inventory:read permission and a user session (API tokens
+        have no personal views). Views are private to the user who saved them.
+      responses:
+        "200":
+          description: Saved views ordered by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/InventorySavedView" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Save the current inventory filters as a named view
+      description: >-
+        Requires the inventory:read permission and a user session. The query is
+        validated like GET /api/inventory filters and stored in canonical form.
+        At most 50 views per user; names are unique per user
+        (case-insensitive).
+      parameters:
+        - { $ref: "#/components/parameters/RequiredCsrfToken" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InventoryViewRequest" }
+      responses:
+        "200":
+          description: Created view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventorySavedView" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "409":
+          description: A view with this name exists or the per-user limit is reached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+  /api/inventory/views/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      summary: Rename or re-point one of the caller's saved views
+      parameters:
+        - { $ref: "#/components/parameters/RequiredCsrfToken" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InventoryViewRequest" }
+      responses:
+        "200":
+          description: Updated view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventorySavedView" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "404":
+          description: No such view for this user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: A view with this name exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      summary: Delete one of the caller's saved views
+      parameters:
+        - { $ref: "#/components/parameters/RequiredCsrfToken" }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such view for this user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
   /api/inventory/duplicates:
     get:
       summary: List OCR-content duplicate groups
@@ -3216,13 +3586,68 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/audit:
     get:
+      summary: List audit events (filtered, keyset-paginated)
+      description: >-
+        Requires the audit:read permission. Newest first. All filters are
+        AND-ed. Pass `next_cursor` of a page as `cursor` to fetch the next
+        (older) page; `next_cursor` is null on the last page.
       parameters:
         - in: query
           name: limit
           required: false
-          schema: { type: integer, format: int64, minimum: 1, maximum: 500 }
+          schema: { type: integer, format: int64, minimum: 1, maximum: 500, default: 200 }
+        - in: query
+          name: actor
+          required: false
+          schema: { type: string, maxLength: 200 }
+          description: >-
+            Username (case-insensitive), user UUID, or raw actor id such as an
+            API token name.
+        - in: query
+          name: actor_type
+          required: false
+          schema: { type: string, maxLength: 200 }
+          description: Exact actor type, e.g. user, api_token, worker, system.
+        - in: query
+          name: document_id
+          required: false
+          schema: { type: integer }
+          description: Paperless document id.
+        - in: query
+          name: event_type
+          required: false
+          schema: { type: string }
+          description: Comma-separated exact event types (at most 20).
+        - in: query
+          name: outcome
+          required: false
+          schema: { type: string, maxLength: 200 }
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+          description: Inclusive lower bound; RFC 3339 timestamp or YYYY-MM-DD (midnight UTC).
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+          description: >-
+            Exclusive upper bound; RFC 3339 timestamp, or YYYY-MM-DD which
+            includes that whole day (UTC).
+        - in: query
+          name: cursor
+          required: false
+          schema: { type: string }
+          description: Opaque keyset cursor from a previous response's next_cursor.
       responses:
-        "200": { description: Audit events }
+        "200":
+          description: Audit events
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditEventPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/audit/export.csv:
     get:
       description: >-
@@ -3238,6 +3663,27 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+  /api/audit/{id}:
+    get:
+      summary: One audit event with its before/after snapshots
+      description: >-
+        Requires the audit:read permission. Backs the before/after diff view.
+        Credential-like keys in before, after and metadata are redacted.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Audit event detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditEventDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/audit/integrity:
     get:
       responses:

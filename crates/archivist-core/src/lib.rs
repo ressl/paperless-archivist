@@ -4453,6 +4453,17 @@ pub struct DocumentInventoryItem {
     pub detected_language_confidence: Option<f32>,
     pub detected_language_source: Option<String>,
     pub last_seen_at: DateTime<Utc>,
+    /// Paperless correspondent / document type ids with their names resolved
+    /// against the synced `paperless_*` tables (#447). A name is null when the
+    /// id is unset or not (yet) synced.
+    #[serde(default)]
+    pub correspondent_id: Option<i32>,
+    #[serde(default)]
+    pub correspondent_name: Option<String>,
+    #[serde(default)]
+    pub document_type_id: Option<i32>,
+    #[serde(default)]
+    pub document_type_name: Option<String>,
 }
 
 /// One member document of a duplicate group (#216 dedup view). Documents are

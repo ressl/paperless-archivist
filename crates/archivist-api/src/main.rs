@@ -381,6 +381,16 @@ fn router(state: AppState) -> Router {
         .route("/workflow/controls", patch(update_workflow_controls))
         .route("/inventory", get(inventory))
         .route("/inventory/duplicates", get(inventory_duplicates))
+        .route("/inventory/facets", get(inventory_facets))
+        .route("/inventory/export", get(inventory_export))
+        .route(
+            "/inventory/views",
+            get(inventory_views).post(create_inventory_view_endpoint),
+        )
+        .route(
+            "/inventory/views/{id}",
+            put(update_inventory_view_endpoint).delete(delete_inventory_view_endpoint),
+        )
         .route(
             "/inventory/{document_id}/metadata-trace",
             get(inventory_metadata_trace),
@@ -435,6 +445,7 @@ fn router(state: AppState) -> Router {
         .route("/audit", get(audit_events))
         .route("/audit/export.csv", get(audit_export))
         .route("/audit/integrity", get(audit_integrity))
+        .route("/audit/{id}", get(audit_event_detail))
         .route("/audit/retention/apply", post(apply_audit_retention))
         .route("/users", get(users).post(create_user))
         .route("/users/{id}/enable", post(enable_user))
@@ -4666,6 +4677,10 @@ struct InventoryQueryParams {
     date_to: Option<String>,
     has_error: Option<bool>,
     needs_review: Option<bool>,
+    /// Comma-separated Paperless correspondent ids and/or `none` (#447).
+    correspondent: Option<String>,
+    /// Comma-separated Paperless document type ids and/or `none` (#447).
+    document_type: Option<String>,
 }
 
 fn split_csv(value: Option<String>) -> Vec<String> {
@@ -4704,20 +4719,7 @@ async fn inventory(
     require(&auth.0, Permission::ReadInventory)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let offset = query.offset.unwrap_or(0).max(0);
-    let inventory_query = archivist_db::InventoryQuery {
-        id: query.id,
-        q: query.q,
-        ocr_status: split_csv(query.ocr_status),
-        metadata_status: split_csv(query.metadata_status),
-        run_status: split_csv(query.run_status),
-        tags_include: split_csv(query.tag),
-        tags_exclude: split_csv(query.not_tag),
-        language: query.lang.filter(|s| !s.is_empty()),
-        date_from: parse_inventory_date_filter("date_from", query.date_from.as_deref())?,
-        date_to: parse_inventory_date_filter("date_to", query.date_to.as_deref())?,
-        has_error: query.has_error,
-        needs_review: query.needs_review,
-    };
+    let inventory_query = inventory_query_from_params(query)?;
     let settings = get_runtime_settings(&state.pool).await?;
     let (items, total) = tokio::try_join!(
         async {
@@ -4735,6 +4737,507 @@ async fn inventory(
         "offset": offset,
         "limit": limit,
     })))
+}
+
+/// Maximum ids per `correspondent` / `document_type` filter (#447).
+const INVENTORY_ID_FILTER_MAX: usize = 100;
+
+/// Parse a `correspondent` / `document_type` filter (#447): comma-separated
+/// positive Paperless ids and/or the literal `none` (object unset). Anything
+/// else is rejected with 400 rather than silently ignored.
+fn parse_inventory_id_filter(
+    name: &str,
+    raw: Option<String>,
+) -> Result<archivist_db::InventoryIdFilter, ApiError> {
+    let mut filter = archivist_db::InventoryIdFilter::default();
+    for part in split_csv(raw) {
+        if part.eq_ignore_ascii_case("none") {
+            filter.include_none = true;
+            continue;
+        }
+        let id = part
+            .parse::<i32>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "'{name}' must be comma-separated Paperless ids or 'none'"
+                ))
+            })?;
+        if !filter.ids.contains(&id) {
+            filter.ids.push(id);
+        }
+    }
+    if filter.ids.len() > INVENTORY_ID_FILTER_MAX {
+        return Err(ApiError::bad_request(format!(
+            "'{name}' accepts at most {INVENTORY_ID_FILTER_MAX} ids"
+        )));
+    }
+    Ok(filter)
+}
+
+/// Translate the `/api/inventory` query parameters into the SQL-layer filter.
+/// Shared by the list, the export and saved-view validation (#447), so all
+/// three accept and reject exactly the same filters.
+fn inventory_query_from_params(
+    query: InventoryQueryParams,
+) -> Result<archivist_db::InventoryQuery, ApiError> {
+    Ok(archivist_db::InventoryQuery {
+        id: query.id,
+        q: query.q,
+        ocr_status: split_csv(query.ocr_status),
+        metadata_status: split_csv(query.metadata_status),
+        run_status: split_csv(query.run_status),
+        tags_include: split_csv(query.tag),
+        tags_exclude: split_csv(query.not_tag),
+        language: query.lang.filter(|s| !s.is_empty()),
+        date_from: parse_inventory_date_filter("date_from", query.date_from.as_deref())?,
+        date_to: parse_inventory_date_filter("date_to", query.date_to.as_deref())?,
+        has_error: query.has_error,
+        needs_review: query.needs_review,
+        correspondent: parse_inventory_id_filter("correspondent", query.correspondent)?,
+        document_type: parse_inventory_id_filter("document_type", query.document_type)?,
+    })
+}
+
+/// Filter keys a saved view / export may carry, in canonical order (#447).
+/// Paging (`limit`, `offset`) is deliberately not part of a view.
+const INVENTORY_FILTER_KEYS: [&str; 14] = [
+    "id",
+    "q",
+    "ocr_status",
+    "metadata_status",
+    "run_status",
+    "tag",
+    "not_tag",
+    "lang",
+    "date_from",
+    "date_to",
+    "has_error",
+    "needs_review",
+    "correspondent",
+    "document_type",
+];
+
+/// Maximum length of a stored / exported filter query string (#447); matches
+/// the `inventory_saved_views.query` CHECK in migration 0056.
+const INVENTORY_FILTER_QUERY_MAX_BYTES: usize = 2000;
+
+/// Validate an inventory filter query string and return it in canonical form
+/// (known keys only, each at most once, empty values dropped, fixed key
+/// order) together with the parsed filter (#447). The canonical string is
+/// what saved views store and what the export audit event records.
+fn canonical_inventory_filter_query(
+    raw: &str,
+) -> Result<(String, archivist_db::InventoryQuery), ApiError> {
+    let raw = raw.trim().trim_start_matches('?');
+    if raw.len() > INVENTORY_FILTER_QUERY_MAX_BYTES {
+        return Err(ApiError::bad_request("inventory filter query is too long"));
+    }
+    let mut pairs: Vec<(usize, String, String)> = Vec::new();
+    for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+        let Some(position) = INVENTORY_FILTER_KEYS.iter().position(|known| *known == key) else {
+            return Err(ApiError::bad_request(format!(
+                "unknown inventory filter '{key}'"
+            )));
+        };
+        if pairs.iter().any(|(existing, _, _)| *existing == position) {
+            return Err(ApiError::bad_request(format!(
+                "inventory filter '{key}' given more than once"
+            )));
+        }
+        let value = value.trim();
+        if !value.is_empty() {
+            pairs.push((position, key.into_owned(), value.to_owned()));
+        }
+    }
+    pairs.sort_by_key(|(position, _, _)| *position);
+    let canonical = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs.iter().map(|(_, key, value)| (key, value)))
+        .finish();
+    if canonical.len() > INVENTORY_FILTER_QUERY_MAX_BYTES {
+        return Err(ApiError::bad_request("inventory filter query is too long"));
+    }
+    let uri: axum::http::Uri = format!("/?{canonical}")
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid inventory filter query"))?;
+    let Query(params) = Query::<InventoryQueryParams>::try_from_uri(&uri)
+        .map_err(|error| ApiError::bad_request(format!("invalid inventory filter: {error}")))?;
+    Ok((canonical, inventory_query_from_params(params)?))
+}
+
+// `GET /api/inventory/facets` (#447): filter vocabularies (synced Paperless
+// correspondents and document types) for the inventory filter pickers.
+async fn inventory_facets(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadInventory)?;
+    Ok(Json(json!(
+        archivist_db::list_inventory_facets(&state.pool).await?
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+struct InventoryViewRequest {
+    name: String,
+    query: String,
+}
+
+/// Validate a saved-view write (#447): a trimmed 1..=80 character name
+/// without control characters and a canonicalised filter query.
+fn validate_inventory_view(request: &InventoryViewRequest) -> Result<(String, String), ApiError> {
+    let name = request.name.trim();
+    let length = name.chars().count();
+    if length == 0 || length > 80 || name.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "view name must be 1 to 80 characters without control characters",
+        ));
+    }
+    let (query, _) = canonical_inventory_filter_query(&request.query)?;
+    Ok((name.to_owned(), query))
+}
+
+/// Map the expected saved-view outcomes to 404/409; everything else stays a
+/// server error (#447).
+fn inventory_view_error(error: anyhow::Error) -> ApiError {
+    match error.downcast_ref::<archivist_db::InventoryViewError>() {
+        Some(archivist_db::InventoryViewError::NotFound) => {
+            ApiError::not_found("saved view not found")
+        }
+        Some(view_error @ archivist_db::InventoryViewError::DuplicateName)
+        | Some(view_error @ archivist_db::InventoryViewError::LimitReached) => {
+            ApiError::conflict(view_error.to_string())
+        }
+        None => ApiError::from(error),
+    }
+}
+
+// Saved inventory views (#447) are UI state private to one user: they need a
+// user session (an API token has no personal views) plus inventory:read.
+const INVENTORY_VIEWS_SESSION_MESSAGE: &str = "saved inventory views require a user session";
+
+async fn inventory_views(
+    State(state): State<AppState>,
+    auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadInventory)?;
+    let user_id = require_user_session(&auth.0, INVENTORY_VIEWS_SESSION_MESSAGE)?;
+    Ok(Json(json!({
+        "items": archivist_db::list_inventory_views(&state.pool, user_id).await?
+    })))
+}
+
+async fn create_inventory_view_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Json(request): Json<InventoryViewRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadInventory)?;
+    let user_id = require_user_session(&auth.0, INVENTORY_VIEWS_SESSION_MESSAGE)?;
+    let (name, query) = validate_inventory_view(&request)?;
+    let view = archivist_db::create_inventory_view(&state.pool, user_id, &name, &query)
+        .await
+        .map_err(inventory_view_error)?;
+    Ok(Json(json!(view)))
+}
+
+async fn update_inventory_view_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+    Json(request): Json<InventoryViewRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadInventory)?;
+    let user_id = require_user_session(&auth.0, INVENTORY_VIEWS_SESSION_MESSAGE)?;
+    let (name, query) = validate_inventory_view(&request)?;
+    let view = archivist_db::update_inventory_view(&state.pool, user_id, id, &name, &query)
+        .await
+        .map_err(inventory_view_error)?;
+    Ok(Json(json!(view)))
+}
+
+async fn delete_inventory_view_endpoint(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadInventory)?;
+    let user_id = require_user_session(&auth.0, INVENTORY_VIEWS_SESSION_MESSAGE)?;
+    archivist_db::delete_inventory_view(&state.pool, user_id, id)
+        .await
+        .map_err(inventory_view_error)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InventoryExportFormat {
+    Csv,
+    Json,
+}
+
+impl InventoryExportFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+        }
+    }
+}
+
+/// Hard wall-clock budget for one inventory export (#447, same policy as the
+/// audit export #394).
+const INVENTORY_EXPORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Rows per keyset page of the inventory export (#447).
+const INVENTORY_EXPORT_PAGE_SIZE: i64 = 500;
+
+// `GET /api/inventory/export?format=csv|json&<filters>` (#447)
+//
+// Streams every inventory row matching the same filters as `/api/inventory`
+// (inventory:read, like the list). Bounded like the audit export (#394):
+// keyset pages that release their pool connection between pages, a bounded
+// channel for backpressure, one running export per actor (sharing the global
+// export slot cap) and a hard deadline. Each export is itself audited
+// (`inventory.exported`, with the canonical filter string).
+async fn inventory_export(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+) -> ApiResult<Response> {
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    require(&auth.0, Permission::ReadInventory)?;
+    let (format, canonical, inventory_query) =
+        parse_inventory_export_query(raw_query.as_deref().unwrap_or_default())?;
+
+    let actor = format!(
+        "inventory:{}:{}",
+        auth.0.actor_type,
+        auth.0.actor_id.as_deref().unwrap_or_default()
+    );
+    // The audit export's slot registry doubles as the global export cap; the
+    // "inventory:" key prefix keeps one inventory and one audit export per
+    // actor independent of each other.
+    let slot = AuditExportSlot::acquire(actor).ok_or_else(|| {
+        ApiError::too_many_requests(
+            "an inventory export is already running; retry when it finishes",
+        )
+    })?;
+    append_audit(
+        &state.pool,
+        AuditEventInput {
+            event_type: "inventory.exported".to_owned(),
+            actor_type: auth.0.actor_type.clone(),
+            actor_id: auth.0.actor_id.clone(),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: None,
+            metadata: Some(json!({ "format": format.as_str(), "filters": canonical })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+
+    let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        let _slot = slot;
+        run_inventory_export(
+            &pool,
+            inventory_query,
+            format,
+            tx,
+            INVENTORY_EXPORT_DEADLINE,
+        )
+        .await;
+    });
+
+    let (content_type, disposition) = match format {
+        InventoryExportFormat::Csv => (
+            "text/csv; charset=utf-8",
+            "attachment; filename=\"paperless-archivist-inventory.csv\"",
+        ),
+        InventoryExportFormat::Json => (
+            "application/json",
+            "attachment; filename=\"paperless-archivist-inventory.json\"",
+        ),
+    };
+    let mut response = Response::new(Body::from_stream(ReceiverStream::new(rx)));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(disposition),
+    );
+    Ok(response)
+}
+
+/// Split the export query into its `format` and the canonicalised filters
+/// (#447). Kept synchronous: the form-urlencoded serializer is not `Send`
+/// and must not live across an await in the handler.
+fn parse_inventory_export_query(
+    raw_query: &str,
+) -> Result<
+    (
+        InventoryExportFormat,
+        String,
+        archivist_db::InventoryQuery,
+    ),
+    ApiError,
+> {
+    let mut format = InventoryExportFormat::Csv;
+    let mut filters = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if key == "format" {
+            format = match value.as_ref() {
+                "csv" => InventoryExportFormat::Csv,
+                "json" => InventoryExportFormat::Json,
+                _ => return Err(ApiError::bad_request("'format' must be csv or json")),
+            };
+        } else {
+            filters.append_pair(&key, &value);
+        }
+    }
+    let (canonical, query) = canonical_inventory_filter_query(&filters.finish())?;
+    Ok((format, canonical, query))
+}
+
+/// Stream the inventory export into `tx` until done, the client disconnects
+/// or `deadline` elapses; a deadline ends the stream with an error so the
+/// client sees a truncated download rather than a silent cut (#447).
+async fn run_inventory_export(
+    pool: &DbPool,
+    query: archivist_db::InventoryQuery,
+    format: InventoryExportFormat,
+    tx: AuditExportSender,
+    deadline: std::time::Duration,
+) {
+    let error_tx = tx.clone();
+    if tokio::time::timeout(deadline, write_inventory_export(pool, &query, format, tx))
+        .await
+        .is_err()
+    {
+        warn!(
+            deadline_seconds = deadline.as_secs(),
+            "inventory export aborted at its deadline"
+        );
+        let _ = error_tx.try_send(Err(std::io::Error::other(
+            "inventory export exceeded its time limit",
+        )));
+    }
+}
+
+const INVENTORY_CSV_HEADER: &str = "paperless_document_id,title,original_file_name,correspondent_id,correspondent,document_type_id,document_type,document_date,tags,ocr_status,metadata_status,run_status,needs_review,complete,detected_language,last_error,last_seen_at\n";
+
+async fn write_inventory_export(
+    pool: &DbPool,
+    query: &archivist_db::InventoryQuery,
+    format: InventoryExportFormat,
+    tx: AuditExportSender,
+) {
+    use bytes::Bytes;
+
+    let opening: &'static str = match format {
+        InventoryExportFormat::Csv => INVENTORY_CSV_HEADER,
+        InventoryExportFormat::Json => "[",
+    };
+    if tx
+        .send(Ok(Bytes::from_static(opening.as_bytes())))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut before_id: Option<i32> = None;
+    let mut first = true;
+    loop {
+        let rows = match archivist_db::list_inventory_keyset(
+            pool,
+            query,
+            before_id,
+            INVENTORY_EXPORT_PAGE_SIZE,
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                let _ = tx
+                    .send(Err(std::io::Error::other(format!(
+                        "stream inventory: {error}"
+                    ))))
+                    .await;
+                return;
+            }
+        };
+        for item in &rows {
+            let chunk = match format {
+                InventoryExportFormat::Csv => inventory_csv_row(item),
+                InventoryExportFormat::Json => match serde_json::to_string(item) {
+                    Ok(json) => format!("{}\n{json}", if first { "" } else { "," }),
+                    Err(error) => {
+                        let _ = tx
+                            .send(Err(std::io::Error::other(format!(
+                                "encode inventory row: {error}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                },
+            };
+            first = false;
+            if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+                return;
+            }
+        }
+        before_id = rows.last().map(|item| item.paperless_document_id);
+        if (rows.len() as i64) < INVENTORY_EXPORT_PAGE_SIZE {
+            break;
+        }
+    }
+    if format == InventoryExportFormat::Json {
+        let _ = tx.send(Ok(Bytes::from_static(b"\n]\n"))).await;
+    }
+}
+
+fn inventory_csv_row(item: &DocumentInventoryItem) -> String {
+    let optional_id = |id: Option<i32>| id.map(|id| id.to_string()).unwrap_or_default();
+    let cells = [
+        item.paperless_document_id.to_string(),
+        item.title.clone().unwrap_or_default(),
+        item.original_file_name.clone().unwrap_or_default(),
+        optional_id(item.correspondent_id),
+        item.correspondent_name.clone().unwrap_or_default(),
+        optional_id(item.document_type_id),
+        item.document_type_name.clone().unwrap_or_default(),
+        item.document_date
+            .map(|date| date.to_string())
+            .unwrap_or_default(),
+        item.current_tags.join("; "),
+        item.ocr_status.clone(),
+        item.metadata_status.clone(),
+        item.current_run_status.clone().unwrap_or_default(),
+        item.needs_review.to_string(),
+        item.complete.to_string(),
+        item.detected_language.clone().unwrap_or_default(),
+        item.last_error.clone().unwrap_or_default(),
+        item.last_seen_at.to_rfc3339(),
+    ];
+    let mut out = String::with_capacity(256);
+    for (i, cell) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&csv_escape(cell));
+    }
+    out.push('\n');
+    out
 }
 
 // `GET /api/inventory/duplicates`
@@ -6739,8 +7242,94 @@ async fn release_scheduled_retries_endpoint(
 #[derive(Debug, Deserialize)]
 struct AuditQuery {
     limit: Option<i64>,
+    /// Username, user UUID or raw actor id (e.g. an API token name). #448
+    actor: Option<String>,
+    actor_type: Option<String>,
+    document_id: Option<i32>,
+    /// Comma-separated exact event types. #448
+    event_type: Option<String>,
+    outcome: Option<String>,
+    /// Inclusive lower bound (RFC 3339 or YYYY-MM-DD). #448
+    from: Option<String>,
+    /// Exclusive upper bound (RFC 3339); a YYYY-MM-DD date includes that whole day. #448
+    to: Option<String>,
+    /// Opaque keyset cursor from a previous page's `next_cursor`. #448
+    cursor: Option<String>,
 }
 
+/// Maximum event types per audit filter (#448).
+const AUDIT_EVENT_TYPE_FILTER_MAX: usize = 20;
+/// Maximum length of any single free-text audit filter value (#448).
+const AUDIT_FILTER_VALUE_MAX_CHARS: usize = 200;
+
+fn audit_filter_text(name: &str, raw: Option<String>) -> Result<Option<String>, ApiError> {
+    match raw.map(|value| value.trim().to_owned()) {
+        Some(value) if value.is_empty() => Ok(None),
+        Some(value) if value.chars().count() > AUDIT_FILTER_VALUE_MAX_CHARS => {
+            Err(ApiError::bad_request(format!("'{name}' is too long")))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Parse an audit time bound (#448): RFC 3339, or a plain `YYYY-MM-DD` date
+/// meaning midnight UTC of that day (`end_of_day` moves a date `to` bound to
+/// the next midnight so the named day is included).
+fn parse_audit_time_bound(
+    name: &str,
+    raw: Option<&str>,
+    end_of_day: bool,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(instant) = DateTime::parse_from_rfc3339(value) {
+        return Ok(Some(instant.with_timezone(&Utc)));
+    }
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        ApiError::bad_request(format!(
+            "'{name}' must be an RFC 3339 timestamp or a YYYY-MM-DD date"
+        ))
+    })?;
+    let date = if end_of_day {
+        date.succ_opt()
+            .ok_or_else(|| ApiError::bad_request(format!("'{name}' is out of range")))?
+    } else {
+        date
+    };
+    Ok(Some(date.and_time(chrono::NaiveTime::MIN).and_utc()))
+}
+
+/// Encode the keyset position of the last returned audit event (#448). The
+/// cursor is opaque to clients: base64url of `<created_at micros>|<id>`.
+fn encode_audit_cursor(created_at: DateTime<Utc>, id: Uuid) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(
+        "{}|{id}",
+        created_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+    ))
+}
+
+fn decode_audit_cursor(raw: &str) -> Result<(DateTime<Utc>, Uuid), ApiError> {
+    use base64::Engine as _;
+    let invalid = || ApiError::bad_request("invalid audit cursor");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw.trim())
+        .map_err(|_| invalid())?;
+    let text = String::from_utf8(bytes).map_err(|_| invalid())?;
+    let (created_at, id) = text.split_once('|').ok_or_else(invalid)?;
+    let created_at = DateTime::parse_from_rfc3339(created_at)
+        .map_err(|_| invalid())?
+        .with_timezone(&Utc);
+    let id = Uuid::parse_str(id).map_err(|_| invalid())?;
+    Ok((created_at, id))
+}
+
+// `GET /api/audit` (#448): newest-first audit events with server-side
+// filters (actor, actor type, document, event types, outcome, time range)
+// and keyset pagination over (created_at, id). Every single-dimension filter
+// is backed by a keyset-shaped index (migration 0057), so deep pages cost the
+// same as the first one.
 async fn audit_events(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -6750,9 +7339,80 @@ async fn audit_events(
     // Clamp so a caller that only needs a handful of rows (the debug console)
     // doesn't pull the full 200, and a large value can't be requested. (#277)
     let limit = query.limit.unwrap_or(200).clamp(1, 500);
-    Ok(Json(
-        json!({ "items": list_audit_events(&state.pool, limit).await? }),
-    ))
+    let actor_id = match audit_filter_text("actor", query.actor)? {
+        None => None,
+        // User events store the user's UUID as actor_id; accept a username
+        // too so the UI can filter by the name it displays. Other actors
+        // (API tokens, the worker) are matched by their raw actor id.
+        Some(actor) if Uuid::parse_str(&actor).is_ok() => Some(actor.to_lowercase()),
+        Some(actor) => Some(
+            match archivist_db::find_user_id_by_username(&state.pool, &actor).await? {
+                Some(user_id) => user_id.to_string(),
+                None => actor,
+            },
+        ),
+    };
+    let event_types = split_csv(query.event_type);
+    if event_types.len() > AUDIT_EVENT_TYPE_FILTER_MAX
+        || event_types
+            .iter()
+            .any(|value| value.chars().count() > AUDIT_FILTER_VALUE_MAX_CHARS)
+    {
+        return Err(ApiError::bad_request(format!(
+            "'event_type' accepts at most {AUDIT_EVENT_TYPE_FILTER_MAX} event types"
+        )));
+    }
+    let filter = archivist_db::AuditEventFilter {
+        actor_id,
+        actor_type: audit_filter_text("actor_type", query.actor_type)?,
+        paperless_document_id: query.document_id,
+        event_types,
+        outcome: audit_filter_text("outcome", query.outcome)?,
+        from: parse_audit_time_bound("from", query.from.as_deref(), false)?,
+        to: parse_audit_time_bound("to", query.to.as_deref(), true)?,
+        before: query
+            .cursor
+            .as_deref()
+            .filter(|cursor| !cursor.trim().is_empty())
+            .map(decode_audit_cursor)
+            .transpose()?,
+    };
+    // One extra row tells whether another page exists without a count query.
+    let mut items = list_audit_events(&state.pool, &filter, limit + 1).await?;
+    let next_cursor = if items.len() as i64 > limit {
+        items.truncate(limit as usize);
+        items
+            .last()
+            .map(|last| encode_audit_cursor(last.created_at, last.id))
+    } else {
+        None
+    };
+    Ok(Json(json!({ "items": items, "next_cursor": next_cursor })))
+}
+
+// `GET /api/audit/{id}` (#448): one event with its before/after snapshots
+// for the diff view. Credential-like keys are redacted with the same rules
+// as usage statistics, so a snapshot can never surface a secret.
+async fn audit_event_detail(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::ReadAudit)?;
+    let Some(mut detail) = archivist_db::get_audit_event(&state.pool, id).await? else {
+        return Err(ApiError::not_found("audit event not found"));
+    };
+    for value in [
+        detail.before.as_mut(),
+        detail.after.as_mut(),
+        detail.event.metadata.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        archivist_core::redact_sensitive_json(value);
+    }
+    Ok(Json(json!(detail)))
 }
 
 /// Hard wall-clock budget for one CSV export. A client that stops reading
