@@ -142,7 +142,7 @@ reproduction harness:
    `["ocr","metadata"]`.
 3. **Tag review_items store unresolved tag names (`Vec<String>`) where the
    patch applier expects `Vec<i32>`** — confirmed in
-   `archivist-worker/src/main.rs::process_metadata` (~ line 1473-1481, and
+   `archivist-worker/src/metadata_stage.rs::process_metadata` (~ line 1473-1481, and
    `1515-1517` for custom_fields). The validation-failure branch pushes
    `tags.tags.clone()` into the review_item as `"tags": [...]` (strings).
    Symptom: `/api/reviews/{id}/approve` returns

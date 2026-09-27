@@ -55,7 +55,7 @@ Key responsibilities:
 | --- | --- |
 | API router and startup | `crates/archivist-api/src/main.rs` (`fn router`), `crates/archivist-api/src/route_policy.rs` |
 | API handlers, auth, OIDC, SSRF guard | `crates/archivist-api/src/routes/*.rs`, `auth.rs`, `oidc.rs`, `ssrf.rs`, `error.rs` |
-| Worker jobs and apply flow | `crates/archivist-worker/src/main.rs` |
+| Worker jobs and apply flow | `crates/archivist-worker/src/` (`main.rs` tick loop, `claim_loop.rs`, `ocr_stage.rs`, `metadata_stage.rs`, `apply.rs`, `providers.rs`, ...) |
 | Domain settings, roles, validation, prompts | `crates/archivist-core/src/lib.rs` |
 | Database repositories | `crates/archivist-db/src/*.rs` (one module per aggregate, re-exported from `lib.rs`) |
 | SQL migrations | `migrations/*.sql` |
@@ -438,7 +438,7 @@ Start here for common tasks:
 | Change runtime settings | `crates/archivist-core/src/lib.rs`, `crates/archivist-db/src/settings.rs`, Settings UI |
 | Change provider logic | `crates/archivist-ai/src/lib.rs`, worker/API call sites |
 | Change Paperless writes | `crates/archivist-paperless/src/lib.rs`, worker apply code |
-| Change job behavior | `crates/archivist-worker/src/main.rs`, DB job functions |
+| Change job behavior | `crates/archivist-worker/src/` (stage modules, `claim_loop.rs`), DB job functions |
 | Change dashboard | DB stats functions, `frontend/src/App.tsx`, Recharts sections |
 | Change Document Chat | chat routes, DB chat functions, core prompt helpers, Chat UI |
 | Review security | `docs/SECURITY_DESIGN.md`, auth middleware, role permissions |
