@@ -3,6 +3,7 @@ import { Archive, Check, FileText, Shield, X } from 'lucide-react';
 import { api, AuditEvent, AuditIntegrityReport, RetentionResult } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
 import { ActionButton, Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { useConfirm } from '../lib/ConfirmDialog';
 
 export function Audit({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatDateTime, formatNumber } = useI18n();
@@ -10,6 +11,7 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
   const [integrity, setIntegrity] = useState<AuditIntegrityReport | null>(null);
   const [retentionResult, setRetentionResult] = useState<RetentionResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   useEffect(() => {
     Promise.all([api.audit(), api.auditIntegrity()])
       .then(([auditData, integrityData]) => {
@@ -21,6 +23,32 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
   const refreshIntegrity = () => api.auditIntegrity()
     .then(setIntegrity)
     .catch((err) => setError(localizedErrorMessage(err, t)));
+
+  // #417: retention permanently deletes audit events, AI artifacts and cached
+  // OCR pages. Confirm with the configured retention windows when the viewer
+  // may read settings; otherwise state the scope without numbers.
+  const applyRetention = async () => {
+    const security = await api.settings().then((settings) => settings.security).catch(() => null);
+    const confirmed = await confirm({
+      title: t('audit.retention_confirm.title'),
+      description: t('audit.retention_confirm.description'),
+      confirmLabel: t('audit.apply_retention'),
+      details: security
+        ? t('audit.retention_confirm.scope', {
+            audit_days: formatNumber(security.audit_retention_days),
+            artifact_days: formatNumber(security.ai_artifact_retention_days)
+          })
+        : t('audit.retention_confirm.scope_unknown')
+    });
+    if (!confirmed) return;
+    await run(setBusy, setError, () => api.applyAuditRetention().then((result) => {
+      setRetentionResult(result);
+      return Promise.all([api.audit(), api.auditIntegrity()]).then(([auditData, integrityData]) => {
+        setItems(auditData.items);
+        setIntegrity(integrityData);
+      });
+    }), t);
+  };
   return (
     <section className="page">
       <PageHeader title={t('audit.title')} />
@@ -35,13 +63,7 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
           icon={<Archive />}
           label={t('audit.apply_retention')}
           busy={busy}
-          onClick={() => run(setBusy, setError, () => api.applyAuditRetention().then((result) => {
-            setRetentionResult(result);
-            return Promise.all([api.audit(), api.auditIntegrity()]).then(([auditData, integrityData]) => {
-              setItems(auditData.items);
-              setIntegrity(integrityData);
-            });
-          }), t)}
+          onClick={applyRetention}
         />
       </div>
       {integrity && (
@@ -97,6 +119,7 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
           </tbody>
         </table>
       </div>
+      {confirmDialog}
     </section>
   );
 }

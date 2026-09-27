@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useDashboardLive, useDashboardStats, useMediaQuery } from './hooks';
-import { RefreshCw, Settings } from 'lucide-react';
+import { RefreshCw, Settings, WifiOff } from 'lucide-react';
 import {
   api,
   CompletionTagReconcileResult,
@@ -11,6 +11,8 @@ import {
 } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
 import { Button, PageHeader, run } from '../lib/ui';
+import { useConfirm } from '../lib/ConfirmDialog';
+import { workflowModeLabel } from '../lib/workflow';
 import { ErrorBoundary } from '../lib/ErrorBoundary';
 import { defaultDashboardRanges, computeHealthScore } from './helpers';
 import { AlertsBar } from './AlertsBar';
@@ -86,8 +88,12 @@ export function Dashboard({
     window.localStorage.setItem('dashboard.drawer_open', String(drawerOpen));
   }, [drawerOpen]);
 
-  const { stats, counts, lastLoadedAt, reload: load } = useDashboardStats(range, setError);
-  const { live, recovery, reload: loadLive, reloadRecovery: loadRecovery, setLive } = useDashboardLive(canReadRuns, setError);
+  const { stats, counts, lastLoadedAt, reload: load, health: statsHealth } = useDashboardStats(range);
+  const { live, recovery, reload: loadLive, reloadRecovery: loadRecovery, setLive, health: liveHealth } = useDashboardLive(canReadRuns);
+  // #427: background polls report failures here (inline indicator), not via
+  // the global error banner.
+  const pollStale = liveHealth.stale || statsHealth.stale;
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const compactLayout = useMediaQuery('(max-width: 1100px)');
   const [activeTab, setActiveTab] = useState<DashboardTab>('analytics');
   const tabRefs = useRef<Record<DashboardTab, HTMLButtonElement | null>>({
@@ -230,6 +236,74 @@ export function Dashboard({
 
   const healthScore = computeHealthScore(stats, live);
 
+  // #417: actions that queue work in bulk, write to Paperless or hand control
+  // to the autopilot ask first, stating count and scope.
+  // Background refresh after a queue action: a failure only marks the stats stale.
+  const refreshStatsQuietly = () => load().catch(() => undefined);
+  const confirmThen = async (options: Parameters<typeof confirm>[0], action: () => void) => {
+    if (await confirm(options)) action();
+  };
+  const requestModeChange = (mode: ProcessingMode) => {
+    const apply = () => void run(setModeBusy, setError, () => updateDashboardWorkflowMode(mode), t);
+    if (mode === 'manual_review') {
+      apply();
+      return;
+    }
+    void confirmThen(
+      {
+        title: t('dashboard.confirm.mode.title', { mode: workflowModeLabel(mode, t) }),
+        description:
+          mode === 'full_auto'
+            ? t('dashboard.confirm.mode.full_auto_description')
+            : t('dashboard.confirm.mode.auto_select_description'),
+        confirmLabel: t('dashboard.confirm.mode.confirm'),
+        details: t('dashboard.confirm.mode.backlog', { count: formatNumber(counts.total_documents - counts.complete) })
+      },
+      apply
+    );
+  };
+  const requestQueueOcr = () =>
+    void confirmThen(
+      {
+        title: t('dashboard.confirm.queue_ocr.title'),
+        description: t('dashboard.confirm.queue_ocr.description', { count: formatNumber(counts.missing_ocr) }),
+        confirmLabel: t('dashboard.action.queue_ocr'),
+        tone: 'default'
+      },
+      () => void run(setBusy, setError, api.queueOcr, t).then(refreshStatsQuietly)
+    );
+  const requestQueueFull = () =>
+    void confirmThen(
+      {
+        title: t('dashboard.confirm.queue_full.title'),
+        description: t('dashboard.confirm.queue_full.description', { count: formatNumber(counts.never_processed) }),
+        confirmLabel: t('dashboard.action.queue_full'),
+        tone: 'default'
+      },
+      () => void run(setBusy, setError, api.queueFull, t).then(refreshStatsQuietly)
+    );
+  const requestRerunFailed = () =>
+    void confirmThen(
+      {
+        title: t('dashboard.confirm.rerun_failed.title', { count: formatNumber(counts.failed) }),
+        description: t('dashboard.confirm.rerun_failed.description', { count: formatNumber(counts.failed) }),
+        confirmLabel: t('dashboard.action.rerun_failed'),
+        tone: 'default'
+      },
+      () => void run(setBusy, setError, api.rerunFailed, t).then(refreshStatsQuietly)
+    );
+  const requestApplyReconcile = () => {
+    const planned = reconcile?.dry_run ? reconcile.planned.length : 0;
+    void confirmThen(
+      {
+        title: t('dashboard.confirm.reconcile.title', { count: formatNumber(planned) }),
+        description: t('dashboard.confirm.reconcile.description', { count: formatNumber(planned) }),
+        confirmLabel: t('dashboard.paperless_tools.apply')
+      },
+      () => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(false), t)
+    );
+  };
+
   const onAlertAction = (item: NeedsAttentionItem) => {
     // Navigation-only alerts: never require WriteRuns, just hop to the
     // relevant tab. Backend kinds come from needs_attention_items in
@@ -284,6 +358,13 @@ export function Dashboard({
           <p aria-live="polite">
             {t('dashboard.last_refresh', { time: lastLoadedAt ? formatRelative(lastLoadedAt) : '-' })}
           </p>
+          <span role="status" aria-live="polite">
+            {pollStale && (
+              <span className="live-poll-indicator">
+                <WifiOff size={14} aria-hidden="true" /> {t('dashboard.poll.stale')}
+              </span>
+            )}
+          </span>
           <HealthBadge
             score={healthScore}
             generatedAt={stats?.generated_at ?? null}
@@ -347,7 +428,7 @@ export function Dashboard({
         live={live}
         modeBusy={modeBusy}
         canManageSettings={canManageSettings}
-        onModeChange={(mode) => void run(setModeBusy, setError, () => updateDashboardWorkflowMode(mode), t)}
+        onModeChange={requestModeChange}
         onPauseChange={(paused) => void run(setModeBusy, setError, () => updateDashboardPause(paused), t)}
       />
 
@@ -366,12 +447,12 @@ export function Dashboard({
           onReleaseScheduled={() => void run(setRecoveryBusy, setError, releaseScheduledRetries, t)}
           onCheckConsistency={() => void run(setPaperlessToolsBusy, setError, checkPaperlessConsistency, t)}
           onDryRunReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(true), t)}
-          onApplyReconcile={() => void run(setPaperlessToolsBusy, setError, () => reconcileCompletionTags(false), t)}
+          onApplyReconcile={requestApplyReconcile}
           queueBusy={busy}
-          onQueueSync={() => void run(setBusy, setError, api.syncPaperless, t).then(load)}
-          onQueueOcr={() => void run(setBusy, setError, api.queueOcr, t).then(load)}
-          onQueueFull={() => void run(setBusy, setError, api.queueFull, t).then(load)}
-          onRerunFailed={() => void run(setBusy, setError, api.rerunFailed, t).then(load)}
+          onQueueSync={() => void run(setBusy, setError, api.syncPaperless, t).then(refreshStatsQuietly)}
+          onQueueOcr={requestQueueOcr}
+          onQueueFull={requestQueueFull}
+          onRerunFailed={requestRerunFailed}
         />
       )}
       </section>
@@ -462,6 +543,7 @@ export function Dashboard({
 
       <ProviderTable usage={stats?.provider_usage ?? []} />
       </section>
+      {confirmDialog}
     </section>
   );
 }
