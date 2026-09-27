@@ -3596,6 +3596,13 @@ async fn reconcile_completion_tags(
         .map(|ids| ids.into_iter().collect::<HashSet<_>>());
     let mut planned = Vec::new();
     let mut applied = Vec::new();
+    // #410: O(1) tag-name lookups instead of a linear scan per document tag.
+    let mut tag_names_by_id: HashMap<i32, String> =
+        tags.iter().map(|tag| (tag.id, tag.name.clone())).collect();
+    // #410: collect per-document failures instead of `?`-returning mid-loop,
+    // so documents already tagged in Paperless always end up in the audit
+    // event below (outcome `failure` when anything failed).
+    let mut failure: Option<anyhow::Error> = None;
     for document in documents {
         if let Some(allowed_ids) = &allowed_ids
             && !allowed_ids.contains(&document.id)
@@ -3605,36 +3612,40 @@ async fn reconcile_completion_tags(
         let tag_names = document
             .tags
             .iter()
-            .filter_map(|id| tags.iter().find(|tag| tag.id == *id))
-            .map(|tag| tag.name.clone())
+            .filter_map(|id| tag_names_by_id.get(id).cloned())
             .collect::<Vec<_>>();
         let stage_tags_complete = !stage_completion_tags.is_empty()
             && stage_completion_tags
                 .iter()
                 .all(|tag| tag_names.iter().any(|name| name.eq_ignore_ascii_case(tag)));
         let inventory_stages_complete = inventory_complete_ids.contains(&document.id);
-        if completion_tag_reconcile_needed(
+        if !completion_tag_reconcile_needed(
             &tag_names,
             &stage_completion_tags,
             &settings.workflow.tags.completion_processed,
             inventory_stages_complete,
         ) {
-            let status_guard = if !dry_run && inventory_stages_complete && !stage_tags_complete {
-                let Some(guard) = archivist_db::begin_completion_tag_reconcile_guard(
+            continue;
+        }
+        if dry_run {
+            planned.push(json!({ "paperless_document_id": document.id, "add": [settings.workflow.tags.completion_processed.clone()] }));
+            continue;
+        }
+        let result: anyhow::Result<bool> = async {
+            // #410: short reservation transaction instead of holding the
+            // advisory lock and a pooled connection across the Paperless PATCH.
+            let reserved = inventory_stages_complete && !stage_tags_complete;
+            if reserved
+                && !archivist_db::reserve_completion_tag_reconcile(
                     &state.pool,
                     document.id,
                     &settings.workflow.enabled_stages,
                 )
                 .await?
-                else {
-                    continue;
-                };
-                Some(guard)
-            } else {
-                None
-            };
-            planned.push(json!({ "paperless_document_id": document.id, "add": [settings.workflow.tags.completion_processed.clone()] }));
-            if !dry_run {
+            {
+                return Ok(false);
+            }
+            let write = async {
                 let tag = match &full_tag {
                     Some(tag) => tag.clone(),
                     None => {
@@ -3644,41 +3655,61 @@ async fn reconcile_completion_tags(
                             &settings.workflow.tags.completion_processed,
                         )
                         .await?;
+                        tag_names_by_id.insert(tag.id, tag.name.clone());
                         full_tag = Some(tag.clone());
                         tag
                     }
                 };
                 client
                     .add_and_remove_tags(document.id, &[tag.id], &[])
-                    .await?;
-                if let Some(guard) = status_guard {
-                    guard.commit().await?;
+                    .await
+            }
+            .await;
+            if let Err(error) = write {
+                if reserved
+                    && let Err(release_error) =
+                        archivist_db::release_completion_tag_reservation(&state.pool, document.id)
+                            .await
+                {
+                    warn!(error = %release_error, document_id = document.id, "failed to release completion-tag reservation; next sync repairs it");
                 }
+                return Err(error);
+            }
+            archivist_db::record_full_completion_tag(&state.pool, document.id).await?;
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(true) => {
+                planned.push(json!({ "paperless_document_id": document.id, "add": [settings.workflow.tags.completion_processed.clone()] }));
                 applied.push(document.id);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                planned.push(json!({ "paperless_document_id": document.id, "add": [settings.workflow.tags.completion_processed.clone()] }));
+                warn!(error = %error, document_id = document.id, "completion tag reconciliation failed; stopping");
+                failure = Some(error.context(format!(
+                    "reconcile completion tag for document {}",
+                    document.id
+                )));
+                break;
             }
         }
     }
     append_audit(
         &state.pool,
-        AuditEventInput {
-            event_type: "paperless.completion_tags_reconciled".to_owned(),
-            actor_type: auth.0.actor_type,
-            actor_id: auth.0.actor_id,
-            run_id: None,
-            job_id: None,
-            paperless_document_id: None,
-            before: None,
-            after: Some(
-                json!({ "planned": planned.len(), "applied": applied.len(), "dry_run": dry_run }),
-            ),
-            metadata: None,
-            outcome: "success".to_owned(),
-            error_message: None,
-            source_ip: None,
-            user_agent: None,
-        },
+        completion_tags_reconciled_audit(
+            &auth.0,
+            dry_run,
+            planned.len(),
+            &applied,
+            failure.as_ref(),
+        ),
     )
     .await?;
+    if let Some(error) = failure {
+        return Err(error.into());
+    }
     info!(
         dry_run,
         planned = planned.len(),
@@ -3688,6 +3719,43 @@ async fn reconcile_completion_tags(
     Ok(Json(
         json!({ "dry_run": dry_run, "planned": planned, "applied": applied }),
     ))
+}
+
+/// Audit event for a completion-tag reconciliation pass. Written on success
+/// and on a partial failure alike, always listing the documents already
+/// tagged in Paperless. #410
+fn completion_tags_reconciled_audit(
+    auth: &AuthContext,
+    dry_run: bool,
+    planned: usize,
+    applied: &[i32],
+    failure: Option<&anyhow::Error>,
+) -> AuditEventInput {
+    AuditEventInput {
+        event_type: "paperless.completion_tags_reconciled".to_owned(),
+        actor_type: auth.actor_type.clone(),
+        actor_id: auth.actor_id.clone(),
+        run_id: None,
+        job_id: None,
+        paperless_document_id: None,
+        before: None,
+        after: Some(json!({
+            "planned": planned,
+            "applied": applied.len(),
+            "applied_document_ids": applied,
+            "dry_run": dry_run,
+        })),
+        metadata: None,
+        outcome: if failure.is_some() {
+            "partial_failure"
+        } else {
+            "success"
+        }
+        .to_owned(),
+        error_message: failure.map(|error| format!("{error:#}")),
+        source_ip: None,
+        user_agent: None,
+    }
 }
 
 fn completion_tag_reconcile_needed(
@@ -8719,6 +8787,26 @@ mod tests {
         )
         .expect("optional expiry allowed");
         assert!(no_expiry.is_none());
+    }
+
+    #[test]
+    fn completion_tag_reconcile_audit_records_applied_documents_on_partial_failure() {
+        // #410: documents already tagged in Paperless must be audited even
+        // when a later document fails.
+        let auth = auth_context_for_session_listing(true, Uuid::new_v4(), vec![], vec![]);
+        let error = anyhow!("Paperless returned 502");
+        let audit = completion_tags_reconciled_audit(&auth, false, 3, &[7, 9], Some(&error));
+        assert_eq!(audit.outcome, "partial_failure");
+        assert_eq!(
+            audit.error_message.as_deref(),
+            Some("Paperless returned 502")
+        );
+        let after = audit.after.expect("after");
+        assert_eq!(after["applied"], 2);
+        assert_eq!(after["applied_document_ids"], json!([7, 9]));
+        let audit = completion_tags_reconciled_audit(&auth, false, 1, &[7], None);
+        assert_eq!(audit.outcome, "success");
+        assert!(audit.error_message.is_none());
     }
 
     #[test]

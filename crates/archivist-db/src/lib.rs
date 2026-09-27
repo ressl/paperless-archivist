@@ -5445,14 +5445,16 @@ pub async fn queue_missing_stage(
     // Eligibility is fully expressible in SQL for this function, so push the budget as `limit $3`
     // and avoid materialising the entire candidate set in Rust.
     let limit_clause = match max_documents {
-        Some(_) => "limit $3",
+        Some(_) => "limit $4",
         None => "",
     };
+    // #410: same terminal-status list as `stage_needs_work` (it used to miss
+    // `rejected`, so batches re-queued rejected documents).
     let query = format!(
         r#"
         select paperless_document_id
           from document_inventory
-         where {column} not in ('succeeded', 'skipped', 'not_needed')
+         where {column} <> all($3::text[])
            and coalesce(current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
            and ($1::text[] = '{{}}' or current_tags && $1::text[])
            and not (current_tags && $2::text[])
@@ -5464,7 +5466,8 @@ pub async fn queue_missing_stage(
     // `limit_clause`; all caller data flows through bind parameters below.
     let mut builder = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(&include_tags)
-        .bind(&exclude_tags);
+        .bind(&exclude_tags)
+        .bind(TERMINAL_STAGE_STATUSES);
     if let Some(limit) = max_documents {
         builder = builder.bind(limit);
     }
@@ -5531,75 +5534,123 @@ pub async fn completed_document_ids_missing_full_tag(
                )
            and (
                  not $1
-                 or ocr_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
+                 or ocr_status = any($3::text[])
                )
            and (
                  not $2
-                 or metadata_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
+                 or metadata_status = any($3::text[])
                )
          order by paperless_document_id
         "#,
     )
     .bind(ocr_enabled)
     .bind(metadata_enabled)
+    .bind(TERMINAL_STAGE_STATUSES)
     .fetch_all(pool)
     .await
     .context("select documents missing the full completion tag")
 }
 
-/// Recheck status-based completion-tag eligibility while holding the same
-/// per-document advisory lock used by run creation.
+/// Recheck status-based completion-tag eligibility under the per-document
+/// advisory lock used by run creation and, when still eligible, reserve the
+/// document by recording the global completion tag in the inventory
+/// (`has_full_completion_tag = complete = true`) before the Paperless write.
 ///
-/// The caller must keep the returned transaction alive until the external
-/// Paperless tag write has completed, then commit it. This closes the window
-/// where a run could become active after bulk candidate discovery but before
-/// the global completion tag is written.
-pub async fn begin_completion_tag_reconcile_guard<'a>(
-    pool: &'a DbPool,
+/// #410: the previous guard kept this transaction — and with it the advisory
+/// lock and a pooled connection — open across the Paperless PATCH. The
+/// reservation commits immediately instead: once `has_full_completion_tag`
+/// is set, neither candidate discovery nor the auto-selector
+/// (`missing_pipeline_stages_for_inventory`) pick the document up again. If
+/// the Paperless write fails, call [`release_completion_tag_reservation`];
+/// the next Paperless sync re-derives the flag from the real tags either way.
+/// Returns `false` when the document is no longer eligible.
+pub async fn reserve_completion_tag_reconcile(
+    pool: &DbPool,
     paperless_document_id: i32,
     enabled_stages: &[Stage],
-) -> Result<Option<Transaction<'a, Postgres>>> {
+) -> Result<bool> {
     let ocr_enabled = enabled_stages.contains(&Stage::Ocr);
     let metadata_enabled = enabled_stages.contains(&Stage::Metadata);
     if !ocr_enabled && !metadata_enabled {
-        return Ok(None);
+        return Ok(false);
     }
 
     let mut tx = pool.begin().await?;
     lock_active_run_document_tx(&mut tx, paperless_document_id).await?;
-    let eligible: bool = sqlx::query_scalar(
+    let reserved = sqlx::query(
         r#"
-        select exists (
-          select 1
-            from document_inventory
-           where paperless_document_id = $1
-             and not has_full_completion_tag
-             and coalesce(current_run_status, '') not in (
-                   'queued', 'running', 'applying', 'waiting_review'
-                 )
-             and (
-                   not $2
-                   or ocr_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
-                 )
-             and (
-                   not $3
-                   or metadata_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
-                 )
-        )
+        update document_inventory
+           set has_full_completion_tag = true,
+               complete = true,
+               updated_at = now()
+         where paperless_document_id = $1
+           and not has_full_completion_tag
+           and coalesce(current_run_status, '') not in (
+                 'queued', 'running', 'applying', 'waiting_review'
+               )
+           and (
+                 not $2
+                 or ocr_status = any($4::text[])
+               )
+           and (
+                 not $3
+                 or metadata_status = any($4::text[])
+               )
         "#,
     )
     .bind(paperless_document_id)
     .bind(ocr_enabled)
     .bind(metadata_enabled)
-    .fetch_one(&mut *tx)
+    .bind(TERMINAL_STAGE_STATUSES)
+    .execute(&mut *tx)
     .await
-    .context("recheck completion-tag reconciliation eligibility")?;
-    if eligible {
-        Ok(Some(tx))
-    } else {
-        tx.rollback().await?;
-        Ok(None)
-    }
+    .context("recheck and reserve completion-tag reconciliation")?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(reserved)
+}
+
+/// Undo [`reserve_completion_tag_reconcile`] after the Paperless tag write
+/// failed. #410
+pub async fn release_completion_tag_reservation(
+    pool: &DbPool,
+    paperless_document_id: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update document_inventory
+           set has_full_completion_tag = false,
+               complete = false,
+               updated_at = now()
+         where paperless_document_id = $1
+        "#,
+    )
+    .bind(paperless_document_id)
+    .execute(pool)
+    .await
+    .context("release completion-tag reservation")?;
+    Ok(())
+}
+
+/// Record that the global completion tag now exists in Paperless, so the
+/// inventory reflects the write without waiting for the next sync. #410
+pub async fn record_full_completion_tag(pool: &DbPool, paperless_document_id: i32) -> Result<()> {
+    sqlx::query(
+        r#"
+        update document_inventory
+           set has_full_completion_tag = true,
+               complete = true,
+               updated_at = now()
+         where paperless_document_id = $1
+           and not (has_full_completion_tag and complete)
+        "#,
+    )
+    .bind(paperless_document_id)
+    .execute(pool)
+    .await
+    .context("record full completion tag")?;
+    Ok(())
 }
 
 /// Trigger tag used by the worker's automatic document selector.
@@ -5802,8 +5853,16 @@ fn missing_pipeline_stages_for_inventory(
         .collect()
 }
 
+/// Inventory stage statuses that count as resolved: no further automatic work.
+/// `rejected` is deliberately terminal — an operator declined the suggestion,
+/// so the document gets the global processed tag via completion
+/// reconciliation and is excluded from further automatic selection; a manual
+/// rerun remains possible. Single source for `stage_needs_work`,
+/// `queue_missing_stage` and completion reconciliation. #410
+pub const TERMINAL_STAGE_STATUSES: &[&str] = &["succeeded", "skipped", "not_needed", "rejected"];
+
 fn stage_needs_work(status: &str) -> bool {
-    !matches!(status, "succeeded" | "skipped" | "not_needed" | "rejected")
+    !TERMINAL_STAGE_STATUSES.contains(&status)
 }
 
 /// One index-ordered pass of [`claim_jobs`]. #412.
@@ -6318,16 +6377,21 @@ pub async fn complete_job(
         .bind(job.run_id)
         .execute(&mut *tx)
         .await?;
+        // #410: `complete` mirrors the authoritative Paperless completion tag
+        // everywhere (sync, migration 0052, here). #414: only the run the
+        // inventory row points at may settle it.
         sqlx::query(
             r#"
             update document_inventory
                set current_run_status = 'succeeded',
-                   complete = true,
+                   complete = has_full_completion_tag,
                    updated_at = now()
              where paperless_document_id = $1
+               and last_run_id = $2
             "#,
         )
         .bind(job.paperless_document_id)
+        .bind(job.run_id)
         .execute(&mut *tx)
         .await?;
     } else {
@@ -7548,7 +7612,7 @@ async fn finalize_review_aggregate_tx(
             r#"
             update document_inventory
                set current_run_status = 'rejected',
-                   complete = false,
+                   complete = has_full_completion_tag, -- #410
                    updated_at = now()
              where paperless_document_id = $1
             "#,
@@ -7582,7 +7646,7 @@ async fn finalize_review_aggregate_tx(
                 r#"
                 update document_inventory
                    set current_run_status = 'succeeded',
-                       complete = true,
+                       complete = has_full_completion_tag, -- #410
                        updated_at = now()
                  where paperless_document_id = $1
                 "#,
@@ -8871,17 +8935,22 @@ pub async fn recover_stuck_runs(
         .map(|row| row.try_get::<Uuid, _>("id"))
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
+    // #414: recovering a superseded run must not overwrite the inventory
+    // status of the run the row now points at, so both updates are guarded on
+    // `last_run_id`. #410: `complete` mirrors the Paperless completion tag.
     if !completed_document_ids.is_empty() {
         sqlx::query(
             r#"
             update document_inventory
                set current_run_status = 'succeeded',
-                   complete = true,
+                   complete = has_full_completion_tag,
                    updated_at = now()
              where paperless_document_id = any($1)
+               and last_run_id = any($2)
             "#,
         )
         .bind(&completed_document_ids)
+        .bind(&completed_run_ids)
         .execute(&mut *tx)
         .await?;
     }
@@ -8893,9 +8962,11 @@ pub async fn recover_stuck_runs(
                    last_error = 'Recovered stuck run with no active jobs',
                    updated_at = now()
              where paperless_document_id = any($1)
+               and last_run_id = any($2)
             "#,
         )
         .bind(&failed_document_ids)
+        .bind(&failed_run_ids)
         .execute(&mut *tx)
         .await?;
     }
@@ -10128,7 +10199,7 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
         r#"
         update document_inventory di
            set current_run_status = 'queued',
-               complete = false,
+               complete = has_full_completion_tag, -- #410
                updated_at = now()
           from pipeline_runs pr
          where pr.id = any($1)
