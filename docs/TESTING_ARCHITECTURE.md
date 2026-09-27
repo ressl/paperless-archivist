@@ -38,6 +38,17 @@ assertions (today: accessibility checks).
   behaviour, transactional semantics, or anything that depends on
   realistic data.
 
+**HTTP level (#440).** `TestApi` in the `archivist-api` test module drives
+the fully composed `router()` (nesting, layers, fallbacks, auth and
+route-policy middleware) through `tower::ServiceExt::oneshot`, with a fixed
+peer address and User-Agent. DB-backed cases are `#[ignore]`d like the other
+integration tests and therefore run in `migration_smoke.sh`; they cover the
+token-vs-session permission matrix over the whole route table, domain 4xx
+errors plus audit request context, and the Paperless consistency check
+against real inventory rows and a mocked Paperless. Prefer extending this
+harness over testing handlers or helpers in isolation when a behaviour depends
+on routing, middleware or status mapping.
+
 `sqlx::query!` (compile-time-checked) would be stricter but requires
 `DATABASE_URL` available at `cargo check` time, which doesn't fit the
 project's offline build path. Smoke covers the same class of bug at
