@@ -545,6 +545,13 @@ Archivist uses workflow tags to coordinate with Paperless:
 - trigger tags mark work that should run
 - completion tags mark successful stages
 - trigger tags are removed after the corresponding successful completion
+- trigger tags are also removed when a stage ends without changing the
+  document (all fields skipped, omitted or invalid); a permanently failed run
+  removes every trigger tag and adds `ai-failed` plus the stage marker
+  (`ai-failed-ocr` or `ai-failed-tagging`)
+- a trigger tag that is still present after a finished run (dry-run, rejected
+  review) does not queue the document again until the document changes in
+  Paperless, for example by removing and re-adding the trigger tag
 
 Default completion tags include:
 
@@ -553,6 +560,29 @@ Default completion tags include:
 - `ai-processed`
 
 Workflow tag names are configurable in `Settings`.
+
+## Tag Strategies And New Objects
+
+`tagging.old_tag_strategy` decides what happens to a document's existing tags
+when a validated tag suggestion is applied:
+
+| Strategy | Result |
+| --- | --- |
+| `keep_existing` (default) | Existing tags stay; suggested tags are added. |
+| `replace_ai_managed` | Tags that Archivist added in earlier applies are replaced by the new suggestion; tags you added yourself stay. |
+| `remove_all_business` | All business tags are replaced by the suggestion. |
+
+No strategy ever removes workflow tags (trigger, completion, failure markers)
+or tags listed in the workflow include/exclude rules. A tag suggestion that
+failed validation (for example low confidence) always goes to review, never
+removes tags on approval, and is never applied by the full-auto review drain.
+
+New tags (`tagging.allow_new_tags`) and new correspondents
+(`metadata.allow_new_correspondents`) are only created in Paperless when a
+suggestion is applied: immediately for a validated suggestion in `full_auto`,
+otherwise when the review is approved. Review items and dry-run never create
+Paperless objects. At most 5 new tags per document are created, names longer
+than 128 characters are dropped, and workflow tag names are never accepted.
 
 ## Document Chat/RAG
 

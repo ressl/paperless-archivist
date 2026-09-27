@@ -1588,6 +1588,15 @@ components:
         custom_fields: true
         standard_metadata:
           $ref: "#/components/schemas/StandardMetadataSuggestion"
+        archivist_new_objects:
+          type: object
+          additionalProperties: false
+          description: Names of model-proposed Paperless objects that do not exist yet. They are created only when the review is applied, subject to allow_new_tags / allow_new_correspondents and per-document caps.
+          properties:
+            tags:
+              type: array
+              items: { type: string }
+            correspondent: { type: string }
     ReviewItem:
       type: object
       additionalProperties: true
