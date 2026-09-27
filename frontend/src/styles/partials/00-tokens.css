@@ -36,6 +36,34 @@
   --teal-border: #b7d8cf;
   --teal-fg: #0f5f5b;
 
+  /* #450: former literal colours, tokenised with identical light values so
+     the dark theme (18-theme-dark.css) can redefine them. */
+  --surface-3: #edf1f3; /* neutral pill / inline code fill */
+  --info-line: #c9dbe8;
+  --info-bg: #f8fbfd;
+  --info-line-strong: #9bb7d4;
+  --brass-line: #d7c9aa;
+  --success-strong: #d6efe9;
+  --warning-strong: #f1e0bc;
+  --warning-fg: #6b4a13;
+  --warning-text: #7b5d20;
+  --warning-line: #d8c082;
+  --warning-bg: #fbf6e6;
+  --warning-solid: #d59c39;
+  --danger-strong: #f0c5c2;
+  --code-bg: #f4f6f7;
+  --review-row-bg: #f8fbfb;
+  --low-confidence-border: #e7bb5f;
+  --low-confidence-bg: #fff8e8;
+  --conflict-border: #d97706;
+  --conflict-bg: #fff7ed;
+  --conflict-fg: #9a3412;
+  --sidebar-bg: #172331; /* the navigation rail stays dark in both themes */
+  --accent-bg: #147f7a; /* filled accent controls (primary buttons, active tabs) */
+  --on-accent: #ffffff; /* text on --accent-bg / --brass-solid / --danger-solid */
+  --brass-solid: #a9782b;
+  --danger-solid: #a6403a;
+
   /* Spacing scale — replaces ad-hoc 4/8/10/12/14/16/24px paddings & gaps */
   --space-1: 4px;
   --space-2: 8px;

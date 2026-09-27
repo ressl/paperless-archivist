@@ -1,0 +1,212 @@
+/*
+ * Dark theme (#450).
+ *
+ * Follows `prefers-color-scheme` unless the viewer picked a theme in the
+ * sidebar (stored per browser, applied as <html data-theme="light|dark">).
+ * Both blocks carry the same token values; scripts/verify/
+ * accessibility_static_check.mjs asserts that and checks their contrast.
+ * Only tokens change, so every rule written against tokens themes itself.
+ */
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --ink: #e8eef4;
+  --ink-2: #d3dce5;
+  --text: #dbe2e9;
+  --muted: #9eabb8;
+  --line: #2e3b48;
+  --line-strong: #45535f;
+  --surface: #18212b;
+  --surface-2: #1e2934;
+  --surface-3: #26323e;
+  --base: #11181f;
+  --paper: #11181f;
+  --teal: #5cc8be;
+  --teal-soft: #16383a;
+  --brass: #e0b766;
+  --brass-soft: #3a2f1a;
+  --danger: #f08c84;
+  --danger-soft: #3d2224;
+  --info: #86b8ea;
+  --info-soft: #1b2f45;
+  --success: #5cc8be;
+  --success-soft: #16383a;
+  --warning: #e0b766;
+  --warning-soft: #3a2f1a;
+  --success-border: #2c6660;
+  --success-bg: #142b2b;
+  --warning-border: #6b5526;
+  --danger-border: #7a3b37;
+  --info-border: #2f5475;
+  --teal-border: #2c6660;
+  --teal-fg: #7fd9d0;
+  --info-line: #2f4a63;
+  --info-bg: #152433;
+  --info-line-strong: #3f6a94;
+  --brass-line: #5c4c2c;
+  --success-strong: #1d4a46;
+  --warning-strong: #4a3a1a;
+  --warning-fg: #f0cf8a;
+  --warning-text: #e8c47a;
+  --warning-line: #6b5526;
+  --warning-bg: #2a2416;
+  --warning-solid: #c98f2e;
+  --danger-strong: #5a2c2c;
+  --code-bg: #0d1319;
+  --review-row-bg: #1b2530;
+  --low-confidence-border: #8a6a22;
+  --low-confidence-bg: #2d2616;
+  --conflict-border: #b45f0a;
+  --conflict-bg: #2e2014;
+  --conflict-fg: #f5b27a;
+  --sidebar-bg: #0b1117;
+  --accent-bg: #147f7a;
+  --on-accent: #ffffff;
+  --brass-solid: #8a5f1c;
+  --danger-solid: #b3453e;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 45%);
+  --shadow-lg: 0 20px 60px rgb(0 0 0 / 55%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --ink: #e8eef4;
+    --ink-2: #d3dce5;
+    --text: #dbe2e9;
+    --muted: #9eabb8;
+    --line: #2e3b48;
+    --line-strong: #45535f;
+    --surface: #18212b;
+    --surface-2: #1e2934;
+    --surface-3: #26323e;
+    --base: #11181f;
+    --paper: #11181f;
+    --teal: #5cc8be;
+    --teal-soft: #16383a;
+    --brass: #e0b766;
+    --brass-soft: #3a2f1a;
+    --danger: #f08c84;
+    --danger-soft: #3d2224;
+    --info: #86b8ea;
+    --info-soft: #1b2f45;
+    --success: #5cc8be;
+    --success-soft: #16383a;
+    --warning: #e0b766;
+    --warning-soft: #3a2f1a;
+    --success-border: #2c6660;
+    --success-bg: #142b2b;
+    --warning-border: #6b5526;
+    --danger-border: #7a3b37;
+    --info-border: #2f5475;
+    --teal-border: #2c6660;
+    --teal-fg: #7fd9d0;
+    --info-line: #2f4a63;
+    --info-bg: #152433;
+    --info-line-strong: #3f6a94;
+    --brass-line: #5c4c2c;
+    --success-strong: #1d4a46;
+    --warning-strong: #4a3a1a;
+    --warning-fg: #f0cf8a;
+    --warning-text: #e8c47a;
+    --warning-line: #6b5526;
+    --warning-bg: #2a2416;
+    --warning-solid: #c98f2e;
+    --danger-strong: #5a2c2c;
+    --code-bg: #0d1319;
+    --review-row-bg: #1b2530;
+    --low-confidence-border: #8a6a22;
+    --low-confidence-bg: #2d2616;
+    --conflict-border: #b45f0a;
+    --conflict-bg: #2e2014;
+    --conflict-fg: #f5b27a;
+    --sidebar-bg: #0b1117;
+    --accent-bg: #147f7a;
+    --on-accent: #ffffff;
+    --brass-solid: #8a5f1c;
+    --danger-solid: #b3453e;
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+    --shadow-md: 0 8px 24px rgb(0 0 0 / 45%);
+    --shadow-lg: 0 20px 60px rgb(0 0 0 / 55%);
+  }
+}
+
+/* Rules that still use literal colours (partials owned by other features). */
+:root[data-theme='dark'] .metadata-review-row {
+  background: var(--review-row-bg);
+}
+
+:root[data-theme='dark'] .metadata-review-row.low-confidence {
+  border-color: var(--low-confidence-border);
+  background: var(--low-confidence-bg);
+}
+
+:root[data-theme='dark'] .review-conflict {
+  border-color: var(--conflict-border);
+  background: var(--conflict-bg);
+  color: var(--conflict-fg);
+}
+
+:root[data-theme='dark'] .prompt-stage-rail button.active {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+}
+
+:root[data-theme='dark'] .prompt-version-list button.active {
+  border-color: var(--info-border);
+}
+
+:root[data-theme='dark'] .dirty-pill,
+:root[data-theme='dark'] .prompt-warning-list {
+  color: var(--warning-text);
+}
+
+:root[data-theme='dark'] .prompt-draft-dialog .danger-button {
+  border-color: var(--danger-solid);
+  background: var(--danger-solid);
+}
+
+:root[data-theme='dark'] .cost-sparkline {
+  background: rgb(255 255 255 / 4%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .metadata-review-row {
+    background: var(--review-row-bg);
+  }
+
+  :root:not([data-theme='light']) .metadata-review-row.low-confidence {
+    border-color: var(--low-confidence-border);
+    background: var(--low-confidence-bg);
+  }
+
+  :root:not([data-theme='light']) .review-conflict {
+    border-color: var(--conflict-border);
+    background: var(--conflict-bg);
+    color: var(--conflict-fg);
+  }
+
+  :root:not([data-theme='light']) .prompt-stage-rail button.active {
+    border-color: var(--success-border);
+    background: var(--success-bg);
+  }
+
+  :root:not([data-theme='light']) .prompt-version-list button.active {
+    border-color: var(--info-border);
+  }
+
+  :root:not([data-theme='light']) .dirty-pill,
+  :root:not([data-theme='light']) .prompt-warning-list {
+    color: var(--warning-text);
+  }
+
+  :root:not([data-theme='light']) .prompt-draft-dialog .danger-button {
+    border-color: var(--danger-solid);
+    background: var(--danger-solid);
+  }
+
+  :root:not([data-theme='light']) .cost-sparkline {
+    background: rgb(255 255 255 / 4%);
+  }
+}

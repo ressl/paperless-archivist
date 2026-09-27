@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RotateCcw, X } from 'lucide-react';
+import { MessageSquare, RotateCcw, X } from 'lucide-react';
 import {
   api,
   isApiError,
@@ -27,7 +27,17 @@ import {
   type Filters,
 } from './types';
 
-export function Inventory({ setError }: { setError: (error: string | null) => void }) {
+/** The chat accepts at most this many document ids as a filter (#449). */
+const MAX_CHAT_DOCUMENTS = 50;
+
+export function Inventory({
+  setError,
+  onAskInChat
+}: {
+  setError: (error: string | null) => void;
+  /** Open the chat scoped to these documents; omitted without chat permission (#449). */
+  onAskInChat?: (documentIds: number[]) => void;
+}) {
   const { t, locale } = useI18n();
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [total, setTotal] = useState<number>(0);
@@ -350,6 +360,16 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
         >
           <RotateCcw size={16} /> {t('inventory.rerun_selected')}
         </button>
+        {onAskInChat && (
+          <button
+            className="secondary-button"
+            disabled={visibleSelected.size === 0 || visibleSelected.size > MAX_CHAT_DOCUMENTS}
+            title={t('inventory.ask_in_chat_hint', { max: MAX_CHAT_DOCUMENTS })}
+            onClick={() => onAskInChat(Array.from(visibleSelected).sort((a, b) => a - b))}
+          >
+            <MessageSquare size={16} /> {t('inventory.ask_in_chat')}
+          </button>
+        )}
         <small className="field-hint">{t('inventory.selected_count', { count: visibleSelected.size })}</small>
         {visibleSelected.size > 0 && (
           <button className="chip-button" onClick={() => setSelected(new Set())}>

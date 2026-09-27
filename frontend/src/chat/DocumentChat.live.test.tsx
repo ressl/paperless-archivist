@@ -15,12 +15,12 @@ vi.mock('../api/client', async () => {
       chatSessions: vi.fn(),
       createChatSession: vi.fn(),
       chatMessages: vi.fn(),
-      postChatMessage: vi.fn()
+      streamChatMessage: vi.fn()
     }
   };
 });
 
-type PostResult = Awaited<ReturnType<typeof api.postChatMessage>>;
+type PostResult = Awaited<ReturnType<typeof api.streamChatMessage>>;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -90,7 +90,7 @@ describe('<DocumentChat> live transcript (#428)', () => {
   it('shows the question and a thinking indicator immediately in a polite log', async () => {
     vi.mocked(api.chatMessages).mockResolvedValueOnce({ items: [] }).mockResolvedValue({ items: answered });
     const post = deferred<PostResult>();
-    vi.mocked(api.postChatMessage).mockReturnValue(post.promise);
+    vi.mocked(api.streamChatMessage).mockReturnValue(post.promise);
     await renderChat();
 
     const log = screen.getByRole('log', { name: 'Chat transcript' });
@@ -112,7 +112,7 @@ describe('<DocumentChat> live transcript (#428)', () => {
 
   it('restores the question and removes the optimistic message when sending fails', async () => {
     vi.mocked(api.chatMessages).mockResolvedValue({ items: [] });
-    vi.mocked(api.postChatMessage).mockRejectedValue(new Error('provider down'));
+    vi.mocked(api.streamChatMessage).mockRejectedValue(new Error('provider down'));
     const setError = await renderChat();
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Question' }), { target: { value: 'Will this fail?' } });
@@ -126,7 +126,7 @@ describe('<DocumentChat> live transcript (#428)', () => {
   it('auto-scrolls to new messages unless the reader scrolled up', async () => {
     const post = deferred<PostResult>();
     vi.mocked(api.chatMessages).mockResolvedValueOnce({ items: [] }).mockResolvedValue({ items: answered });
-    vi.mocked(api.postChatMessage).mockReturnValue(post.promise);
+    vi.mocked(api.streamChatMessage).mockReturnValue(post.promise);
     await renderChat();
     const log = screen.getByRole('log', { name: 'Chat transcript' });
     const geometry = scrollGeometry(log, { scroll: 1000, client: 200 });

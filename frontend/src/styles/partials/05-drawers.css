@@ -68,7 +68,7 @@
   padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: #fff;
+  background: var(--surface);
 }
 
 .drawer-section strong {
@@ -127,7 +127,7 @@
 
 .diagnose-state code {
   font-size: 11px;
-  background: #edf1f3;
+  background: var(--surface-3);
   padding: 1px 4px;
   border-radius: 4px;
 }
@@ -181,17 +181,17 @@
 }
 
 .diagnose-field-card.tone-success {
-  border-color: #b7d8cf;
-  background: #f3fbf7;
+  border-color: var(--success-border);
+  background: var(--success-bg);
 }
 
 .diagnose-field-card.tone-review {
-  border-color: #e0c999;
+  border-color: var(--warning-border);
   background: var(--brass-soft);
 }
 
 .diagnose-field-card.tone-danger {
-  border-color: #e0a09b;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
@@ -250,7 +250,7 @@
 .diagnose-raw pre {
   margin: 0;
   padding: var(--space-2);
-  background: #f4f6f7;
+  background: var(--code-bg);
   border-radius: 4px;
   font-size: 11px;
   overflow-x: auto;

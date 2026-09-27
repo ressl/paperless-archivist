@@ -42,10 +42,10 @@
   gap: var(--space-2);
   width: 100%;
   min-height: 42px;
-  border: 1px solid var(--teal);
+  border: 1px solid var(--accent-bg);
   border-radius: var(--radius-md);
-  background: var(--teal);
-  color: white;
+  background: var(--accent-bg);
+  color: var(--on-accent);
   font-weight: 700;
   text-decoration: none;
 }
@@ -78,7 +78,7 @@
   grid-template-rows: auto 1fr auto auto;
   gap: 18px;
   padding: 18px;
-  background: var(--ink);
+  background: var(--sidebar-bg);
   color: #eef3f3;
 }
 
@@ -273,7 +273,7 @@
 
 .language-selector.compact select {
   border-color: var(--line);
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
 }
 
@@ -287,9 +287,9 @@
   gap: 14px;
   margin-bottom: 18px;
   padding: var(--space-4);
-  border: 1px solid #c9dbe8;
+  border: 1px solid var(--info-line);
   border-radius: var(--radius-md);
-  background: #f8fbfd;
+  background: var(--info-bg);
 }
 
 .first-run-wizard header {
@@ -331,12 +331,12 @@
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: #fff;
+  background: var(--surface);
 }
 
 .first-run-steps article.complete {
-  border-color: #b7d8cf;
-  background: #f3fbf7;
+  border-color: var(--success-border);
+  background: var(--success-bg);
 }
 
 .first-run-steps article > svg {

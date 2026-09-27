@@ -16,6 +16,7 @@ import { workflowModeLabel } from '../lib/workflow';
 import { ErrorBoundary } from '../lib/ErrorBoundary';
 import { defaultDashboardRanges, computeHealthScore } from './helpers';
 import { AlertsBar } from './AlertsBar';
+import { BudgetAlert } from './BudgetAlert';
 import { HealthBadge } from './HealthBadge';
 import { OperationsStrip } from './OperationsStrip';
 import { MaintenanceDrawer } from './MaintenanceDrawer';
@@ -88,7 +89,7 @@ export function Dashboard({
     window.localStorage.setItem('dashboard.drawer_open', String(drawerOpen));
   }, [drawerOpen]);
 
-  const { stats, counts, lastLoadedAt, reload: load, health: statsHealth } = useDashboardStats(range);
+  const { stats, counts, lastLoadedAt, budget, reload: load, health: statsHealth } = useDashboardStats(range);
   const { live, recovery, reload: loadLive, reloadRecovery: loadRecovery, setLive, health: liveHealth } = useDashboardLive(canReadRuns);
   // #427: background polls report failures here (inline indicator), not via
   // the global error banner.
@@ -412,6 +413,7 @@ export function Dashboard({
       <section className="dash-tier">
         <h3 className="dash-tier-label">{t('dashboard.tier.overview')}</h3>
         <AlertsBar items={live?.needs_attention ?? []} onAction={onAlertAction} />
+        <BudgetAlert budget={budget} />
 
       {/* Primary KPI hierarchy first (issue #237): hero + headline + demoted stats. */}
         <KpiRow stats={stats} counts={counts} range={range} />

@@ -1,0 +1,298 @@
+/* #449 / #450: toast stack, chat Markdown + sources, budget alert, theme selector. */
+
+/* --- Toasts (#450) ------------------------------------------------------- */
+
+.toast-region {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 60;
+  display: grid;
+  gap: var(--space-2);
+  width: min(420px, calc(100vw - 2 * var(--space-4)));
+  pointer-events: none;
+}
+
+.toast-stack {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.toast-stack:empty {
+  display: none;
+}
+
+.toast {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+  pointer-events: auto;
+}
+
+.toast > svg {
+  margin-top: 2px;
+}
+
+.toast-message {
+  overflow-wrap: anywhere;
+}
+
+.toast--error {
+  border-color: var(--danger-border);
+  border-left-color: var(--danger);
+}
+
+.toast--error > svg {
+  color: var(--danger);
+}
+
+.toast--warning {
+  border-color: var(--warning-border);
+  border-left-color: var(--warning-solid);
+}
+
+.toast--warning > svg {
+  color: var(--warning-text);
+}
+
+.toast--success {
+  border-color: var(--success-border);
+  border-left-color: var(--teal);
+}
+
+.toast--success > svg {
+  color: var(--teal-fg);
+}
+
+.toast--info {
+  border-color: var(--info-border);
+  border-left-color: var(--info);
+}
+
+.toast--info > svg {
+  color: var(--info);
+}
+
+.toast-count {
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+}
+
+.toast-dismiss {
+  min-height: 24px;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.toast-dismiss:hover {
+  color: var(--ink);
+}
+
+.toast-more {
+  justify-self: end;
+  margin: 0;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--font-size-xs);
+  box-shadow: var(--shadow-sm);
+  pointer-events: auto;
+}
+
+@media (max-width: 860px) {
+  .toast-region {
+    right: var(--space-2);
+    bottom: var(--space-2);
+    width: calc(100vw - 2 * var(--space-2));
+  }
+}
+
+/* --- Chat (#449) ----------------------------------------------------------- */
+
+.chat-session-actions .ghost-button,
+.chat-session-rename .ghost-button {
+  width: auto;
+}
+
+.chat-question {
+  white-space: pre-wrap;
+}
+
+.chat-markdown {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-message .chat-markdown p {
+  white-space: normal;
+}
+
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 0;
+  padding-left: 1.4em;
+}
+
+.chat-markdown li + li {
+  margin-top: 2px;
+}
+
+.chat-markdown pre {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  font-size: var(--font-size-sm);
+}
+
+.chat-markdown code {
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  font-size: 0.92em;
+}
+
+.chat-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.chat-markdown blockquote {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--line-strong);
+  color: var(--ink-2);
+}
+
+.chat-markdown hr {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.chat-markdown a {
+  color: var(--info);
+}
+
+.chat-citation {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+a.chat-citation:hover {
+  text-decoration: underline;
+}
+
+.chat-sources-title {
+  color: var(--ink-2);
+  font-size: var(--font-size-sm);
+}
+
+.chat-source-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.chat-source-row details {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-source-link {
+  display: inline-flex;
+  padding-top: 2px;
+  color: var(--info);
+}
+
+.chat-scope-hint {
+  grid-column: 1 / -1;
+}
+
+/* --- Budget alert (#450) -------------------------------------------------- */
+
+.budget-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.budget-alert.severity-critical {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.budget-alert.severity-warning {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+}
+
+.budget-alert.severity-info {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+}
+
+.budget-alert .alert-text {
+  display: grid;
+  gap: 2px;
+}
+
+.budget-alert small {
+  color: var(--muted);
+}
+
+/* --- Theme selector (#450) ------------------------------------------------ */
+
+.theme-selector {
+  margin-top: calc(-1 * var(--space-2));
+}
+
+/* Recharts ships light-grey axes and grid lines; follow the dark tokens. */
+:root[data-theme='dark'] .recharts-cartesian-axis-tick-value,
+:root[data-theme='dark'] .recharts-legend-item-text {
+  fill: var(--muted);
+}
+
+:root[data-theme='dark'] .recharts-cartesian-grid line {
+  stroke: var(--line);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .recharts-cartesian-axis-tick-value,
+  :root:not([data-theme='light']) .recharts-legend-item-text {
+    fill: var(--muted);
+  }
+
+  :root:not([data-theme='light']) .recharts-cartesian-grid line {
+    stroke: var(--line);
+  }
+}

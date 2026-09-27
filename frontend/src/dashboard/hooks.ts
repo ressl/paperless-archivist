@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
+  CostBudgetStatus,
   Counts,
   DashboardLiveStatus,
   DashboardRange,
@@ -115,6 +116,8 @@ export type DashboardStatsState = {
   stats: DashboardStats | null;
   counts: Counts;
   lastLoadedAt: string | null;
+  /** Month-to-date cost vs. the monthly budget; null when none is set (#450). */
+  budget: CostBudgetStatus | null;
   reload: () => Promise<void>;
   setStats: (updater: (current: DashboardStats | null) => DashboardStats | null) => void;
   health: PollHealth;
@@ -124,6 +127,7 @@ export function useDashboardStats(range: DashboardRange): DashboardStatsState {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [counts, setCounts] = useState<Counts>(DEFAULT_COUNTS);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
+  const [budget, setBudget] = useState<CostBudgetStatus | null>(null);
   // Monotonic request id so a slow response for an old range can't overwrite
   // the data for a newer one (out-of-order guard).
   const requestIdRef = useRef(0);
@@ -136,6 +140,7 @@ export function useDashboardStats(range: DashboardRange): DashboardStatsState {
       if (requestId !== requestIdRef.current) return;
       setCounts(data.counts);
       setStats(data.stats);
+      setBudget(data.budget ?? null);
       setLastLoadedAt(new Date().toISOString());
       recordSuccess();
     } catch (err) {
@@ -172,7 +177,7 @@ export function useDashboardStats(range: DashboardRange): DashboardStatsState {
     []
   );
 
-  return { stats, counts, lastLoadedAt, reload, setStats: updateStats, health };
+  return { stats, counts, lastLoadedAt, budget, reload, setStats: updateStats, health };
 }
 
 export type DashboardLiveState = {

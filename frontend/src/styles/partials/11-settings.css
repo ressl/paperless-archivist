@@ -65,7 +65,7 @@
 }
 
 .field-hint.warning {
-  color: #7b5d20;
+  color: var(--warning-text);
 }
 
 .connection-feedback {
@@ -100,8 +100,8 @@
 }
 
 .connection-feedback.success {
-  border-color: #b7d8cf;
-  background: #f3fbf7;
+  border-color: var(--success-border);
+  background: var(--success-bg);
 }
 
 .connection-feedback.success header {
@@ -109,7 +109,7 @@
 }
 
 .connection-feedback.error {
-  border-color: #e0a09b;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
@@ -118,7 +118,7 @@
 }
 
 .connection-feedback.running {
-  border-color: #b7d3e6;
+  border-color: var(--info-border);
   background: var(--info-soft);
 }
 
@@ -268,13 +268,13 @@
 }
 
 .connection-feedback.warning {
-  border-color: #d8c082;
-  background: #fbf6e6;
+  border-color: var(--warning-line);
+  background: var(--warning-bg);
   color: var(--ink-2);
 }
 
 .connection-feedback.warning header {
-  color: #7b5d20;
+  color: var(--warning-text);
 }
 
 .ollama-kubectl-example {

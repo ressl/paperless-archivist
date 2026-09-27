@@ -71,16 +71,16 @@ export const TrendCharts = memo(function TrendCharts({
           <ComposedChart data={throughputWithRate}>
             <defs>
               <pattern id="pat-created" patternUnits="userSpaceOnUse" width="6" height="6">
-                <rect width="6" height="6" fill="#dbe9f5" />
-                <circle cx="3" cy="3" r="1.2" fill="#28649b" />
+                <rect width="6" height="6" fill="var(--info-soft)" />
+                <circle cx="3" cy="3" r="1.2" fill="var(--info)" />
               </pattern>
               <pattern id="pat-succeeded" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
-                <rect width="6" height="6" fill="#d9eeee" />
-                <line x1="0" y1="0" x2="0" y2="6" stroke="#147f7a" strokeWidth="1.2" />
+                <rect width="6" height="6" fill="var(--teal-soft)" />
+                <line x1="0" y1="0" x2="0" y2="6" stroke="var(--teal)" strokeWidth="1.2" />
               </pattern>
               <pattern id="pat-failed" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(-45)">
-                <rect width="6" height="6" fill="#f5dddd" />
-                <line x1="0" y1="0" x2="0" y2="6" stroke="#a6403a" strokeWidth="1.6" />
+                <rect width="6" height="6" fill="var(--danger-soft)" />
+                <line x1="0" y1="0" x2="0" y2="6" stroke="var(--danger)" strokeWidth="1.6" />
               </pattern>
             </defs>
             <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -89,10 +89,10 @@ export const TrendCharts = memo(function TrendCharts({
             <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" width={44} />
             <Tooltip formatter={chartTooltipFormatter} />
             <Legend />
-            <Area yAxisId="count" type="monotone" dataKey="jobs_created" name={t('dashboard.chart.created')} stroke="#28649b" fill="url(#pat-created)" />
-            <Area yAxisId="count" type="monotone" dataKey="jobs_succeeded" name={t('dashboard.chart.succeeded')} stroke="#147f7a" fill="url(#pat-succeeded)" />
-            <Area yAxisId="count" type="monotone" dataKey="jobs_failed" name={t('dashboard.chart.failed')} stroke="#a6403a" fill="url(#pat-failed)" />
-            <Line yAxisId="rate" type="monotone" dataKey="success_rate" name={t('dashboard.chart.success_rate')} stroke="#0f5f5b" strokeWidth={2} dot={false} />
+            <Area yAxisId="count" type="monotone" dataKey="jobs_created" name={t('dashboard.chart.created')} stroke="var(--info)" fill="url(#pat-created)" />
+            <Area yAxisId="count" type="monotone" dataKey="jobs_succeeded" name={t('dashboard.chart.succeeded')} stroke="var(--teal)" fill="url(#pat-succeeded)" />
+            <Area yAxisId="count" type="monotone" dataKey="jobs_failed" name={t('dashboard.chart.failed')} stroke="var(--danger)" fill="url(#pat-failed)" />
+            <Line yAxisId="rate" type="monotone" dataKey="success_rate" name={t('dashboard.chart.success_rate')} stroke="var(--teal-fg)" strokeWidth={2} dot={false} />
           </ComposedChart>
         </ResponsiveContainer>
       </ChartPanel>
@@ -103,8 +103,8 @@ export const TrendCharts = memo(function TrendCharts({
             <ComposedChart data={backlogWithRate}>
               <defs>
                 <pattern id="pat-backlog" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(135)">
-                  <rect width="8" height="8" fill="#f1e5d0" />
-                  <line x1="0" y1="0" x2="0" y2="8" stroke="#a9782b" strokeWidth="1.2" />
+                  <rect width="8" height="8" fill="var(--brass-soft)" />
+                  <line x1="0" y1="0" x2="0" y2="8" stroke="var(--brass)" strokeWidth="1.2" />
                 </pattern>
               </defs>
               <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -113,8 +113,8 @@ export const TrendCharts = memo(function TrendCharts({
               <YAxis yAxisId="rate" orientation="right" domain={[0, 100]} unit="%" width={44} />
               <Tooltip formatter={chartTooltipFormatter} />
               <Legend />
-              <Area yAxisId="count" type="monotone" dataKey="open_backlog" name={t('dashboard.chart.open')} stroke="#a9782b" fill="url(#pat-backlog)" />
-              <Line yAxisId="rate" type="monotone" dataKey="completion_rate" name={t('dashboard.chart.completion_rate')} stroke="#147f7a" strokeWidth={2} dot={false} />
+              <Area yAxisId="count" type="monotone" dataKey="open_backlog" name={t('dashboard.chart.open')} stroke="var(--brass)" fill="url(#pat-backlog)" />
+              <Line yAxisId="rate" type="monotone" dataKey="completion_rate" name={t('dashboard.chart.completion_rate')} stroke="var(--teal)" strokeWidth={2} dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </ChartPanel>
@@ -125,7 +125,7 @@ export const TrendCharts = memo(function TrendCharts({
               <XAxis type="number" allowDecimals={false} />
               <YAxis type="category" dataKey="label" width={92} />
               <Tooltip />
-              <Bar dataKey="count" fill="#28649b" radius={[0, 4, 4, 0]} />
+              <Bar dataKey="count" fill="var(--info)" radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </ChartPanel>

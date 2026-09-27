@@ -56,17 +56,59 @@ const contrast = (a, b) => {
 };
 const TEXT_TOKENS = ['text', 'ink', 'ink-2', 'muted'];
 const BACKGROUND_TOKENS = ['base', 'surface', 'surface-2'];
+// Text on filled accent controls (primary buttons, active tabs, badges). #450
+const PAIRS_BOTH_THEMES = [['on-accent', 'accent-bg'], ['on-accent', 'danger-solid']];
+// Tone text on its soft fill. Checked for the dark theme, which #450 added;
+// some light-theme tone pairs predate the check (tracked separately).
+const PAIRS_DARK_ONLY = [
+  ['teal', 'teal-soft'], ['teal-fg', 'teal-soft'], ['danger', 'danger-soft'], ['info', 'info-soft'],
+  ['brass', 'brass-soft'], ['warning-text', 'warning-bg'], ['warning-fg', 'warning-strong'],
+  ['conflict-fg', 'conflict-bg'], ['on-accent', 'brass-solid'], ['info', 'surface'], ['teal', 'surface'],
+  ['danger', 'surface'], ['muted', 'teal-soft'], ['muted', 'info-soft'], ['muted', 'danger-soft']
+];
 const contrastFailures = [];
-for (const fg of TEXT_TOKENS) {
-  for (const bg of BACKGROUND_TOKENS) {
-    if (!tokens[fg] || !tokens[bg]) {
-      contrastFailures.push(`--${fg}/--${bg} token missing`);
-      continue;
-    }
-    const ratio = contrast(tokens[fg], tokens[bg]);
-    if (ratio < 4.5) contrastFailures.push(`--${fg} on --${bg} is ${ratio.toFixed(2)}:1`);
+const checkPair = (palette, theme, fg, bg) => {
+  if (!palette[fg] || !palette[bg]) {
+    contrastFailures.push(`${theme}: --${fg}/--${bg} token missing`);
+    return;
   }
+  const ratio = contrast(palette[fg], palette[bg]);
+  if (ratio < 4.5) contrastFailures.push(`${theme}: --${fg} on --${bg} is ${ratio.toFixed(2)}:1`);
+};
+
+// Dark theme (#450): the explicit `:root[data-theme='dark']` block and the
+// `prefers-color-scheme` block must define identical tokens, must redefine
+// every light colour token (a forgotten token would render light-on-dark),
+// and must pass the same contrast bar.
+const parseTokens = (block) =>
+  Object.fromEntries(
+    [...block.matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{6})\b/g)].map(([, name, value]) => [name, value.toLowerCase()])
+  );
+const explicitDarkBlock = css.match(/:root\[data-theme='dark'\]\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+const mediaDarkBlock =
+  css.match(/@media \(prefers-color-scheme: dark\)\s*\{\s*:root:not\(\[data-theme='light'\]\)\s*\{([\s\S]*?)\n {2}\}/)?.[1] ?? '';
+const explicitDark = parseTokens(explicitDarkBlock);
+const mediaDark = parseTokens(mediaDarkBlock);
+const darkThemeFailures = [];
+if (Object.keys(explicitDark).length === 0) darkThemeFailures.push("no :root[data-theme='dark'] token block");
+if (Object.keys(mediaDark).length === 0) darkThemeFailures.push('no prefers-color-scheme dark token block');
+if (JSON.stringify(Object.entries(explicitDark).sort()) !== JSON.stringify(Object.entries(mediaDark).sort())) {
+  darkThemeFailures.push('explicit and prefers-color-scheme dark tokens differ');
 }
+for (const name of Object.keys(tokens)) {
+  if (!explicitDark[name]) darkThemeFailures.push(`--${name} has no dark value`);
+}
+if (!explicitDarkBlock.includes('color-scheme: dark')) darkThemeFailures.push('dark block must set color-scheme: dark');
+if (darkThemeFailures.length) console.error(`dark theme: ${darkThemeFailures.join('; ')}`);
+const darkTokens = { ...tokens, ...explicitDark };
+
+for (const [theme, palette] of [['light', tokens], ['dark', darkTokens]]) {
+  for (const fg of TEXT_TOKENS) {
+    for (const bg of BACKGROUND_TOKENS) checkPair(palette, theme, fg, bg);
+  }
+  for (const [fg, bg] of PAIRS_BOTH_THEMES) checkPair(palette, theme, fg, bg);
+}
+for (const [fg, bg] of PAIRS_DARK_ONLY) checkPair(darkTokens, 'dark', fg, bg);
 if (contrastFailures.length) console.error(`contrast: ${contrastFailures.join('; ')}`);
 
 const inAnySource = (needle) =>
@@ -100,7 +142,15 @@ const checks = [
   ['icon reload button has aria-label', settings.includes("aria-label={t('settings.ollama.reload_models')}")],
   ['user admin controls have labels', users.includes("aria-label={t('auth.username')}") && users.includes("aria-label={t('auth.password')}")],
   ['prefers-reduced-motion respected', css.includes('@media (prefers-reduced-motion: reduce)')],
-  ['text colour tokens reach WCAG AA 4.5:1 on base/surface backgrounds', contrastFailures.length === 0],
+  ['text colour tokens reach WCAG AA 4.5:1 on base/surface backgrounds (light and dark)', contrastFailures.length === 0],
+  // #450: dark mode follows prefers-color-scheme and the per-browser toggle.
+  ['dark theme tokens are complete and identical for the toggle and prefers-color-scheme', darkThemeFailures.length === 0],
+  ['theme toggle is labelled', app.includes('<ThemeSelector />') && readFileSync(join(root, 'frontend/src/lib/theme.tsx'), 'utf8').includes("aria-label={t('theme.label')}")],
+  // #450: notifications are a queued toast stack with always-mounted live regions.
+  ['toast stack has assertive and polite live regions', (() => {
+    const toast = readFileSync(join(root, 'frontend/src/lib/toast.tsx'), 'utf8');
+    return toast.includes('role="alert" aria-live="assertive"') && toast.includes('role="status" aria-live="polite"') && app.includes('<ToastProvider>');
+  })()],
 ];
 
 const failed = checks.filter(([, ok]) => !ok);

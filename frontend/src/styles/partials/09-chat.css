@@ -24,34 +24,80 @@
   display: grid;
   align-content: start;
   gap: var(--space-2);
+  margin: 0;
+  padding: 0;
   overflow: auto;
+  list-style: none;
 }
 
-.chat-session-list button {
+/* #449: each session is a select button plus rename / delete actions. */
+.chat-session-list li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.chat-session-list li.active {
+  border-color: var(--success-border);
+  background: var(--teal-soft);
+}
+
+.chat-session-select {
   min-width: 0;
   display: grid;
   justify-content: stretch;
   gap: var(--space-1);
   padding: 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
   text-align: left;
 }
 
-.chat-session-list button.active {
-  border-color: #b7d8cf;
-  background: var(--teal-soft);
-}
-
-.chat-session-list span,
-.chat-session-list small {
+.chat-session-select span,
+.chat-session-select small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chat-session-list small {
+.chat-session-select small {
   color: var(--muted);
   font-size: 11px;
+}
+
+.chat-session-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: var(--space-1);
+}
+
+.chat-session-actions .ghost-button,
+.chat-session-rename .ghost-button {
+  min-height: 28px;
+  padding: 4px 6px;
+  color: var(--muted);
+}
+
+.chat-session-actions .ghost-button:hover,
+.chat-session-rename .ghost-button:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.chat-session-rename {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
 }
 
 .chat-panel {
@@ -94,8 +140,8 @@
 
 .chat-message.user {
   justify-self: end;
-  border-color: #b7d8cf;
-  background: #f3fbf7;
+  border-color: var(--success-border);
+  background: var(--success-bg);
 }
 
 .chat-message.assistant {

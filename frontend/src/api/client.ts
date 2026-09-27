@@ -222,9 +222,14 @@ export type DashboardStats = {
   cost_breakdown_by_provider: DashboardProviderCostSummary[];
 };
 
+/** Month-to-date AI cost against the configured monthly budget (#450). */
+export type CostBudgetStatus = components['schemas']['CostBudgetStatus'];
+
 export type DashboardResponse = {
   counts: Counts;
   stats: DashboardStats;
+  /** Null (or absent from older servers) when no budget is configured. */
+  budget?: CostBudgetStatus | null;
 };
 
 export type ServiceProcessingStatus = {
@@ -673,7 +678,7 @@ function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+function requestHeaders(init: RequestInit): Headers {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has('content-type')) {
     headers.set('content-type', 'application/json');
@@ -683,27 +688,36 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (csrf && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
     headers.set('x-csrf-token', csrf);
   }
+  return headers;
+}
+
+/** Build the ApiError for a non-2xx response (and signal an expired session). */
+function responseError(path: string, response: Response, text: string): ApiError {
+  let message = `${response.status} ${response.statusText}`.trim();
+  let code: string | undefined;
+  const parsed = text ? parseJson(text) : null;
+  if (parsed?.ok && parsed.value && typeof parsed.value === 'object') {
+    const body = parsed.value as { error?: unknown; code?: unknown };
+    if (typeof body.error === 'string' && body.error) message = body.error;
+    if (typeof body.code === 'string' && body.code) code = body.code;
+  }
+  // A 401 on any call but a credential check means the session expired;
+  // notify the app so it returns to the login screen.
+  if (response.status === 401 && !CREDENTIAL_CHECK_PATHS.has(path.split('?')[0])) {
+    unauthorizedHandler?.();
+  }
+  return new ApiError(message, response.status, code);
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
     credentials: 'include',
-    headers
+    headers: requestHeaders(init)
   });
   const text = await response.text();
   if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`.trim();
-    let code: string | undefined;
-    const parsed = text ? parseJson(text) : null;
-    if (parsed?.ok && parsed.value && typeof parsed.value === 'object') {
-      const body = parsed.value as { error?: unknown; code?: unknown };
-      if (typeof body.error === 'string' && body.error) message = body.error;
-      if (typeof body.code === 'string' && body.code) code = body.code;
-    }
-    // A 401 on any call but a credential check means the session expired;
-    // notify the app so it returns to the login screen.
-    if (response.status === 401 && !CREDENTIAL_CHECK_PATHS.has(path.split('?')[0])) {
-      unauthorizedHandler?.();
-    }
-    throw new ApiError(message, response.status, code);
+    throw responseError(path, response, text);
   }
   // 204 No Content / empty body: nothing to parse.
   if (!text) return undefined as T;
@@ -714,6 +728,116 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(`Unexpected non-JSON response (${response.status})`, response.status, INVALID_RESPONSE_CODE);
   }
   return parsed.value as T;
+}
+
+export type ChatMessageResult = {
+  session_id: string;
+  user_message_id: string;
+  assistant_message_id: string;
+  answer: string;
+  sources: DocumentChatSource[];
+};
+
+export type ChatStreamHandlers = {
+  onSources?: (sources: DocumentChatSource[]) => void;
+  onDelta?: (text: string) => void;
+};
+
+/** `code` of the ApiError for a streamed answer that failed after it started (#449). */
+export const STREAM_ERROR_CODE = 'stream_error';
+
+type SseEvent = { event: string; data: string };
+
+/**
+ * Split complete server-sent-event frames off `buffer` (#449). Returns the
+ * parsed events and the unconsumed tail (a frame still being received).
+ * Comment lines (`: keep-alive`) and frames without data are skipped.
+ */
+export function parseSseFrames(buffer: string): { events: SseEvent[]; rest: string } {
+  const normalized = buffer.replace(/\r\n?/g, '\n');
+  const frames = normalized.split('\n\n');
+  const rest = frames.pop() ?? '';
+  const events: SseEvent[] = [];
+  for (const frame of frames) {
+    let event = 'message';
+    const data: string[] = [];
+    for (const line of frame.split('\n')) {
+      if (!line || line.startsWith(':')) continue;
+      const separator = line.indexOf(':');
+      const field = separator === -1 ? line : line.slice(0, separator);
+      let value = separator === -1 ? '' : line.slice(separator + 1);
+      if (value.startsWith(' ')) value = value.slice(1);
+      if (field === 'event') event = value;
+      else if (field === 'data') data.push(value);
+    }
+    if (data.length > 0) events.push({ event, data: data.join('\n') });
+  }
+  return { events, rest };
+}
+
+/**
+ * Ask a chat question and stream the answer from the API's same-origin SSE
+ * endpoint (#449). `fetch` + a stream reader instead of `EventSource`, which
+ * cannot POST or send the CSRF header. Resolves with the stored exchange once
+ * the `done` event arrives; rejects with an ApiError for HTTP errors, an
+ * `error` event or a stream that ends without `done`.
+ */
+async function streamChatMessage(
+  id: string,
+  input: { question: string; document_ids?: number[] | null; max_sources?: number },
+  handlers: ChatStreamHandlers = {},
+  options: RequestOptions = {}
+): Promise<ChatMessageResult> {
+  const path = `/api/chat/sessions/${encodeURIComponent(id)}/messages/stream`;
+  const init: RequestInit = {
+    method: 'POST',
+    body: JSON.stringify(input),
+    signal: options.signal,
+    headers: { accept: 'text/event-stream' }
+  };
+  const response = await fetch(path, { ...init, credentials: 'include', headers: requestHeaders(init) });
+  if (!response.ok) throw responseError(path, response, await response.text());
+  if (!response.body) {
+    throw new ApiError('Streaming responses are not supported by this browser', response.status, STREAM_ERROR_CODE);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      // At the end of the body a final frame may lack its blank line.
+      const parsed = parseSseFrames(done ? `${buffer}\n\n` : buffer);
+      buffer = parsed.rest;
+      for (const event of parsed.events) {
+        const payload = parseJson(event.data);
+        if (!payload.ok || !payload.value || typeof payload.value !== 'object') continue;
+        const body = payload.value as Record<string, unknown>;
+        switch (event.event) {
+          case 'sources':
+            if (Array.isArray(body.sources)) handlers.onSources?.(body.sources as DocumentChatSource[]);
+            break;
+          case 'delta':
+            if (typeof body.text === 'string' && body.text) handlers.onDelta?.(body.text);
+            break;
+          case 'done':
+            return body as unknown as ChatMessageResult;
+          case 'error':
+            throw new ApiError(
+              typeof body.error === 'string' && body.error ? body.error : 'Request failed',
+              500,
+              STREAM_ERROR_CODE
+            );
+        }
+      }
+      if (done) break;
+    }
+  } finally {
+    // Release the connection when we stop early (done/error/abort).
+    void reader.cancel().catch(() => undefined);
+  }
+  throw new ApiError('The answer stream ended unexpectedly', 502, STREAM_ERROR_CODE);
 }
 
 export const api = {
@@ -821,7 +945,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ stages, mode })
     }),
-  chatSessions: (options?: RequestOptions) => request<{ items: DocumentChatSession[] }>('/api/chat/sessions', options),
+  // `paperless_base`: browser-facing Paperless URL for source links (#449).
+  chatSessions: (options?: RequestOptions) =>
+    request<{ items: DocumentChatSession[]; paperless_base?: string }>('/api/chat/sessions', options),
+  renameChatSession: (id: string, title: string) =>
+    request<{ id: string; title: string }>(`/api/chat/sessions/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title })
+    }),
+  deleteChatSession: (id: string) =>
+    request<{ id: string; deleted: boolean }>(`/api/chat/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  streamChatMessage,
   createChatSession: (title?: string) =>
     request<{ id: string; title: string }>('/api/chat/sessions', {
       method: 'POST',

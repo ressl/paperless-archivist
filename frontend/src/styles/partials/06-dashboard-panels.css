@@ -26,7 +26,7 @@
 }
 
 .cost-total-card strong {
-  color: #0f5f5b;
+  color: var(--teal-fg);
   font-size: 32px;
   line-height: 1;
 }
@@ -132,9 +132,9 @@
 }
 
 .dashboard-tabs button.active {
-  border-color: var(--teal);
-  background: var(--teal);
-  color: #fff;
+  border-color: var(--accent-bg);
+  background: var(--accent-bg);
+  color: var(--on-accent);
 }
 
 .is-hidden {
@@ -297,7 +297,7 @@
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: #fff;
+  background: var(--surface);
 }
 
 .live-summary strong {
@@ -323,7 +323,7 @@
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: #fff;
+  background: var(--surface);
 }
 
 .live-job strong,
@@ -345,12 +345,12 @@
 }
 
 .live-failure {
-  border-color: #e0a09b;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
 .live-failure.retry {
-  border-color: #9bb7d4;
+  border-color: var(--info-line-strong);
   background: var(--info-soft);
 }
 

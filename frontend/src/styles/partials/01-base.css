@@ -121,7 +121,7 @@ textarea {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: 8px 10px;
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
 }
 

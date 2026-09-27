@@ -13,7 +13,7 @@
 }
 
 .banner.error {
-  border-color: #e0a09b;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
   color: var(--danger);
 }
@@ -44,7 +44,7 @@
   gap: var(--space-3);
   padding: var(--space-5);
   margin: var(--space-4);
-  border: 1px solid #e0a09b;
+  border: 1px solid var(--danger-border);
   border-radius: var(--radius-md);
   background: var(--danger-soft);
   color: var(--danger);

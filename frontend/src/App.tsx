@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import {
   Activity,
   Archive,
@@ -19,7 +19,9 @@ import { api, Me, OidcConfig, setUnauthorizedHandler, type Permissions } from '.
 import { buildInfo, buildInfoLabel } from './buildInfo';
 import { useI18n } from './i18n/I18nProvider';
 import { ErrorBoundary } from './lib/ErrorBoundary';
-import { Banner, PageHeader, localizedErrorMessage } from './lib/ui';
+import { PageHeader, localizedErrorMessage } from './lib/ui';
+import { ToastProvider, useToast } from './lib/toast';
+import { ThemeSelector } from './lib/theme';
 import { LanguageSelector } from './lib/LanguageSelector';
 import { isTab, navigate, parseRoute, replaceLocation, routePath, useLocation, type Route, type Tab } from './lib/router';
 
@@ -74,14 +76,36 @@ function resolveActiveTab(route: Route, viewable: Record<Tab, boolean>, debugCon
 }
 
 export function App() {
+  // #450: every page reports through the toast queue instead of one banner.
+  return (
+    <ToastProvider>
+      <AppShell />
+    </ToastProvider>
+  );
+}
+
+function AppShell() {
   const { t } = useI18n();
+  const toast = useToast();
   // The URL is the source of truth for the current page, so reload, back /
   // forward and deep links all work (#424).
   const route = parseRoute(useLocation().pathname);
   const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  // Pages keep their `setError` / `setSuccess` props (#450): a message is
+  // queued as a toast (repeats fold into one), and `null` clears only the
+  // page's own toasts of that tone, exactly like clearing the old banner did,
+  // so budget or other app-level notifications are never dropped by a page.
+  const setError = useCallback(
+    (message: string | null) =>
+      message ? toast.notify({ tone: 'error', message, scope: 'page' }) : toast.clear('page', 'error'),
+    [toast]
+  );
+  const setSuccess = useCallback(
+    (message: string | null) =>
+      message ? toast.notify({ tone: 'success', message, scope: 'page' }) : toast.clear('page', 'success'),
+    [toast]
+  );
   const [debugConsoleEnabled, setDebugConsoleEnabled] = useState<boolean | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -93,7 +117,7 @@ export function App() {
       setError(null);
     });
     return () => setUnauthorizedHandler(null);
-  }, []);
+  }, [setError]);
 
   useEffect(() => {
     api
@@ -143,10 +167,9 @@ export function App() {
   // A new page starts without the previous page's banners and with the mobile
   // menu collapsed — also on browser back/forward.
   useEffect(() => {
-    setError(null);
-    setSuccess(null);
+    toast.clear('page');
     setMenuOpen(false);
-  }, [activeTab]);
+  }, [activeTab, toast]);
 
   if (loading) return <div className="boot">{t('app.loading')}</div>;
   if (!me || !viewable)
@@ -248,6 +271,7 @@ export function App() {
           )}
         </nav>
         <LanguageSelector />
+        <ThemeSelector />
         <div className="sidebar-version" aria-label={buildInfoLabel} title={buildInfoLabel}>
           <span>{t('nav.version')}</span>
           <strong>{buildInfo.version}</strong>
@@ -277,8 +301,6 @@ export function App() {
       </aside>
 
       <main className="workspace" id={MAIN_CONTENT_ID} tabIndex={-1}>
-        {error && <Banner tone="error" message={error} onDismiss={() => setError(null)} />}
-        {success && <Banner tone="success" message={success} onDismiss={() => setSuccess(null)} />}
         {activeTab === null && lazyFallback}
         {page(
           'dashboard',
@@ -297,7 +319,14 @@ export function App() {
           />
         )}
         {page('statistics', <Statistics setError={setError} />)}
-        {page('inventory', <Inventory setError={setError} />)}
+        {page(
+          'inventory',
+          <Inventory
+            setError={setError}
+            // #449: hand the selected documents to the chat as its filter.
+            onAskInChat={viewable.chat ? (ids) => selectTab('chat', `?documents=${ids.join(',')}`) : undefined}
+          />
+        )}
         {page('chat', <DocumentChat setError={setError} />)}
         {page('reviews', <Reviews setError={setError} setSuccess={setSuccess} focusReviewId={route.tab === 'reviews' ? route.id : undefined} />)}
         {page('settings', <SettingsPage setError={setError} />)}

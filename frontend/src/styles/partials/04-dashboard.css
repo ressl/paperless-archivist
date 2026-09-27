@@ -115,12 +115,12 @@
 }
 
 .autopilot-card.enabled {
-  border-color: #b7d8cf;
-  background: #f3fbf7;
+  border-color: var(--success-border);
+  background: var(--success-bg);
 }
 
 .autopilot-card.disabled {
-  border-color: #d7c9aa;
+  border-color: var(--brass-line);
   background: var(--brass-soft);
 }
 
@@ -161,7 +161,7 @@
   justify-content: flex-start;
   min-height: 30px;
   border-color: var(--line);
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
   font-size: 12px;
   font-weight: 700;
@@ -169,9 +169,9 @@
 }
 
 .mode-button-group button.active {
-  border-color: var(--teal);
-  background: var(--teal);
-  color: #fff;
+  border-color: var(--accent-bg);
+  background: var(--accent-bg);
+  color: var(--on-accent);
 }
 
 .mode-button-group small {
@@ -186,12 +186,12 @@
 }
 
 .service-card.running {
-  border-color: #b7d3e6;
+  border-color: var(--info-border);
   background: var(--info-soft);
 }
 
 .service-card.error {
-  border-color: #e0a09b;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
@@ -224,7 +224,7 @@
   justify-content: space-between;
   gap: var(--space-4);
   padding: 14px 16px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .maintenance-grid {
@@ -235,8 +235,8 @@
 }
 
 .paperless-maintenance-panel {
-  border-color: #c9dbe8;
-  background: #f8fbfd;
+  border-color: var(--info-line);
+  background: var(--info-bg);
 }
 
 .recovery-panel strong {
@@ -448,32 +448,32 @@
 }
 
 .health-badge.success {
-  border-color: #b7d8cf;
+  border-color: var(--success-border);
   background: var(--teal-soft);
 }
 
 .health-badge.success .health-score {
-  background: #d6efe9;
-  color: #0f5f5b;
+  background: var(--success-strong);
+  color: var(--teal-fg);
 }
 
 .health-badge.warning {
-  border-color: #e0c999;
+  border-color: var(--warning-border);
   background: var(--brass-soft);
 }
 
 .health-badge.warning .health-score {
-  background: #f1e0bc;
-  color: #6b4a13;
+  background: var(--warning-strong);
+  color: var(--warning-fg);
 }
 
 .health-badge.danger {
-  border-color: #e0a09b;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
 .health-badge.danger .health-score {
-  background: #f0c5c2;
+  background: var(--danger-strong);
   color: var(--danger);
 }
 
@@ -537,17 +537,17 @@
 }
 
 .alert-item.severity-critical {
-  border-color: #e0a09b;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
 .alert-item.severity-warning {
-  border-color: #e0c999;
+  border-color: var(--warning-border);
   background: var(--brass-soft);
 }
 
 .alert-item.severity-info {
-  border-color: #b7d3e6;
+  border-color: var(--info-border);
   background: var(--info-soft);
 }
 
@@ -567,7 +567,7 @@
 .alert-count {
   padding: 3px 8px;
   border-radius: var(--radius-pill);
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
   font-size: 12px;
   font-weight: 700;
@@ -650,14 +650,14 @@
   gap: 10px;
   margin-top: 10px;
   padding: 10px 12px;
-  border: 1px solid #e0c999;
+  border: 1px solid var(--warning-border);
   border-radius: var(--radius-md);
   background: var(--brass-soft);
 }
 
 .dry-run-banner strong {
   display: block;
-  color: #6b4a13;
+  color: var(--warning-fg);
   font-size: 13px;
 }
 
@@ -731,7 +731,7 @@
 }
 
 .quota-bar.warning .quota-fill {
-  background: #d59c39;
+  background: var(--warning-solid);
 }
 
 .quota-bar.danger .quota-fill {
@@ -790,8 +790,8 @@
   display: inline-block;
   padding: 3px 8px;
   border-radius: var(--radius-pill);
-  background: var(--brass);
-  color: #fff;
+  background: var(--brass-solid);
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -832,7 +832,7 @@
   gap: var(--space-3);
   padding: 8px 10px;
   border-left: 3px solid var(--line);
-  background: #fff;
+  background: var(--surface);
   border-radius: 4px;
 }
 

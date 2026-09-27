@@ -7,11 +7,11 @@ import {
 } from '../api/client';
 import { I18nProvider } from '../i18n/I18nProvider';
 
-const { chatSessions, createChatSession, chatMessages, postChatMessage } = vi.hoisted(() => ({
+const { chatSessions, createChatSession, chatMessages, streamChatMessage } = vi.hoisted(() => ({
   chatSessions: vi.fn(),
   createChatSession: vi.fn(),
   chatMessages: vi.fn(),
-  postChatMessage: vi.fn()
+  streamChatMessage: vi.fn()
 }));
 
 vi.mock('../api/client', async () => {
@@ -23,7 +23,7 @@ vi.mock('../api/client', async () => {
       chatSessions,
       createChatSession,
       chatMessages,
-      postChatMessage
+      streamChatMessage
     }
   };
 });
@@ -76,7 +76,7 @@ const messagesResponse = (sessionId: string, content: string) => ({
 
 const chatSessionsMock = vi.mocked(api.chatSessions);
 const chatMessagesMock = vi.mocked(api.chatMessages);
-const postChatMessageMock = vi.mocked(api.postChatMessage);
+const streamChatMessageMock = vi.mocked(api.streamChatMessage);
 
 async function renderChat() {
   const { DocumentChat } = await import('./DocumentChat');
@@ -112,7 +112,7 @@ async function beginPostSendRefresh(
   });
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
   await waitFor(() => {
-    expect(postChatMessageMock).toHaveBeenCalledTimes(1);
+    expect(streamChatMessageMock).toHaveBeenCalledTimes(1);
     expect(chatMessagesMock.mock.calls.filter(([id]) => id === 'session-a')).toHaveLength(2);
   });
   fireEvent.click(screen.getByTitle('Session B'));
@@ -127,10 +127,10 @@ describe('<DocumentChat> request ownership', () => {
     window.localStorage.setItem('paperless-archivist.ui-locale', 'en');
     chatSessionsMock.mockReset();
     chatMessagesMock.mockReset();
-    postChatMessageMock.mockReset();
+    streamChatMessageMock.mockReset();
     vi.mocked(api.createChatSession).mockReset();
     chatSessionsMock.mockResolvedValue({ items: sessions });
-    postChatMessageMock.mockResolvedValue({
+    streamChatMessageMock.mockResolvedValue({
       session_id: 'session-a',
       user_message_id: 'user-1',
       assistant_message_id: 'assistant-1',

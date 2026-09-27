@@ -73,8 +73,8 @@
 }
 
 .confirm-dialog .danger-button {
-  border-color: var(--danger);
-  background: var(--danger);
+  border-color: var(--danger-solid);
+  background: var(--danger-solid);
 }
 
 .state-block {
@@ -211,7 +211,7 @@
   border: 1px solid var(--warning-border);
   border-radius: var(--radius-pill);
   background: var(--warning-soft);
-  color: #7b5d20;
+  color: var(--warning-text);
   font-size: var(--font-size-xs);
   font-weight: 700;
 }
