@@ -624,6 +624,55 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
 }
 
+/**
+ * Error thrown for every non-2xx API response (and for a 2xx body that is not
+ * valid JSON). Keeps the backend's `{ "error": "..." }` text as `message`, so
+ * callers that only read `err.message` behave exactly as before, but also
+ * carries the HTTP `status` and an optional machine-readable `code` so callers
+ * can branch on the error type instead of matching substrings. (#432)
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** `code` of the ApiError thrown when a 2xx response body is not valid JSON. */
+export const INVALID_RESPONSE_CODE = 'invalid_response';
+
+export function isApiError(err: unknown): err is ApiError {
+  return err instanceof ApiError;
+}
+
+/** True when `err` is the rejection of a request cancelled via its AbortSignal. */
+export function isAbortError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
+}
+
+// Endpoints whose 401 means "these credentials are wrong", not "the session
+// expired": a failed login attempt or a wrong current password must surface as
+// a form error instead of bouncing the user to the login screen. Every other
+// /api/auth/* call (me, sessions, revoke, logout) does signal an expired
+// session. (#432)
+const CREDENTIAL_CHECK_PATHS = new Set(['/api/auth/login', '/api/auth/paperless-login', '/api/auth/change-password']);
+
+/** Optional per-call request options (currently only cancellation). */
+export type RequestOptions = { signal?: AbortSignal };
+
+function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has('content-type')) {
@@ -639,23 +688,32 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     credentials: 'include',
     headers
   });
+  const text = await response.text();
   if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`;
-    try {
-      const body = await response.json();
-      if (body.error) message = body.error;
-    } catch {
-      // ignore non-JSON errors
+    let message = `${response.status} ${response.statusText}`.trim();
+    let code: string | undefined;
+    const parsed = text ? parseJson(text) : null;
+    if (parsed?.ok && parsed.value && typeof parsed.value === 'object') {
+      const body = parsed.value as { error?: unknown; code?: unknown };
+      if (typeof body.error === 'string' && body.error) message = body.error;
+      if (typeof body.code === 'string' && body.code) code = body.code;
     }
-    // A 401 on any call but the login attempts themselves means the session
-    // expired; notify the app so it returns to the login screen.
-    if (response.status === 401 && !path.startsWith('/api/auth/')) {
+    // A 401 on any call but a credential check means the session expired;
+    // notify the app so it returns to the login screen.
+    if (response.status === 401 && !CREDENTIAL_CHECK_PATHS.has(path.split('?')[0])) {
       unauthorizedHandler?.();
     }
-    throw new Error(message);
+    throw new ApiError(message, response.status, code);
   }
-  const text = await response.text();
-  return text ? (JSON.parse(text) as T) : (undefined as T);
+  // 204 No Content / empty body: nothing to parse.
+  if (!text) return undefined as T;
+  const parsed = parseJson(text);
+  if (!parsed.ok) {
+    // e.g. an HTML page from a misconfigured proxy: fail with a typed error
+    // instead of leaking a bare SyntaxError from JSON.parse.
+    throw new ApiError(`Unexpected non-JSON response (${response.status})`, response.status, INVALID_RESPONSE_CODE);
+  }
+  return parsed.value as T;
 }
 
 export const api = {
@@ -669,10 +727,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ username, password })
     }),
-  oidcConfig: () => request<OidcConfig>('/api/auth/oidc/config'),
+  oidcConfig: (options?: RequestOptions) => request<OidcConfig>('/api/auth/oidc/config', options),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  me: () => request<Me>('/api/auth/me'),
-  settings: () => request<RuntimeSettings>('/api/settings'),
+  me: (options?: RequestOptions) => request<Me>('/api/auth/me', options),
+  settings: (options?: RequestOptions) => request<RuntimeSettings>('/api/settings', options),
   saveSettings: (settings: RuntimeSettingsInput, paperlessToken?: string, providerSecrets?: Record<string, string>, notificationWebhookUrl?: string) =>
     request<RuntimeSettings>('/api/settings', {
       method: 'PUT',
@@ -697,22 +755,22 @@ export const api = {
     return request<AiRuntimeHints>(`/api/ai/runtime-hints${query}`);
   },
   syncPaperless: () => request<Record<string, unknown>>('/api/paperless/sync-metadata', { method: 'POST' }),
-  paperlessConsistency: () => request<PaperlessConsistencyResult>('/api/paperless/consistency'),
+  paperlessConsistency: (options?: RequestOptions) => request<PaperlessConsistencyResult>('/api/paperless/consistency', options),
   reconcileCompletionTags: (input: { dry_run?: boolean; document_ids?: number[] }) =>
     request<CompletionTagReconcileResult>('/api/paperless/completion-tags/reconcile', {
       method: 'POST',
       body: JSON.stringify(input)
     }),
-  dashboard: (range: DashboardRange = '24h') => request<DashboardResponse>(`/api/dashboard?range=${encodeURIComponent(range)}`),
-  statistics: (params: StatisticsQueryParams = {}) => {
+  dashboard: (range: DashboardRange = '24h', options?: RequestOptions) => request<DashboardResponse>(`/api/dashboard?range=${encodeURIComponent(range)}`, options),
+  statistics: (params: StatisticsQueryParams = {}, options?: RequestOptions) => {
     const qs = new URLSearchParams();
     if (params.from) qs.set('from', params.from);
     if (params.to) qs.set('to', params.to);
     if (params.bucket) qs.set('bucket', params.bucket);
     const query = qs.toString();
-    return request<StatisticsResponse>(`/api/statistics${query ? `?${query}` : ''}`);
+    return request<StatisticsResponse>(`/api/statistics${query ? `?${query}` : ''}`, options);
   },
-  dashboardLive: () => request<DashboardLiveStatus>('/api/dashboard/live'),
+  dashboardLive: (options?: RequestOptions) => request<DashboardLiveStatus>('/api/dashboard/live', options),
   updateWorkflowMode: (mode: ProcessingMode) =>
     request<RuntimeSettings>('/api/workflow/mode', {
       method: 'PUT',
@@ -723,7 +781,7 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch)
     }),
-  inventory: (params: InventoryQueryParams = {}) => {
+  inventory: (params: InventoryQueryParams = {}, options?: RequestOptions) => {
     const qs = new URLSearchParams();
     qs.set('limit', String(params.limit ?? 500));
     qs.set('offset', String(params.offset ?? 0));
@@ -740,13 +798,13 @@ export const api = {
     if (params.has_error != null) qs.set('has_error', String(params.has_error));
     if (params.needs_review != null) qs.set('needs_review', String(params.needs_review));
     return request<{ items: InventoryItem[]; total: number; offset: number; limit: number }>(
-      `/api/inventory?${qs.toString()}`
+      `/api/inventory?${qs.toString()}`, options
     );
   },
   inventoryDuplicates: () =>
     request<{ groups: DuplicateGroup[]; paperless_base: string }>('/api/inventory/duplicates'),
-  inventoryMetadataTrace: (documentId: number) =>
-    request<MetadataTrace>(`/api/inventory/${documentId}/metadata-trace`),
+  inventoryMetadataTrace: (documentId: number, options?: RequestOptions) =>
+    request<MetadataTrace>(`/api/inventory/${documentId}/metadata-trace`, options),
   queueOcr: () => request<{ queued: number }>('/api/batches/ocr', { method: 'POST' }),
   queueFull: () => request<{ queued: number }>('/api/batches/full', { method: 'POST' }),
   bulkRerun: (document_ids: number[], stages: Stage[]) =>
@@ -763,13 +821,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ stages, mode })
     }),
-  chatSessions: () => request<{ items: DocumentChatSession[] }>('/api/chat/sessions'),
+  chatSessions: (options?: RequestOptions) => request<{ items: DocumentChatSession[] }>('/api/chat/sessions', options),
   createChatSession: (title?: string) =>
     request<{ id: string; title: string }>('/api/chat/sessions', {
       method: 'POST',
       body: JSON.stringify({ title: title || null })
     }),
-  chatMessages: (id: string) => request<{ items: DocumentChatMessage[] }>(`/api/chat/sessions/${id}`),
+  chatMessages: (id: string, options?: RequestOptions) => request<{ items: DocumentChatMessage[] }>(`/api/chat/sessions/${id}`, options),
   postChatMessage: (id: string, input: { question: string; document_ids?: number[] | null; max_sources?: number }) =>
     request<{
       session_id: string;
@@ -781,9 +839,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input)
     }),
-  reviews: (limit = 100) =>
+  reviews: (limit = 100, options?: RequestOptions) =>
     request<{ items: ReviewItem[]; total: number; has_more: boolean }>(
-      `/api/reviews?status=pending&limit=${encodeURIComponent(String(limit))}`
+      `/api/reviews?status=pending&limit=${encodeURIComponent(String(limit))}`, options
     ),
   approveReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/approve`, { method: 'POST' }),
   rejectReview: (id: string) => request<{ ok: boolean }>(`/api/reviews/${id}/reject`, { method: 'POST' }),
@@ -846,15 +904,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
-  audit: (limit?: number) =>
+  audit: (limit?: number, options?: RequestOptions) =>
     request<{ items: AuditEvent[] }>(
-      limit ? `/api/audit?limit=${encodeURIComponent(limit)}` : '/api/audit'
+      limit ? `/api/audit?limit=${encodeURIComponent(limit)}` : '/api/audit', options
     ),
-  auditIntegrity: () => request<AuditIntegrityReport>('/api/audit/integrity'),
+  auditIntegrity: (options?: RequestOptions) => request<AuditIntegrityReport>('/api/audit/integrity', options),
   applyAuditRetention: () => request<RetentionResult>('/api/audit/retention/apply', { method: 'POST' }),
-  prompts: () => request<{ items: Prompt[] }>('/api/prompts'),
-  promptUsage: () => request<{ items: PromptUsage[] }>('/api/prompts/usage'),
-  promptExperiments: () => request<{ items: PromptExperiment[] }>('/api/prompts/experiments'),
+  prompts: (options?: RequestOptions) => request<{ items: Prompt[] }>('/api/prompts', options),
+  promptUsage: (options?: RequestOptions) => request<{ items: PromptUsage[] }>('/api/prompts/usage', options),
+  promptExperiments: (options?: RequestOptions) => request<{ items: PromptExperiment[] }>('/api/prompts/experiments', options),
   createPrompt: (input: { stage: Stage; name: string; content: string; output_schema?: unknown; activate?: boolean }) =>
     request<{ id: string }>('/api/prompts', {
       method: 'POST',
@@ -866,14 +924,14 @@ export const api = {
       body: JSON.stringify(input)
     }),
   activatePrompt: (id: string) => request<{ ok: boolean }>(`/api/prompts/${id}/activate`, { method: 'POST' }),
-  sessions: () => request<{ items: SessionItem[] }>('/api/auth/sessions'),
+  sessions: (options?: RequestOptions) => request<{ items: SessionItem[] }>('/api/auth/sessions', options),
   revokeSession: (id: string) => request<{ ok: boolean }>(`/api/auth/sessions/${id}/revoke`, { method: 'POST' }),
   changePassword: (current_password: string, new_password: string) =>
     request<{ ok: boolean }>('/api/auth/change-password', {
       method: 'POST',
       body: JSON.stringify({ current_password, new_password })
     }),
-  users: () => request<{ items: UserItem[] }>('/api/users'),
+  users: (options?: RequestOptions) => request<{ items: UserItem[] }>('/api/users', options),
   createUser: (input: { username: string; email?: string; password: string; roles: Role[] }) =>
     request<{ id: string }>('/api/users', {
       method: 'POST',
@@ -891,7 +949,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ password })
     }),
-  apiTokens: () => request<{ items: ApiToken[] }>('/api/api-tokens'),
+  apiTokens: (options?: RequestOptions) => request<{ items: ApiToken[] }>('/api/api-tokens', options),
   createApiToken: (input: { name: string; scopes: string[]; expires_in_days?: number | null }) =>
     request<{ id: string; token: string; expires_at?: string | null }>('/api/api-tokens', {
       method: 'POST',

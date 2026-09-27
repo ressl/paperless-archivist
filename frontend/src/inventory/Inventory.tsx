@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RotateCcw, X } from 'lucide-react';
 import {
   api,
+  isApiError,
   type InventoryItem,
   type MetadataTrace,
 } from '../api/client';
@@ -234,8 +235,8 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
         setDiagnoseTrace(trace);
       } catch (err) {
         if (diagnoseDocumentIdRef.current !== documentId) return;
-        const message = err instanceof Error ? err.message : '';
-        if (message.toLowerCase().includes('no metadata run')) {
+        // The trace endpoint answers 404 when the document has no metadata run yet. (#432)
+        if (isApiError(err) && err.status === 404) {
           setDiagnoseMissing(true);
         } else {
           setError(localizedErrorMessage(err, t));

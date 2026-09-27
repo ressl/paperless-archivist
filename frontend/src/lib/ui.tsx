@@ -8,6 +8,7 @@ import {
   type RefObject
 } from 'react';
 import { AlertTriangle, Check, CircleDashed, Eye, Info, X } from 'lucide-react';
+import { ApiError } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { deltaTone, statusLabel } from './format';
 
@@ -327,20 +328,39 @@ export async function run(
   }
 }
 
+type ErrorKind = 'unauthorized' | 'timeout' | 'network' | 'other';
+
+/**
+ * Classify an error by its type instead of its message text (#432): API errors
+ * by HTTP status, a rejected `fetch` (TypeError) as a network failure and a
+ * `TimeoutError` (e.g. from `AbortSignal.timeout`) as a timeout.
+ */
+function errorKind(err: unknown): ErrorKind {
+  if (err instanceof ApiError) {
+    if (err.status === 401 || err.status === 403) return 'unauthorized';
+    if (err.status === 408 || err.status === 504) return 'timeout';
+    if (err.status === 502 || err.status === 503) return 'network';
+    return 'other';
+  }
+  if (typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError') return 'timeout';
+  // fetch() rejects with a TypeError when the request never reached a server.
+  if (err instanceof TypeError) return 'network';
+  return 'other';
+}
+
 export function localizedErrorMessage(err: unknown, t: TFunction, fallback = t('generic.request_failed')) {
   const message = errorToString(err);
-  const lower = message.toLowerCase();
-  if (lower.includes('401') || lower.includes('403') || lower.includes('unauthorized') || lower.includes('forbidden')) {
-    return `${t('generic.unauthorized')} ${message}`;
+  switch (errorKind(err)) {
+    case 'unauthorized':
+      return `${t('generic.unauthorized')} ${message}`;
+    case 'timeout':
+      return `${t('generic.timeout')} ${message}`;
+    case 'network':
+      return `${t('generic.network_error')} ${message}`;
+    default:
+      if (!message || message === 'Request failed') return fallback;
+      return message;
   }
-  if (lower.includes('timeout') || lower.includes('timed out')) {
-    return `${t('generic.timeout')} ${message}`;
-  }
-  if (lower.includes('failed to fetch') || lower.includes('network') || lower.includes('connect')) {
-    return `${t('generic.network_error')} ${message}`;
-  }
-  if (!message || message === 'Request failed') return fallback;
-  return message;
 }
 
 export function errorToString(err: unknown) {
