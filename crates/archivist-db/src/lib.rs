@@ -61,6 +61,58 @@ pub enum ReviewDecisionError {
     NotPending,
 }
 
+/// A referenced aggregate does not exist (or, for API tokens, is already
+/// revoked). An expected client condition, mapped to 404 by the API. #441
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+pub enum NotFoundError {
+    #[error("user does not exist")]
+    User,
+    #[error("API token not found or already revoked")]
+    ApiToken,
+    #[error("prompt does not exist")]
+    Prompt,
+}
+
+/// Request context that audit events written while serving an HTTP request
+/// inherit when the caller did not set `source_ip` / `user_agent` itself.
+/// The API scopes every request with [`with_audit_request_context`]; worker
+/// code never sets it, so its events keep `null`. #441
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditRequestContext {
+    pub source_ip: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+tokio::task_local! {
+    static AUDIT_REQUEST_CONTEXT: AuditRequestContext;
+}
+
+/// Run `future` with `context` as the audit request context. Tasks spawned
+/// from it do not inherit the context; re-scope them with
+/// [`current_audit_request_context`] when they write audit events.
+pub async fn with_audit_request_context<F: std::future::Future>(
+    context: AuditRequestContext,
+    future: F,
+) -> F::Output {
+    AUDIT_REQUEST_CONTEXT.scope(context, future).await
+}
+
+/// The audit request context of the current task, if any.
+pub fn current_audit_request_context() -> Option<AuditRequestContext> {
+    AUDIT_REQUEST_CONTEXT.try_with(Clone::clone).ok()
+}
+
+fn apply_audit_request_context(event: &mut AuditEventInput) {
+    let _ = AUDIT_REQUEST_CONTEXT.try_with(|context| {
+        if event.source_ip.is_none() {
+            event.source_ip.clone_from(&context.source_ip);
+        }
+        if event.user_agent.is_none() {
+            event.user_agent.clone_from(&context.user_agent);
+        }
+    });
+}
+
 pub async fn connect(database_url: &str, max_connections: u32) -> Result<DbPool> {
     PgPoolOptions::new()
         .max_connections(max_connections)
@@ -1589,7 +1641,7 @@ pub async fn set_user_enabled(
         .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| anyhow!("user does not exist"))?
+        .ok_or(NotFoundError::User)?
         .try_get::<bool, _>("enabled")?;
 
     if before
@@ -1654,6 +1706,14 @@ pub async fn set_user_roles(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     lock_enabled_admin_invariant_tx(&mut tx).await?;
+    // Unknown users used to surface as a foreign-key 500. #441
+    let exists: bool = sqlx::query_scalar("select exists(select 1 from users where id = $1)")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !exists {
+        return Err(NotFoundError::User.into());
+    }
     let before = load_user_roles_tx(&mut tx, user_id).await?;
 
     if before.contains(&Role::Admin)
@@ -1941,7 +2001,7 @@ pub async fn rotate_api_token(
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| anyhow!("API token not found or already revoked"))?;
+    .ok_or(NotFoundError::ApiToken)?;
     let name: String = existing.try_get("name")?;
     let scopes: Vec<String> = existing.try_get("scopes")?;
     sqlx::query("update api_tokens set revoked_at = now() where id = $1")
@@ -2329,7 +2389,7 @@ pub async fn activate_prompt(pool: &DbPool, prompt_id: Uuid, actor_id: Uuid) -> 
         .bind(prompt_id)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| anyhow!("prompt does not exist"))?;
+        .ok_or(NotFoundError::Prompt)?;
     let stage: String = row.try_get("stage")?;
     let name: String = row.try_get("name")?;
     let version: i32 = row.try_get("version")?;
@@ -9415,6 +9475,8 @@ async fn append_audit_tx(
     tx: &mut Transaction<'_, Postgres>,
     mut event: AuditEventInput,
 ) -> Result<()> {
+    // Fill request context before hashing so audit hash v2 binds it. #441
+    apply_audit_request_context(&mut event);
     if let Some(value) = &mut event.before {
         redact_sensitive_json(value);
     }
