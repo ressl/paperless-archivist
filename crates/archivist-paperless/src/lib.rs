@@ -226,6 +226,22 @@ impl PaperlessClient {
         self.get_paginated("api/documents/").await
     }
 
+    /// List documents without their OCR `content`: `fields` restricts the
+    /// serializer on Paperless-ngx 2.x, and `truncate_content` bounds the text
+    /// on servers that ignore `fields`. For callers that only compare
+    /// metadata, such as the consistency check. #386
+    pub async fn list_documents_for_consistency(&self) -> Result<Vec<PaperlessDocumentSummary>> {
+        let mut url = self.url("api/documents/")?;
+        url.query_pairs_mut()
+            .append_pair("page_size", "100")
+            .append_pair(
+                "fields",
+                "id,title,created,modified,tags,correspondent,document_type",
+            )
+            .append_pair("truncate_content", "true");
+        self.get_paginated_url(url).await
+    }
+
     pub async fn list_documents_modified_since(
         &self,
         since: &str,

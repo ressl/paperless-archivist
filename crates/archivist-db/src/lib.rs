@@ -2933,15 +2933,16 @@ pub async fn custom_field_ids_for_names(
     if names.is_empty() {
         return Ok(Vec::new());
     }
+    // Fold both sides in SQL under the builtin `pg_unicode_fast` collation
+    // (PostgreSQL 18) so matching doesn't depend on the database locale: under
+    // `C`, `lower('Ä')` stays 'Ä'. Rust's ASCII-only folding never matched
+    // catalog names with non-ASCII capitals ("Ärzte"). #409
     let rows = sqlx::query(
-        "select name, id, data_type from paperless_custom_fields where lower(name) = any($1) order by name",
+        "select name, id, data_type from paperless_custom_fields \
+         where lower(name collate pg_unicode_fast) = any(select lower(requested collate pg_unicode_fast) from unnest($1::text[]) as requested) \
+         order by name",
     )
-    .bind(
-        names
-            .iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect::<Vec<_>>(),
-    )
+    .bind(names)
     .fetch_all(pool)
     .await?;
     rows.into_iter()
@@ -2959,16 +2960,15 @@ pub async fn tag_ids_for_names(pool: &DbPool, names: &[String]) -> Result<Vec<i3
     if names.is_empty() {
         return Ok(Vec::new());
     }
-    let rows =
-        sqlx::query("select id from paperless_tags where lower(name) = any($1) order by name")
-            .bind(
-                names
-                    .iter()
-                    .map(|name| name.to_ascii_lowercase())
-                    .collect::<Vec<_>>(),
-            )
-            .fetch_all(pool)
-            .await?;
+    // See `custom_field_ids_for_names` for why both sides fold in SQL. #409
+    let rows = sqlx::query(
+        "select id from paperless_tags \
+         where lower(name collate pg_unicode_fast) = any(select lower(requested collate pg_unicode_fast) from unnest($1::text[]) as requested) \
+         order by name",
+    )
+    .bind(names)
+    .fetch_all(pool)
+    .await?;
     rows.into_iter()
         .map(|row| row.try_get("id").context("tag id"))
         .collect()
@@ -2981,15 +2981,13 @@ pub async fn tag_id_pairs_for_names(pool: &DbPool, names: &[String]) -> Result<V
     if names.is_empty() {
         return Ok(Vec::new());
     }
+    // See `custom_field_ids_for_names` for why both sides fold in SQL. #409
     let rows = sqlx::query(
-        "select name, id from paperless_tags where lower(name) = any($1) order by name",
+        "select name, id from paperless_tags \
+         where lower(name collate pg_unicode_fast) = any(select lower(requested collate pg_unicode_fast) from unnest($1::text[]) as requested) \
+         order by name",
     )
-    .bind(
-        names
-            .iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect::<Vec<_>>(),
-    )
+    .bind(names)
     .fetch_all(pool)
     .await?;
     rows.into_iter()

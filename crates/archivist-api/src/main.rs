@@ -171,10 +171,10 @@ async fn auth_rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let path = req.uri().path();
-    if !path.starts_with("/api/auth/") {
-        return Ok(next.run(req).await);
-    }
+    // No path check here: this layer is only attached to the `auth_public`
+    // sub-router. That router is nested at `/api/auth`, so axum strips the
+    // prefix and this middleware would only ever see `/login`. A
+    // `starts_with("/api/auth/")` guard therefore disabled the limiter. #385
     let ip = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -3427,6 +3427,47 @@ async fn sync_paperless(
     Ok(Json(summary))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ConsistencyInventoryRow {
+    title: Option<String>,
+    current_tag_ids: Vec<i32>,
+    correspondent: Option<i32>,
+    document_type: Option<i32>,
+    document_date: Option<chrono::NaiveDate>,
+}
+
+/// Load the inventory columns compared by the consistency check.
+/// `document_date` has been a typed `date` since migration 0043; decoding it
+/// as text failed for every non-null row and turned the endpoint into a
+/// permanent 500. #386
+async fn load_consistency_inventory(
+    pool: &DbPool,
+) -> anyhow::Result<HashMap<i32, ConsistencyInventoryRow>> {
+    let rows = sqlx::query(
+        r#"
+        select paperless_document_id, title, current_tag_ids, correspondent_id,
+               document_type_id, document_date
+          from document_inventory
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut inventory = HashMap::with_capacity(rows.len());
+    for row in rows {
+        inventory.insert(
+            row.try_get::<i32, _>("paperless_document_id")?,
+            ConsistencyInventoryRow {
+                title: row.try_get("title")?,
+                current_tag_ids: row.try_get("current_tag_ids")?,
+                correspondent: row.try_get("correspondent_id")?,
+                document_type: row.try_get("document_type_id")?,
+                document_date: row.try_get("document_date")?,
+            },
+        );
+    }
+    Ok(inventory)
+}
+
 #[tracing::instrument(
     skip(state, auth),
     fields(user_id = tracing::field::Empty, documents_checked = tracing::field::Empty)
@@ -3441,29 +3482,10 @@ async fn paperless_consistency(
     }
     let settings = get_runtime_settings(&state.pool).await?;
     let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
-    let documents = client.list_documents().await?;
-    let rows = sqlx::query(
-        r#"
-        select paperless_document_id, title, current_tag_ids, correspondent_id,
-               document_type_id, document_date
-          from document_inventory
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await?;
-    let mut inventory = HashMap::new();
-    for row in rows {
-        inventory.insert(
-            row.try_get::<i32, _>("paperless_document_id")?,
-            json!({
-                "title": row.try_get::<Option<String>, _>("title")?,
-                "current_tag_ids": row.try_get::<Vec<i32>, _>("current_tag_ids")?,
-                "correspondent": row.try_get::<Option<i32>, _>("correspondent_id")?,
-                "document_type": row.try_get::<Option<i32>, _>("document_type_id")?,
-                "created": row.try_get::<Option<String>, _>("document_date")?
-            }),
-        );
-    }
+    // Only the compared fields are needed; never pull every document's full
+    // OCR text into memory for a consistency check. #386
+    let documents = client.list_documents_for_consistency().await?;
+    let inventory = load_consistency_inventory(&state.pool).await?;
 
     let mut missing_local = Vec::new();
     let mut mismatches = Vec::new();
@@ -3477,35 +3499,23 @@ async fn paperless_consistency(
             continue;
         };
         let mut fields = Vec::new();
-        if local.get("title").and_then(Value::as_str) != document.title.as_deref() {
+        if local.title.as_deref() != document.title.as_deref() {
             fields.push("title");
         }
-        if local
-            .get("correspondent")
-            .and_then(Value::as_i64)
-            .map(|value| value as i32)
-            != document.correspondent
-        {
+        if local.correspondent != document.correspondent {
             fields.push("correspondent");
         }
-        if local
-            .get("document_type")
-            .and_then(Value::as_i64)
-            .map(|value| value as i32)
-            != document.document_type
-        {
+        if local.document_type != document.document_type {
             fields.push("document_type");
         }
-        if local.get("created").and_then(Value::as_str) != document.created.as_deref() {
+        // Compare through the same parser the sync uses to write the typed
+        // column, so RFC3339 vs plain-date `created` values don't mismatch.
+        if local.document_date
+            != archivist_db::parse_paperless_document_date(document.created.as_deref())
+        {
             fields.push("document_date");
         }
-        let mut local_tags = local
-            .get("current_tag_ids")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|value| value.as_i64().map(|value| value as i32))
-            .collect::<Vec<_>>();
+        let mut local_tags = local.current_tag_ids.clone();
         let mut remote_tags = document.tags.clone();
         local_tags.sort_unstable();
         remote_tags.sort_unstable();
@@ -9131,6 +9141,63 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn consistency_inventory_decodes_typed_document_dates() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = connect(&database_url, 10)
+            .await
+            .expect("connect consistency test database");
+        migrate(&pool).await.expect("apply migrations");
+        sqlx::query(
+            "delete from document_inventory where paperless_document_id in (386001, 386002)",
+        )
+        .execute(&pool)
+        .await
+        .expect("clear consistency fixtures");
+        sqlx::query(
+            r#"
+            insert into document_inventory (
+              paperless_document_id, title, current_tag_ids, correspondent_id,
+              document_type_id, document_date
+            ) values
+              (386001, 'Rechnung', '{3,1}', 7, 9, date '2026-09-27'),
+              (386002, null, '{}', null, null, null)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("insert consistency fixtures");
+
+        let inventory = load_consistency_inventory(&pool)
+            .await
+            .expect("typed document_date must decode (#386)");
+        sqlx::query(
+            "delete from document_inventory where paperless_document_id in (386001, 386002)",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean up consistency fixtures");
+
+        let dated = inventory.get(&386001).expect("dated row");
+        assert_eq!(
+            dated.document_date,
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 27)
+        );
+        assert_eq!(dated.current_tag_ids, vec![3, 1]);
+        assert_eq!(dated.correspondent, Some(7));
+        assert_eq!(
+            dated.document_date,
+            archivist_db::parse_paperless_document_date(Some("2026-09-27T00:00:00+02:00"))
+        );
+        assert_eq!(
+            inventory.get(&386002).expect("undated row").document_date,
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
     async fn paperless_bridge_requires_origin_mapping_and_is_concurrency_safe() {
         let Ok(database_url) = std::env::var("DATABASE_URL") else {
             return;
@@ -9957,6 +10024,45 @@ mod tests {
             config: Arc::new(test_config()),
             auth_rate_limiter: Arc::new(AuthRateLimiter::new(10, 60)),
         }
+    }
+
+    /// Exercises the real `router()` (nesting included) instead of the limiter
+    /// struct, so a prefix-stripping regression is caught. Invalid JSON bodies
+    /// are rejected by the extractor before any database access. #385
+    #[tokio::test]
+    async fn auth_routes_are_rate_limited_through_the_nested_router() {
+        let mut state = api_text_test_state();
+        state.auth_rate_limiter = Arc::new(AuthRateLimiter::new(2, 3600));
+        let app = router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .ok();
+        });
+        let client = reqwest::Client::new();
+        let mut statuses = Vec::new();
+        for path in ["login", "paperless-login", "login"] {
+            let response = client
+                .post(format!("http://{address}/api/auth/{path}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body("{}")
+                .send()
+                .await
+                .expect("auth request");
+            statuses.push(response.status().as_u16());
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                assert!(response.headers().contains_key(header::RETRY_AFTER));
+            }
+        }
+        handle.abort();
+        assert_ne!(statuses[0], 429, "first request must pass the limiter");
+        assert_ne!(statuses[1], 429, "second request must pass the limiter");
+        assert_eq!(statuses[2], 429, "third request must be rate limited");
     }
 
     #[tokio::test]

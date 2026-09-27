@@ -2174,14 +2174,14 @@ fn diff_known_tag_names(
 ) -> (Vec<i32>, Vec<String>) {
     let known_lower: std::collections::HashSet<String> = known_pairs
         .iter()
-        .map(|(name, _)| name.to_ascii_lowercase())
+        .map(|(name, _)| archivist_core::fold_catalog_name(name))
         .collect();
     let mut ids: Vec<i32> = known_pairs.iter().map(|(_, id)| *id).collect();
     ids.sort_unstable();
     ids.dedup();
     let unknown: Vec<String> = requested
         .iter()
-        .filter(|name| !known_lower.contains(&name.to_ascii_lowercase()))
+        .filter(|name| !known_lower.contains(&archivist_core::fold_catalog_name(name)))
         .cloned()
         .collect();
     (ids, unknown)
@@ -2260,7 +2260,7 @@ fn build_custom_field_value_patch(
         .filter_map(|field| {
             let (_, id, data_type) = id_pairs
                 .iter()
-                .find(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))?;
+                .find(|(name, _, _)| archivist_core::catalog_names_equal(name, &field.name))?;
             match archivist_core::coerce_custom_field_value(data_type.as_deref(), &field.value) {
                 Some(value) => Some(json!({ "field": id, "value": value })),
                 None => {
@@ -2292,7 +2292,7 @@ async fn resolve_custom_field_values_to_ids(
     for field in fields {
         if !id_pairs
             .iter()
-            .any(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))
+            .any(|(name, _, _)| archivist_core::catalog_names_equal(name, &field.name))
         {
             warn!(
                 unknown_custom_field = %field.name,
@@ -2961,10 +2961,9 @@ async fn process_metadata(
                 let ids = custom_field_ids_for_names(pool, &names).await?;
                 let mut values = Vec::new();
                 for field in &valid.fields {
-                    let Some((_, id, data_type)) = ids
-                        .iter()
-                        .find(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))
-                    else {
+                    let Some((_, id, data_type)) = ids.iter().find(|(name, _, _)| {
+                        archivist_core::catalog_names_equal(name, &field.name)
+                    }) else {
                         continue;
                     };
                     match archivist_core::coerce_custom_field_value(
@@ -5741,6 +5740,17 @@ mod tests {
             vec!["NoSuchTag".to_owned()],
             "only the unmatched name needs creation-or-drop downstream"
         );
+    }
+
+    #[test]
+    fn diff_known_tag_names_folds_non_ascii_capitals() {
+        // The SQL lookup returns the catalog spelling; a lowercase request must
+        // not be treated as unknown (and re-created in Paperless). #409
+        let requested = vec!["ärzte".to_owned(), "Übersetzung".to_owned()];
+        let known = vec![("Ärzte".to_owned(), 21), ("übersetzung".to_owned(), 22)];
+        let (ids, unknown) = diff_known_tag_names(&requested, &known);
+        assert_eq!(ids, vec![21, 22]);
+        assert!(unknown.is_empty(), "unexpected unknown tags: {unknown:?}");
     }
 
     #[test]

@@ -2906,7 +2906,7 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Created token */
+                /** @description Created token, raw token shown once */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -2947,7 +2947,7 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Rotated token */
+                /** @description Rotated token, raw token shown once */
                 200: {
                     headers: {
                         [name: string]: unknown;

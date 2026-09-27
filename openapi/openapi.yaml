@@ -2144,8 +2144,7 @@ components:
           # The raw `ai_artifacts.normalized_output` payload. Free-form because
           # its inner shape evolves with prompt changes — frontends should treat
           # this as best-effort debug content.
-          nullable: true
-          type: object
+          type: [object, "null"]
           additionalProperties: true
         per_field_outcomes:
           type: array
@@ -3285,7 +3284,7 @@ paths:
                       - users:manage
                       - audit:read
       responses:
-        "200": { description: Created token, raw token shown once }
+        "200": { description: "Created token, raw token shown once" }
   /api/api-tokens/{id}/rotate:
     post:
       parameters:
@@ -3302,7 +3301,7 @@ paths:
               properties:
                 expires_in_days: { type: [integer, "null"] }
       responses:
-        "200": { description: Rotated token, raw token shown once }
+        "200": { description: "Rotated token, raw token shown once" }
   /api/api-tokens/{id}:
     delete:
       parameters:
