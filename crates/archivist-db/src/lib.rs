@@ -5602,6 +5602,16 @@ pub async fn begin_completion_tag_reconcile_guard<'a>(
     }
 }
 
+/// Trigger tag used by the worker's automatic document selector.
+pub const AUTO_SELECTOR_TRIGGER: &str = "auto-selector";
+/// #401: after this many consecutive failed runs (failed runs since the last
+/// succeeded run) the auto-selector stops picking the document; an operator
+/// rerun or manual batch is required.
+pub const AUTO_SELECTOR_FAILED_RUN_CAP: i64 = 5;
+/// #401: base cool-off after a failed run before the auto-selector may pick the
+/// document again; doubles per consecutive failed run (1h, 2h, 4h, 8h).
+pub const AUTO_SELECTOR_FAILED_COOLOFF_BASE_SECONDS: f64 = 3600.0;
+
 pub async fn queue_missing_pipeline(
     pool: &DbPool,
     enabled_stages: &[Stage],
@@ -5617,6 +5627,12 @@ pub async fn queue_missing_pipeline(
     // capped chunks of ~2x budget keyset-paginated by paperless_document_id rather than push
     // a brittle predicate into SQL. When the budget is None, fetch everything in one shot.
     let chunk_size = max_documents.map(|limit| limit.saturating_mul(2).max(16));
+    // #401: `stage_needs_work("failed")` is true, so without a cool-off a
+    // permanently failing document is re-queued on every selector tick and
+    // (ordered by id) can consume the whole hourly/daily budget. Only the
+    // automatic selector is throttled; operator-initiated batches and manual
+    // reruns bypass the cool-off.
+    let apply_failed_cooloff = trigger_tag == AUTO_SELECTOR_TRIGGER;
 
     // Amortise one transaction across every chunk + per-doc insert. Candidate
     // discovery completes before document locks are taken so no transaction
@@ -5629,23 +5645,45 @@ pub async fn queue_missing_pipeline(
             break;
         }
         let limit_clause = match chunk_size {
-            Some(_) => "limit $4",
+            Some(_) => "limit $7",
             None => "",
         };
         let query = format!(
             r#"
-            select paperless_document_id,
-                   ocr_status,
-                   metadata_status,
-                   has_ocr_completion_tag,
-                   has_tagging_completion_tag,
-                   has_full_completion_tag
-              from document_inventory
-             where coalesce(current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
-               and ($1::text[] = '{{}}' or current_tags && $1::text[])
-               and not (current_tags && $2::text[])
-               and paperless_document_id > $3
-             order by paperless_document_id
+            select di.paperless_document_id,
+                   di.ocr_status,
+                   di.metadata_status,
+                   di.has_ocr_completion_tag,
+                   di.has_tagging_completion_tag,
+                   di.has_full_completion_tag
+              from document_inventory di
+             where coalesce(di.current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
+               and ($1::text[] = '{{}}' or di.current_tags && $1::text[])
+               and not (di.current_tags && $2::text[])
+               and di.paperless_document_id > $3
+               -- #401: failed-run cool-off for the auto-selector only.
+               and (not $4 or not exists (
+                     select 1
+                       from (
+                         select count(*) as failed_runs,
+                                max(coalesce(fr.finished_at, fr.updated_at)) as last_failed_at
+                           from pipeline_runs fr
+                          where fr.paperless_document_id = di.paperless_document_id
+                            and fr.status = 'failed'
+                            and fr.created_at > coalesce((
+                                  select max(sr.created_at)
+                                    from pipeline_runs sr
+                                   where sr.paperless_document_id = di.paperless_document_id
+                                     and sr.status = 'succeeded'
+                                ), '-infinity'::timestamptz)
+                       ) f
+                      where f.failed_runs >= $5
+                         or (f.failed_runs > 0
+                             and f.last_failed_at > now() - make_interval(
+                                   secs => $6 * power(2, least(f.failed_runs - 1, 10))
+                                 ))
+                   ))
+             order by di.paperless_document_id
              {limit_clause}
             "#
         );
@@ -5654,7 +5692,10 @@ pub async fn queue_missing_pipeline(
         let mut builder = sqlx::query(sqlx::AssertSqlSafe(query))
             .bind(&include_tags)
             .bind(&exclude_tags)
-            .bind(last_seen);
+            .bind(last_seen)
+            .bind(apply_failed_cooloff)
+            .bind(AUTO_SELECTOR_FAILED_RUN_CAP)
+            .bind(AUTO_SELECTOR_FAILED_COOLOFF_BASE_SECONDS);
         if let Some(size) = chunk_size {
             builder = builder.bind(size);
         }
