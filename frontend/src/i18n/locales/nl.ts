@@ -921,6 +921,15 @@ const nlMessages: Record<MessageKey, string> = {
   'stats.col.cost': 'Gesch. kosten',
 
   // --- audit 2026-09 frontend UX (#417-#429) ---
+  'inventory.trigger_queued': 'Document #{id} ingepland voor verwerking.',
+  'inventory.action_for': '{action} voor document #{id}',
+  'inventory.rerun_confirm.title': '{count} geselecteerd(e) document(en) opnieuw uitvoeren?',
+  'inventory.rerun_confirm.description': 'Plant OCR en metadata opnieuw in voor {count} document(en), vóór automatisch geselecteerd werk. Dit kan kosten bij de AI-provider veroorzaken.',
+  'inventory.loading': 'Documenten laden…',
+  'inventory.load_error': 'Documenten konden niet worden geladen.',
+  'chat.thinking': 'Archivist denkt na…',
+  'chat.transcript': 'Chatverloop',
+  'chat.sending': 'Verzenden…',
   'users.you': '(jij)',
   'users.error_no_roles': '{user} moet minstens één rol behouden.',
   'users.last_role_hint': 'Een gebruiker heeft minstens één rol nodig.',

@@ -921,6 +921,15 @@ const esMessages: Record<MessageKey, string> = {
   'stats.col.cost': 'Coste est.',
 
   // --- audit 2026-09 frontend UX (#417-#429) ---
+  'inventory.trigger_queued': 'Documento #{id} encolado para su procesamiento.',
+  'inventory.action_for': '{action} para el documento #{id}',
+  'inventory.rerun_confirm.title': '¿Reejecutar {count} documento(s) seleccionado(s)?',
+  'inventory.rerun_confirm.description': 'Vuelve a encolar OCR y metadatos para {count} documento(s), por delante del trabajo seleccionado automáticamente. Puede generar costes del proveedor de IA.',
+  'inventory.loading': 'Cargando documentos…',
+  'inventory.load_error': 'No se pudieron cargar los documentos.',
+  'chat.thinking': 'Archivist está pensando…',
+  'chat.transcript': 'Transcripción del chat',
+  'chat.sending': 'Enviando…',
   'users.you': '(tú)',
   'users.error_no_roles': '{user} debe conservar al menos un rol.',
   'users.last_role_hint': 'Un usuario necesita al menos un rol.',

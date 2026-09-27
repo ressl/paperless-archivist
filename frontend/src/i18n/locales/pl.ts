@@ -921,6 +921,15 @@ const plMessages: Record<MessageKey, string> = {
   'stats.col.cost': 'Szac. koszt',
 
   // --- audit 2026-09 frontend UX (#417-#429) ---
+  'inventory.trigger_queued': 'Dokument #{id} dodano do kolejki przetwarzania.',
+  'inventory.action_for': '{action} dla dokumentu #{id}',
+  'inventory.rerun_confirm.title': 'Ponownie uruchomić {count} zaznaczonych dokumentów?',
+  'inventory.rerun_confirm.description': 'Ponownie dodaje OCR i metadane dla {count} dokumentów, przed pracą wybraną automatycznie. Może to generować koszty u dostawcy AI.',
+  'inventory.loading': 'Ładowanie dokumentów…',
+  'inventory.load_error': 'Nie udało się wczytać dokumentów.',
+  'chat.thinking': 'Archivist myśli…',
+  'chat.transcript': 'Zapis czatu',
+  'chat.sending': 'Wysyłanie…',
   'users.you': '(ty)',
   'users.error_no_roles': '{user} musi zachować co najmniej jedną rolę.',
   'users.last_role_hint': 'Użytkownik potrzebuje co najmniej jednej roli.',

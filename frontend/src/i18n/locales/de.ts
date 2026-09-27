@@ -921,6 +921,15 @@ const deMessages: Record<MessageKey, string> = {
   'stats.col.cost': 'Gesch. Kosten',
 
   // --- audit 2026-09 frontend UX (#417-#429) ---
+  'inventory.trigger_queued': 'Dokument #{id} zur Verarbeitung eingereiht.',
+  'inventory.action_for': '{action} für Dokument #{id}',
+  'inventory.rerun_confirm.title': '{count} ausgewählte(s) Dokument(e) erneut ausführen?',
+  'inventory.rerun_confirm.description': 'Reiht OCR und Metadaten für {count} Dokument(e) erneut ein, vor automatisch ausgewählter Arbeit. Das kann Kosten beim KI-Anbieter verursachen.',
+  'inventory.loading': 'Dokumente werden geladen…',
+  'inventory.load_error': 'Dokumente konnten nicht geladen werden.',
+  'chat.thinking': 'Archivist denkt nach…',
+  'chat.transcript': 'Chat-Verlauf',
+  'chat.sending': 'Wird gesendet…',
   'users.you': '(du)',
   'users.error_no_roles': '{user} muss mindestens eine Rolle behalten.',
   'users.last_role_hint': 'Ein User braucht mindestens eine Rolle.',

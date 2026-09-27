@@ -919,6 +919,15 @@ export const enMessages = {
   'stats.col.cost': 'Est. cost',
 
   // --- audit 2026-09 frontend UX (#417-#429) ---
+  'inventory.trigger_queued': 'Queued document #{id} for processing.',
+  'inventory.action_for': '{action} for document #{id}',
+  'inventory.rerun_confirm.title': 'Re-run {count} selected document(s)?',
+  'inventory.rerun_confirm.description': 'Queues OCR and metadata again for {count} document(s), ahead of automatically selected work. This can incur AI provider costs.',
+  'inventory.loading': 'Loading documents…',
+  'inventory.load_error': 'Could not load documents.',
+  'chat.thinking': 'Archivist is thinking…',
+  'chat.transcript': 'Chat transcript',
+  'chat.sending': 'Sending…',
   'users.you': '(you)',
   'users.error_no_roles': '{user} must keep at least one role.',
   'users.last_role_hint': 'A user needs at least one role.',

@@ -921,6 +921,15 @@ const itMessages: Record<MessageKey, string> = {
   'stats.col.cost': 'Costo st.',
 
   // --- audit 2026-09 frontend UX (#417-#429) ---
+  'inventory.trigger_queued': 'Documento #{id} accodato per l\'elaborazione.',
+  'inventory.action_for': '{action} per il documento #{id}',
+  'inventory.rerun_confirm.title': 'Rieseguire {count} documento/i selezionati?',
+  'inventory.rerun_confirm.description': 'Riaccoda OCR e metadati per {count} documento/i, prima del lavoro selezionato automaticamente. Può generare costi presso il provider IA.',
+  'inventory.loading': 'Caricamento dei documenti…',
+  'inventory.load_error': 'Impossibile caricare i documenti.',
+  'chat.thinking': 'Archivist sta pensando…',
+  'chat.transcript': 'Trascrizione della chat',
+  'chat.sending': 'Invio…',
   'users.you': '(tu)',
   'users.error_no_roles': '{user} deve mantenere almeno un ruolo.',
   'users.last_role_hint': 'Un utente ha bisogno di almeno un ruolo.',

@@ -921,6 +921,15 @@ const frMessages: Record<MessageKey, string> = {
   'stats.col.cost': 'Coût est.',
 
   // --- audit 2026-09 frontend UX (#417-#429) ---
+  'inventory.trigger_queued': 'Document #{id} mis en file pour traitement.',
+  'inventory.action_for': '{action} pour le document #{id}',
+  'inventory.rerun_confirm.title': 'Relancer {count} document(s) sélectionné(s) ?',
+  'inventory.rerun_confirm.description': 'Remet en file l\'OCR et les métadonnées pour {count} document(s), avant le travail sélectionné automatiquement. Cela peut engendrer des coûts chez le fournisseur d\'IA.',
+  'inventory.loading': 'Chargement des documents…',
+  'inventory.load_error': 'Impossible de charger les documents.',
+  'chat.thinking': 'Archivist réfléchit…',
+  'chat.transcript': 'Transcription du chat',
+  'chat.sending': 'Envoi…',
   'users.you': '(vous)',
   'users.error_no_roles': '{user} doit conserver au moins un rôle.',
   'users.last_role_hint': 'Un utilisateur a besoin d\'au moins un rôle.',

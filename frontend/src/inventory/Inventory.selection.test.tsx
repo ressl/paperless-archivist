@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { api, type InventoryItem, type InventoryQueryParams } from '../api/client';
 import { I18nProvider } from '../i18n/I18nProvider';
 
@@ -66,6 +66,12 @@ async function renderInventory() {
   return screen.findByRole('checkbox', { name: 'Select document #1' }, { timeout: 2_000 });
 }
 
+// #417: bulk re-run asks first; confirm in the dialog.
+async function confirmRerun() {
+  const dialog = await screen.findByRole('alertdialog');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Re-run selected' }));
+}
+
 function selectedCount(count: number) {
   return screen.getByText(`${count} selected`);
 }
@@ -113,6 +119,7 @@ describe('<Inventory> selection query context', () => {
 
     fireEvent.click(secondCheckbox);
     fireEvent.click(screen.getByRole('button', { name: 'Re-run selected' }));
+    await confirmRerun();
     await waitFor(() => expect(bulkRerunMock).toHaveBeenCalledWith([2], ['ocr', 'metadata']));
   });
 
@@ -174,6 +181,7 @@ describe('<Inventory> selection query context', () => {
     expect(selectedCount(1)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Re-run selected' }));
+    await confirmRerun();
     await waitFor(() => expect(bulkRerunMock).toHaveBeenCalledWith([1], ['ocr', 'metadata']));
   });
 });
