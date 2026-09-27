@@ -6,16 +6,37 @@ import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { Button, PageHeader, Status, localizedErrorMessage, run, useFocusTrap } from '../lib/ui';
 import { formatMs } from '../lib/format';
 import { lineDiffStats } from './lineDiff';
+import { useResource } from '../lib/useResource';
 
 type PendingPromptSelection =
   | { kind: 'stage'; stage: Stage }
   | { kind: 'prompt'; promptId: string | null };
 
+// Stable empty lists so memoised derivations don't recompute before the first load.
+const NO_PROMPTS: Prompt[] = [];
+const NO_USAGE: PromptUsage[] = [];
+const NO_EXPERIMENTS: PromptExperiment[] = [];
+
 export function Prompts({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatDateTime, formatPercent } = useI18n();
-  const [items, setItems] = useState<Prompt[]>([]);
-  const [usage, setUsage] = useState<PromptUsage[]>([]);
-  const [experiments, setExperiments] = useState<PromptExperiment[]>([]);
+  const resource = useResource(
+    async (signal) => {
+      const [promptData, usageData, experimentData] = await Promise.all([
+        api.prompts({ signal }),
+        // Usage and A/B stats are optional extras; the workbench works without them.
+        api.promptUsage({ signal }).catch(() => ({ items: [] as PromptUsage[] })),
+        api.promptExperiments({ signal }).catch(() => ({ items: [] as PromptExperiment[] }))
+      ]);
+      return { items: promptData.items, usage: usageData.items, experiments: experimentData.items };
+    },
+    [],
+    { onError: (err) => setError(localizedErrorMessage(err, t, t('prompts.load_error'))) }
+  );
+  const load = resource.reload;
+  const loading = resource.loading;
+  const items = resource.data?.items ?? NO_PROMPTS;
+  const usage = resource.data?.usage ?? NO_USAGE;
+  const experiments = resource.data?.experiments ?? NO_EXPERIMENTS;
   const [selectedStage, setSelectedStage] = useState<Stage>('ocr');
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [comparePromptId, setComparePromptId] = useState<string | null>(null);
@@ -28,7 +49,6 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [activating, setActivating] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [pendingSelection, setPendingSelection] = useState<PendingPromptSelection | null>(null);
   const usageByPromptId = useMemo(() => {
     const byId = new Map<string, PromptUsage>();
@@ -65,27 +85,6 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const stageHelp = resolvePromptStageHelp(selectedStage, t);
   const promptStats = promptTextStats(editorContent);
   const diffStats = comparePrompt && selectedPrompt ? lineDiffStats(comparePrompt.content, editorContent) : null;
-  const load = async () => {
-    setLoading(true);
-    try {
-      const [promptData, usageData, experimentData] = await Promise.all([
-        api.prompts(),
-        api.promptUsage().catch(() => ({ items: [] as PromptUsage[] })),
-        api.promptExperiments().catch(() => ({ items: [] as PromptExperiment[] }))
-      ]);
-      setItems(promptData.items);
-      setUsage(usageData.items);
-      setExperiments(experimentData.items);
-    } catch (err) {
-      setError(localizedErrorMessage(err, t, t('prompts.load_error')));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void load();
-  }, []);
 
   useEffect(() => {
     if (stagePrompts.length === 0) {

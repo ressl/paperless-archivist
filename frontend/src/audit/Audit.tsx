@@ -1,26 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Archive, Check, FileText, Shield, X } from 'lucide-react';
 import { api, AuditEvent, AuditIntegrityReport, RetentionResult } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
 import { ActionButton, Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { useResource } from '../lib/useResource';
 
 export function Audit({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatDateTime, formatNumber } = useI18n();
-  const [items, setItems] = useState<AuditEvent[]>([]);
-  const [integrity, setIntegrity] = useState<AuditIntegrityReport | null>(null);
   const [retentionResult, setRetentionResult] = useState<RetentionResult | null>(null);
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    Promise.all([api.audit(), api.auditIntegrity()])
-      .then(([auditData, integrityData]) => {
-        setItems(auditData.items);
-        setIntegrity(integrityData);
-      })
-      .catch((err) => setError(localizedErrorMessage(err, t)));
-  }, [setError, t]);
-  const refreshIntegrity = () => api.auditIntegrity()
-    .then(setIntegrity)
-    .catch((err) => setError(localizedErrorMessage(err, t)));
+  const onError = (err: unknown) => setError(localizedErrorMessage(err, t));
+  // Two resources so "Verify chain" re-checks integrity without refetching the log.
+  const events = useResource((signal) => api.audit(undefined, { signal }), [], { onError });
+  const integrityResource = useResource((signal) => api.auditIntegrity({ signal }), [], { onError });
+  const items: AuditEvent[] = events.data?.items ?? [];
+  const integrity: AuditIntegrityReport | null = integrityResource.data ?? null;
+  const refreshIntegrity = integrityResource.reload;
   return (
     <section className="page">
       <PageHeader title={t('audit.title')} />
@@ -37,10 +32,7 @@ export function Audit({ setError }: { setError: (error: string | null) => void }
           busy={busy}
           onClick={() => run(setBusy, setError, () => api.applyAuditRetention().then((result) => {
             setRetentionResult(result);
-            return Promise.all([api.audit(), api.auditIntegrity()]).then(([auditData, integrityData]) => {
-              setItems(auditData.items);
-              setIntegrity(integrityData);
-            });
+            return Promise.all([events.reload(), integrityResource.reload()]);
           }), t)}
         />
       </div>

@@ -1,76 +1,62 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { MessageSquare, Send } from 'lucide-react';
 import { api, DocumentChatMessage, DocumentChatSession } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
 import { Button, PageHeader, localizedErrorMessage, run } from '../lib/ui';
+import { useResource } from '../lib/useResource';
+
+const NO_SESSIONS: DocumentChatSession[] = [];
+const NO_MESSAGES: DocumentChatMessage[] = [];
 
 export function DocumentChat({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatDateTime } = useI18n();
-  const [sessions, setSessions] = useState<DocumentChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  // Session identity plus a monotonically increasing request generation form
-  // the message-state ownership token. The ref is updated synchronously on a
-  // click, before React commits the state change, so even a response resolving
-  // in that gap is stale. The generation also covers A -> B -> A and two
-  // overlapping requests for the same session. (#272, #286)
+  // Mirrors activeSessionId synchronously (a click updates it before React
+  // commits), so sendMessage can tell whether the user switched sessions
+  // while its request was in flight. (#272, #286)
   const activeSessionIdRef = useRef<string | null>(null);
-  const messageRequestGenerationRef = useRef(0);
-  const [messages, setMessages] = useState<DocumentChatMessage[]>([]);
   const [sessionTitle, setSessionTitle] = useState(t('chat.default_session_title'));
   const [question, setQuestion] = useState('');
   const [documentIds, setDocumentIds] = useState('');
   const [busy, setBusy] = useState(false);
+  const onError = (err: unknown) => setError(localizedErrorMessage(err, t));
+
+  // Message state is owned by the newest request for the active session:
+  // useResource aborts and ignores older requests (A -> B -> A, a late
+  // post-send refresh after a switch), including their errors. (#286, #444)
+  const messagesResource = useResource(
+    async (signal) => (activeSessionId ? (await api.chatMessages(activeSessionId, { signal })).items : NO_MESSAGES),
+    [activeSessionId],
+    { onError }
+  );
+  const messages = messagesResource.data ?? NO_MESSAGES;
 
   const selectSession = (sessionId: string) => {
     if (activeSessionIdRef.current === sessionId) return;
     activeSessionIdRef.current = sessionId;
-    messageRequestGenerationRef.current += 1;
+    // A response for the previous session landing before the switch commits
+    // must not be shown.
+    messagesResource.cancel();
     setActiveSessionId(sessionId);
   };
 
-  const loadSessions = () =>
-    api.chatSessions().then((data) => {
-      setSessions(data.items);
-      if (activeSessionIdRef.current === null && data.items[0]) {
-        selectSession(data.items[0].id);
-      }
-    }).catch((err) => setError(localizedErrorMessage(err, t)));
-
-  const loadMessages = async (sessionId: string) => {
-    const generation = messageRequestGenerationRef.current + 1;
-    messageRequestGenerationRef.current = generation;
-    const ownsMessageState = () =>
-      activeSessionIdRef.current === sessionId &&
-      messageRequestGenerationRef.current === generation;
-    try {
-      const data = await api.chatMessages(sessionId);
-      if (ownsMessageState()) setMessages(data.items);
-    } catch (err) {
-      if (ownsMessageState()) setError(localizedErrorMessage(err, t));
+  const sessionsResource = useResource((signal) => api.chatSessions({ signal }).then((data) => data.items), [], {
+    onError,
+    onSuccess: (items) => {
+      if (activeSessionIdRef.current === null && items[0]) selectSession(items[0].id);
     }
-  };
-
-  useEffect(() => {
-    void loadSessions();
-  }, []);
-
-  useEffect(() => {
-    if (!activeSessionId) {
-      messageRequestGenerationRef.current += 1;
-      setMessages([]);
-      return;
-    }
-    void loadMessages(activeSessionId);
-    return () => {
-      messageRequestGenerationRef.current += 1;
-    };
-  }, [activeSessionId, t]);
+  });
+  const sessions = sessionsResource.data ?? NO_SESSIONS;
+  const loadSessions = sessionsResource.reload;
 
   const createSession = async () => {
     const created = await api.createChatSession(sessionTitle);
-    setSessions((current) => [{ id: created.id, title: created.title, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }, ...current]);
+    const now = new Date().toISOString();
+    sessionsResource.setData((current = NO_SESSIONS) => [
+      { id: created.id, title: created.title, created_at: now, updated_at: now },
+      ...current
+    ]);
     selectSession(created.id);
-    setMessages([]);
   };
 
   const sendMessage = async () => {
@@ -95,11 +81,10 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
     });
     setQuestion('');
     await loadSessions();
-    // Avoid an unnecessary request after a switch. `loadMessages` also checks
-    // session + generation when the response resolves, which closes the race
-    // when the switch happens during this request. (#286)
+    // Avoid an unnecessary request after a switch; a switch during this refresh
+    // supersedes it inside useResource. (#286)
     if (activeSessionIdRef.current === sessionId) {
-      await loadMessages(sessionId);
+      await messagesResource.reload();
     }
   };
 

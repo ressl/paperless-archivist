@@ -116,7 +116,7 @@ async function beginPostSendRefresh(
     expect(chatMessagesMock.mock.calls.filter(([id]) => id === 'session-a')).toHaveLength(2);
   });
   fireEvent.click(screen.getByTitle('Session B'));
-  await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-b'));
+  await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-b', expect.anything()));
   return setError;
 }
 
@@ -147,9 +147,9 @@ describe('<DocumentChat> request ownership', () => {
     );
 
     await renderChat();
-    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-a'));
+    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-a', expect.anything()));
     fireEvent.click(screen.getByTitle('Session B'));
-    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-b'));
+    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-b', expect.anything()));
 
     await act(async () => sessionB.resolve(messagesResponse('session-b', 'B current')));
     expect(await screen.findByText('B current')).toBeInTheDocument();
@@ -173,9 +173,9 @@ describe('<DocumentChat> request ownership', () => {
     });
 
     await renderChat();
-    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-a'));
+    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-a', expect.anything()));
     fireEvent.click(screen.getByTitle('Session B'));
-    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-b'));
+    await waitFor(() => expect(chatMessagesMock).toHaveBeenCalledWith('session-b', expect.anything()));
     fireEvent.click(screen.getByTitle('Session A'));
     await waitFor(() =>
       expect(chatMessagesMock.mock.calls.filter(([id]) => id === 'session-a')).toHaveLength(2)

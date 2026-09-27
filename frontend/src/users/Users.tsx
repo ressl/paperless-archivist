@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Copy, KeyRound, Power, RotateCcw, UserPlus, X } from 'lucide-react';
 import { api, ApiToken, Role, SessionItem, UserItem } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { Button, NumberField, PageHeader, localizedErrorMessage } from '../lib/ui';
+import { useResource } from '../lib/useResource';
 
 const ALL_ROLES: Role[] = ['viewer', 'reviewer', 'operator', 'auditor', 'admin'];
 
@@ -15,9 +16,6 @@ function splitTags(value: string) {
 
 export function Users({ setError }: { setError: (error: string | null) => void }) {
   const { t, formatDateTime } = useI18n();
-  const [users, setUsers] = useState<UserItem[]>([]);
-  const [sessions, setSessions] = useState<SessionItem[]>([]);
-  const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [newToken, setNewToken] = useState<string | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -26,18 +24,22 @@ export function Users({ setError }: { setError: (error: string | null) => void }
   const [tokenScopes, setTokenScopes] = useState('runs:read, inventory:read');
   const [tokenExpiresInDays, setTokenExpiresInDays] = useState(90);
   const [resetPasswords, setResetPasswords] = useState<Record<string, string>>({});
-  const load = () =>
-    Promise.all([api.users(), api.sessions(), api.apiTokens()])
-      .then(([userData, sessionData, tokenData]) => {
-        setUsers(userData.items);
-        setSessions(sessionData.items);
-        setTokens(tokenData.items);
-      })
-      .catch((err) => setError(localizedErrorMessage(err, t)));
-
-  useEffect(() => {
-    void load();
-  }, []);
+  const resource = useResource(
+    (signal) =>
+      Promise.all([api.users({ signal }), api.sessions({ signal }), api.apiTokens({ signal })]).then(
+        ([userData, sessionData, tokenData]) => ({
+          users: userData.items,
+          sessions: sessionData.items,
+          tokens: tokenData.items
+        })
+      ),
+    [],
+    { onError: (err) => setError(localizedErrorMessage(err, t)) }
+  );
+  const load = resource.reload;
+  const users: UserItem[] = resource.data?.users ?? [];
+  const sessions: SessionItem[] = resource.data?.sessions ?? [];
+  const tokens: ApiToken[] = resource.data?.tokens ?? [];
 
   return (
     <section className="page">
