@@ -258,6 +258,10 @@ impl PaperlessClient {
         self.get_json(url).await
     }
 
+    /// Download the document file. Despite the name, Paperless' `/download/`
+    /// endpoint (without `original=true`) returns the archive PDF whenever one
+    /// exists and the original upload otherwise, so the bytes may not match
+    /// `original_file_name`; OCR classifies inputs by magic bytes. #405
     pub async fn download_original(&self, id: i32) -> Result<Bytes> {
         let url = self.url(&format!("api/documents/{id}/download/"))?;
         // Override the JSON-tuned client timeout with a larger budget so big

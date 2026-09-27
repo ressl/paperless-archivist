@@ -54,35 +54,108 @@ pub async fn render_document_pages(
         return Ok(Vec::new());
     }
 
+    // #405: Paperless' `/download/` endpoint serves the *archive* PDF whenever
+    // one exists, while `original_name` describes the original upload (.jpg,
+    // .tiff, .docx, .eml, ...). Decide by the bytes we actually hold; the
+    // file name is only a fallback when the content is not recognisable.
+    let kind = match sniff_input_kind(document_bytes) {
+        Some(kind) => kind,
+        None => input_kind_from_name(original_name)?,
+    };
+
+    match kind {
+        InputKind::Image(mime_type) => {
+            // Image inputs go straight to the vision model without rendering,
+            // but they still get loaded into memory (and base64-encoded), so
+            // the per-page byte cap must apply here too — the PDF path is not
+            // the only way to feed a huge raster into the worker. #282
+            accumulate_rendered_page_size(0, document_bytes.len() as u64)?;
+            Ok(vec![RenderedPage {
+                path: PathBuf::from(original_name.unwrap_or("document-image")),
+                mime_type: mime_type.to_owned(),
+                bytes: document_bytes.to_vec(),
+            }])
+        }
+        InputKind::Tiff => Err(anyhow!(
+            "OCR input is a TIFF image without a Paperless archive PDF; vision models do not accept TIFF"
+        )),
+        InputKind::Pdf => render_pdf_with_pdftoppm(document_bytes, page_limit).await,
+    }
+}
+
+/// What the OCR input bytes are. #405
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    Pdf,
+    /// A raster the vision model accepts directly, with its MIME type.
+    Image(&'static str),
+    Tiff,
+}
+
+/// Identify the input from its magic bytes. `None` when unrecognised. #405
+fn sniff_input_kind(bytes: &[u8]) -> Option<InputKind> {
+    // PDF readers accept up to 1 KiB of leading garbage before the header.
+    let head = &bytes[..bytes.len().min(1024)];
+    if head.windows(5).any(|window| window == b"%PDF-") {
+        return Some(InputKind::Pdf);
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(InputKind::Image("image/png"));
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some(InputKind::Image("image/jpeg"));
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(InputKind::Image("image/webp"));
+    }
+    if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        return Some(InputKind::Tiff);
+    }
+    None
+}
+
+/// Fallback classification from the file name (missing name = PDF, the
+/// historical default). #405
+fn input_kind_from_name(original_name: Option<&str>) -> Result<InputKind> {
     let extension = original_name
         .and_then(|name| Path::new(name).extension())
         .and_then(|ext| ext.to_str())
         .unwrap_or("pdf")
         .to_ascii_lowercase();
-
-    if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp") {
-        // Image inputs go straight to the vision model without rendering, but
-        // they still get loaded into memory (and base64-encoded), so the
-        // per-page byte cap must apply here too — the PDF path is not the only
-        // way to feed a huge raster into the worker. #282
-        accumulate_rendered_page_size(0, document_bytes.len() as u64)?;
-        let mime_type = mime_guess::from_ext(&extension)
-            .first_or_octet_stream()
-            .to_string();
-        return Ok(vec![RenderedPage {
-            path: PathBuf::from(original_name.unwrap_or("document-image")),
-            mime_type,
-            bytes: document_bytes.to_vec(),
-        }]);
-    }
-
-    if extension != "pdf" {
-        return Err(anyhow!(
+    match extension.as_str() {
+        "pdf" => Ok(InputKind::Pdf),
+        "png" => Ok(InputKind::Image("image/png")),
+        "jpg" | "jpeg" => Ok(InputKind::Image("image/jpeg")),
+        "webp" => Ok(InputKind::Image("image/webp")),
+        "tif" | "tiff" => Ok(InputKind::Tiff),
+        _ => Err(anyhow!(
             "OCR rendering supports PDF and image inputs for MVP, got .{extension}"
-        ));
+        )),
     }
+}
 
-    render_pdf_with_pdftoppm(document_bytes, page_limit).await
+/// Wall-clock budget for the `pdfinfo` geometry probe. #407
+const PDFINFO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `command` to completion with a wall-clock bound. The child is spawned
+/// with `kill_on_drop`, so on timeout it is killed rather than left running
+/// (a hung poppler process used to block the whole job batch). Returns
+/// `Ok(None)` on timeout. #407
+async fn output_with_timeout(
+    command: &mut Command,
+    budget: Duration,
+) -> std::io::Result<Option<std::process::Output>> {
+    let child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    match tokio::time::timeout(budget, child.wait_with_output()).await {
+        Ok(output) => output.map(Some),
+        // Dropping the `wait_with_output` future drops the child -> SIGKILL.
+        Err(_) => Ok(None),
+    }
 }
 
 async fn render_pdf_with_pdftoppm(
@@ -175,16 +248,24 @@ async fn reject_oversized_pages(input: &Path, page_limit: u16) -> Result<()> {
     // slipped past the cap even though pdftoppm still rendered it. Probe
     // exactly the range pdftoppm will rasterize; pdfinfo clamps -l beyond the
     // page count and the parser handles the per-page `Page N size:` lines. #309
-    let probe = Command::new("pdfinfo")
-        .arg("-f")
-        .arg("1")
-        .arg("-l")
-        .arg(page_limit.to_string())
-        .arg(input)
-        .output()
-        .await;
+    let probe = output_with_timeout(
+        Command::new("pdfinfo")
+            .arg("-f")
+            .arg("1")
+            .arg("-l")
+            .arg(page_limit.to_string())
+            .arg(input),
+        PDFINFO_TIMEOUT,
+    )
+    .await;
     let output = match probe {
-        Ok(output) => output,
+        Ok(Some(output)) => output,
+        // A corrupt PDF can hang poppler; the child is already killed. #407
+        Ok(None) => {
+            return Err(anyhow!(
+                "pdfinfo timed out after {PDFINFO_TIMEOUT:?} probing the PDF"
+            ));
+        }
         // pdfinfo missing from the image: skip the pre-check rather than fail
         // every render; the byte cap + /tmp sizeLimit still bound the blast.
         Err(error) => {
@@ -676,6 +757,95 @@ mod tests {
         reject_oversized_pages(&input, 1)
             .await
             .expect("A4 page 1 alone is within the cap");
+    }
+
+    const JPEG_HEAD: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+
+    #[test]
+    fn input_kind_follows_the_bytes_not_the_original_file_name() {
+        // #405: Paperless serves the archive PDF for .jpg/.tiff/.docx/.eml
+        // originals; the bytes decide.
+        assert_eq!(
+            sniff_input_kind(&two_page_pdf("0 0 595 842")),
+            Some(InputKind::Pdf)
+        );
+        // Leading garbage before the header is tolerated like PDF readers do.
+        assert_eq!(
+            sniff_input_kind(b"\xEF\xBB\xBF\r\n%PDF-1.7\n"),
+            Some(InputKind::Pdf)
+        );
+        assert_eq!(
+            sniff_input_kind(JPEG_HEAD),
+            Some(InputKind::Image("image/jpeg"))
+        );
+        assert_eq!(
+            sniff_input_kind(b"\x89PNG\r\n\x1a\n...."),
+            Some(InputKind::Image("image/png"))
+        );
+        assert_eq!(
+            sniff_input_kind(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            Some(InputKind::Image("image/webp"))
+        );
+        assert_eq!(sniff_input_kind(b"II*\0rest"), Some(InputKind::Tiff));
+        assert_eq!(sniff_input_kind(b"MM\0*rest"), Some(InputKind::Tiff));
+        assert_eq!(sniff_input_kind(&[0u8; 64]), None);
+        // Unknown bytes fall back to the name.
+        assert_eq!(
+            input_kind_from_name(Some("x.JPEG")).unwrap(),
+            InputKind::Image("image/jpeg")
+        );
+        assert_eq!(input_kind_from_name(None).unwrap(), InputKind::Pdf);
+        assert!(input_kind_from_name(Some("letter.docx")).is_err());
+    }
+
+    #[tokio::test]
+    async fn image_mime_type_matches_the_bytes() {
+        // #405: a JPEG labelled .png must reach the model as image/jpeg.
+        let pages = render_document_pages(JPEG_HEAD, Some("scan.png"), 4)
+            .await
+            .expect("jpeg bytes accepted");
+        assert_eq!(pages[0].mime_type, "image/jpeg");
+        // A real TIFF without archive PDF fails with a clear message instead
+        // of being mislabelled.
+        let error = render_document_pages(b"II*\0....", Some("fax.tiff"), 4)
+            .await
+            .expect_err("tiff is not a vision input");
+        assert!(error.to_string().contains("TIFF"));
+    }
+
+    #[tokio::test]
+    async fn archive_pdf_of_non_pdf_original_is_rendered_as_pdf() {
+        // #405: .jpg/.docx originals with an archive PDF render via pdftoppm.
+        if Command::new("pdftoppm").arg("-v").output().await.is_err() {
+            eprintln!("pdftoppm not installed; skipping archive-PDF render test");
+            return;
+        }
+        let pdf = two_page_pdf("0 0 595 842");
+        for name in ["scan.jpg", "letter.docx", "fax.tiff"] {
+            let pages = render_document_pages(&pdf, Some(name), 2)
+                .await
+                .expect("archive PDF renders");
+            assert_eq!(pages.len(), 2, "{name}");
+            assert!(pages.iter().all(|page| page.mime_type == "image/png"));
+        }
+    }
+
+    #[tokio::test]
+    async fn hung_subprocess_is_killed_after_its_budget() {
+        // #407: a hanging child is bounded and killed, not awaited forever.
+        let started = std::time::Instant::now();
+        let output =
+            output_with_timeout(Command::new("sleep").arg("30"), Duration::from_millis(200))
+                .await
+                .expect("spawn sleep");
+        assert!(output.is_none(), "timeout reported");
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let output = output_with_timeout(&mut Command::new("true"), Duration::from_secs(10))
+            .await
+            .expect("spawn true")
+            .expect("finishes in budget");
+        assert!(output.status.success());
     }
 
     #[test]
