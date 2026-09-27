@@ -28,6 +28,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub type DbPool = PgPool;
+/// Transaction handle for callers that batch several helpers in one TX
+/// without depending on sqlx directly (worker sync batches, #408).
+pub type DbTransaction<'a> = Transaction<'a, Postgres>;
 
 const LAST_ENABLED_ADMIN_REJECTION: &str = "last enabled administrator mutation rejected";
 static AUDIT_INTEGRITY_VERIFY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -5445,14 +5448,16 @@ pub async fn queue_missing_stage(
     // Eligibility is fully expressible in SQL for this function, so push the budget as `limit $3`
     // and avoid materialising the entire candidate set in Rust.
     let limit_clause = match max_documents {
-        Some(_) => "limit $3",
+        Some(_) => "limit $4",
         None => "",
     };
+    // #410: same terminal-status list as `stage_needs_work` (it used to miss
+    // `rejected`, so batches re-queued rejected documents).
     let query = format!(
         r#"
         select paperless_document_id
           from document_inventory
-         where {column} not in ('succeeded', 'skipped', 'not_needed')
+         where {column} <> all($3::text[])
            and coalesce(current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
            and ($1::text[] = '{{}}' or current_tags && $1::text[])
            and not (current_tags && $2::text[])
@@ -5464,7 +5469,8 @@ pub async fn queue_missing_stage(
     // `limit_clause`; all caller data flows through bind parameters below.
     let mut builder = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(&include_tags)
-        .bind(&exclude_tags);
+        .bind(&exclude_tags)
+        .bind(TERMINAL_STAGE_STATUSES);
     if let Some(limit) = max_documents {
         builder = builder.bind(limit);
     }
@@ -5531,76 +5537,134 @@ pub async fn completed_document_ids_missing_full_tag(
                )
            and (
                  not $1
-                 or ocr_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
+                 or ocr_status = any($3::text[])
                )
            and (
                  not $2
-                 or metadata_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
+                 or metadata_status = any($3::text[])
                )
          order by paperless_document_id
         "#,
     )
     .bind(ocr_enabled)
     .bind(metadata_enabled)
+    .bind(TERMINAL_STAGE_STATUSES)
     .fetch_all(pool)
     .await
     .context("select documents missing the full completion tag")
 }
 
-/// Recheck status-based completion-tag eligibility while holding the same
-/// per-document advisory lock used by run creation.
+/// Recheck status-based completion-tag eligibility under the per-document
+/// advisory lock used by run creation and, when still eligible, reserve the
+/// document by recording the global completion tag in the inventory
+/// (`has_full_completion_tag = complete = true`) before the Paperless write.
 ///
-/// The caller must keep the returned transaction alive until the external
-/// Paperless tag write has completed, then commit it. This closes the window
-/// where a run could become active after bulk candidate discovery but before
-/// the global completion tag is written.
-pub async fn begin_completion_tag_reconcile_guard<'a>(
-    pool: &'a DbPool,
+/// #410: the previous guard kept this transaction — and with it the advisory
+/// lock and a pooled connection — open across the Paperless PATCH. The
+/// reservation commits immediately instead: once `has_full_completion_tag`
+/// is set, neither candidate discovery nor the auto-selector
+/// (`missing_pipeline_stages_for_inventory`) pick the document up again. If
+/// the Paperless write fails, call [`release_completion_tag_reservation`];
+/// the next Paperless sync re-derives the flag from the real tags either way.
+/// Returns `false` when the document is no longer eligible.
+pub async fn reserve_completion_tag_reconcile(
+    pool: &DbPool,
     paperless_document_id: i32,
     enabled_stages: &[Stage],
-) -> Result<Option<Transaction<'a, Postgres>>> {
+) -> Result<bool> {
     let ocr_enabled = enabled_stages.contains(&Stage::Ocr);
     let metadata_enabled = enabled_stages.contains(&Stage::Metadata);
     if !ocr_enabled && !metadata_enabled {
-        return Ok(None);
+        return Ok(false);
     }
 
     let mut tx = pool.begin().await?;
     lock_active_run_document_tx(&mut tx, paperless_document_id).await?;
-    let eligible: bool = sqlx::query_scalar(
+    let reserved = sqlx::query(
         r#"
-        select exists (
-          select 1
-            from document_inventory
-           where paperless_document_id = $1
-             and not has_full_completion_tag
-             and coalesce(current_run_status, '') not in (
-                   'queued', 'running', 'applying', 'waiting_review'
-                 )
-             and (
-                   not $2
-                   or ocr_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
-                 )
-             and (
-                   not $3
-                   or metadata_status in ('succeeded', 'skipped', 'not_needed', 'rejected')
-                 )
-        )
+        update document_inventory
+           set has_full_completion_tag = true,
+               complete = true,
+               updated_at = now()
+         where paperless_document_id = $1
+           and not has_full_completion_tag
+           and coalesce(current_run_status, '') not in (
+                 'queued', 'running', 'applying', 'waiting_review'
+               )
+           and (
+                 not $2
+                 or ocr_status = any($4::text[])
+               )
+           and (
+                 not $3
+                 or metadata_status = any($4::text[])
+               )
         "#,
     )
     .bind(paperless_document_id)
     .bind(ocr_enabled)
     .bind(metadata_enabled)
-    .fetch_one(&mut *tx)
+    .bind(TERMINAL_STAGE_STATUSES)
+    .execute(&mut *tx)
     .await
-    .context("recheck completion-tag reconciliation eligibility")?;
-    if eligible {
-        Ok(Some(tx))
-    } else {
-        tx.rollback().await?;
-        Ok(None)
-    }
+    .context("recheck and reserve completion-tag reconciliation")?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(reserved)
 }
+
+/// Undo [`reserve_completion_tag_reconcile`] after the Paperless tag write
+/// failed. #410
+pub async fn release_completion_tag_reservation(
+    pool: &DbPool,
+    paperless_document_id: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update document_inventory
+           set has_full_completion_tag = false,
+               complete = false,
+               updated_at = now()
+         where paperless_document_id = $1
+        "#,
+    )
+    .bind(paperless_document_id)
+    .execute(pool)
+    .await
+    .context("release completion-tag reservation")?;
+    Ok(())
+}
+
+/// Record that the global completion tag now exists in Paperless, so the
+/// inventory reflects the write without waiting for the next sync. #410
+pub async fn record_full_completion_tag(pool: &DbPool, paperless_document_id: i32) -> Result<()> {
+    sqlx::query(
+        r#"
+        update document_inventory
+           set has_full_completion_tag = true,
+               complete = true,
+               updated_at = now()
+         where paperless_document_id = $1
+           and not (has_full_completion_tag and complete)
+        "#,
+    )
+    .bind(paperless_document_id)
+    .execute(pool)
+    .await
+    .context("record full completion tag")?;
+    Ok(())
+}
+
+/// Trigger tag used by the worker's automatic document selector.
+pub const AUTO_SELECTOR_TRIGGER: &str = "auto-selector";
+/// #401: after this many consecutive failed runs (failed runs since the last
+/// succeeded run) the auto-selector stops picking the document; an operator
+/// rerun or manual batch is required.
+pub const AUTO_SELECTOR_FAILED_RUN_CAP: i64 = 5;
+/// #401: base cool-off after a failed run before the auto-selector may pick the
+/// document again; doubles per consecutive failed run (1h, 2h, 4h, 8h).
+pub const AUTO_SELECTOR_FAILED_COOLOFF_BASE_SECONDS: f64 = 3600.0;
 
 pub async fn queue_missing_pipeline(
     pool: &DbPool,
@@ -5617,6 +5681,12 @@ pub async fn queue_missing_pipeline(
     // capped chunks of ~2x budget keyset-paginated by paperless_document_id rather than push
     // a brittle predicate into SQL. When the budget is None, fetch everything in one shot.
     let chunk_size = max_documents.map(|limit| limit.saturating_mul(2).max(16));
+    // #401: `stage_needs_work("failed")` is true, so without a cool-off a
+    // permanently failing document is re-queued on every selector tick and
+    // (ordered by id) can consume the whole hourly/daily budget. Only the
+    // automatic selector is throttled; operator-initiated batches and manual
+    // reruns bypass the cool-off.
+    let apply_failed_cooloff = trigger_tag == AUTO_SELECTOR_TRIGGER;
 
     // Amortise one transaction across every chunk + per-doc insert. Candidate
     // discovery completes before document locks are taken so no transaction
@@ -5629,23 +5699,45 @@ pub async fn queue_missing_pipeline(
             break;
         }
         let limit_clause = match chunk_size {
-            Some(_) => "limit $4",
+            Some(_) => "limit $7",
             None => "",
         };
         let query = format!(
             r#"
-            select paperless_document_id,
-                   ocr_status,
-                   metadata_status,
-                   has_ocr_completion_tag,
-                   has_tagging_completion_tag,
-                   has_full_completion_tag
-              from document_inventory
-             where coalesce(current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
-               and ($1::text[] = '{{}}' or current_tags && $1::text[])
-               and not (current_tags && $2::text[])
-               and paperless_document_id > $3
-             order by paperless_document_id
+            select di.paperless_document_id,
+                   di.ocr_status,
+                   di.metadata_status,
+                   di.has_ocr_completion_tag,
+                   di.has_tagging_completion_tag,
+                   di.has_full_completion_tag
+              from document_inventory di
+             where coalesce(di.current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
+               and ($1::text[] = '{{}}' or di.current_tags && $1::text[])
+               and not (di.current_tags && $2::text[])
+               and di.paperless_document_id > $3
+               -- #401: failed-run cool-off for the auto-selector only.
+               and (not $4 or not exists (
+                     select 1
+                       from (
+                         select count(*) as failed_runs,
+                                max(coalesce(fr.finished_at, fr.updated_at)) as last_failed_at
+                           from pipeline_runs fr
+                          where fr.paperless_document_id = di.paperless_document_id
+                            and fr.status = 'failed'
+                            and fr.created_at > coalesce((
+                                  select max(sr.created_at)
+                                    from pipeline_runs sr
+                                   where sr.paperless_document_id = di.paperless_document_id
+                                     and sr.status = 'succeeded'
+                                ), '-infinity'::timestamptz)
+                       ) f
+                      where f.failed_runs >= $5
+                         or (f.failed_runs > 0
+                             and f.last_failed_at > now() - make_interval(
+                                   secs => $6 * power(2, least(f.failed_runs - 1, 10))
+                                 ))
+                   ))
+             order by di.paperless_document_id
              {limit_clause}
             "#
         );
@@ -5654,7 +5746,10 @@ pub async fn queue_missing_pipeline(
         let mut builder = sqlx::query(sqlx::AssertSqlSafe(query))
             .bind(&include_tags)
             .bind(&exclude_tags)
-            .bind(last_seen);
+            .bind(last_seen)
+            .bind(apply_failed_cooloff)
+            .bind(AUTO_SELECTOR_FAILED_RUN_CAP)
+            .bind(AUTO_SELECTOR_FAILED_COOLOFF_BASE_SECONDS);
         if let Some(size) = chunk_size {
             builder = builder.bind(size);
         }
@@ -5761,52 +5856,79 @@ fn missing_pipeline_stages_for_inventory(
         .collect()
 }
 
+/// Inventory stage statuses that count as resolved: no further automatic work.
+/// `rejected` is deliberately terminal — an operator declined the suggestion,
+/// so the document gets the global processed tag via completion
+/// reconciliation and is excluded from further automatic selection; a manual
+/// rerun remains possible. Single source for `stage_needs_work`,
+/// `queue_missing_stage` and completion reconciliation. #410
+pub const TERMINAL_STAGE_STATUSES: &[&str] = &["succeeded", "skipped", "not_needed", "rejected"];
+
 fn stage_needs_work(status: &str) -> bool {
-    !matches!(status, "succeeded" | "skipped" | "not_needed" | "rejected")
+    !TERMINAL_STAGE_STATUSES.contains(&status)
 }
 
-pub async fn claim_jobs(
-    pool: &DbPool,
-    limit: i64,
-    lease_owner: &str,
-    lease_seconds: i64,
-) -> Result<Vec<JobRecord>> {
-    // v1.4.0: `priority` now carries the cross-run (age-derived) value while `stage_priority`
-    // enforces within-run stage ordering. The inner subquery uses stage_priority so all jobs
-    // of one run share the same `priority` value without losing OCR -> Metadata ordering. The
-    // outer ORDER BY claims newer documents first (smaller priority), then earlier stages
-    // (smaller stage_priority), then FIFO as a tiebreaker. The retry bias (failed jobs first)
-    // stays first in the order so a stuck retry never starves out.
-    // Both `priority` and `stage_priority` are STORED generated columns (0019/0030), so the
-    // partial `idx_jobs_claim` (priority, stage_priority, run_after, created_at) where
-    // status='queued' backs this ordering — the column names and values are unchanged.
-    // The claim and its run/inventory follow-ups run in one TX so a crash between them can't
-    // leave jobs `running` while their run/inventory rows stay `queued`.
-    let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
-        r#"
-        with claimed as (
-          select id,
-                 status as prior_status,
-                 lease_owner as prior_lease_owner,
-                 attempts as prior_attempts
-            from jobs
-           where ((status = 'queued' and run_after <= now())
-              or (status = 'running' and lease_until < now()))
+/// One index-ordered pass of [`claim_jobs`]. #412.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimPass {
+    /// `running` jobs whose lease expired (worker crash/OOM) with attempts left.
+    StaleLease,
+    /// `queued` jobs that already failed at least once (retry bias).
+    Retry,
+    /// Every other runnable `queued` job.
+    Queued,
+}
+
+/// Predicate shared by every claim pass: a job may only run once all earlier
+/// stages of its run are resolved.
+const CLAIM_STAGE_ORDER_GUARD: &str = r#"
              and not exists (
                select 1
                  from jobs prev
                 where prev.run_id = jobs.run_id
                   and prev.stage_priority < jobs.stage_priority
                   and prev.status in ('queued', 'running', 'waiting_review', 'failed')
-             )
-           order by case when error_message is not null and attempts > 0 then 0 else 1 end,
-                    priority,
-                    stage_priority,
-                    run_after,
-                    created_at
+             )"#;
+
+/// The candidate SELECT for one claim pass: filter and ORDER BY are shaped so
+/// the planner can walk an index in order and stop after `limit` rows instead
+/// of sorting the backlog. #412. Public so the DB tests can `EXPLAIN` it.
+pub fn claim_jobs_candidate_sql(pass: ClaimPass) -> String {
+    let (filter, order) = match pass {
+        ClaimPass::StaleLease => (
+            // #402: exhausted rows are failed by `fail_exhausted_stale_jobs_tx`
+            // and never re-leased here.
+            "status = 'running' and lease_until < now() and attempts < max_attempts",
+            "lease_until",
+        ),
+        ClaimPass::Retry => (
+            "status = 'queued' and error_message is not null and attempts > 0 and run_after <= now()",
+            "priority, stage_priority, run_after, created_at",
+        ),
+        ClaimPass::Queued => (
+            "status = 'queued' and run_after <= now()",
+            "priority, stage_priority, run_after, created_at",
+        ),
+    };
+    format!(
+        r#"
+          select id,
+                 status as prior_status,
+                 lease_owner as prior_lease_owner,
+                 attempts as prior_attempts
+            from jobs
+           where {filter}{CLAIM_STAGE_ORDER_GUARD}
+           order by {order}
            for update skip locked
-           limit $1
+           limit $1"#
+    )
+}
+
+fn claim_jobs_pass_sql(pass: ClaimPass) -> String {
+    let candidates = claim_jobs_candidate_sql(pass);
+    format!(
+        r#"
+        with claimed as ({candidates}
         ),
         updated as (
           update jobs j
@@ -5826,13 +5948,185 @@ pub async fn claim_jobs(
                u.prior_status, u.prior_lease_owner, u.prior_attempts
           from updated u
           join pipeline_runs r on r.id = u.run_id
+        "#
+    )
+}
+
+/// #402: fail `running` jobs whose lease expired after they had already used
+/// their last attempt. Such a job took the worker down (OOM kill, abort) before
+/// `fail_job` could enforce the retry budget; reclaiming it again would just
+/// crash the next worker. Returns the number of jobs failed.
+async fn fail_exhausted_stale_jobs_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    limit: i64,
+) -> Result<usize> {
+    let rows = sqlx::query(
+        r#"
+        with exhausted as (
+          select id
+            from jobs
+           where status = 'running'
+             and lease_until < now()
+             and attempts >= max_attempts
+           order by lease_until
+           for update skip locked
+           limit $1
+        )
+        update jobs j
+           set status = 'failed',
+               error_message = format(
+                 'lease expired after attempt %s of %s without a result; the worker likely crashed (OOM/panic) while processing this job',
+                 j.attempts, j.max_attempts
+               ),
+               lease_owner = null,
+               lease_until = null,
+               updated_at = now()
+          from exhausted
+         where j.id = exhausted.id
+        returning j.id, j.run_id, j.paperless_document_id, j.stage, j.attempts,
+                  j.max_attempts, j.error_message
         "#,
     )
     .bind(limit)
-    .bind(lease_owner)
-    .bind(lease_seconds as f64)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
+    for row in &rows {
+        let job_id: Uuid = row.try_get("id")?;
+        let run_id: Uuid = row.try_get("run_id")?;
+        let document_id: i32 = row.try_get("paperless_document_id")?;
+        let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
+        let error: String = row.try_get("error_message")?;
+        tracing::warn!(
+            job_id = %job_id,
+            run_id = %run_id,
+            stage = %stage,
+            "failing job with expired lease and exhausted retry budget"
+        );
+        apply_permanent_job_failure_tx(tx, job_id, run_id, document_id, stage, &error).await?;
+        append_audit_tx(
+            tx,
+            AuditEventInput {
+                event_type: "job.failed".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: Some(run_id),
+                job_id: Some(job_id),
+                paperless_document_id: Some(document_id),
+                before: None,
+                after: Some(json!({ "status": "failed", "retry": false })),
+                metadata: Some(json!({
+                    "stage": stage,
+                    "reason": "lease_expired_attempts_exhausted",
+                    "attempts": row.try_get::<i32, _>("attempts")?,
+                    "max_attempts": row.try_get::<i32, _>("max_attempts")?,
+                })),
+                outcome: "failed".to_owned(),
+                error_message: Some(error),
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+    if !rows.is_empty() {
+        increment_metric_counter_tx(tx, "job_failures_total", rows.len() as i64).await?;
+    }
+    Ok(rows.len())
+}
+
+/// Permanent-failure follow-ups shared by `fail_job` and the #402 stale-lease
+/// path: inventory stage `failed`, run `failed`, and cancel the run's siblings.
+async fn apply_permanent_job_failure_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    run_id: Uuid,
+    paperless_document_id: i32,
+    stage: Stage,
+    error: &str,
+) -> Result<()> {
+    set_inventory_stage_status_tx(
+        tx,
+        paperless_document_id,
+        stage,
+        "failed",
+        Some(error),
+        false,
+        Some(run_id),
+    )
+    .await?;
+    sqlx::query(
+        "update pipeline_runs set status = 'failed', error_message = $2, finished_at = now(), updated_at = now() where id = $1",
+    )
+    .bind(run_id)
+    .bind(error)
+    .execute(&mut **tx)
+    .await?;
+    // A permanent failure aborts the whole run, so cancel the sibling jobs in the same TX.
+    // Mirrors the reject path: leaving them `queued` makes them unclaimable (the claim guard
+    // blocks them behind the failed stage) yet still scanned on every poll, inflating
+    // `jobs_queued` forever.
+    sqlx::query(
+        r#"
+        update jobs
+           set status = 'cancelled',
+               lease_owner = null,
+               lease_until = null,
+               updated_at = now()
+         where run_id = $1
+           and id <> $2
+           and status in ('queued', 'running', 'waiting_review')
+        "#,
+    )
+    .bind(run_id)
+    .bind(job_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub async fn claim_jobs(
+    pool: &DbPool,
+    limit: i64,
+    lease_owner: &str,
+    lease_seconds: i64,
+) -> Result<Vec<JobRecord>> {
+    // v1.4.0: `priority` now carries the cross-run (age-derived) value while `stage_priority`
+    // enforces within-run stage ordering. The inner subquery uses stage_priority so all jobs
+    // of one run share the same `priority` value without losing OCR -> Metadata ordering. The
+    // outer ORDER BY claims newer documents first (smaller priority), then earlier stages
+    // (smaller stage_priority), then FIFO as a tiebreaker. The retry bias (failed jobs first)
+    // stays first in the order so a stuck retry never starves out.
+    // #412: the former single query ORed `queued`/`running` in WHERE and led the ORDER BY with
+    // a CASE retry-bias expression, so no index could serve it and every poll sorted the whole
+    // backlog. The claim now runs as up to three index-ordered passes in one TX, each taking
+    // only what the previous passes left of `limit`:
+    //   1. stale-lease reclaim (`jobs_lease_until_idx`), budget-exhausted rows excluded (#402);
+    //   2. queued retries (`idx_jobs_claim_retry`, migration 0053) — keeps the retry bias;
+    //   3. regular queued jobs (`idx_jobs_claim`) in (priority, stage_priority, run_after,
+    //      created_at) order.
+    // The claim and its run/inventory follow-ups run in one TX so a crash between them can't
+    // leave jobs `running` while their run/inventory rows stay `queued`.
+    let mut tx = pool.begin().await?;
+    // #402: a job whose lease expired after it already consumed its last attempt (worker
+    // OOM-killed or crashed mid-job) is failed here instead of being reclaimed forever.
+    fail_exhausted_stale_jobs_tx(&mut tx, limit.max(1)).await?;
+    let mut rows = Vec::new();
+    for pass in [ClaimPass::StaleLease, ClaimPass::Retry, ClaimPass::Queued] {
+        let remaining = limit - rows.len() as i64;
+        if remaining <= 0 {
+            break;
+        }
+        let query = claim_jobs_pass_sql(pass);
+        // SAFETY: `query` is assembled from static per-pass fragments only; all
+        // caller data flows through bind parameters.
+        let pass_rows = sqlx::query(sqlx::AssertSqlSafe(query))
+            .bind(remaining)
+            .bind(lease_owner)
+            .bind(lease_seconds as f64)
+            .fetch_all(&mut *tx)
+            .await?;
+        rows.extend(pass_rows);
+    }
 
     let mut jobs = Vec::new();
     // (job_id, run_id, document_id, prior_lease_owner, prior_attempts) for stale-lease reclaims.
@@ -5927,13 +6221,23 @@ pub async fn claim_jobs(
         .execute(&mut *tx)
         .await?;
 
+        // #408: lock the inventory rows in ascending id order (the order the
+        // batched Paperless sync upserts them in) so the two cannot deadlock.
         sqlx::query(
             r#"
-            update document_inventory
+            with locked as (
+              select paperless_document_id
+                from document_inventory
+               where paperless_document_id = any($1::int[])
+                 and current_run_status in ('queued', 'running', 'waiting_review')
+               order by paperless_document_id
+               for update
+            )
+            update document_inventory di
                set current_run_status = 'running',
                    updated_at = now()
-             where paperless_document_id = any($1::int[])
-               and current_run_status in ('queued', 'running', 'waiting_review')
+              from locked
+             where di.paperless_document_id = locked.paperless_document_id
             "#,
         )
         .bind(&document_ids)
@@ -5973,6 +6277,24 @@ pub async fn bump_job_lease(
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Current `lease_until` of a job while `lease_owner` still holds it; `None`
+/// once the lease was released, completed or taken over. Used by the worker's
+/// no-progress watchdog. #407
+pub async fn job_lease_until(
+    pool: &DbPool,
+    job_id: Uuid,
+    lease_owner: &str,
+) -> Result<Option<DateTime<Utc>>> {
+    let lease_until: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+        "select lease_until from jobs where id = $1 and lease_owner = $2 and status in ('running', 'waiting_review')",
+    )
+    .bind(job_id)
+    .bind(lease_owner)
+    .fetch_optional(pool)
+    .await?;
+    Ok(lease_until.flatten())
 }
 
 /// Mark a single run + inventory row as running. `claim_jobs` issues equivalent updates in bulk;
@@ -6068,16 +6390,21 @@ pub async fn complete_job(
         .bind(job.run_id)
         .execute(&mut *tx)
         .await?;
+        // #410: `complete` mirrors the authoritative Paperless completion tag
+        // everywhere (sync, migration 0052, here). #414: only the run the
+        // inventory row points at may settle it.
         sqlx::query(
             r#"
             update document_inventory
                set current_run_status = 'succeeded',
-                   complete = true,
+                   complete = has_full_completion_tag,
                    updated_at = now()
              where paperless_document_id = $1
+               and last_run_id = $2
             "#,
         )
         .bind(job.paperless_document_id)
+        .bind(job.run_id)
         .execute(&mut *tx)
         .await?;
     } else {
@@ -6215,42 +6542,14 @@ pub async fn fail_job(
     }
 
     if !retry {
-        set_inventory_stage_status_tx(
+        apply_permanent_job_failure_tx(
             &mut tx,
+            job.id,
+            job.run_id,
             job.paperless_document_id,
             job.stage,
-            "failed",
-            Some(error),
-            false,
-            Some(job.run_id),
+            error,
         )
-        .await?;
-        sqlx::query(
-            "update pipeline_runs set status = 'failed', error_message = $2, finished_at = now(), updated_at = now() where id = $1",
-        )
-        .bind(job.run_id)
-        .bind(error)
-        .execute(&mut *tx)
-        .await?;
-        // A permanent failure aborts the whole run, so cancel the sibling jobs in the same TX.
-        // Mirrors the reject path: leaving them `queued` makes them unclaimable (the claim guard
-        // blocks them behind the failed stage) yet still scanned on every poll, inflating
-        // `jobs_queued` forever.
-        sqlx::query(
-            r#"
-            update jobs
-               set status = 'cancelled',
-                   lease_owner = null,
-                   lease_until = null,
-                   updated_at = now()
-             where run_id = $1
-               and id <> $2
-               and status in ('queued', 'running', 'waiting_review')
-            "#,
-        )
-        .bind(job.run_id)
-        .bind(job.id)
-        .execute(&mut *tx)
         .await?;
     }
 
@@ -7326,7 +7625,7 @@ async fn finalize_review_aggregate_tx(
             r#"
             update document_inventory
                set current_run_status = 'rejected',
-                   complete = false,
+                   complete = has_full_completion_tag, -- #410
                    updated_at = now()
              where paperless_document_id = $1
             "#,
@@ -7360,7 +7659,7 @@ async fn finalize_review_aggregate_tx(
                 r#"
                 update document_inventory
                    set current_run_status = 'succeeded',
-                       complete = true,
+                       complete = has_full_completion_tag, -- #410
                        updated_at = now()
                  where paperless_document_id = $1
                 "#,
@@ -8086,6 +8385,10 @@ pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Re
     let (input_tokens, output_tokens) = ai_response_token_usage(input.response.as_ref());
     let request = prepare_ai_artifact_value(input.request, input.storage_mode);
     let response = prepare_ai_artifact_value(input.response, input.storage_mode);
+    let normalized_output = input.normalized_output.map(|mut value| {
+        replace_nul_in_json(&mut value);
+        value
+    });
 
     let id = sqlx::query(
         r#"
@@ -8106,7 +8409,7 @@ pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Re
     .bind(input.input_hash)
     .bind(request)
     .bind(response)
-    .bind(input.normalized_output)
+    .bind(normalized_output)
     .bind(input.duration_ms)
     .bind(input_tokens)
     .bind(output_tokens)
@@ -8116,12 +8419,39 @@ pub async fn insert_ai_artifact(pool: &DbPool, input: AiArtifactInput<'_>) -> Re
     Ok(id)
 }
 
+/// Replace every U+0000 in JSON strings and object keys with U+FFFD, which
+/// PostgreSQL `jsonb`/`text` can store. #415
+pub fn replace_nul_in_json(value: &mut Value) {
+    const NUL: char = '\u{0}';
+    const REPLACEMENT: &str = "\u{FFFD}";
+    match value {
+        Value::String(text) if text.contains(NUL) => {
+            *text = text.replace(NUL, REPLACEMENT);
+        }
+        Value::Array(items) => items.iter_mut().for_each(replace_nul_in_json),
+        Value::Object(map) => {
+            if map.keys().any(|key| key.contains(NUL)) {
+                let entries = std::mem::take(map);
+                *map = entries
+                    .into_iter()
+                    .map(|(key, value)| (key.replace(NUL, REPLACEMENT), value))
+                    .collect();
+            }
+            map.values_mut().for_each(replace_nul_in_json);
+        }
+        _ => {}
+    }
+}
+
 fn prepare_ai_artifact_value(
     value: Option<Value>,
     storage_mode: AiArtifactStorageMode,
 ) -> Option<Value> {
     let mut value = value?;
     redact_sensitive_json(&mut value);
+    // #415: PostgreSQL rejects U+0000 in jsonb; model output occasionally
+    // contains it, which failed the insert in `Full` mode.
+    replace_nul_in_json(&mut value);
     match storage_mode {
         AiArtifactStorageMode::Full => Some(value),
         AiArtifactStorageMode::Redacted => {
@@ -8649,17 +8979,22 @@ pub async fn recover_stuck_runs(
         .map(|row| row.try_get::<Uuid, _>("id"))
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
+    // #414: recovering a superseded run must not overwrite the inventory
+    // status of the run the row now points at, so both updates are guarded on
+    // `last_run_id`. #410: `complete` mirrors the Paperless completion tag.
     if !completed_document_ids.is_empty() {
         sqlx::query(
             r#"
             update document_inventory
                set current_run_status = 'succeeded',
-                   complete = true,
+                   complete = has_full_completion_tag,
                    updated_at = now()
              where paperless_document_id = any($1)
+               and last_run_id = any($2)
             "#,
         )
         .bind(&completed_document_ids)
+        .bind(&completed_run_ids)
         .execute(&mut *tx)
         .await?;
     }
@@ -8671,9 +9006,11 @@ pub async fn recover_stuck_runs(
                    last_error = 'Recovered stuck run with no active jobs',
                    updated_at = now()
              where paperless_document_id = any($1)
+               and last_run_id = any($2)
             "#,
         )
         .bind(&failed_document_ids)
+        .bind(&failed_run_ids)
         .execute(&mut *tx)
         .await?;
     }
@@ -9525,6 +9862,9 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
              or j.error_message ilike $2
              or j.error_message ilike $3
            )
+           -- #406: one-shot per job; a crash-looping pod must not raise
+           -- max_attempts again on every start.
+           and not coalesce((j.payload ->> 'vision_requeued')::boolean, false)
            and not exists (
              select 1
                from pipeline_runs active
@@ -9559,6 +9899,7 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
                or j.error_message ilike $2
                or j.error_message ilike $3
              )
+             and not coalesce((j.payload ->> 'vision_requeued')::boolean, false)
              and not exists (
                select 1
                  from pipeline_runs active
@@ -9579,11 +9920,13 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
                or j.error_message ilike $2
                or j.error_message ilike $3
              )
+             and not coalesce((j.payload ->> 'vision_requeued')::boolean, false)
            for update of j
         )
         update jobs j
            set status = 'queued',
                max_attempts = j.max_attempts + 1,
+               payload = j.payload || '{"vision_requeued": true}'::jsonb,
                run_after = now(),
                lease_owner = null,
                lease_until = null,
@@ -9628,6 +9971,26 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
                updated_at = now()
          where id = any($1)
            and status = 'failed'
+        "#,
+    )
+    .bind(&run_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    // #406: `fail_job` cancelled the run's later-stage siblings (metadata)
+    // when OCR failed. Restore them too, otherwise the OCR job looks like the
+    // run's last active job, sets the global completion tag and metadata
+    // never runs for this document.
+    sqlx::query(
+        r#"
+        update jobs
+           set status = 'queued',
+               run_after = now(),
+               lease_owner = null,
+               lease_until = null,
+               updated_at = now()
+         where run_id = any($1)
+           and status = 'cancelled'
         "#,
     )
     .bind(&run_ids)
@@ -9880,7 +10243,7 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
         r#"
         update document_inventory di
            set current_run_status = 'queued',
-               complete = false,
+               complete = has_full_completion_tag, -- #410
                updated_at = now()
           from pipeline_runs pr
          where pr.id = any($1)
