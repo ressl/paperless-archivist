@@ -1220,6 +1220,129 @@ impl PaperlessSettings {
             .dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
         self
     }
+
+    /// The enabled profile named by `active_archive`, if any.
+    pub fn active_profile(&self) -> Option<&PaperlessArchiveProfile> {
+        self.archive_profiles.iter().find(|profile| {
+            profile.enabled && profile.name.eq_ignore_ascii_case(&self.active_archive)
+        })
+    }
+
+    /// Base URL and token secret every Paperless call (API, worker, login
+    /// bridge) must use. A profile without its own token only inherits the
+    /// global token when it points at the same origin as the global base URL;
+    /// otherwise no token is returned, so instance A's token is never sent to
+    /// host B. #396
+    pub fn active_connection(&self) -> (&str, Option<Uuid>) {
+        let Some(profile) = self.active_profile() else {
+            return (&self.base_url, self.token_secret_id);
+        };
+        let token = profile.token_secret_id.or_else(|| {
+            self.token_secret_id
+                .filter(|_| same_http_origin(&profile.base_url, &self.base_url))
+        });
+        (&profile.base_url, token)
+    }
+}
+
+/// Whether two http(s) URLs share scheme, host and effective port. Returns
+/// `false` for anything that does not parse as an absolute http(s) URL. #396
+pub fn same_http_origin(left: &str, right: &str) -> bool {
+    match (http_origin(left), http_origin(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn http_origin(url: &str) -> Option<(String, String, u16)> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (host, tail) = bracketed.split_once(']')?;
+        (host, tail.strip_prefix(':'))
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host_port, None),
+        }
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port {
+        Some("") | None => default_port,
+        Some(port) => port.parse().ok()?,
+    };
+    Some((
+        scheme,
+        host.trim_end_matches('.').to_ascii_lowercase(),
+        port,
+    ))
+}
+
+#[cfg(test)]
+mod paperless_connection_tests {
+    use super::*;
+
+    fn settings_with_profile(profile_url: &str, profile_token: Option<Uuid>) -> PaperlessSettings {
+        PaperlessSettings {
+            base_url: "https://paperless-a.example".to_owned(),
+            token_secret_id: Some(Uuid::from_u128(1)),
+            active_archive: "second".to_owned(),
+            archive_profiles: vec![PaperlessArchiveProfile {
+                name: "Second".to_owned(),
+                base_url: profile_url.to_owned(),
+                token_secret_id: profile_token,
+                enabled: true,
+            }],
+            ..PaperlessSettings::default()
+        }
+    }
+
+    #[test]
+    fn global_token_is_never_sent_to_another_origin() {
+        // #396: profile on host B without its own token.
+        let settings = settings_with_profile("https://paperless-b.example", None);
+        assert_eq!(
+            settings.active_connection(),
+            ("https://paperless-b.example", None)
+        );
+    }
+
+    #[test]
+    fn same_origin_profile_inherits_the_global_token() {
+        let settings = settings_with_profile("https://PAPERLESS-A.example:443/", None);
+        assert_eq!(
+            settings.active_connection(),
+            ("https://PAPERLESS-A.example:443/", Some(Uuid::from_u128(1)))
+        );
+        let own = settings_with_profile("https://paperless-b.example", Some(Uuid::from_u128(2)));
+        assert_eq!(own.active_connection().1, Some(Uuid::from_u128(2)));
+    }
+
+    #[test]
+    fn origin_comparison_covers_scheme_port_and_userinfo() {
+        assert!(same_http_origin("http://host:80/a", "http://HOST/b?c"));
+        assert!(same_http_origin("https://u:p@host/", "https://host:443"));
+        assert!(same_http_origin(
+            "http://[::1]:8000/",
+            "http://[::1]:8000/api/"
+        ));
+        assert!(!same_http_origin("http://host/", "https://host/"));
+        assert!(!same_http_origin("http://host:8000/", "http://host:8001/"));
+        assert!(!same_http_origin("http://host.evil/", "http://host/"));
+        assert!(!same_http_origin("ftp://host/", "ftp://host/"));
+        assert!(!same_http_origin("not a url", "not a url"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

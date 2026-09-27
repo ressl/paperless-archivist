@@ -410,6 +410,20 @@ Token creation accepts `expires_in_days`. When omitted, the configured default
 TTL is used. Rotation accepts the same field and preserves the original scopes.
 Retention and token policy are part of runtime settings under `security`.
 
+A token never grants more than its creator currently may: on every request its
+scopes are intersected with the permissions of the creator's current roles, so
+demoting or disabling the creator immediately narrows or disables the token.
+Changing or resetting a user's password revokes all API tokens that user
+created (together with their sessions). `last_used_at` is updated at most once
+per minute. Review decisions (`approve`, `reject`, `edit`, batch and auto-fix)
+require an interactive user session; tokens cannot make them.
+
+Unknown `/api/*` paths return a JSON `404`. Malformed or mistyped request
+bodies return the usual `{"error": "..."}` body with `400`, `413`, `415` or
+`422`. A review that is already decided returns `409`, an unknown one `404`.
+`GET /api/audit/export.csv` is audited (`audit.exported`), limited to one
+concurrent export per actor (`429` otherwise) and aborted after 10 minutes.
+
 Audit CSV exports include `prev_event_hash` and `event_hash` for events created
 after hash-chain tracking was enabled. `GET /api/audit/integrity` returns
 whether the current chain verifies, how many hashed events were checked, and how

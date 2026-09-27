@@ -68,7 +68,15 @@ export type GeneratedRouteContract = ExpectAll<[
   HasJsonBodyRejections<paths['/api/reviews/auto-fix']['post']>,
   HasJsonBodyRejections<paths['/api/operations/unblock-jobs']['post']>,
   HasJsonBodyRejections<paths['/api/operations/provider-cooldowns/clear']['post']>,
+  // #399: extractor rejections are rewritten to the JSON error shape.
   'text/plain' extends keyof components['responses']['BadRequest']['content']
+    ? false
+    : true,
+  'application/json' extends keyof components['responses']['UnprocessableEntity']['content']
     ? true
     : false,
+  // #393: review decisions are session-only.
+  HasRequiredCsrf<paths['/api/reviews/{id}/approve']['post']>,
+  HasRequiredCsrf<paths['/api/reviews/{id}/reject']['post']>,
+  HasRequiredCsrf<paths['/api/reviews/{id}/edit']['post']>,
 ]>

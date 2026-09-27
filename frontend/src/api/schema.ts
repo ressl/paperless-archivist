@@ -232,6 +232,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Redirects to the OIDC provider and sets the short-lived HttpOnly pa_oidc_state cookie that binds the login attempt to this browser. */
         get: {
             parameters: {
                 query?: {
@@ -267,6 +268,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description The state parameter must match the pa_oidc_state cookie set by /api/auth/oidc/login in the same browser; the cookie is cleared on every callback outcome. */
         get: {
             parameters: {
                 query?: {
@@ -288,6 +290,8 @@ export interface paths {
                     };
                     content?: never;
                 };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
             };
         };
         put?: never;
@@ -1742,7 +1746,7 @@ export interface paths {
         put?: never;
         /**
          * Queue selected documents and stages again
-         * @description Requires the batches:write permission. Duplicate document IDs are coalesced.
+         * @description Requires the batches:write permission. At most 500 positive document IDs per request; duplicate document IDs are coalesced.
          */
         post: {
             parameters: {
@@ -1980,10 +1984,17 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Approve a pending review and apply it to Paperless
+         * @description Requires the reviews:write permission and an interactive user session. An already decided review returns 409, an unknown review 404. If the Paperless apply fails without an ambiguous in-flight request, the review returns to pending.
+         */
         post: {
             parameters: {
                 query?: never;
-                header?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
                 path: {
                     id: string;
                 };
@@ -1998,6 +2009,12 @@ export interface paths {
                     };
                     content?: never;
                 };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalServerError"];
             };
         };
         delete?: never;
@@ -2056,10 +2073,17 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Reject a pending review
+         * @description Requires the reviews:write permission and an interactive user session. An already decided review returns 409, an unknown review 404.
+         */
         post: {
             parameters: {
                 query?: never;
-                header?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
                 path: {
                     id: string;
                 };
@@ -2074,6 +2098,12 @@ export interface paths {
                     };
                     content?: never;
                 };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalServerError"];
             };
         };
         delete?: never;
@@ -2091,10 +2121,17 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Edit a pending review and apply the edited patch
+         * @description Requires the reviews:write permission and an interactive user session. An already decided review returns 409, an unknown review 404.
+         */
         post: {
             parameters: {
                 query?: never;
-                header?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
                 path: {
                     id: string;
                 };
@@ -2117,6 +2154,14 @@ export interface paths {
                     };
                     content?: never;
                 };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                415: components["responses"]["UnsupportedMediaType"];
+                422: components["responses"]["UnprocessableEntity"];
+                500: components["responses"]["InternalServerError"];
             };
         };
         delete?: never;
@@ -2523,6 +2568,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Requires the audit:read permission. Each export is itself audited, is limited to one concurrent export per actor (and a small global cap), and is aborted after a fixed deadline. */
         get: {
             parameters: {
                 query?: never;
@@ -2541,6 +2587,9 @@ export interface paths {
                         "text/csv": string;
                     };
                 };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                429: components["responses"]["TooManyRequests"];
             };
         };
         put?: never;
@@ -4571,7 +4620,6 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["ErrorResponse"];
-                "text/plain": string;
             };
         };
         /** @description Missing or invalid authentication */
@@ -4610,13 +4658,40 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description Unknown API path or referenced resource does not exist */
+        NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Resource is no longer in a state that accepts this request */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description A concurrency or rate limit was reached; retry later */
+        TooManyRequests: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description Request body exceeds the configured route limit */
         PayloadTooLarge: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
-                "text/plain": string;
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
         /** @description JSON request body has a missing or unsupported Content-Type */
@@ -4625,7 +4700,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "text/plain": string;
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
         /** @description JSON is syntactically valid but cannot be deserialized into the request type */
@@ -4634,7 +4709,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "text/plain": string;
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
     };

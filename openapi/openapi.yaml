@@ -31,8 +31,6 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
-        text/plain:
-          schema: { type: string }
     Unauthorized:
       description: Missing or invalid authentication
       content:
@@ -53,21 +51,36 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
+    NotFound:
+      description: Unknown API path or referenced resource does not exist
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Conflict:
+      description: Resource is no longer in a state that accepts this request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    TooManyRequests:
+      description: A concurrency or rate limit was reached; retry later
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
     PayloadTooLarge:
       description: Request body exceeds the configured route limit
       content:
-        text/plain:
-          schema: { type: string }
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
     UnsupportedMediaType:
       description: JSON request body has a missing or unsupported Content-Type
       content:
-        text/plain:
-          schema: { type: string }
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
     UnprocessableEntity:
       description: JSON is syntactically valid but cannot be deserialized into the request type
       content:
-        text/plain:
-          schema: { type: string }
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
   parameters:
     ConditionalCsrfToken:
       name: X-CSRF-Token
@@ -1805,7 +1818,8 @@ components:
         document_ids:
           type: array
           minItems: 1
-          items: { type: integer, format: int32 }
+          maxItems: 500
+          items: { type: integer, format: int32, minimum: 1 }
         stages:
           type: array
           minItems: 1
@@ -2315,6 +2329,9 @@ paths:
   /api/auth/oidc/login:
     get:
       security: []
+      description: >-
+        Redirects to the OIDC provider and sets the short-lived HttpOnly
+        pa_oidc_state cookie that binds the login attempt to this browser.
       parameters:
         - name: return_to
           in: query
@@ -2337,8 +2354,14 @@ paths:
         - name: error_description
           in: query
           schema: { type: string }
+      description: >-
+        The state parameter must match the pa_oidc_state cookie set by
+        /api/auth/oidc/login in the same browser; the cookie is cleared on
+        every callback outcome.
       responses:
         "303": { description: Login completed and session cookies issued }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /api/webhooks/paperless/document-consumed:
     post:
       summary: Queue newly consumed Paperless documents immediately
@@ -2850,7 +2873,9 @@ paths:
   /api/batches/rerun:
     post:
       summary: Queue selected documents and stages again
-      description: Requires the batches:write permission. Duplicate document IDs are coalesced.
+      description: >-
+        Requires the batches:write permission. At most 500 positive document
+        IDs per request; duplicate document IDs are coalesced.
       parameters:
         - $ref: "#/components/parameters/ConditionalCsrfToken"
       requestBody:
@@ -2949,13 +2974,28 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/{id}/approve:
     post:
+      summary: Approve a pending review and apply it to Paperless
+      description: >-
+        Requires the reviews:write permission and an interactive user session.
+        An already decided review returns 409, an unknown review 404. If the
+        Paperless apply fails without an ambiguous in-flight request, the
+        review returns to pending.
+      security:
+        - cookieSession: []
       parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
         - name: id
           in: path
           required: true
           schema: { type: string, format: uuid }
       responses:
         "200": { description: Approved and applied }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/batch:
     post:
       requestBody:
@@ -2977,16 +3017,36 @@ paths:
         "200": { description: Batch review result }
   /api/reviews/{id}/reject:
     post:
+      summary: Reject a pending review
+      description: >-
+        Requires the reviews:write permission and an interactive user session.
+        An already decided review returns 409, an unknown review 404.
+      security:
+        - cookieSession: []
       parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
         - name: id
           in: path
           required: true
           schema: { type: string, format: uuid }
       responses:
         "200": { description: Rejected }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/{id}/edit:
     post:
+      summary: Edit a pending review and apply the edited patch
+      description: >-
+        Requires the reviews:write permission and an interactive user session.
+        An already decided review returns 409, an unknown review 404.
+      security:
+        - cookieSession: []
       parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
         - name: id
           in: path
           required: true
@@ -3004,6 +3064,14 @@ paths:
                   additionalProperties: true
       responses:
         "200": { description: Edited and applied }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/{id}/auto-fix:
     post:
       summary: Apply deterministic cleanup to one pending review
@@ -3157,12 +3225,19 @@ paths:
         "200": { description: Audit events }
   /api/audit/export.csv:
     get:
+      description: >-
+        Requires the audit:read permission. Each export is itself audited, is
+        limited to one concurrent export per actor (and a small global cap),
+        and is aborted after a fixed deadline.
       responses:
         "200":
           description: Audit events as CSV
           content:
             text/csv:
               schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
   /api/audit/integrity:
     get:
       responses:

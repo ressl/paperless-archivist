@@ -21,13 +21,14 @@ use archivist_core::{
     EffectiveTuning, MetadataFieldFlags, Permission, ProcessingMode, ProviderTuning,
     ProviderUsageStats, Role, RuntimeSettings, Stage, WorkflowRules, build_document_chat_prompt,
     detect_document_language, document_chat_snippet, document_chat_terms,
-    prefilter_allowed_list_lower, roles_have_permission, score_document_chat_source,
+    prefilter_allowed_list_lower, roles_have_permission, same_http_origin,
+    score_document_chat_source,
 };
 use archivist_db::{
     AmbiguousUserIdentityLinkError, AuthUser, DbPool, DocumentChatCandidate,
     InvalidUserIdentityError, LastEnabledAdminError, MetadataApplyAudit, MetadataArtifact,
-    MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry, ReviewItemRecord,
-    UserIdentityConflictError, append_audit, apply_security_retention, connect,
+    MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry, ReviewDecisionError,
+    ReviewItemRecord, UserIdentityConflictError, append_audit, apply_security_retention, connect,
     consume_oidc_login_state, count_reviews, create_document_chat_session, create_oidc_login_state,
     create_run_with_jobs_with_priority, create_runs_for_documents, create_session,
     create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
@@ -447,6 +448,12 @@ fn router(state: AppState) -> Router {
             state.clone(),
             auth_middleware,
         ))
+        // Nested routers without their own fallback inherit the outer SPA
+        // fallback, so `/api/typo` used to answer 200 + index.html. The
+        // fallback is outside `route_layer`, so unknown paths get a JSON 404
+        // without an authentication round-trip. #399
+        .fallback(api_not_found)
+        .layer(middleware::map_response(json_error_body))
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT));
 
     let static_dir = state.config.static_dir.clone();
@@ -465,6 +472,8 @@ fn router(state: AppState) -> Router {
             state.clone(),
             auth_rate_limit_middleware,
         ))
+        .fallback(api_not_found)
+        .layer(middleware::map_response(json_error_body))
         // Login/OIDC bodies are tiny; cap them so an unauthenticated caller
         // can't push axum's 2 MB default. #291
         .layer(DefaultBodyLimit::max(16 * 1024));
@@ -478,6 +487,8 @@ fn router(state: AppState) -> Router {
             "/paperless/document-consumed",
             post(webhook_paperless_document_consumed),
         )
+        .fallback(api_not_found)
+        .layer(middleware::map_response(json_error_body))
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT));
 
     // Content-Security-Policy for a same-origin SPA + JSON API. `script-src
@@ -908,7 +919,7 @@ async fn oidc_config(State(state): State<AppState>) -> Json<OidcConfigResponse> 
 async fn oidc_login(
     State(state): State<AppState>,
     Query(query): Query<OidcLoginQuery>,
-) -> ApiResult<Redirect> {
+) -> ApiResult<Response> {
     let values = oidc_values(&state.config)?;
     let http_client = oidc_http_client()?;
     let provider_metadata = oidc_discover(&http_client, values.issuer_url).await?;
@@ -930,11 +941,54 @@ async fn oidc_login(
         &nonce,
         &pkce_verifier,
         return_to.as_deref(),
-        Utc::now() + Duration::minutes(10),
+        Utc::now() + Duration::minutes(OIDC_STATE_TTL_MINUTES),
     )
     .await?;
 
-    Ok(Redirect::temporary(&auth_url))
+    let mut response = Redirect::temporary(&auth_url).into_response();
+    // Bind the login attempt to this browser: the callback only accepts a
+    // `state` that matches this cookie, so an attacker cannot hand a victim
+    // a callback URL carrying the attacker's own code/state (login CSRF). #387
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        header_value(oidc_state_cookie(&csrf_state, state.config.cookie_secure))?,
+    );
+    Ok(response)
+}
+
+const OIDC_STATE_COOKIE: &str = "pa_oidc_state";
+const OIDC_STATE_TTL_MINUTES: i64 = 10;
+
+/// Short-lived, HttpOnly browser binding for an in-progress OIDC login.
+/// `SameSite=Lax` still sends it on the IdP's top-level GET redirect back to
+/// the callback. Path `/` keeps it working behind prefix-rewriting proxies. #387
+fn oidc_state_cookie(value: &str, secure: bool) -> Cookie<'static> {
+    Cookie::build((OIDC_STATE_COOKIE, value.to_owned()))
+        .path("/")
+        .same_site(SameSite::Lax)
+        .http_only(true)
+        .secure(secure)
+        .max_age(cookie::time::Duration::minutes(OIDC_STATE_TTL_MINUTES))
+        .build()
+}
+
+/// Reject a callback whose `state` was not issued to this browser. Constant
+/// time so the comparison leaks nothing about the stored value. #387
+fn verify_oidc_state_binding(headers: &HeaderMap, state_value: &str) -> ApiResult<()> {
+    let Some(bound) = cookie_value(headers, OIDC_STATE_COOKIE).filter(|value| !value.is_empty())
+    else {
+        return Err(ApiError::unauthorized(
+            "OIDC login was not started in this browser",
+        ));
+    };
+    if bound.len() != state_value.len()
+        || !bool::from(bound.as_bytes().ct_eq(state_value.as_bytes()))
+    {
+        return Err(ApiError::unauthorized(
+            "OIDC state does not match this browser",
+        ));
+    }
+    Ok(())
 }
 
 async fn oidc_callback(
@@ -942,6 +996,24 @@ async fn oidc_callback(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(query): Query<OidcCallbackQuery>,
+) -> Response {
+    let secure = state.config.cookie_secure;
+    let mut response = oidc_callback_inner(state, peer, headers, query)
+        .await
+        .unwrap_or_else(IntoResponse::into_response);
+    // The browser binding is single-use: clear it on every outcome so a
+    // stale state cookie can never pair with a later callback. #387
+    if let Ok(value) = header_value(expire_cookie(OIDC_STATE_COOKIE, true, secure)) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+}
+
+async fn oidc_callback_inner(
+    state: AppState,
+    peer: SocketAddr,
+    headers: HeaderMap,
+    query: OidcCallbackQuery,
 ) -> ApiResult<Response> {
     let source_ip = request_source_ip(&state, &headers, Some(peer));
     let user_agent = request_user_agent(&headers);
@@ -957,6 +1029,9 @@ async fn oidc_callback(
     let state_value = query
         .state
         .ok_or_else(|| ApiError::bad_request("missing OIDC state"))?;
+    // Check the browser binding before consuming the server-side state so a
+    // forged callback cannot even burn the attacker-initiated login. #387
+    verify_oidc_state_binding(&headers, &state_value)?;
     let login_state = consume_oidc_login_state(&state.pool, &hash_token(&state_value))
         .await?
         .ok_or_else(|| ApiError::unauthorized("invalid or expired OIDC state"))?;
@@ -1349,7 +1424,11 @@ async fn verify_paperless_credentials(
 ) -> Result<PaperlessBridgeIdentity> {
     // Same up-front SSRF validation as the other outbound tester paths —
     // this endpoint forwards user credentials to the configured URL.
-    let base_url = validate_outbound_url(settings.paperless.base_url.trim())
+    // Authenticate against the *active* archive profile, the same instance
+    // every other Paperless call uses; the bridge subject below is derived
+    // from it too. #396
+    let (active_base_url, _) = settings.paperless.active_connection();
+    let base_url = validate_outbound_url(active_base_url.trim())
         .await
         .map_err(|error| anyhow!("Paperless base URL rejected: {}", error.message))?;
     let api_root = base_url.join("api/").context("build Paperless API root")?;
@@ -1638,6 +1717,27 @@ async fn update_settings(
     // first secret or settings write. Any failure therefore leaves both the
     // runtime settings and all encrypted-secret mappings untouched.
     prepare_settings_update(&mut request)?;
+    let current_settings = get_runtime_settings(&state.pool).await?;
+    let new_provider_secrets: HashSet<String> = request
+        .provider_secrets
+        .iter()
+        .flatten()
+        .filter(|(_, secret)| !secret.trim().is_empty())
+        .map(|(name, _)| name.clone())
+        .collect();
+    validate_secret_bindings(
+        &current_settings,
+        &request.settings,
+        &new_provider_secrets,
+        request
+            .paperless_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty()),
+        request
+            .notification_webhook_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty()),
+    )?;
 
     // Config-time SSRF guard (SECURITY_DESIGN §4.3): outbound URLs are
     // validated when they are PERSISTED, not only when the operator happens
@@ -2255,15 +2355,7 @@ async fn test_paperless(
     require(&auth.0, Permission::ReadSettings)?;
     let result = async {
         let settings = get_runtime_settings(&state.pool).await?;
-        let active_profile = settings.paperless.archive_profiles.iter().find(|profile| {
-            profile.enabled
-                && profile
-                    .name
-                    .eq_ignore_ascii_case(&settings.paperless.active_archive)
-        });
-        let base_url = active_profile
-            .map(|profile| profile.base_url.as_str())
-            .unwrap_or(&settings.paperless.base_url);
+        let (base_url, _) = settings.paperless.active_connection();
         if let Err(error) = validate_outbound_url(base_url).await {
             return Err(anyhow!("Paperless base URL rejected: {}", error.message));
         }
@@ -2954,17 +3046,133 @@ async fn provider_test_secret(
         return Ok(Some(SecretString::from(secret)));
     }
     if let Some(secret_id) = provider.secret_id
-        && !settings
-            .ai
-            .providers
-            .iter()
-            .any(|saved| saved.secret_id == Some(secret_id))
+        && !saved_provider_secret_matches(
+            settings,
+            &provider.name,
+            &provider.kind,
+            &provider.base_url,
+            secret_id,
+        )
     {
+        // Secrets are write-only: a stored key may only be sent to the exact
+        // endpoint it was saved for, otherwise a settings admin could point
+        // a draft at their own URL and exfiltrate it. #397
         return Err(anyhow!(
-            "provider secret reference is not assigned to a saved AI provider"
+            "stored provider secret can only be tested against its saved provider endpoint; \
+             enter the key again to test a different endpoint"
         ));
     }
     provider_secret(state, provider).await
+}
+
+/// The base URL a saved provider actually talks to (the built-in Ollama
+/// provider uses `ai.ollama_base_url`), normalized like [`provider_base_url`].
+fn saved_provider_endpoint<'a>(
+    settings: &'a RuntimeSettings,
+    provider: &'a AiProviderSettings,
+) -> &'a str {
+    let base_url = if provider.name.eq_ignore_ascii_case("ollama") {
+        settings.ai.ollama_base_url.as_str()
+    } else {
+        provider.base_url.as_str()
+    };
+    base_url.trim().trim_end_matches('/')
+}
+
+/// Whether `secret_id` is the stored secret of the saved provider with this
+/// name, kind and endpoint. #397
+fn saved_provider_secret_matches(
+    settings: &RuntimeSettings,
+    name: &str,
+    kind: &AiProviderKind,
+    base_url: &str,
+    secret_id: Uuid,
+) -> bool {
+    settings.ai.providers.iter().any(|saved| {
+        saved.secret_id == Some(secret_id)
+            && saved.name.eq_ignore_ascii_case(name.trim())
+            && &saved.kind == kind
+            && saved_provider_endpoint(settings, saved) == base_url.trim().trim_end_matches('/')
+    })
+}
+
+/// Reject a settings update that would re-bind a stored secret to another
+/// target: every secret reference must either be unchanged for the same
+/// provider/profile *and* endpoint, or be freshly supplied in this request.
+/// Otherwise a settings admin could move a stored OpenAI/Anthropic key (or a
+/// Paperless token) onto a URL they control. #397, #396
+fn validate_secret_bindings(
+    current: &RuntimeSettings,
+    next: &RuntimeSettings,
+    new_provider_secrets: &HashSet<String>,
+    new_paperless_token: bool,
+    new_webhook_url: bool,
+) -> ApiResult<()> {
+    for provider in &next.ai.providers {
+        let Some(secret_id) = provider.secret_id else {
+            continue;
+        };
+        if new_provider_secrets.contains(&provider.name) {
+            continue;
+        }
+        if !saved_provider_secret_matches(
+            current,
+            &provider.name,
+            &provider.kind,
+            saved_provider_endpoint(next, provider),
+            secret_id,
+        ) {
+            return Err(ApiError::bad_request(format!(
+                "AI provider '{}': the stored API key is bound to the saved provider and \
+                 endpoint; enter the key again after changing the provider or its base URL",
+                provider.name
+            )));
+        }
+    }
+
+    let paperless_token_matches = |secret_id: Uuid, base_url: &str| {
+        (current.paperless.token_secret_id == Some(secret_id)
+            && same_http_origin(&current.paperless.base_url, base_url))
+            || current.paperless.archive_profiles.iter().any(|profile| {
+                profile.token_secret_id == Some(secret_id)
+                    && same_http_origin(&profile.base_url, base_url)
+            })
+    };
+    if !new_paperless_token
+        && let Some(secret_id) = next.paperless.token_secret_id
+        && !paperless_token_matches(secret_id, &next.paperless.base_url)
+    {
+        return Err(ApiError::bad_request(
+            "Paperless: the stored token is bound to its saved instance; enter the token \
+             again after changing the Paperless base URL",
+        ));
+    }
+    for profile in &next.paperless.archive_profiles {
+        let Some(secret_id) = profile.token_secret_id else {
+            continue;
+        };
+        // A profile may reuse the global token on the global instance
+        // (normalization seeds the default profile that way).
+        let reuses_global_token = next.paperless.token_secret_id == Some(secret_id)
+            && same_http_origin(&next.paperless.base_url, &profile.base_url);
+        if !reuses_global_token && !paperless_token_matches(secret_id, &profile.base_url) {
+            return Err(ApiError::bad_request(format!(
+                "archive profile '{}': the stored token is bound to its saved instance; \
+                 enter the token again after changing the profile base URL",
+                profile.name
+            )));
+        }
+    }
+
+    if !new_webhook_url
+        && let Some(secret_id) = next.notifications.webhook_url_secret_id
+        && current.notifications.webhook_url_secret_id != Some(secret_id)
+    {
+        return Err(ApiError::bad_request(
+            "notification webhook secret reference does not belong to the saved settings",
+        ));
+    }
+    Ok(())
 }
 
 fn provider_test_response(
@@ -5606,6 +5814,28 @@ async fn queue_full_batch(
     Ok(Json(json!({ "queued": created })))
 }
 
+/// Same per-request ceiling as the other bulk endpoints; each ID becomes one
+/// document advisory lock, so an unbounded list could exhaust the shared
+/// lock table. #390
+const MAX_RERUN_BATCH_DOCUMENTS: usize = 500;
+
+fn validate_rerun_document_ids(document_ids: &[i32]) -> ApiResult<()> {
+    if document_ids.is_empty() {
+        return Err(ApiError::bad_request("document_ids must not be empty"));
+    }
+    if document_ids.len() > MAX_RERUN_BATCH_DOCUMENTS {
+        return Err(ApiError::bad_request(format!(
+            "rerun batch is limited to {MAX_RERUN_BATCH_DOCUMENTS} documents per request"
+        )));
+    }
+    if let Some(invalid) = document_ids.iter().find(|id| **id <= 0) {
+        return Err(ApiError::bad_request(format!(
+            "document_ids must be positive Paperless document IDs (got {invalid})"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct RerunBatchRequest {
     document_ids: Vec<i32>,
@@ -5627,9 +5857,7 @@ async fn rerun_batch(
         Span::current().record("user_id", tracing::field::display(user_id));
     }
 
-    if request.document_ids.is_empty() {
-        return Err(ApiError::bad_request("document_ids must not be empty"));
-    }
+    validate_rerun_document_ids(&request.document_ids)?;
     if request.stages.is_empty() {
         return Err(ApiError::bad_request("stages must not be empty"));
     }
@@ -5861,10 +6089,11 @@ async fn approve_review(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteReviews)?;
-    let actor_id = auth
-        .0
-        .user_id
-        .ok_or_else(|| ApiError::forbidden("review decisions require a user session"))?;
+    // Token requests carry the creator's user_id, so accepting them here
+    // attributed automation decisions to that admin in the audit trail and
+    // apply intents. All review decision endpoints now require an
+    // interactive session, matching batch/auto-fix. #393
+    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     review_decision(&state.pool, id, "approved", None, actor_id).await?;
     apply_review_patch(&state, id, actor_id).await?;
@@ -5882,10 +6111,11 @@ async fn reject_review(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteReviews)?;
-    let actor_id = auth
-        .0
-        .user_id
-        .ok_or_else(|| ApiError::forbidden("review decisions require a user session"))?;
+    // Token requests carry the creator's user_id, so accepting them here
+    // attributed automation decisions to that admin in the audit trail and
+    // apply intents. All review decision endpoints now require an
+    // interactive session, matching batch/auto-fix. #393
+    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     review_decision(&state.pool, id, "rejected", None, actor_id).await?;
     info!(review_id = %id, %actor_id, "review rejected");
@@ -6104,8 +6334,9 @@ async fn auto_fix_single(
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteReviews)?;
     let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
-    let items = archivist_db::list_reviews(&state.pool, Some("pending"), 2000).await?;
-    let Some(item) = items.into_iter().find(|i| i.id == id) else {
+    // Look the review up by ID instead of scanning the newest 2000 pending
+    // rows, which missed older items in a large backlog. #395
+    let Some(item) = archivist_db::get_pending_review(&state.pool, id).await? else {
         return Err(ApiError::bad_request(
             "review item not pending or not found",
         ));
@@ -6129,6 +6360,10 @@ async fn auto_fix_apply_one(
             // Stamp the cleaned patch onto the review_item as edited_patch,
             // then route through the existing approve+apply pipeline so the
             // audit trail and Paperless write semantics stay identical.
+            // `edited` is already an applyable decision; a second
+            // `approved` decision is rejected because the row is no longer
+            // `pending`, which used to strand every auto-fixed review in
+            // `edited` without an apply. #388
             review_decision(
                 &state.pool,
                 item.id,
@@ -6137,7 +6372,6 @@ async fn auto_fix_apply_one(
                 actor_id,
             )
             .await?;
-            review_decision(&state.pool, item.id, "approved", None, actor_id).await?;
             apply_review_patch(state, item.id, actor_id).await?;
             append_audit(
                 &state.pool,
@@ -6201,10 +6435,11 @@ async fn edit_review(
     Json(request): Json<EditReviewRequest>,
 ) -> ApiResult<Json<Value>> {
     require(&auth.0, Permission::WriteReviews)?;
-    let actor_id = auth
-        .0
-        .user_id
-        .ok_or_else(|| ApiError::forbidden("review decisions require a user session"))?;
+    // Token requests carry the creator's user_id, so accepting them here
+    // attributed automation decisions to that admin in the audit trail and
+    // apply intents. All review decision endpoints now require an
+    // interactive session, matching batch/auto-fix. #393
+    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
     review_decision(
         &state.pool,
         id,
@@ -6520,68 +6755,91 @@ async fn audit_events(
     ))
 }
 
+/// Hard wall-clock budget for one CSV export. A client that stops reading
+/// without disconnecting can otherwise pin the export task forever. #394
+const AUDIT_EXPORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Rows fetched per keyset page. Each page is a short query, so no pool
+/// connection is held while the task waits on a slow client. #394
+const AUDIT_EXPORT_PAGE_SIZE: i64 = 500;
+/// Concurrent exports across all actors (the default pool has 10 connections). #394
+const MAX_CONCURRENT_AUDIT_EXPORTS: usize = 4;
+
+static AUDIT_EXPORTS_IN_FLIGHT: std::sync::LazyLock<Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// One running audit export. At most one per actor and
+/// [`MAX_CONCURRENT_AUDIT_EXPORTS`] in total; the slot is released on drop,
+/// i.e. when the export task ends for any reason. #394
+struct AuditExportSlot {
+    actor: String,
+}
+
+impl AuditExportSlot {
+    fn acquire(actor: String) -> Option<Self> {
+        let mut in_flight = AUDIT_EXPORTS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if in_flight.len() >= MAX_CONCURRENT_AUDIT_EXPORTS || in_flight.contains(&actor) {
+            return None;
+        }
+        in_flight.insert(actor.clone());
+        Some(Self { actor })
+    }
+}
+
+impl Drop for AuditExportSlot {
+    fn drop(&mut self) {
+        AUDIT_EXPORTS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&self.actor);
+    }
+}
+
+type AuditExportSender = tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>;
+
 async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> ApiResult<Response> {
-    use bytes::Bytes;
-    use futures::TryStreamExt;
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::ReceiverStream;
 
     require(&auth.0, Permission::ReadAudit)?;
+    let actor = format!(
+        "{}:{}",
+        auth.0.actor_type,
+        auth.0.actor_id.as_deref().unwrap_or_default()
+    );
+    let slot = AuditExportSlot::acquire(actor).ok_or_else(|| {
+        ApiError::too_many_requests("an audit export is already running; retry when it finishes")
+    })?;
+    // Exporting the whole audit trail is itself an auditable action. #394
+    append_audit(
+        &state.pool,
+        AuditEventInput {
+            event_type: "audit.exported".to_owned(),
+            actor_type: auth.0.actor_type.clone(),
+            actor_id: auth.0.actor_id.clone(),
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: None,
+            metadata: Some(json!({ "format": "csv" })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
 
     // Use a bounded channel so the writer task applies backpressure when
-    // the HTTP client (or proxy) is slow: rows accumulate in postgres /
-    // sqlx, not in our process. Capacity 16 is plenty for one-CSV-row-
-    // at-a-time delivery.
-    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    // the HTTP client (or proxy) is slow. Capacity 16 is plenty for
+    // one-CSV-row-at-a-time delivery.
+    let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
     let pool = state.pool.clone();
     tokio::spawn(async move {
-        const HEADER: &str = "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash,hash_version,source_ip,user_agent\n";
-        if tx
-            .send(Ok(Bytes::from_static(HEADER.as_bytes())))
-            .await
-            .is_err()
-        {
-            return;
-        }
-        let mut stream = sqlx::query(
-            r#"
-            select id, event_type, actor_type, actor_id, paperless_document_id,
-                   outcome, error_message, created_at, metadata,
-                   prev_event_hash, event_hash, hash_version, source_ip, user_agent
-              from audit_events
-             order by created_at desc, id desc
-            "#,
-        )
-        .fetch(&pool);
-
-        loop {
-            match stream.try_next().await {
-                Ok(Some(row)) => match audit_csv_row(&row) {
-                    Ok(line) => {
-                        if tx.send(Ok(Bytes::from(line))).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = tx
-                            .send(Err(std::io::Error::other(format!(
-                                "encode audit row: {error}"
-                            ))))
-                            .await;
-                        break;
-                    }
-                },
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = tx
-                        .send(Err(std::io::Error::other(format!(
-                            "stream audit events: {error}"
-                        ))))
-                        .await;
-                    break;
-                }
-            }
-        }
+        let _slot = slot;
+        run_audit_export(&pool, tx, AUDIT_EXPORT_DEADLINE).await;
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
@@ -6594,6 +6852,106 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
         HeaderValue::from_static("attachment; filename=\"paperless-archivist-audit.csv\""),
     );
     Ok(response)
+}
+
+/// Stream the CSV into `tx` until done, the client disconnects, or
+/// `deadline` elapses; on the deadline the stream is terminated with an error
+/// so the client sees a truncated download rather than a silent cut. #394
+async fn run_audit_export(pool: &DbPool, tx: AuditExportSender, deadline: std::time::Duration) {
+    let error_tx = tx.clone();
+    if tokio::time::timeout(deadline, write_audit_export(pool, tx))
+        .await
+        .is_err()
+    {
+        warn!(
+            deadline_seconds = deadline.as_secs(),
+            "audit CSV export aborted at its deadline"
+        );
+        let _ = error_tx.try_send(Err(std::io::Error::other(
+            "audit export exceeded its time limit",
+        )));
+    }
+}
+
+async fn write_audit_export(pool: &DbPool, tx: AuditExportSender) {
+    use bytes::Bytes;
+
+    const HEADER: &str = "id,created_at,event_type,actor_type,actor_id,paperless_document_id,outcome,error_message,metadata,prev_event_hash,event_hash,hash_version,source_ip,user_agent\n";
+    if tx
+        .send(Ok(Bytes::from_static(HEADER.as_bytes())))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    // Keyset pagination on the (created_at, id) sort key instead of one
+    // long-lived cursor: every page releases its pool connection before the
+    // rows are pushed to the (possibly stalled) client. #394
+    let mut cursor: Option<(DateTime<Utc>, Uuid)> = None;
+    loop {
+        let rows = match sqlx::query(
+            r#"
+            select id, event_type, actor_type, actor_id, paperless_document_id,
+                   outcome, error_message, created_at, metadata,
+                   prev_event_hash, event_hash, hash_version, source_ip, user_agent
+              from audit_events
+             where $1::timestamptz is null or (created_at, id) < ($1, $2)
+             order by created_at desc, id desc
+             limit $3
+            "#,
+        )
+        .bind(cursor.map(|(created_at, _)| created_at))
+        .bind(cursor.map(|(_, id)| id))
+        .bind(AUDIT_EXPORT_PAGE_SIZE)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                let _ = tx
+                    .send(Err(std::io::Error::other(format!(
+                        "stream audit events: {error}"
+                    ))))
+                    .await;
+                return;
+            }
+        };
+        let page_len = rows.len();
+        for row in &rows {
+            let line = match audit_csv_row(row) {
+                Ok(line) => line,
+                Err(error) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::other(format!(
+                            "encode audit row: {error}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+            if tx.send(Ok(Bytes::from(line))).await.is_err() {
+                return;
+            }
+        }
+        let Some(last) = rows.last() else {
+            return;
+        };
+        match (
+            last.try_get::<DateTime<Utc>, _>("created_at"),
+            last.try_get::<Uuid, _>("id"),
+        ) {
+            (Ok(created_at), Ok(id)) => cursor = Some((created_at, id)),
+            _ => {
+                let _ = tx
+                    .send(Err(std::io::Error::other("audit export cursor")))
+                    .await;
+                return;
+            }
+        }
+        if (page_len as i64) < AUDIT_EXPORT_PAGE_SIZE {
+            return;
+        }
+    }
 }
 
 fn audit_csv_row(row: &sqlx::postgres::PgRow) -> Result<String, sqlx::Error> {
@@ -6879,12 +7237,11 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
     let Some(review) = archivist_db::claim_review_for_apply(&state.pool, review_id).await? else {
         return Ok(());
     };
-    // review.status holds the pre-claim status ('approved'/'edited'). The row
-    // is now 'applying', which fences out a concurrent apply / autopilot
-    // drain. Only failures that never produced a nonterminal durable intent
-    // may be reverted immediately; ambiguous HTTP outcomes stay fenced for
-    // the recovery worker instead of becoming blindly retryable.
-    let prior_status = review.status.clone();
+    // The row is now 'applying', which fences out a concurrent apply /
+    // autopilot drain. Only failures that never produced a nonterminal
+    // durable intent may be reverted immediately; ambiguous HTTP outcomes
+    // stay fenced for the recovery worker instead of becoming blindly
+    // retryable.
     let result = apply_claimed_review(state, &review, actor_id).await;
     if let Err(error) = &result
         && let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>()
@@ -6903,12 +7260,22 @@ async fn apply_review_patch(state: &AppState, review_id: Uuid, actor_id: Uuid) -
     if result.is_err() {
         match archivist_db::review_has_nonterminal_apply_intent(&state.pool, review_id).await {
             Ok(false) => {
-                let _ = archivist_db::revert_review_from_applying(
-                    &state.pool,
-                    review_id,
-                    &prior_status,
-                )
-                .await;
+                // Revert to `pending`, not the pre-claim `approved`/`edited`:
+                // nothing (drain, UI, review_decision) ever picks those up
+                // again, so a transient Paperless error used to strand the
+                // review forever. The edited patch is kept. Settling the
+                // failed intent right away lets a re-approval prepare a fresh
+                // attempt for the same patch (#389). #388
+                if let Err(error) =
+                    archivist_db::revert_review_from_applying(&state.pool, review_id, "pending")
+                        .await
+                {
+                    warn!(%review_id, error = %error, "failed to revert review after apply error");
+                } else if let Err(error) =
+                    archivist_db::finalize_failed_review_apply_intents(&state.pool, review_id).await
+                {
+                    warn!(%review_id, error = %error, "failed to settle failed apply intent");
+                }
             }
             Ok(true) => warn!(
                 %review_id,
@@ -6983,7 +7350,9 @@ async fn apply_claimed_review(
                 "stage": review.stage,
                 "review_id": review.id
             }),
-            review_revert_status: Some(review.status.clone()),
+            // Recovery settles a failed human intent back to this status;
+            // `pending` keeps the review decidable again. #388
+            review_revert_status: Some("pending".to_owned()),
             review_precondition: Some(ReviewApplyPrecondition {
                 baseline: review.baseline.clone(),
                 tag_operations,
@@ -7192,19 +7561,11 @@ async fn paperless_client_from_settings(
     config: &AppConfig,
     settings: &RuntimeSettings,
 ) -> Result<PaperlessClient> {
-    let active_profile = settings.paperless.archive_profiles.iter().find(|profile| {
-        profile.enabled
-            && profile
-                .name
-                .eq_ignore_ascii_case(&settings.paperless.active_archive)
-    });
-    let base_url = active_profile
-        .map(|profile| profile.base_url.as_str())
-        .unwrap_or(&settings.paperless.base_url);
-    let secret_id = active_profile
-        .and_then(|profile| profile.token_secret_id)
-        .or(settings.paperless.token_secret_id)
-        .ok_or_else(|| anyhow!("Paperless token is not configured"))?;
+    // The global token is only inherited by a same-origin profile. #396
+    let (base_url, secret_id) = settings.paperless.active_connection();
+    let secret_id = secret_id.ok_or_else(|| {
+        anyhow!("Paperless token is not configured for the active archive profile")
+    })?;
     let token = resolve_secret(pool, &config.secret_key, secret_id)
         .await?
         .ok_or_else(|| anyhow!("Paperless token secret reference does not exist"))?;
@@ -7806,13 +8167,14 @@ async fn authenticate(pool: &DbPool, headers: &HeaderMap) -> Result<AuthContext,
     if let Some(token) = bearer_token(headers) {
         let token_hash = hash_token(token);
         if let Some(principal) = find_api_token(pool, &token_hash).await? {
+            let scopes = effective_token_scopes(&principal.scopes, &principal.creator_roles);
             return Ok(AuthContext {
                 actor_type: "api_token".to_owned(),
                 actor_id: Some(principal.name),
                 user_id: principal.user_id,
                 username: None,
                 roles: Vec::new(),
-                scopes: principal.scopes,
+                scopes,
                 session_id: None,
                 csrf_secret_hash: None,
                 cookie_auth: false,
@@ -7880,6 +8242,38 @@ fn require_user_session(auth: &AuthContext, message: &'static str) -> Result<Uui
         return Err(ApiError::forbidden(message));
     }
     auth.user_id.ok_or_else(|| ApiError::forbidden(message))
+}
+
+const ALL_PERMISSIONS: [Permission; 12] = [
+    Permission::ReadDashboard,
+    Permission::ReadRuns,
+    Permission::WriteRuns,
+    Permission::ReadInventory,
+    Permission::WriteBatches,
+    Permission::UseChat,
+    Permission::ReadReviews,
+    Permission::WriteReviews,
+    Permission::ReadSettings,
+    Permission::WriteSettings,
+    Permission::ManageUsers,
+    Permission::ReadAudit,
+];
+
+/// A token can never do more than its creator currently may: keep only the
+/// scopes backed by a permission the creator's *current* roles still grant,
+/// so demoting a user (OIDC role replace #289, `set_user_roles`) immediately
+/// narrows every token they created. #392
+fn effective_token_scopes(scopes: &[String], creator_roles: &[Role]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| {
+            ALL_PERMISSIONS.iter().any(|permission| {
+                scope_for_permission(*permission) == scope.as_str()
+                    && roles_have_permission(creator_roles, *permission)
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 fn scope_for_permission(permission: Permission) -> &'static str {
@@ -10447,6 +10841,633 @@ mod tests {
         saved_handle.abort();
         draft_handle.abort();
     }
+
+    // ----- 2026-09 audit: API / security hardening ----------------------
+
+    async fn spawn_api_router(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = router(state);
+        let handle = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .ok();
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn no_redirect_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+    }
+
+    fn is_json(response: &reqwest::Response) -> bool {
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    }
+
+    #[tokio::test]
+    async fn unknown_api_paths_and_body_rejections_return_json_errors() {
+        // #399
+        let (base, handle) = spawn_api_router(api_text_test_state()).await;
+        let client = no_redirect_client();
+        for path in [
+            "/api/does-not-exist",
+            "/api/reviews/not/a/route",
+            "/api/auth/does-not-exist",
+            "/api/webhooks/does-not-exist",
+        ] {
+            let response = client.get(format!("{base}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            assert!(is_json(&response), "{path} must not serve the SPA");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["error"], "not found");
+        }
+
+        let malformed = client
+            .post(format!("{base}/api/auth/login"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{not json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert!(is_json(&malformed));
+        let body: Value = malformed.json().await.unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+        );
+
+        let wrong_shape = client
+            .post(format!("{base}/api/auth/login"))
+            .json(&json!({ "username": 1 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong_shape.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(is_json(&wrong_shape));
+
+        let no_content_type = client
+            .post(format!("{base}/api/auth/login"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_content_type.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(is_json(&no_content_type));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_requires_the_browser_bound_state_cookie() {
+        // #387: a callback URL crafted from the attacker's own login must not
+        // log the victim in.
+        let (base, handle) = spawn_api_router(api_text_test_state()).await;
+        let client = no_redirect_client();
+        let url = format!("{base}/api/auth/oidc/callback?code=attacker-code&state=attacker-state");
+
+        let without_cookie = client.get(&url).send().await.unwrap();
+        assert_eq!(without_cookie.status(), StatusCode::UNAUTHORIZED);
+        let cleared = without_cookie
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .any(|value| value.starts_with("pa_oidc_state=;") && value.contains("Max-Age=0"));
+        assert!(
+            cleared,
+            "the state cookie is invalidated after every callback"
+        );
+
+        let other_browser = client
+            .get(&url)
+            .header(reqwest::header::COOKIE, "pa_oidc_state=victim-own-state")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(other_browser.status(), StatusCode::UNAUTHORIZED);
+        let body: Value = other_browser.json().await.unwrap();
+        assert_eq!(body["error"], "OIDC state does not match this browser");
+        handle.abort();
+    }
+
+    #[test]
+    fn oidc_state_cookie_is_short_lived_http_only_and_compared_exactly() {
+        // #387
+        let rendered = oidc_state_cookie("abc123", true).to_string();
+        for attribute in [
+            "HttpOnly",
+            "SameSite=Lax",
+            "Secure",
+            "Max-Age=600",
+            "Path=/",
+        ] {
+            assert!(rendered.contains(attribute), "{rendered} lacks {attribute}");
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("pa_session=x; pa_oidc_state=abc123"),
+        );
+        verify_oidc_state_binding(&headers, "abc123").expect("issued state is accepted");
+        for forged in ["abc124", "abc12", ""] {
+            assert_eq!(
+                verify_oidc_state_binding(&headers, forged)
+                    .unwrap_err()
+                    .status,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            verify_oidc_state_binding(&HeaderMap::new(), "abc123")
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn review_decision_races_map_to_conflict_and_not_found() {
+        // #391
+        let conflict = ApiError::from(anyhow::Error::new(ReviewDecisionError::NotPending));
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        let missing = ApiError::from(anyhow::Error::new(ReviewDecisionError::NotFound));
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn rerun_batches_are_bounded_and_require_positive_ids() {
+        // #390
+        assert!(validate_rerun_document_ids(&[1, 2, 3]).is_ok());
+        let max: Vec<i32> = (1..=MAX_RERUN_BATCH_DOCUMENTS as i32).collect();
+        assert!(validate_rerun_document_ids(&max).is_ok());
+        let over: Vec<i32> = (1..=MAX_RERUN_BATCH_DOCUMENTS as i32 + 1).collect();
+        assert_eq!(
+            validate_rerun_document_ids(&over).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+        for invalid in [vec![], vec![1, 0], vec![-5]] {
+            assert_eq!(
+                validate_rerun_document_ids(&invalid).unwrap_err().status,
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[test]
+    fn token_scopes_are_limited_by_the_creators_current_roles() {
+        // #392
+        let scopes = vec![
+            "reviews:read".to_owned(),
+            "reviews:write".to_owned(),
+            "settings:read".to_owned(),
+            "runs:read".to_owned(),
+        ];
+        assert_eq!(effective_token_scopes(&scopes, &[Role::Admin]), scopes);
+        assert_eq!(
+            effective_token_scopes(&scopes, &[Role::Reviewer]),
+            vec!["reviews:read", "reviews:write", "runs:read"]
+        );
+        assert_eq!(
+            effective_token_scopes(&scopes, &[Role::Viewer]),
+            vec!["runs:read"]
+        );
+        assert!(effective_token_scopes(&scopes, &[]).is_empty());
+    }
+
+    #[test]
+    fn audit_exports_are_limited_per_actor_and_globally() {
+        // #394
+        let first = AuditExportSlot::acquire("test-export:alice".to_owned()).expect("first");
+        assert!(
+            AuditExportSlot::acquire("test-export:alice".to_owned()).is_none(),
+            "one export per actor"
+        );
+        let others: Vec<_> = (1..MAX_CONCURRENT_AUDIT_EXPORTS)
+            .map(|index| AuditExportSlot::acquire(format!("test-export:user-{index}")))
+            .collect();
+        assert!(others.iter().all(Option::is_some));
+        assert!(
+            AuditExportSlot::acquire("test-export:bob".to_owned()).is_none(),
+            "global cap"
+        );
+        drop(first);
+        assert!(AuditExportSlot::acquire("test-export:alice".to_owned()).is_some());
+    }
+
+    fn secret_binding_settings(secret_id: Uuid) -> RuntimeSettings {
+        let mut settings = RuntimeSettings::default();
+        settings.ai.providers = vec![AiProviderSettings {
+            name: "openai".to_owned(),
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: "https://api.openai.example/v1".to_owned(),
+            default_text_model: Some("gpt".to_owned()),
+            default_vision_model: None,
+            cost_per_1m_input_tokens_usd: None,
+            cost_per_1m_output_tokens_usd: None,
+            secret_id: Some(secret_id),
+            enabled: true,
+            tuning: ProviderTuning::default(),
+        }];
+        settings.paperless.base_url = "https://paperless-a.example".to_owned();
+        settings.paperless.token_secret_id = Some(Uuid::from_u128(77));
+        settings.paperless = settings.paperless.normalized();
+        settings
+    }
+
+    #[tokio::test]
+    async fn provider_test_refuses_stored_secret_for_a_foreign_endpoint() {
+        // #397
+        let secret_id = Uuid::from_u128(42);
+        let settings = secret_binding_settings(secret_id);
+        assert!(saved_provider_secret_matches(
+            &settings,
+            "OpenAI",
+            &AiProviderKind::OpenaiCompatible,
+            "https://api.openai.example/v1/",
+            secret_id
+        ));
+        let mut provider = make_api_provider(AiProviderKind::OpenaiCompatible);
+        provider.name = "openai".to_owned();
+        provider.base_url = "https://attacker.example/v1".to_owned();
+        provider.secret_id = Some(secret_id);
+        // Rejected before any secret lookup, so the lazy test pool is never used.
+        let error = provider_test_secret(&api_text_test_state(), &settings, &provider, None)
+            .await
+            .expect_err("foreign URL + stored secret must be rejected");
+        assert!(error.to_string().contains("saved provider endpoint"));
+
+        provider.base_url = "https://api.openai.example/v1".to_owned();
+        provider.kind = AiProviderKind::Anthropic;
+        assert!(
+            provider_test_secret(&api_text_test_state(), &settings, &provider, None)
+                .await
+                .is_err(),
+            "a kind change cannot reuse the stored secret either"
+        );
+    }
+
+    #[test]
+    fn settings_update_cannot_rebind_stored_secrets() {
+        // #397 / #396
+        let secret_id = Uuid::from_u128(42);
+        let current = secret_binding_settings(secret_id);
+        let none = HashSet::new();
+
+        validate_secret_bindings(&current, &current, &none, false, false)
+            .expect("an unchanged save is accepted");
+
+        let mut moved_url = current.clone();
+        moved_url.ai.providers[0].base_url = "https://attacker.example/v1".to_owned();
+        assert_eq!(
+            validate_secret_bindings(&current, &moved_url, &none, false, false)
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+        let fresh_key = HashSet::from(["openai".to_owned()]);
+        validate_secret_bindings(&current, &moved_url, &fresh_key, false, false)
+            .expect("a freshly entered key may target the new URL");
+
+        let mut stolen = current.clone();
+        let mut attacker = stolen.ai.providers[0].clone();
+        attacker.name = "attacker".to_owned();
+        attacker.base_url = "https://attacker.example/v1".to_owned();
+        stolen.ai.providers.push(attacker);
+        assert!(validate_secret_bindings(&current, &stolen, &none, false, false).is_err());
+
+        let mut moved_paperless = current.clone();
+        moved_paperless.paperless.base_url = "https://paperless-b.example".to_owned();
+        assert!(validate_secret_bindings(&current, &moved_paperless, &none, false, false).is_err());
+        validate_secret_bindings(&current, &moved_paperless, &none, true, false)
+            .expect("a new Paperless token may target the new instance");
+
+        let mut foreign_profile = current.clone();
+        foreign_profile
+            .paperless
+            .archive_profiles
+            .push(archivist_core::PaperlessArchiveProfile {
+                name: "other".to_owned(),
+                base_url: "https://paperless-b.example".to_owned(),
+                token_secret_id: current.paperless.token_secret_id,
+                enabled: true,
+            });
+        assert!(
+            validate_secret_bindings(&current, &foreign_profile, &none, false, false).is_err(),
+            "instance A's token cannot be attached to a profile on host B"
+        );
+    }
+
+    async fn security_db_state() -> Option<AppState> {
+        let database_url = std::env::var("DATABASE_URL").ok()?;
+        let pool = connect(&database_url, 4)
+            .await
+            .expect("connect security test database");
+        migrate(&pool).await.expect("apply migrations");
+        sqlx::query(
+            "truncate paperless_apply_intents, review_items, jobs, pipeline_runs, audit_events restart identity cascade",
+        )
+        .execute(&pool)
+        .await
+        .expect("truncate review fixtures");
+        Some(AppState {
+            pool,
+            config: Arc::new(test_config()),
+            auth_rate_limiter: Arc::new(AuthRateLimiter::new(10, 60)),
+        })
+    }
+
+    async fn seed_pending_review(pool: &DbPool) -> Uuid {
+        let run_id: Uuid = sqlx::query_scalar(
+            r#"
+            insert into pipeline_runs (paperless_document_id, mode, trigger_tag, status, stages)
+            values ((select coalesce(max(paperless_document_id), 0) + 1 from pipeline_runs),
+                    'manual_review', 'ai-process', 'waiting_review', '["metadata"]'::jsonb)
+            returning id
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .expect("insert run");
+        sqlx::query_scalar(
+            r#"
+            insert into review_items (run_id, paperless_document_id, stage, status, suggested_patch, validation_warnings)
+            values ($1, (select paperless_document_id from pipeline_runs where id = $1),
+                    'metadata', 'pending', '{"title":"x"}'::jsonb, '[]'::jsonb)
+            returning id
+            "#,
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("insert review")
+    }
+
+    async fn review_status_of(pool: &DbPool, review_id: Uuid) -> String {
+        sqlx::query_scalar("select status from review_items where id = $1")
+            .bind(review_id)
+            .fetch_one(pool)
+            .await
+            .expect("review status")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn review_endpoints_report_races_require_sessions_and_follow_token_roles() {
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        let suffix = Uuid::now_v7().simple().to_string();
+        let admin = create_user_with_roles(
+            &pool,
+            &format!("security-admin-{suffix}"),
+            None,
+            "hash",
+            &[Role::Admin],
+            None,
+        )
+        .await
+        .expect("admin");
+        let reviewer = create_user_with_roles(
+            &pool,
+            &format!("security-reviewer-{suffix}"),
+            None,
+            "hash",
+            &[Role::Reviewer, Role::Auditor],
+            None,
+        )
+        .await
+        .expect("reviewer");
+        let session_token = random_token();
+        let csrf_token = random_token();
+        create_session(
+            &pool,
+            reviewer,
+            &hash_token(&session_token),
+            &hash_token(&csrf_token),
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .expect("session");
+        let api_token = format!("pa_{}", random_token());
+        archivist_db::create_api_token(
+            &pool,
+            "automation",
+            &hash_token(&api_token),
+            &["reviews:read".to_owned(), "reviews:write".to_owned()],
+            reviewer,
+            None,
+        )
+        .await
+        .expect("token");
+
+        let (base, handle) = spawn_api_router(state).await;
+        let client = no_redirect_client();
+        let session_post = |path: String| {
+            client
+                .post(format!("{base}{path}"))
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("{SESSION_COOKIE}={session_token}"),
+                )
+                .header("x-csrf-token", &csrf_token)
+        };
+
+        // #391: a second decision is a 409, an unknown review a 404.
+        let decided = seed_pending_review(&pool).await;
+        let first = session_post(format!("/api/reviews/{decided}/reject"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let again = session_post(format!("/api/reviews/{decided}/approve"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+        let unknown = session_post(format!("/api/reviews/{}/approve", Uuid::now_v7()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        // #388: a failing human apply (no Paperless token configured) returns
+        // the review to `pending` instead of stranding it in `approved`.
+        let failing = seed_pending_review(&pool).await;
+        let apply_error = session_post(format!("/api/reviews/{failing}/approve"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(apply_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(review_status_of(&pool, failing).await, "pending");
+
+        // #393: a token cannot make review decisions attributed to its creator.
+        let token_target = seed_pending_review(&pool).await;
+        for action in ["approve", "reject"] {
+            let response = client
+                .post(format!("{base}/api/reviews/{token_target}/{action}"))
+                .bearer_auth(&api_token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{action}");
+        }
+        let edit = client
+            .post(format!("{base}/api/reviews/{token_target}/edit"))
+            .bearer_auth(&api_token)
+            .json(&json!({ "patch": { "title": "token edit" } }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(edit.status(), StatusCode::FORBIDDEN);
+        assert_eq!(review_status_of(&pool, token_target).await, "pending");
+        let token_audits: i64 = sqlx::query_scalar(
+            "select count(*) from audit_events where event_type like 'review.%' and metadata->>'review_id' = $1",
+        )
+        .bind(token_target.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("token audit count");
+        assert_eq!(
+            token_audits, 0,
+            "no decision may be attributed to the token creator"
+        );
+
+        // #392: token rights shrink with the creator's roles.
+        let list = client
+            .get(format!("{base}/api/reviews"))
+            .bearer_auth(&api_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        set_user_roles(&pool, reviewer, &[Role::Viewer], admin)
+            .await
+            .expect("demote reviewer");
+        let demoted = client
+            .get(format!("{base}/api/reviews"))
+            .bearer_auth(&api_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(demoted.status(), StatusCode::FORBIDDEN);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn audit_export_is_audited_and_its_deadline_frees_the_pool() {
+        // #394
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        for index in 0..40 {
+            append_audit(
+                &pool,
+                AuditEventInput {
+                    event_type: "test.export_fixture".to_owned(),
+                    actor_type: "system".to_owned(),
+                    actor_id: None,
+                    run_id: None,
+                    job_id: None,
+                    paperless_document_id: Some(index),
+                    before: None,
+                    after: None,
+                    metadata: None,
+                    outcome: "success".to_owned(),
+                    error_message: None,
+                    source_ip: None,
+                    user_agent: None,
+                },
+            )
+            .await
+            .expect("audit fixture");
+        }
+
+        // A client that never reads: the channel fills, the deadline fires,
+        // and the task ends instead of waiting forever.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_audit_export(&pool, tx, std::time::Duration::from_millis(300)),
+        )
+        .await
+        .expect("export must stop at its deadline");
+        let mut delivered = 0;
+        while rx.recv().await.is_some() {
+            delivered += 1;
+        }
+        assert!(delivered <= 5, "only the buffered chunks were produced");
+        // Keyset pages release their connection: the whole pool is available.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut held = Vec::new();
+            for _ in 0..4 {
+                held.push(pool.acquire().await.expect("acquire"));
+            }
+        })
+        .await
+        .expect("no connection is pinned by the aborted export");
+
+        // Full export through the route, with an audit trail entry.
+        let suffix = Uuid::now_v7().simple().to_string();
+        let auditor = create_user_with_roles(
+            &pool,
+            &format!("export-auditor-{suffix}"),
+            None,
+            "hash",
+            &[Role::Auditor],
+            None,
+        )
+        .await
+        .expect("auditor");
+        let session_token = random_token();
+        create_session(
+            &pool,
+            auditor,
+            &hash_token(&session_token),
+            &hash_token(&random_token()),
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .expect("session");
+        let (base, handle) = spawn_api_router(state).await;
+        let csv = no_redirect_client()
+            .get(format!("{base}/api/audit/export.csv"))
+            .header(
+                reqwest::header::COOKIE,
+                format!("{SESSION_COOKIE}={session_token}"),
+            )
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        // header + 40 fixtures + the export event itself (+ login-free setup)
+        assert!(csv.lines().count() >= 42, "{}", csv.lines().count());
+        let exported: i64 = sqlx::query_scalar(
+            "select count(*) from audit_events where event_type = 'audit.exported' and actor_id = $1",
+        )
+        .bind(auditor.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("export audit");
+        assert_eq!(exported, 1);
+        handle.abort();
+    }
 }
 
 fn random_token() -> String {
@@ -10541,6 +11562,27 @@ impl ApiError {
         }
     }
 
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.into(),
+        }
+    }
+
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -10561,6 +11603,49 @@ impl IntoResponse for ApiError {
         let body = Json(json!({ "error": self.message }));
         (self.status, body).into_response()
     }
+}
+
+/// JSON 404 for unknown `/api/*` paths. #399
+async fn api_not_found() -> ApiError {
+    ApiError::not_found("not found")
+}
+
+/// Rewrite axum's plain-text extractor rejections (malformed JSON, missing
+/// content type, body too large, bad path/query parameters) into the
+/// `{"error": ...}` shape every other API error uses. Only client errors
+/// with a `text/plain` body are touched, so handler responses pass through
+/// unchanged. #399
+async fn json_error_body(response: Response) -> Response {
+    const MAX_REJECTION_BODY: usize = 16 * 1024;
+    let status = response.status();
+    let is_plain_text = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/plain"));
+    if !status.is_client_error() || !is_plain_text {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let message = match axum::body::to_bytes(body, MAX_REJECTION_BODY).await {
+        Ok(bytes) if !bytes.is_empty() => String::from_utf8_lossy(&bytes).trim().to_owned(),
+        _ => parts
+            .status
+            .canonical_reason()
+            .unwrap_or("request rejected")
+            .to_owned(),
+    };
+    let mut rewritten = ApiError {
+        status: parts.status,
+        message,
+    }
+    .into_response();
+    for (name, value) in &parts.headers {
+        if name != header::CONTENT_TYPE && name != header::CONTENT_LENGTH {
+            rewritten.headers_mut().append(name.clone(), value.clone());
+        }
+    }
+    rewritten
 }
 
 impl From<anyhow::Error> for ApiError {
@@ -10590,6 +11675,14 @@ impl From<anyhow::Error> for ApiError {
             return Self {
                 status: StatusCode::CONFLICT,
                 message: "OIDC identity matches multiple local accounts".to_owned(),
+            };
+        }
+        // Expected review races (double click, concurrent reviewers) are
+        // client-visible states, not server faults: no ERROR log. #391
+        if let Some(decision) = error.downcast_ref::<ReviewDecisionError>() {
+            return match decision {
+                ReviewDecisionError::NotFound => Self::not_found(decision.to_string()),
+                ReviewDecisionError::NotPending => Self::conflict(decision.to_string()),
             };
         }
         if let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>() {
