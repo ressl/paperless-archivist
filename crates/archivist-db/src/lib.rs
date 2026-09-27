@@ -48,6 +48,16 @@ pub struct InvalidUserIdentityError;
 #[error("OIDC identity matches multiple local accounts")]
 pub struct AmbiguousUserIdentityLinkError;
 
+/// Expected outcomes of a review decision that are not server faults
+/// (double click, two reviewers racing, stale UI). #391
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+pub enum ReviewDecisionError {
+    #[error("review item does not exist")]
+    NotFound,
+    #[error("review item is not pending")]
+    NotPending,
+}
+
 pub async fn connect(database_url: &str, max_connections: u32) -> Result<DbPool> {
     PgPoolOptions::new()
         .max_connections(max_connections)
@@ -141,6 +151,9 @@ pub struct ApiTokenPrincipal {
     pub name: String,
     pub scopes: Vec<String>,
     pub user_id: Option<Uuid>,
+    /// The creator's *current* roles. Token scopes are only effective while
+    /// the creator still holds a matching permission. #392
+    pub creator_roles: Vec<Role>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1709,6 +1722,16 @@ pub async fn update_user_password_hash(
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+    // A password change/reset is the credential-compromise response, so it
+    // also revokes the API tokens this user created (they act with the
+    // user's rights). Decided in #392; operators re-issue tokens afterwards.
+    let api_tokens_revoked = sqlx::query(
+        "update api_tokens set revoked_at = now() where created_by = $1 and revoked_at is null",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     append_audit_tx(
         &mut tx,
         AuditEventInput {
@@ -1719,7 +1742,11 @@ pub async fn update_user_password_hash(
             job_id: None,
             paperless_document_id: None,
             before: None,
-            after: Some(json!({ "user_id": user_id, "sessions_revoked": true })),
+            after: Some(json!({
+                "user_id": user_id,
+                "sessions_revoked": true,
+                "api_tokens_revoked": api_tokens_revoked
+            })),
             metadata: None,
             outcome: "success".to_owned(),
             error_message: None,
@@ -1735,34 +1762,56 @@ pub async fn update_user_password_hash(
 pub async fn find_api_token(pool: &DbPool, token_hash: &str) -> Result<Option<ApiTokenPrincipal>> {
     let row = sqlx::query(
         r#"
-        update api_tokens
-           set last_used_at = now()
-         where token_hash = $1
-           and revoked_at is null
-           and (expires_at is null or expires_at > now())
+        select t.id, t.name, t.scopes, t.created_by,
+               coalesce(
+                 array_agg(ur.role order by ur.role) filter (where ur.role is not null),
+                 '{}'
+               ) as creator_roles
+          from api_tokens t
+          join users u on u.id = t.created_by
+          left join user_roles ur on ur.user_id = u.id
+         where t.token_hash = $1
+           and t.revoked_at is null
+           and (t.expires_at is null or t.expires_at > now())
            -- Neutralize tokens whose creator has been disabled: set_user_enabled
            -- revokes sessions but not API tokens, so without this a disabled
            -- operator's token kept full access. #271
-           and exists (
-             select 1 from users u
-              where u.id = api_tokens.created_by and u.enabled = true
-           )
-        returning id, name, scopes, created_by
+           and u.enabled = true
+         group by t.id
         "#,
     )
     .bind(token_hash)
     .fetch_optional(pool)
     .await?;
 
-    row.map(|row| {
-        Ok(ApiTokenPrincipal {
-            token_id: row.try_get("id")?,
-            name: row.try_get("name")?,
-            scopes: row.try_get("scopes")?,
-            user_id: row.try_get("created_by")?,
-        })
-    })
-    .transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let token_id: Uuid = row.try_get("id")?;
+    // Throttle the activity timestamp to one write per minute, like
+    // sessions (#316); it is display-only. #392
+    sqlx::query(
+        r#"
+        update api_tokens
+           set last_used_at = now()
+         where id = $1
+           and (last_used_at is null or last_used_at < now() - interval '60 seconds')
+        "#,
+    )
+    .bind(token_id)
+    .execute(pool)
+    .await?;
+    let creator_roles: Vec<String> = row.try_get("creator_roles")?;
+    Ok(Some(ApiTokenPrincipal {
+        token_id,
+        name: row.try_get("name")?,
+        scopes: row.try_get("scopes")?,
+        user_id: row.try_get("created_by")?,
+        creator_roles: creator_roles
+            .iter()
+            .map(|role| role.parse())
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    }))
 }
 
 pub async fn list_api_tokens(pool: &DbPool) -> Result<Vec<ApiTokenView>> {
@@ -5161,7 +5210,8 @@ pub async fn create_run_with_jobs_with_priority(
     Ok(run_id)
 }
 
-/// Bulk re-run: create one run (with the given stages) per document in a single transaction.
+/// Bulk re-run: create one run (with the given stages) per document, committed in bounded
+/// chunks of [`CREATE_RUNS_CHUNK_SIZE`] documents.
 ///
 /// Used by the `/api/batches/rerun` endpoint so operators can re-trigger a hand-picked set of
 /// "succeeded-but-wrong" documents in one shot instead of one trigger at a time. The active-run
@@ -5184,36 +5234,49 @@ pub async fn create_runs_for_documents(
     document_ids.sort_unstable();
     document_ids.dedup();
 
-    // Amortise one transaction across the whole batch instead of a begin+commit per document.
-    let mut tx = pool.begin().await?;
-    // Acquire every document lock before the first audit append. Audit chaining
-    // also uses a transaction-scoped advisory lock, so taking all document
-    // locks first gives every batch the same deadlock-free lock order.
-    lock_active_run_documents_tx(&mut tx, &document_ids).await?;
     let mut queued: i64 = 0;
-    let mut audit_events = Vec::new();
-    for document_id in document_ids {
-        let prepared = prepare_run_with_jobs_on_tx(
-            &mut tx,
-            document_id,
-            stages,
-            mode,
-            trigger_tag,
-            actor,
-            priority,
-        )
-        .await?;
-        if let Some(event) = prepared.audit_event {
-            audit_events.push(event);
+    // One transaction per bounded chunk: each document holds a transaction
+    // scoped advisory lock until commit, so a "rerun all failed" over
+    // thousands of documents in one transaction overflowed the shared lock
+    // table ("out of shared memory") and blocked the worker's per-document
+    // locks for the whole batch. Chunks stay in ascending ID order, so the
+    // canonical lock order below is preserved across chunks. A failure keeps
+    // the chunks committed before it (each document is idempotent through the
+    // active-run guard, so a retry does not duplicate runs). #390
+    for chunk in document_ids.chunks(CREATE_RUNS_CHUNK_SIZE) {
+        // Amortise one transaction across the chunk instead of a begin+commit per document.
+        let mut tx = pool.begin().await?;
+        // Acquire every document lock before the first audit append. Audit chaining
+        // also uses a transaction-scoped advisory lock, so taking all document
+        // locks first gives every batch the same deadlock-free lock order.
+        lock_active_run_documents_tx(&mut tx, chunk).await?;
+        let mut audit_events = Vec::new();
+        for &document_id in chunk {
+            let prepared = prepare_run_with_jobs_on_tx(
+                &mut tx,
+                document_id,
+                stages,
+                mode,
+                trigger_tag,
+                actor,
+                priority,
+            )
+            .await?;
+            if let Some(event) = prepared.audit_event {
+                audit_events.push(event);
+            }
+            queued += 1;
         }
-        queued += 1;
+        for event in audit_events {
+            append_audit_tx(&mut tx, event).await?;
+        }
+        tx.commit().await?;
     }
-    for event in audit_events {
-        append_audit_tx(&mut tx, event).await?;
-    }
-    tx.commit().await?;
     Ok(queued)
 }
+
+/// Documents per [`create_runs_for_documents`] transaction. #390
+pub const CREATE_RUNS_CHUNK_SIZE: usize = 250;
 
 /// Document ids the dashboard surfaces as "failed" — a stage (`ocr` or
 /// `metadata`) is in `failed` state — and that are NOT currently being
@@ -6543,28 +6606,54 @@ pub async fn list_reviews(
         .await?
     };
 
-    rows.into_iter()
-        .map(|row| {
-            let stage: String = row.try_get("stage")?;
-            Ok(ReviewItemRecord {
-                id: row.try_get("id")?,
-                run_id: row.try_get("run_id")?,
-                job_id: row.try_get("job_id")?,
-                paperless_document_id: row.try_get("paperless_document_id")?,
-                stage: stage.parse()?,
-                status: row.try_get("status")?,
-                suggested_patch: row.try_get("suggested_patch")?,
-                edited_patch: row.try_get("edited_patch")?,
-                baseline: row.try_get("baseline")?,
-                conflict_fields: row.try_get("conflict_fields")?,
-                conflicted_at: row.try_get("conflicted_at")?,
-                validation_warnings: row.try_get("validation_warnings")?,
-                debug_context: row.try_get("debug_context")?,
-                paperless_title: row.try_get("paperless_title").ok(),
-                created_at: row.try_get("created_at")?,
-            })
-        })
-        .collect()
+    rows.into_iter().map(review_list_item_from_row).collect()
+}
+
+fn review_list_item_from_row(row: PgRow) -> Result<ReviewItemRecord> {
+    let stage: String = row.try_get("stage")?;
+    Ok(ReviewItemRecord {
+        id: row.try_get("id")?,
+        run_id: row.try_get("run_id")?,
+        job_id: row.try_get("job_id")?,
+        paperless_document_id: row.try_get("paperless_document_id")?,
+        stage: stage.parse()?,
+        status: row.try_get("status")?,
+        suggested_patch: row.try_get("suggested_patch")?,
+        edited_patch: row.try_get("edited_patch")?,
+        baseline: row.try_get("baseline")?,
+        conflict_fields: row.try_get("conflict_fields")?,
+        conflicted_at: row.try_get("conflicted_at")?,
+        validation_warnings: row.try_get("validation_warnings")?,
+        debug_context: row.try_get("debug_context")?,
+        paperless_title: row.try_get("paperless_title").ok(),
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+/// Load one review by ID only while it is still `pending`, independent of
+/// how deep it sits in the backlog. #395
+pub async fn get_pending_review(
+    pool: &DbPool,
+    review_id: Uuid,
+) -> Result<Option<ReviewItemRecord>> {
+    let row = sqlx::query(
+        r#"
+        select ri.id, ri.run_id, ri.job_id, ri.paperless_document_id, ri.stage, ri.status,
+               ri.suggested_patch, ri.edited_patch, ri.baseline,
+               ri.conflict_fields, ri.conflicted_at,
+               ri.validation_warnings, ri.created_at,
+               di.title as paperless_title,
+               null::jsonb as debug_context
+          from review_items ri
+          left join document_inventory di
+            on di.paperless_document_id = ri.paperless_document_id
+         where ri.id = $1 and ri.status = 'pending'
+        "#,
+    )
+    .bind(review_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(review_list_item_from_row).transpose()
 }
 
 /// Count review items matching the same optional `status` filter used by
@@ -6612,8 +6701,21 @@ pub async fn review_decision(
     .bind(&edited_patch)
     .bind(actor_id)
     .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| anyhow!("review item is not pending or does not exist"))?;
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        let exists: bool =
+            sqlx::query_scalar("select exists (select 1 from review_items where id = $1)")
+                .bind(review_id)
+                .fetch_one(pool)
+                .await?;
+        return Err(if exists {
+            ReviewDecisionError::NotPending
+        } else {
+            ReviewDecisionError::NotFound
+        }
+        .into());
+    };
 
     // None only when the originating run was pruned by retention (terminal
     // runs only) — impossible for a still-pending review in practice, but
@@ -6795,7 +6897,41 @@ pub async fn prepare_apply_intent(
             tx.rollback().await?;
             return Err(anyhow!("Paperless apply intent hash collision"));
         }
-        (record, false)
+        if record.state == "failed" && record.finalized_at.is_some() {
+            // A failed attempt proved (by 4xx or a post-error GET) that the
+            // PATCH did not take effect, and finalization means its review was
+            // already returned to a decidable state. A new decision for the
+            // same patch may therefore start a fresh attempt instead of being
+            // blocked forever by "already failed". #389
+            let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+                r#"
+                update paperless_apply_intents
+                   set state = 'prepared', owner_type = $2, owner_id = $3,
+                       run_id = $4, job_id = $5, before_state = $6, metadata = $7,
+                       review_revert_status = $8, response_state = null,
+                       request_started_at = null, confirmed_at = null,
+                       finalized_at = null, updated_at = now()
+                 where attempt_id = $1 and state = 'failed' and finalized_at is not null
+                returning {APPLY_INTENT_COLUMNS}
+                "#
+            )))
+            .bind(record.attempt_id)
+            .bind(&input.owner_type)
+            .bind(&input.owner_id)
+            .bind(input.run_id)
+            .bind(input.job_id)
+            .bind(&input.before)
+            .bind(&input.metadata)
+            .bind(&input.review_revert_status)
+            .fetch_optional(&mut *tx)
+            .await?;
+            match row {
+                Some(row) => (apply_intent_from_row(row)?, true),
+                None => (record, false),
+            }
+        } else {
+            (record, false)
+        }
     };
 
     if was_inserted {
@@ -7064,6 +7200,75 @@ pub async fn fail_apply_intent(
     Ok(true)
 }
 
+/// After a transient PATCH failure (5xx, network, timeout) whose follow-up GET
+/// proved the document was not changed, return the attempt to `prepared` so
+/// the owner (job retry or review recovery) may send the same body again
+/// instead of the patch being blocked forever. Bounded by `max_retries`
+/// (tracked in `metadata.transient_failures`); returns `false` once the budget
+/// is exhausted, in which case the caller fails the intent terminally. #389
+pub async fn release_transient_apply_intent(
+    pool: &DbPool,
+    attempt_id: Uuid,
+    owner_id: &str,
+    error: &str,
+    max_retries: i32,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set state = 'prepared', request_started_at = null, last_error = $3,
+               metadata = jsonb_set(
+                 metadata, '{transient_failures}',
+                 to_jsonb(coalesce((metadata->>'transient_failures')::int, 0) + 1)
+               ),
+               updated_at = now()
+         where attempt_id = $1 and owner_id = $2 and state = 'in_flight'
+           and coalesce((metadata->>'transient_failures')::int, 0) < $4
+        returning source, source_key, owner_type, owner_id, run_id, job_id,
+                  paperless_document_id, patch_hash, patch, before_state, metadata
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(owner_id)
+    .bind(error)
+    .bind(max_retries)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "document.patch_retry_scheduled".to_owned(),
+            actor_type: row.try_get("owner_type")?,
+            actor_id: Some(row.try_get("owner_id")?),
+            run_id: row.try_get("run_id")?,
+            job_id: row.try_get("job_id")?,
+            paperless_document_id: Some(row.try_get("paperless_document_id")?),
+            before: row.try_get("before_state")?,
+            after: Some(apply_audit_patch(&row.try_get("patch")?)),
+            metadata: Some(json!({
+                "attempt_id": attempt_id,
+                "patch_hash": row.try_get::<String, _>("patch_hash")?,
+                "source": row.try_get::<String, _>("source")?,
+                "source_key": row.try_get::<String, _>("source_key")?,
+                "context": row.try_get::<Value, _>("metadata")?
+            })),
+            outcome: "failed".to_owned(),
+            error_message: Some(error.to_owned()),
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    increment_metric_counter_tx(&mut tx, "apply_failure_total", 1).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub async fn finalize_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bool> {
     let updated = sqlx::query(
         r#"
@@ -7093,6 +7298,23 @@ pub async fn finalize_failed_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Re
     .execute(pool)
     .await?;
     Ok(updated.rows_affected() == 1)
+}
+
+/// Settle every failed, not yet finalized intent of a review after the caller
+/// already returned the review to a decidable status. A finalized failed
+/// intent may be re-prepared by a later decision for the same patch. #389
+pub async fn finalize_failed_review_apply_intents(pool: &DbPool, review_id: Uuid) -> Result<u64> {
+    let updated = sqlx::query(
+        r#"
+        update paperless_apply_intents
+           set finalized_at = now(), updated_at = now()
+         where review_id = $1 and state = 'failed' and finalized_at is null
+        "#,
+    )
+    .bind(review_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected())
 }
 
 /// Whether reverting an `applying` review would make an ambiguous Paperless
@@ -7506,6 +7728,15 @@ pub async fn list_pending_review_items_for_autopilot_drain(
                conflict_fields, conflicted_at, validation_warnings, created_at
           from review_items
          where status = 'pending'
+           -- A terminally failed Paperless attempt is left for a human
+           -- decision; re-draining it every tick would loop forever on the
+           -- same failure. #389
+           and not exists (
+             select 1
+               from paperless_apply_intents pai
+              where pai.review_id = review_items.id
+                and pai.state = 'failed'
+           )
          order by created_at asc
          limit $1
         "#,
@@ -7785,8 +8016,9 @@ pub async fn mark_review_apply_conflict(
 }
 
 /// Release a human-apply claim after the Paperless PATCH failed: move the row
-/// from `applying` back to the status it had before the claim so the operator
-/// can retry. #253.
+/// from `applying` back to `to_status` so the operator can retry. The API
+/// reverts to `pending` (#388); `approved`/`edited` remain accepted for
+/// legacy intents persisted with that revert status. #253.
 pub async fn revert_review_from_applying(
     pool: &DbPool,
     review_id: Uuid,
@@ -7795,7 +8027,8 @@ pub async fn revert_review_from_applying(
     sqlx::query(
         r#"
         update review_items
-           set status = $2
+           set status = $2,
+               reviewed_at = case when $2 = 'pending' then null else reviewed_at end
          where id = $1 and status = 'applying'
         "#,
     )
@@ -10129,20 +10362,35 @@ pub struct StuckRunStatusFixSummary {
 /// reconciled/finalized by the apply recovery state machine; blindly requeuing
 /// them could repeat an externally successful PATCH. Returns the number of
 /// rows recovered. #253, #342.
+///
+/// The same sweep also returns `approved`/`edited` rows to `pending` once
+/// they are older than the window and have no unfinalized intent at all: a
+/// human apply claims its row immediately after the decision, so such a row
+/// was abandoned (handler future dropped by a proxy timeout, or a legacy
+/// revert to the pre-claim status) and nothing else would ever apply it. #388
 pub async fn reset_stale_applying_reviews(pool: &DbPool, older_than_seconds: i64) -> Result<i64> {
     let reset = sqlx::query(
         r#"
         update review_items
            set status = 'pending',
                reviewed_at = null
-         where status = 'applying'
+         where (
+                 (status = 'applying'
+                  and not exists (
+                    select 1
+                      from paperless_apply_intents pai
+                     where pai.review_id = review_items.id
+                       and pai.state in ('prepared', 'in_flight', 'confirmed', 'reconciled')
+                  ))
+                 or (status in ('approved', 'edited')
+                  and not exists (
+                    select 1
+                      from paperless_apply_intents pai
+                     where pai.review_id = review_items.id
+                       and pai.finalized_at is null
+                  ))
+               )
            and reviewed_at < now() - make_interval(secs => $1)
-           and not exists (
-             select 1
-               from paperless_apply_intents pai
-              where pai.review_id = review_items.id
-                and pai.state in ('prepared', 'in_flight', 'confirmed', 'reconciled')
-           )
         "#,
     )
     .bind(older_than_seconds as f64)

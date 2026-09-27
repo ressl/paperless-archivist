@@ -17,8 +17,8 @@ use archivist_db::{
     finalize_failed_apply_intent, get_apply_intent, get_recoverable_apply_intent_by_source_key,
     get_review_status, list_recoverable_review_apply_intents, mark_apply_intent_confirmed,
     mark_apply_intent_in_flight, mark_review_applied, mark_review_auto_applied,
-    prepare_apply_intent, reconcile_apply_intent, revert_review_from_applying,
-    revert_review_to_pending_after_failed_drain,
+    prepare_apply_intent, reconcile_apply_intent, release_transient_apply_intent,
+    revert_review_from_applying, revert_review_to_pending_after_failed_drain,
 };
 use archivist_paperless::{
     PaperlessClient, PaperlessDocumentDetail, PaperlessError, document_matches_patch,
@@ -580,6 +580,25 @@ async fn apply_document_inner(
                     let message = format!(
                         "ambiguous Paperless PATCH did not match current document: {patch_error:#}"
                     );
+                    // A 5xx/network/timeout whose follow-up GET shows the
+                    // document unchanged did not apply: keep the attempt
+                    // retryable (bounded) instead of blocking this patch
+                    // forever. Only definitive failures become terminal. #389
+                    if is_transient_paperless_error(&patch_error)
+                        && release_transient_apply_intent(
+                            pool,
+                            intent.attempt_id,
+                            &request.owner_id,
+                            &message,
+                            MAX_TRANSIENT_APPLY_RETRIES,
+                        )
+                        .await?
+                    {
+                        return Err(anyhow!(
+                            "transient Paperless PATCH failure; attempt {} will be retried: {patch_error:#}",
+                            intent.attempt_id
+                        ));
+                    }
                     fail_apply_intent(pool, intent.attempt_id, &request.owner_id, &message).await?;
 
                     if request.allow_custom_fields_fallback
@@ -751,6 +770,13 @@ async fn settle_failed_review(pool: &DbPool, intent: &ApplyIntentRecord) -> Resu
     let review_id = intent
         .review_id
         .ok_or_else(|| anyhow!("review apply intent has no review ID"))?;
+    // The API settles a human failure itself and a later decision may then
+    // re-prepare the same intent (#389). Never act on a stale snapshot: that
+    // would revert a review whose fresh attempt is already in progress.
+    let current = get_apply_intent(pool, intent.attempt_id).await?;
+    if !current.is_some_and(|current| current.state == "failed" && current.finalized_at.is_none()) {
+        return Ok(());
+    }
     let current_status = get_review_status(pool, review_id)
         .await?
         .ok_or_else(|| anyhow!("review apply intent references a missing review"))?;
@@ -852,6 +878,15 @@ async fn resume_existing(
             intent.attempt_id
         )),
     }
+}
+
+/// Transient PATCH failures an intent may retry before failing terminally. #389
+pub const MAX_TRANSIENT_APPLY_RETRIES: i32 = 5;
+
+fn is_transient_paperless_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<PaperlessError>()
+        .is_some_and(PaperlessError::is_transient)
 }
 
 fn is_custom_fields_bad_request(error: &anyhow::Error) -> bool {
