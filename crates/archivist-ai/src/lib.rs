@@ -1731,6 +1731,319 @@ impl TextProvider for AnthropicClient {
     }
 }
 
+// --- Streamed text chat (#449) ---------------------------------------------
+//
+// Document Chat streams the answer to the browser. Only the API process talks
+// to providers; the browser receives the deltas through the API's own SSE
+// endpoint. The streamed clients reuse the non-streaming payload builders and
+// only flip the provider's `stream` flag, so tuning (reasoning effort, token
+// caps, MiniMax thinking mode) is identical on both paths. Structured output
+// (`response_schema`) is not supported while streaming; chat never sets it.
+
+/// Wire framing of a provider's streamed chat response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatStreamFormat {
+    /// Ollama `/api/chat`: one JSON object per line.
+    OllamaNdjson,
+    /// OpenAI-compatible `/chat/completions`: `data: {json}` SSE lines ending
+    /// with `data: [DONE]`.
+    OpenAiSse,
+    /// Anthropic `/messages`: typed SSE events (`content_block_delta`, ...).
+    AnthropicSse,
+}
+
+/// What one line of a streamed provider response contributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatStreamLine {
+    /// Visible answer text carried by the line (reasoning/thinking deltas are
+    /// deliberately dropped).
+    pub delta: Option<String>,
+    /// The provider signalled the end of the answer.
+    pub done: bool,
+    /// The provider reported an error inside the stream.
+    pub error: Option<String>,
+}
+
+/// Parse one line of a streamed provider response. Blank lines, SSE comments,
+/// `event:` lines and unknown payloads yield an empty [`ChatStreamLine`].
+pub fn parse_chat_stream_line(format: ChatStreamFormat, line: &str) -> ChatStreamLine {
+    let line = line.trim();
+    if line.is_empty() {
+        return ChatStreamLine::default();
+    }
+    let payload = match format {
+        ChatStreamFormat::OllamaNdjson => line,
+        ChatStreamFormat::OpenAiSse | ChatStreamFormat::AnthropicSse => {
+            let Some(data) = line.strip_prefix("data:") else {
+                return ChatStreamLine::default();
+            };
+            data.trim()
+        }
+    };
+    if format == ChatStreamFormat::OpenAiSse && payload == "[DONE]" {
+        return ChatStreamLine {
+            done: true,
+            ..ChatStreamLine::default()
+        };
+    }
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        return ChatStreamLine::default();
+    };
+    if let Some(error) = value.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .unwrap_or("provider reported a stream error");
+        return ChatStreamLine {
+            error: Some(message.to_owned()),
+            ..ChatStreamLine::default()
+        };
+    }
+    let non_empty = |text: Option<&str>| text.filter(|text| !text.is_empty()).map(str::to_owned);
+    match format {
+        ChatStreamFormat::OllamaNdjson => ChatStreamLine {
+            delta: non_empty(
+                value
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .and_then(Value::as_str),
+            ),
+            done: value.get("done").and_then(Value::as_bool).unwrap_or(false),
+            error: None,
+        },
+        ChatStreamFormat::OpenAiSse => ChatStreamLine {
+            delta: non_empty(
+                value
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str),
+            ),
+            done: false,
+            error: None,
+        },
+        ChatStreamFormat::AnthropicSse => match value.get("type").and_then(Value::as_str) {
+            Some("content_block_delta")
+                if value.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta") =>
+            {
+                ChatStreamLine {
+                    delta: non_empty(value.pointer("/delta/text").and_then(Value::as_str)),
+                    ..ChatStreamLine::default()
+                }
+            }
+            Some("message_stop") => ChatStreamLine {
+                done: true,
+                ..ChatStreamLine::default()
+            },
+            _ => ChatStreamLine::default(),
+        },
+    }
+}
+
+/// Apply one parsed line: forward its delta, fail on an in-stream error.
+/// Returns whether the provider signalled the end of the answer.
+fn apply_chat_stream_line(
+    format: ChatStreamFormat,
+    line: &[u8],
+    text: &mut String,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> Result<bool> {
+    let parsed = parse_chat_stream_line(format, &String::from_utf8_lossy(line));
+    if let Some(error) = parsed.error {
+        return Err(anyhow::Error::new(AiProviderError::InvalidResponse(
+            truncate_utf8(&error, AI_PROVIDER_ERROR_SNIPPET_LIMIT_BYTES)
+                .0
+                .to_owned(),
+        ))
+        .context("provider aborted the streamed chat"));
+    }
+    if let Some(delta) = parsed.delta {
+        on_delta(&delta);
+        text.push_str(&delta);
+    }
+    Ok(parsed.done)
+}
+
+/// Read a streamed provider body line by line, forwarding every text delta to
+/// `on_delta` and returning the complete answer. The body is bounded by
+/// [`AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES`] like every buffered response.
+async fn read_chat_stream(
+    mut response: reqwest::Response,
+    format: ChatStreamFormat,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> Result<String> {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut received = 0usize;
+    let mut text = String::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(AiProviderError::from)
+        .context("read streamed chat response")?
+    {
+        received += chunk.len();
+        if received > AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES {
+            return Err(anyhow::Error::new(AiProviderError::InvalidResponse(
+                format!(
+                    "streamed chat response exceeded {AI_PROVIDER_RESPONSE_BODY_LIMIT_BYTES} bytes"
+                ),
+            )));
+        }
+        pending.extend_from_slice(&chunk);
+        while let Some(position) = pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = pending.drain(..=position).collect();
+            if apply_chat_stream_line(format, &line[..line.len() - 1], &mut text, on_delta)? {
+                return Ok(text);
+            }
+        }
+    }
+    if !pending.is_empty() {
+        apply_chat_stream_line(format, &pending, &mut text, on_delta)?;
+    }
+    Ok(text)
+}
+
+/// Turn a non-success streamed-chat response into the same typed error the
+/// buffered clients return.
+async fn streamed_chat_http_error(
+    provider: &str,
+    response: reqwest::Response,
+    operation: &'static str,
+) -> anyhow::Error {
+    match check_quota_then_take_body(provider, response).await {
+        Ok(error) => anyhow::Error::new(AiProviderError::from_http(
+            error.status.as_u16(),
+            error.safe_body,
+        ))
+        .context(operation),
+        Err(error) => error,
+    }
+}
+
+fn streamed_response(provider: &str, model: String, text: String, started: Instant) -> AiResponse {
+    AiResponse {
+        provider: provider.to_owned(),
+        model,
+        text,
+        raw_response: json!({ "streamed": true }),
+        duration_ms: started.elapsed().as_millis().min(i32::MAX as u128) as i32,
+    }
+}
+
+fn enable_stream_flag(payload: &mut Value) {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("stream".to_owned(), json!(true));
+    }
+}
+
+impl OllamaClient {
+    /// Streamed variant of [`TextProvider::chat`] (#449).
+    pub async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<AiResponse> {
+        let started = Instant::now();
+        let mut payload = build_ollama_chat_payload(&request);
+        enable_stream_flag(&mut payload);
+        let response = self
+            .client
+            .post(format!("{}/api/chat", self.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(AiProviderError::from)
+            .context("call Ollama streamed chat")?;
+        if !response.status().is_success() {
+            return Err(streamed_chat_http_error(
+                &self.provider_name,
+                response,
+                "Ollama chat call",
+            )
+            .await);
+        }
+        let text = read_chat_stream(response, ChatStreamFormat::OllamaNdjson, on_delta).await?;
+        Ok(streamed_response(
+            &self.provider_name,
+            request.model,
+            text,
+            started,
+        ))
+    }
+}
+
+impl OpenAiCompatibleClient {
+    /// Streamed variant of [`TextProvider::chat`] (#449). No structured-output
+    /// retry: streamed chat never sends a response schema.
+    pub async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<AiResponse> {
+        let started = Instant::now();
+        let mut payload = build_openai_chat_payload(&request)?;
+        enable_stream_flag(&mut payload);
+        let response = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(AiProviderError::from)
+            .context("call OpenAI-compatible streamed chat")?;
+        if !response.status().is_success() {
+            return Err(streamed_chat_http_error(
+                &self.provider_name,
+                response,
+                "OpenAI-compatible chat call",
+            )
+            .await);
+        }
+        let text = read_chat_stream(response, ChatStreamFormat::OpenAiSse, on_delta).await?;
+        Ok(streamed_response(
+            &self.provider_name,
+            request.model,
+            text,
+            started,
+        ))
+    }
+}
+
+impl AnthropicClient {
+    /// Streamed variant of [`TextProvider::chat`] (#449).
+    pub async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<AiResponse> {
+        let started = Instant::now();
+        let mut payload = build_anthropic_chat_payload(&request);
+        enable_stream_flag(&mut payload);
+        let response = self
+            .client
+            .post(format!("{}/messages", self.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(AiProviderError::from)
+            .context("call Anthropic streamed messages API")?;
+        if !response.status().is_success() {
+            return Err(streamed_chat_http_error(
+                &self.provider_name,
+                response,
+                "Anthropic messages call",
+            )
+            .await);
+        }
+        let text = read_chat_stream(response, ChatStreamFormat::AnthropicSse, on_delta).await?;
+        Ok(streamed_response(
+            &self.provider_name,
+            request.model,
+            text,
+            started,
+        ))
+    }
+}
+
 #[async_trait]
 impl VisionProvider for AnthropicClient {
     async fn vision(&self, request: VisionRequest) -> Result<AiResponse> {
