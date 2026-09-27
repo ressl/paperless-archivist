@@ -135,7 +135,7 @@ reproduction harness:
    v1.4.x `metadata_status` column.
 2. **`/api/batches/full` queues N single-stage runs per stage instead of one
    multi-stage run per doc** — confirmed in
-   `archivist-api/src/main.rs::queue_full_batch` (~ line 3336). It loops over
+   `archivist-api/src/routes/operations.rs::queue_full_batch`. It loops over
    `enabled_stages` and calls `queue_missing_stage(..., stage, ...)` per stage
    rather than `queue_missing_pipeline(enabled_stages, ...)`. Symptom:
    `pipeline_runs.stages` is `["ocr"]` or `["metadata"]` for every row, never

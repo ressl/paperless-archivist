@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 
 const requireFromFrontend = createRequire(
   new URL('../../frontend/package.json', import.meta.url)
@@ -8,10 +8,36 @@ const requireFromFrontend = createRequire(
 const { parse } = requireFromFrontend('yaml');
 
 const repositoryRoot = new URL('../../', import.meta.url);
-const routerSource = await readFile(
-  new URL('crates/archivist-api/src/main.rs', repositoryRoot),
-  'utf8'
-);
+// The runtime router is assembled only in `fn router` in main.rs; handlers
+// live in `src/routes/*.rs` and are referenced from there by name. #438
+const apiSourceRoot = new URL('crates/archivist-api/src/', repositoryRoot);
+const routerSource = await readFile(new URL('main.rs', apiSourceRoot), 'utf8');
+
+async function rustSourceFiles(directory, prefix = '') {
+  const files = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const relative = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) {
+      files.push(...(await rustSourceFiles(new URL(`${entry.name}/`, directory), `${relative}/`)));
+    } else if (entry.name.endsWith('.rs')) {
+      files.push(relative);
+    }
+  }
+  return files;
+}
+
+// Guard the single-file assumption above: a Router built in any other
+// non-test module would carry routes this verifier cannot see.
+for (const relative of await rustSourceFiles(apiSourceRoot)) {
+  if (relative === 'main.rs' || relative === 'test_support.rs' || relative.startsWith('tests/')) {
+    continue;
+  }
+  const source = await readFile(new URL(relative, apiSourceRoot), 'utf8');
+  assert.ok(
+    !/\bRouter::new\(\)|\bfn\s+router\s*\(/.test(source),
+    `crates/archivist-api/src/${relative} builds an Axum Router; routes must be declared in fn router (main.rs)`
+  );
+}
 const openapi = parse(
   await readFile(new URL('openapi/openapi.yaml', repositoryRoot), 'utf8')
 );

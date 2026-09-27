@@ -53,7 +53,8 @@ Key responsibilities:
 
 | Area | Files |
 | --- | --- |
-| API routes, auth, orchestration | `crates/archivist-api/src/main.rs` |
+| API router and startup | `crates/archivist-api/src/main.rs` (`fn router`), `crates/archivist-api/src/route_policy.rs` |
+| API handlers, auth, OIDC, SSRF guard | `crates/archivist-api/src/routes/*.rs`, `auth.rs`, `oidc.rs`, `ssrf.rs`, `error.rs` |
 | Worker jobs and apply flow | `crates/archivist-worker/src/main.rs` |
 | Domain settings, roles, validation, prompts | `crates/archivist-core/src/lib.rs` |
 | Database repositories | `crates/archivist-db/src/lib.rs` |
@@ -433,7 +434,7 @@ Start here for common tasks:
 | Task | Start with |
 | --- | --- |
 | Understand product behavior | `README.md`, `docs/USER_GUIDE.md`, `docs/PROJECT_OVERVIEW.md` |
-| Add or change API endpoint | `crates/archivist-api/src/main.rs`, `openapi/openapi.yaml` |
+| Add or change API endpoint | `crates/archivist-api/src/routes/<area>.rs`, `fn router` in `crates/archivist-api/src/main.rs`, `crates/archivist-api/src/route_policy.rs`, `openapi/openapi.yaml` |
 | Change runtime settings | `crates/archivist-core/src/lib.rs`, `crates/archivist-db/src/lib.rs`, Settings UI |
 | Change provider logic | `crates/archivist-ai/src/lib.rs`, worker/API call sites |
 | Change Paperless writes | `crates/archivist-paperless/src/lib.rs`, worker apply code |

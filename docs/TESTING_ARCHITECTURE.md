@@ -188,7 +188,8 @@ is a good walk-through because it hits every layer.
   5-step decision tree (applied via audit, applied via approved
   review, pending review, rejected review, skipped overwrite-disabled,
   dropped no-proposal, skipped entity-not-found). Tests live in
-  `crates/archivist-api/src/main.rs`'s `#[cfg(test)] mod tests`.
+  `crates/archivist-api/src/routes/metadata_trace.rs`'s
+  `#[cfg(test)] mod metadata_trace_tests`.
 - **Frontend**: `tsc --noEmit` verifies that the drawer consumes the
   generated `MetadataTrace` / `MetadataFieldOutcome` types
   correctly. The drawer renders unconditionally for the 6

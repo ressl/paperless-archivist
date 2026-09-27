@@ -289,9 +289,10 @@ deliberately configure — loopback to scan the API pod itself, IMDS to
 exfiltrate cloud credentials, link-local to probe the host network.
 
 Implementation: the up-front check is
-`crates/archivist-api/src/main.rs::validate_outbound_url` (invoked by
+`crates/archivist-api/src/ssrf.rs::validate_outbound_url` (invoked by
 `test_paperless`, `test_provider`, `test_notification`,
-`model_provider_models`), covered by unit tests in the same file. The shared
+`model_provider_models`), covered by unit tests in
+`crates/archivist-api/src/tests/ssrf.rs`. The shared
 address policy lives in `crates/archivist-core/src/ssrf.rs`
 (`is_ssrf_dangerous_ip`). The no-redirect policy is set on every Paperless /
 AI-provider / webhook client across the API and worker.
