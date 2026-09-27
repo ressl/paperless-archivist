@@ -319,8 +319,7 @@ runs:write
 reviews:read
 reviews:write
 settings:read
-settings:write
-users:manage
+audit:read
 inventory:read
 batches:write
 ```

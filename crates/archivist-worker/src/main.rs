@@ -25,7 +25,7 @@ use archivist_core::{
     validate_title_suggestion,
 };
 use archivist_db::{
-    AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, append_audit,
+    AiArtifactInput, DbPool, JobRecord, ReviewItemRecord, StartupRepair, append_audit,
     backfill_metadata_stage_for_ocr_only_runs, bump_text_num_ctx_if_too_small,
     bump_vision_num_ctx_if_too_small, claim_jobs, claim_notification_delivery,
     claim_pending_review_for_autopilot_drain, complete_job, connect, create_review_item,
@@ -36,10 +36,10 @@ use archivist_db::{
     list_pending_review_items_for_autopilot_drain, mark_review_apply_conflict,
     mark_review_auto_applied, named_entity_id_for_name, paperless_sync_cursor,
     queue_missing_pipeline, rebalance_backfilled_metadata_priorities, record_dashboard_snapshot,
-    record_document_language, release_job_lease_for_cooldown, requeue_vision_crashed_jobs,
-    reset_stale_applying_reviews, reset_stuck_running_pipeline_runs, resolve_secret,
-    revert_review_to_pending_after_failed_drain, selector_document_budget, tag_id_pairs_for_names,
-    tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
+    record_document_language, record_startup_repair, release_job_lease_for_cooldown,
+    requeue_vision_crashed_jobs, reset_stale_applying_reviews, reset_stuck_running_pipeline_runs,
+    resolve_secret, revert_review_from_applying, selector_document_budget, startup_repair_applied,
+    tag_id_pairs_for_names, tag_ids_for_names, update_paperless_sync_cursor, upsert_inventory_item,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
 };
 use archivist_ocr::{normalize_and_validate_ocr_pages, render_document_pages, strip_code_fences};
@@ -153,89 +153,131 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
         Err(error) => warn!(error = %error, "failed to read Ollama num_ctx settings at startup"),
     }
 
+    // #443: the one-shot repairs below run at most once per
+    // (name, version) — see `StartupRepair` — instead of on every boot. The
+    // recurring review sweeps after them are not repairs and stay ungated.
+
     // One-shot: lift the GGML_ASSERT recurrence ceiling that v1.5.1 set to
     // 16384. Production observed 137 OCR jobs burning through their retry
     // budget despite num_ctx=16384, so we bump the floor to 32768 for any
     // deployment that hasn't already raised it manually. This runs BEFORE
     // the vision-crash requeue so the requeued jobs run under the new num_ctx.
-    match bump_vision_num_ctx_if_too_small(&pool).await {
-        Ok(summary) if summary.bumped => info!(
-            previous = ?summary.previous,
-            current = summary.current,
-            "bumped ai.ollama_vision_num_ctx to 32768 to give vision model more headroom"
-        ),
-        Ok(_) => info!("ai.ollama_vision_num_ctx already at or above 32768; no bump"),
-        Err(error) => warn!(error = %error, "startup vision num_ctx bump failed"),
-    }
+    run_startup_repair(&pool, StartupRepair::VISION_NUM_CTX_FLOOR, || async {
+        let summary = bump_vision_num_ctx_if_too_small(&pool).await?;
+        if summary.bumped {
+            info!(
+                previous = ?summary.previous,
+                current = summary.current,
+                "bumped ai.ollama_vision_num_ctx to 32768 to give vision model more headroom"
+            );
+        } else {
+            info!("ai.ollama_vision_num_ctx already at or above 32768; no bump");
+        }
+        Ok(Some(json!({
+            "previous": summary.previous,
+            "current": summary.current,
+            "bumped": summary.bumped,
+        })))
+    })
+    .await;
 
     // One-shot: raise the text num_ctx to a 32768 floor (matching vision). A
     // large metadata prompt (bounded OCR + candidate allowlists + few-shots +
     // JSON shape) can exceed 16384 tokens on a long document and fail the
     // metadata job with exceed_context_size_error (seen at 18962). Operators
     // who already raised it past the floor are untouched.
-    match bump_text_num_ctx_if_too_small(&pool).await {
-        Ok(summary) if summary.bumped => info!(
-            previous = ?summary.previous,
-            current = summary.current,
-            "bumped ai.ollama_text_num_ctx to 32768 to give the text model context headroom"
-        ),
-        Ok(_) => info!("ai.ollama_text_num_ctx already at or above 32768; no bump"),
-        Err(error) => warn!(error = %error, "startup text num_ctx bump failed"),
-    }
+    run_startup_repair(&pool, StartupRepair::TEXT_NUM_CTX_FLOOR, || async {
+        let summary = bump_text_num_ctx_if_too_small(&pool).await?;
+        if summary.bumped {
+            info!(
+                previous = ?summary.previous,
+                current = summary.current,
+                "bumped ai.ollama_text_num_ctx to 32768 to give the text model context headroom"
+            );
+        } else {
+            info!("ai.ollama_text_num_ctx already at or above 32768; no bump");
+        }
+        Ok(Some(json!({
+            "previous": summary.previous,
+            "current": summary.current,
+            "bumped": summary.bumped,
+        })))
+    })
+    .await;
 
     // One-shot: lift failed OCR jobs killed by the GGML vision-runtime crash signature back
     // into the queue so they get a second chance under the new fallback machinery.
-    // Idempotent — finding no matching rows is a no-op. Gated by the runtime setting so
-    // operators can disable for upgrade scenarios where the queue must not be touched.
-    if let Err(error) = run_startup_vision_crash_requeue(&pool).await {
-        warn!(error = %error, "startup vision-crash requeue failed");
-    }
+    // Gated by the runtime setting so operators can disable for upgrade scenarios where the
+    // queue must not be touched; a disabled pass records no marker.
+    run_startup_repair(&pool, StartupRepair::VISION_CRASH_REQUEUE, || {
+        run_startup_vision_crash_requeue(&pool)
+    })
+    .await;
 
     // One-shot: backfill the consolidated `metadata` stage onto historical
     // `pipeline_runs` that were queued with only `["ocr"]` (e.g. by trigger
     // polling against documents tagged only with the OCR trigger). Without
     // this, those runs terminate after OCR and the Review queue fills up
     // with content-only review items that never get a real
-    // Title/Correspondent/Tags suggestion. Idempotent — once every OCR-only
-    // run has a metadata job, subsequent startups find nothing to do.
-    match backfill_metadata_stage_for_ocr_only_runs(&pool).await {
-        Ok(summary) if summary.runs_updated > 0 => info!(
-            runs_updated = summary.runs_updated,
-            jobs_inserted = summary.jobs_inserted,
-            "metadata-stage backfill lifted OCR-only pipeline_runs to include the metadata stage"
-        ),
-        Ok(_) => info!("metadata-stage backfill found no OCR-only pipeline_runs to lift"),
-        Err(error) => warn!(error = %error, "startup metadata-stage backfill failed"),
-    }
+    // Title/Correspondent/Tags suggestion.
+    run_startup_repair(&pool, StartupRepair::METADATA_STAGE_BACKFILL, || async {
+        let summary = backfill_metadata_stage_for_ocr_only_runs(&pool).await?;
+        if summary.runs_updated > 0 {
+            info!(
+                runs_updated = summary.runs_updated,
+                jobs_inserted = summary.jobs_inserted,
+                "metadata-stage backfill lifted OCR-only pipeline_runs to include the metadata stage"
+            );
+        } else {
+            info!("metadata-stage backfill found no OCR-only pipeline_runs to lift");
+        }
+        Ok(Some(json!({
+            "runs_updated": summary.runs_updated,
+            "jobs_inserted": summary.jobs_inserted,
+        })))
+    })
+    .await;
 
     // One-shot: fix the v1.5.4 backfill bug where new metadata jobs got
     // `payload.priority = 1_000_000 - document_id` instead of inheriting
     // the OCR sibling's priority. Without this, the backfilled metadata
     // jobs sit queued indefinitely behind every other OCR job globally.
-    // Idempotent — once every backfilled metadata job has a matching
-    // priority, subsequent startups find nothing to do.
-    match rebalance_backfilled_metadata_priorities(&pool).await {
-        Ok(summary) if summary.jobs_repriced > 0 => info!(
-            jobs_repriced = summary.jobs_repriced,
-            "rebalanced backfilled metadata-job priorities to inherit OCR siblings'"
-        ),
-        Ok(_) => info!("metadata-job priority rebalance found no mispriced rows"),
-        Err(error) => warn!(error = %error, "startup metadata-priority rebalance failed"),
-    }
+    run_startup_repair(
+        &pool,
+        StartupRepair::METADATA_PRIORITY_REBALANCE,
+        || async {
+            let summary = rebalance_backfilled_metadata_priorities(&pool).await?;
+            if summary.jobs_repriced > 0 {
+                info!(
+                    jobs_repriced = summary.jobs_repriced,
+                    "rebalanced backfilled metadata-job priorities to inherit OCR siblings'"
+                );
+            } else {
+                info!("metadata-job priority rebalance found no mispriced rows");
+            }
+            Ok(Some(json!({ "jobs_repriced": summary.jobs_repriced })))
+        },
+    )
+    .await;
 
     // One-shot: clean up pipeline_runs.status='running' rows whose jobs
     // are all settled. Pre-v1.5.7 complete_job left intermediate stage
     // successes on 'running' which surfaced as "N stuck run(s)" on the
     // dashboard. v1.5.7 fixes complete_job for new runs; this catches
     // the historical residue.
-    match reset_stuck_running_pipeline_runs(&pool).await {
-        Ok(summary) if summary.runs_reset > 0 => info!(
-            runs_reset = summary.runs_reset,
-            "reset historical pipeline_runs stuck on 'running' to their correct status"
-        ),
-        Ok(_) => info!("stuck-running pipeline_runs cleanup found no rows to reset"),
-        Err(error) => warn!(error = %error, "startup stuck-runs reset failed"),
-    }
+    run_startup_repair(&pool, StartupRepair::STUCK_RUNNING_RUNS_RESET, || async {
+        let summary = reset_stuck_running_pipeline_runs(&pool).await?;
+        if summary.runs_reset > 0 {
+            info!(
+                runs_reset = summary.runs_reset,
+                "reset historical pipeline_runs stuck on 'running' to their correct status"
+            );
+        } else {
+            info!("stuck-running pipeline_runs cleanup found no rows to reset");
+        }
+        Ok(Some(json!({ "runs_reset": summary.runs_reset })))
+    })
+    .await;
 
     // Reconcile durable Paperless intents before the legacy stale-review
     // sweep. Active/confirmed intents remain fenced; only rows with no active
@@ -525,18 +567,61 @@ async fn wait_for_schema(pool: &DbPool) -> Result<()> {
     Ok(())
 }
 
+/// #443: run the one-shot startup repair `repair` unless its (name, version)
+/// marker already exists, and record the marker with the repair's summary
+/// once it succeeded. `run` returns `None` when the repair was skipped (e.g.
+/// disabled by a runtime setting) so it is retried on a later boot. Errors
+/// are logged and swallowed: the worker should still come up even if this
+/// housekeeping fails, and a failed repair records no marker.
+async fn run_startup_repair<F, Fut>(pool: &DbPool, repair: StartupRepair, run: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Option<serde_json::Value>>>,
+{
+    match startup_repair_applied(pool, repair).await {
+        Ok(true) => {
+            info!(
+                repair = repair.name,
+                version = repair.version,
+                "startup repair already applied; skipping"
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            warn!(repair = repair.name, error = %error, "startup repair marker lookup failed");
+            return;
+        }
+    }
+    match run().await {
+        Ok(Some(details)) => {
+            match record_startup_repair(pool, repair, env!("CARGO_PKG_VERSION"), details).await {
+                Ok(_) => info!(
+                    repair = repair.name,
+                    version = repair.version,
+                    "startup repair applied and recorded"
+                ),
+                Err(error) => {
+                    warn!(repair = repair.name, error = %error, "failed to record startup repair")
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(error) => warn!(repair = repair.name, error = %error, "startup repair failed"),
+    }
+}
+
 /// One-shot startup helper: when enabled in runtime settings, lifts `failed` OCR jobs that
 /// match the vision-runtime-crash signature back into `queued` and bumps their attempt
-/// budget by one. Designed to run exactly once per worker process start; idempotent if a
-/// rerun finds zero matching rows. Errors are swallowed by the caller (the worker should
-/// still come up even if this housekeeping fails).
-async fn run_startup_vision_crash_requeue(pool: &DbPool) -> Result<()> {
+/// budget by one (at most once per job, #406). Gated by [`run_startup_repair`] (#443);
+/// returns `None` while the setting disables it so no marker is recorded.
+async fn run_startup_vision_crash_requeue(pool: &DbPool) -> Result<Option<serde_json::Value>> {
     let settings = get_runtime_settings(pool).await?;
     if !settings.ai.requeue_vision_crashes_on_startup {
         info!(
             "vision-crash startup requeue disabled by setting requeue_vision_crashes_on_startup=false"
         );
-        return Ok(());
+        return Ok(None);
     }
     let summary = requeue_vision_crashed_jobs(pool).await?;
     if summary.jobs_requeued > 0 {
@@ -547,7 +632,7 @@ async fn run_startup_vision_crash_requeue(pool: &DbPool) -> Result<()> {
     } else {
         info!("vision-crash startup requeue found no matching jobs");
     }
-    Ok(())
+    Ok(Some(json!({ "jobs_requeued": summary.jobs_requeued })))
 }
 
 /// Baseline job-lease window in seconds. Claims and heartbeat bumps never
@@ -4218,7 +4303,7 @@ async fn apply_one_autopilot_drain_review(
             match archivist_db::review_has_nonterminal_apply_intent(pool, claimed.id).await {
                 Ok(false) => {
                     if let Err(revert_error) =
-                        revert_review_to_pending_after_failed_drain(pool, claimed.id).await
+                        revert_review_from_applying(pool, claimed.id, "pending").await
                     {
                         warn!(
                             review_id = %claimed.id,

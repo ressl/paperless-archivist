@@ -27,6 +27,18 @@ use sqlx::{Connection, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod transitions;
+
+pub use transitions::{
+    JobStatus, JobTransition, RECOVERED_STUCK_RUN_ERROR, ReviewStatus, ReviewTransition, RunStatus,
+    RunTransition,
+};
+use transitions::{
+    mirror_run_status_tx, revert_review_from_applying_tx, review_revert_target,
+    sql_active_job_statuses, sql_active_run_statuses, sql_terminal_run_statuses,
+    sql_terminal_stage_statuses, transition_run_tx, transition_runs_tx,
+};
+
 pub type DbPool = PgPool;
 /// Transaction handle for callers that batch several helpers in one TX
 /// without depending on sqlx directly (worker sync batches, #408).
@@ -59,6 +71,58 @@ pub enum ReviewDecisionError {
     NotFound,
     #[error("review item is not pending")]
     NotPending,
+}
+
+/// A referenced aggregate does not exist (or, for API tokens, is already
+/// revoked). An expected client condition, mapped to 404 by the API. #441
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+pub enum NotFoundError {
+    #[error("user does not exist")]
+    User,
+    #[error("API token not found or already revoked")]
+    ApiToken,
+    #[error("prompt does not exist")]
+    Prompt,
+}
+
+/// Request context that audit events written while serving an HTTP request
+/// inherit when the caller did not set `source_ip` / `user_agent` itself.
+/// The API scopes every request with [`with_audit_request_context`]; worker
+/// code never sets it, so its events keep `null`. #441
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditRequestContext {
+    pub source_ip: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+tokio::task_local! {
+    static AUDIT_REQUEST_CONTEXT: AuditRequestContext;
+}
+
+/// Run `future` with `context` as the audit request context. Tasks spawned
+/// from it do not inherit the context; re-scope them with
+/// [`current_audit_request_context`] when they write audit events.
+pub async fn with_audit_request_context<F: std::future::Future>(
+    context: AuditRequestContext,
+    future: F,
+) -> F::Output {
+    AUDIT_REQUEST_CONTEXT.scope(context, future).await
+}
+
+/// The audit request context of the current task, if any.
+pub fn current_audit_request_context() -> Option<AuditRequestContext> {
+    AUDIT_REQUEST_CONTEXT.try_with(Clone::clone).ok()
+}
+
+fn apply_audit_request_context(event: &mut AuditEventInput) {
+    let _ = AUDIT_REQUEST_CONTEXT.try_with(|context| {
+        if event.source_ip.is_none() {
+            event.source_ip.clone_from(&context.source_ip);
+        }
+        if event.user_agent.is_none() {
+            event.user_agent.clone_from(&context.user_agent);
+        }
+    });
 }
 
 pub async fn connect(database_url: &str, max_connections: u32) -> Result<DbPool> {
@@ -1589,7 +1653,7 @@ pub async fn set_user_enabled(
         .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| anyhow!("user does not exist"))?
+        .ok_or(NotFoundError::User)?
         .try_get::<bool, _>("enabled")?;
 
     if before
@@ -1654,6 +1718,14 @@ pub async fn set_user_roles(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     lock_enabled_admin_invariant_tx(&mut tx).await?;
+    // Unknown users used to surface as a foreign-key 500. #441
+    let exists: bool = sqlx::query_scalar("select exists(select 1 from users where id = $1)")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !exists {
+        return Err(NotFoundError::User.into());
+    }
     let before = load_user_roles_tx(&mut tx, user_id).await?;
 
     if before.contains(&Role::Admin)
@@ -1941,7 +2013,7 @@ pub async fn rotate_api_token(
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| anyhow!("API token not found or already revoked"))?;
+    .ok_or(NotFoundError::ApiToken)?;
     let name: String = existing.try_get("name")?;
     let scopes: Vec<String> = existing.try_get("scopes")?;
     sqlx::query("update api_tokens set revoked_at = now() where id = $1")
@@ -2329,7 +2401,7 @@ pub async fn activate_prompt(pool: &DbPool, prompt_id: Uuid, actor_id: Uuid) -> 
         .bind(prompt_id)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| anyhow!("prompt does not exist"))?;
+        .ok_or(NotFoundError::Prompt)?;
     let stage: String = row.try_get("stage")?;
     let name: String = row.try_get("name")?;
     let version: i32 = row.try_get("version")?;
@@ -3339,16 +3411,18 @@ fn selector_processing_status(
 }
 
 async fn dashboard_live_runs(pool: &DbPool) -> Result<Vec<DashboardLiveRun>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"
         select id, paperless_document_id, mode, status, trigger_tag, stages,
                started_at, created_at, updated_at
           from pipeline_runs
-         where status in ('queued', 'running', 'waiting_review', 'applying')
+         where status in ("#,
+        sql_active_run_statuses!(),
+        r#")
          order by updated_at desc
          limit 8
-        "#,
-    )
+        "#
+    ))
     .fetch_all(pool)
     .await?;
 
@@ -3374,17 +3448,19 @@ async fn dashboard_live_runs(pool: &DbPool) -> Result<Vec<DashboardLiveRun>> {
 }
 
 async fn dashboard_live_jobs(pool: &DbPool) -> Result<Vec<DashboardLiveJob>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"
         select id, run_id, paperless_document_id, stage, status, attempts,
                max_attempts, lease_owner, lease_until, updated_at, error_message
           from jobs
-         where status in ('queued', 'running', 'waiting_review')
+         where status in ("#,
+        sql_active_job_statuses!(),
+        r#")
          order by case status when 'running' then 0 when 'queued' then 1 else 2 end,
                   updated_at desc
          limit 16
-        "#,
-    )
+        "#
+    ))
     .fetch_all(pool)
     .await?;
 
@@ -4144,7 +4220,7 @@ fn compute_dashboard_comparison(
 /// matrix by the old `touched > 0` clause anyway.
 async fn stage_status(pool: &DbPool) -> Result<Vec<DashboardStageStatus>> {
     let rows = sqlx::query(
-        r#"
+        concat!(r#"
         with stage_rows as (
           select 'ocr' as stage,
                  case when has_full_completion_tag then 'succeeded' else ocr_status end as status,
@@ -4160,10 +4236,14 @@ async fn stage_status(pool: &DbPool) -> Result<Vec<DashboardStageStatus>> {
           select
             stage,
             count(*)::bigint as total,
-            count(*) filter (where status in ('succeeded', 'skipped', 'not_needed', 'rejected'))::bigint as complete,
+            count(*) filter (where status in ("#,
+sql_terminal_stage_statuses!(),
+r#"))::bigint as complete,
             count(*) filter (where status = 'failed')::bigint as failed,
             count(*) filter (where status = 'waiting_review' or current_run_status = 'waiting_review')::bigint as waiting_review,
-            count(*) filter (where current_run_status in ('queued', 'running', 'applying') and status not in ('succeeded', 'skipped', 'not_needed', 'rejected', 'failed'))::bigint as running
+            count(*) filter (where current_run_status in ('queued', 'running', 'applying') and status not in ("#,
+sql_terminal_stage_statuses!(),
+r#", 'failed'))::bigint as running
           from stage_rows
           group by stage
         )
@@ -4171,7 +4251,7 @@ async fn stage_status(pool: &DbPool) -> Result<Vec<DashboardStageStatus>> {
                greatest(total - complete - failed - waiting_review - running, 0)::bigint as pending
           from counted
          order by case stage when 'ocr' then 1 else 2 end
-        "#,
+        "#),
     )
     .fetch_all(pool)
     .await?;
@@ -5288,15 +5368,17 @@ pub const CREATE_RUNS_CHUNK_SIZE: usize = 250;
 /// exclusion avoids shadowing an in-flight auto-selected run; `create_runs_for_documents`'
 /// own per-document guard is a second line of defence.
 pub async fn failed_document_ids(pool: &DbPool) -> Result<Vec<i32>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"
         select paperless_document_id
           from document_inventory
          where (ocr_status = 'failed' or metadata_status = 'failed')
-           and coalesce(current_run_status, '') not in ('queued', 'running', 'applying', 'waiting_review')
+           and coalesce(current_run_status, '') not in ("#,
+        sql_active_run_statuses!(),
+        r#")
          order by paperless_document_id
-        "#,
-    )
+        "#
+    ))
     .fetch_all(pool)
     .await?;
     rows.into_iter()
@@ -5334,16 +5416,18 @@ async fn prepare_run_with_jobs_on_tx(
     let stages_json = serde_json::to_value(stages)?;
     let mode_text = mode.to_string();
     let run_id = loop {
-        let inserted = sqlx::query(
+        let inserted = sqlx::query(concat!(
             r#"
             insert into pipeline_runs (paperless_document_id, mode, trigger_tag, status, stages)
             values ($1, $2, $3, 'queued', $4)
             on conflict (paperless_document_id)
-              where status in ('queued', 'running', 'waiting_review', 'applying')
+              where status in ("#,
+            sql_active_run_statuses!(),
+            r#")
             do nothing
             returning id
-            "#,
-        )
+            "#
+        ))
         .bind(paperless_document_id)
         .bind(&mode_text)
         .bind(trigger_tag)
@@ -5358,15 +5442,17 @@ async fn prepare_run_with_jobs_on_tx(
         // transaction. A concurrent active-to-terminal transition can remove
         // that conflict before this follow-up snapshot; retry in that narrow
         // window instead of surfacing a missing-row error.
-        if let Some(row) = sqlx::query(
+        if let Some(row) = sqlx::query(concat!(
             r#"
             select id from pipeline_runs
              where paperless_document_id = $1
-               and status in ('queued', 'running', 'waiting_review', 'applying')
+               and status in ("#,
+            sql_active_run_statuses!(),
+            r#")
              order by created_at desc
              limit 1
-            "#,
-        )
+            "#
+        ))
         .bind(paperless_document_id)
         .fetch_optional(&mut **tx)
         .await?
@@ -5521,12 +5607,13 @@ pub async fn queue_missing_stage(
         select paperless_document_id
           from document_inventory
          where {column} <> all($3::text[])
-           and coalesce(current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
+           and coalesce(current_run_status, '') not in ({active_runs})
            and ($1::text[] = '{{}}' or current_tags && $1::text[])
            and not (current_tags && $2::text[])
          order by paperless_document_id
          {limit_clause}
-        "#
+        "#,
+        active_runs = sql_active_run_statuses!(),
     );
     // SAFETY: `query` is assembled from static fragments plus the validated
     // `limit_clause`; all caller data flows through bind parameters below.
@@ -5590,13 +5677,15 @@ pub async fn completed_document_ids_missing_full_tag(
         return Ok(Vec::new());
     }
 
-    sqlx::query_scalar(
+    sqlx::query_scalar(concat!(
         r#"
         select paperless_document_id
           from document_inventory
          where not has_full_completion_tag
            and coalesce(current_run_status, '') not in (
-                 'queued', 'running', 'applying', 'waiting_review'
+                 "#,
+        sql_active_run_statuses!(),
+        r#"
                )
            and (
                  not $1
@@ -5607,8 +5696,8 @@ pub async fn completed_document_ids_missing_full_tag(
                  or metadata_status = any($3::text[])
                )
          order by paperless_document_id
-        "#,
-    )
+        "#
+    ))
     .bind(ocr_enabled)
     .bind(metadata_enabled)
     .bind(TERMINAL_STAGE_STATUSES)
@@ -5643,7 +5732,7 @@ pub async fn reserve_completion_tag_reconcile(
 
     let mut tx = pool.begin().await?;
     lock_active_run_document_tx(&mut tx, paperless_document_id).await?;
-    let reserved = sqlx::query(
+    let reserved = sqlx::query(concat!(
         r#"
         update document_inventory
            set has_full_completion_tag = true,
@@ -5652,7 +5741,9 @@ pub async fn reserve_completion_tag_reconcile(
          where paperless_document_id = $1
            and not has_full_completion_tag
            and coalesce(current_run_status, '') not in (
-                 'queued', 'running', 'applying', 'waiting_review'
+                 "#,
+        sql_active_run_statuses!(),
+        r#"
                )
            and (
                  not $2
@@ -5662,8 +5753,8 @@ pub async fn reserve_completion_tag_reconcile(
                  not $3
                  or metadata_status = any($4::text[])
                )
-        "#,
-    )
+        "#
+    ))
     .bind(paperless_document_id)
     .bind(ocr_enabled)
     .bind(metadata_enabled)
@@ -5774,7 +5865,7 @@ pub async fn queue_missing_pipeline(
                    di.has_tagging_completion_tag,
                    di.has_full_completion_tag
               from document_inventory di
-             where coalesce(di.current_run_status, '') not in ('queued', 'running', 'waiting_review', 'applying')
+             where coalesce(di.current_run_status, '') not in ({active_runs})
                and ($1::text[] = '{{}}' or di.current_tags && $1::text[])
                and not (di.current_tags && $2::text[])
                and di.paperless_document_id > $3
@@ -5802,7 +5893,8 @@ pub async fn queue_missing_pipeline(
                    ))
              order by di.paperless_document_id
              {limit_clause}
-            "#
+            "#,
+            active_runs = sql_active_run_statuses!(),
         );
         // SAFETY: `query` is assembled from static fragments plus the validated
         // `limit_clause`; all caller data flows through bind parameters below.
@@ -5944,14 +6036,18 @@ pub enum ClaimPass {
 
 /// Predicate shared by every claim pass: a job may only run once all earlier
 /// stages of its run are resolved.
-const CLAIM_STAGE_ORDER_GUARD: &str = r#"
+const CLAIM_STAGE_ORDER_GUARD: &str = concat!(
+    r#"
              and not exists (
                select 1
                  from jobs prev
                 where prev.run_id = jobs.run_id
                   and prev.stage_priority < jobs.stage_priority
-                  and prev.status in ('queued', 'running', 'waiting_review', 'failed')
-             )"#;
+                  and prev.status in ("#,
+    sql_active_job_statuses!(),
+    r#", 'failed')
+             )"#
+);
 
 /// The candidate SELECT for one claim pass: filter and ORDER BY are shaped so
 /// the planner can walk an index in order and stop after `limit` rows instead
@@ -6117,18 +6213,27 @@ async fn apply_permanent_job_failure_tx(
         Some(run_id),
     )
     .await?;
-    sqlx::query(
-        "update pipeline_runs set status = 'failed', error_message = $2, finished_at = now(), updated_at = now() where id = $1",
-    )
-    .bind(run_id)
-    .bind(error)
-    .execute(&mut **tx)
-    .await?;
+    transition_run_tx(tx, run_id, RunTransition::Failed, Some(error)).await?;
+    // `set_inventory_stage_status_tx` already flipped the badge to `failed`;
+    // the mirror keeps it equal to the run should the run not have been
+    // active any more. #439
+    mirror_run_status_tx(tx, &[run_id], None).await?;
     // A permanent failure aborts the whole run, so cancel the sibling jobs in the same TX.
     // Mirrors the reject path: leaving them `queued` makes them unclaimable (the claim guard
     // blocks them behind the failed stage) yet still scanned on every poll, inflating
     // `jobs_queued` forever.
-    sqlx::query(
+    cancel_active_run_jobs_tx(tx, run_id, Some(job_id)).await?;
+    Ok(())
+}
+
+/// [`JobTransition::Cancelled`] for every still-active job of a run except
+/// `keep_job_id`. Shared by the permanent-failure and all-rejected paths. #439
+async fn cancel_active_run_jobs_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    keep_job_id: Option<Uuid>,
+) -> Result<u64> {
+    let updated = sqlx::query(concat!(
         r#"
         update jobs
            set status = 'cancelled',
@@ -6136,14 +6241,31 @@ async fn apply_permanent_job_failure_tx(
                lease_until = null,
                updated_at = now()
          where run_id = $1
-           and id <> $2
-           and status in ('queued', 'running', 'waiting_review')
-        "#,
-    )
+           and ($2::uuid is null or id <> $2)
+           and status in ("#,
+        sql_active_job_statuses!(),
+        ")"
+    ))
     .bind(run_id)
-    .bind(job_id)
+    .bind(keep_job_id)
     .execute(&mut **tx)
     .await?;
+    Ok(updated.rows_affected())
+}
+
+/// Run follow-up after one stage of it settled successfully (direct
+/// `complete_job` or the review aggregate): the run succeeds once no job is
+/// active any more, otherwise it goes back to `queued` for the next stage.
+/// The inventory badge follows the run (#303/#414), `complete` the Paperless
+/// completion tag (#410). #439
+async fn settle_run_after_stage_tx(tx: &mut Transaction<'_, Postgres>, run_id: Uuid) -> Result<()> {
+    let event = if no_remaining_jobs_tx(tx, run_id).await? {
+        RunTransition::Succeeded
+    } else {
+        RunTransition::StageAdvanced
+    };
+    transition_run_tx(tx, run_id, event, None).await?;
+    mirror_run_status_tx(tx, &[run_id], None).await?;
     Ok(())
 }
 
@@ -6266,46 +6388,11 @@ pub async fn claim_jobs(
         let mut run_ids: Vec<Uuid> = jobs.iter().map(|job| job.run_id).collect();
         run_ids.sort_unstable();
         run_ids.dedup();
-        let mut document_ids: Vec<i32> = jobs.iter().map(|job| job.paperless_document_id).collect();
-        document_ids.sort_unstable();
-        document_ids.dedup();
-
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'running',
-                   started_at = coalesce(started_at, now()),
-                   updated_at = now()
-             where id = any($1::uuid[])
-               and status in ('queued', 'running', 'waiting_review')
-            "#,
-        )
-        .bind(&run_ids)
-        .execute(&mut *tx)
-        .await?;
-
-        // #408: lock the inventory rows in ascending id order (the order the
-        // batched Paperless sync upserts them in) so the two cannot deadlock.
-        sqlx::query(
-            r#"
-            with locked as (
-              select paperless_document_id
-                from document_inventory
-               where paperless_document_id = any($1::int[])
-                 and current_run_status in ('queued', 'running', 'waiting_review')
-               order by paperless_document_id
-               for update
-            )
-            update document_inventory di
-               set current_run_status = 'running',
-                   updated_at = now()
-              from locked
-             where di.paperless_document_id = locked.paperless_document_id
-            "#,
-        )
-        .bind(&document_ids)
-        .execute(&mut *tx)
-        .await?;
+        transition_runs_tx(&mut tx, &run_ids, RunTransition::Claimed, None).await?;
+        // #408: the mirror locks inventory rows in ascending id order (the
+        // order the batched Paperless sync upserts them in) so the two cannot
+        // deadlock. #414: only rows whose `last_run_id` is a claimed run.
+        mirror_run_status_tx(&mut tx, &run_ids, None).await?;
     }
     tx.commit().await?;
     Ok(jobs)
@@ -6364,30 +6451,11 @@ pub async fn job_lease_until(
 /// this helper exists for callers outside the claim path that legitimately need to flip exactly
 /// one run.
 #[allow(dead_code)]
-pub async fn mark_run_running(pool: &DbPool, run_id: Uuid, document_id: i32) -> Result<()> {
-    sqlx::query(
-        r#"
-        update pipeline_runs
-           set status = 'running',
-               started_at = coalesce(started_at, now()),
-               updated_at = now()
-         where id = $1 and status in ('queued', 'running', 'waiting_review')
-        "#,
-    )
-    .bind(run_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        update document_inventory
-           set current_run_status = 'running',
-               updated_at = now()
-         where paperless_document_id = $1
-        "#,
-    )
-    .bind(document_id)
-    .execute(pool)
-    .await?;
+pub async fn mark_run_running(pool: &DbPool, run_id: Uuid, _document_id: i32) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    transition_run_tx(&mut tx, run_id, RunTransition::Claimed, None).await?;
+    mirror_run_status_tx(&mut tx, &[run_id], None).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -6442,66 +6510,12 @@ pub async fn complete_job(
     )
     .await?;
 
-    if no_remaining_jobs_tx(&mut tx, job.run_id).await? {
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'succeeded', finished_at = now(), updated_at = now()
-             where id = $1
-            "#,
-        )
-        .bind(job.run_id)
-        .execute(&mut *tx)
-        .await?;
-        // #410: `complete` mirrors the authoritative Paperless completion tag
-        // everywhere (sync, migration 0052, here). #414: only the run the
-        // inventory row points at may settle it.
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'succeeded',
-                   complete = has_full_completion_tag,
-                   updated_at = now()
-             where paperless_document_id = $1
-               and last_run_id = $2
-            "#,
-        )
-        .bind(job.paperless_document_id)
-        .bind(job.run_id)
-        .execute(&mut *tx)
-        .await?;
-    } else {
-        // Reset pipeline_runs.status back to 'queued' when stage-N succeeded
-        // but stage-N+1 is still pending. Without this, runs that went through
-        // a stage via the direct (non-review) full_auto path stay stuck on
-        // 'running' forever, which surfaces as "N stuck run(s) — pipeline runs
-        // have not progressed in the last 10 minutes" on the dashboard even
-        // though the next-stage jobs ARE waiting in the queue and will be
-        // claimed normally. Mirrors mark_review_auto_applied behavior.
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'queued', updated_at = now()
-             where id = $1
-               and status not in ('succeeded', 'failed', 'cancelled')
-            "#,
-        )
-        .bind(job.run_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'queued', updated_at = now()
-             where paperless_document_id = $1
-               and last_run_id = $2
-            "#,
-        )
-        .bind(job.paperless_document_id)
-        .bind(job.run_id)
-        .execute(&mut *tx)
-        .await?;
-    }
+    // Succeed the run once nothing is left, otherwise reset it to 'queued'
+    // while stage N+1 is pending. Without the reset, runs that went through a
+    // stage via the direct (non-review) full_auto path stayed stuck on
+    // 'running' forever ("N stuck run(s)" on the dashboard) although the
+    // next-stage jobs were waiting in the queue. #410/#414 via the mirror.
+    settle_run_after_stage_tx(&mut tx, job.run_id).await?;
 
     append_audit_tx(
         &mut tx,
@@ -6527,16 +6541,18 @@ pub async fn complete_job(
 }
 
 pub async fn is_last_active_job(pool: &DbPool, run_id: Uuid, current_job_id: Uuid) -> Result<bool> {
-    let row = sqlx::query(
+    let row = sqlx::query(concat!(
         r#"
         select not exists(
           select 1 from jobs
            where run_id = $1
              and id <> $2
-             and status in ('queued', 'running', 'waiting_review')
+             and status in ("#,
+        sql_active_job_statuses!(),
+        r#")
         ) as is_last
-        "#,
-    )
+        "#
+    ))
     .bind(run_id)
     .bind(current_job_id)
     .fetch_one(pool)
@@ -6708,44 +6724,12 @@ pub async fn release_job_lease_for_cooldown(
         return Ok(false);
     }
 
-    sqlx::query(
-        r#"
-        update pipeline_runs
-           set status = 'queued',
-               updated_at = now()
-         where id = $1
-           and status = 'running'
-           and not exists (
-             select 1 from jobs
-              where run_id = $1
-                and status = 'running'
-           )
-        "#,
-    )
-    .bind(job.run_id)
-    .execute(&mut *tx)
-    .await?;
-
+    transition_run_tx(&mut tx, job.run_id, RunTransition::LeaseReleased, None).await?;
     // Mirror whatever the run's status now is, rather than hardcoding
     // 'queued': if the guard above skipped the run flip, copying the actual
     // status keeps the mirror invariant (current_run_status follows the run
     // that last_run_id points at) instead of introducing the opposite drift.
-    sqlx::query(
-        r#"
-        update document_inventory di
-           set current_run_status = pr.status,
-               updated_at = now()
-          from pipeline_runs pr
-         where pr.id = $2
-           and di.paperless_document_id = $1
-           and di.last_run_id = pr.id
-           and di.current_run_status is distinct from pr.status
-        "#,
-    )
-    .bind(job.paperless_document_id)
-    .bind(job.run_id)
-    .execute(&mut *tx)
-    .await?;
+    mirror_run_status_tx(&mut tx, &[job.run_id], None).await?;
 
     tx.commit().await?;
     Ok(true)
@@ -6805,12 +6789,7 @@ pub async fn create_review_item(
     .await?
     .try_get("id")?;
 
-    sqlx::query(
-        "update pipeline_runs set status = 'waiting_review', updated_at = now() where id = $1",
-    )
-    .bind(job.run_id)
-    .execute(&mut *tx)
-    .await?;
+    transition_run_tx(&mut tx, job.run_id, RunTransition::AwaitingReview, None).await?;
     set_inventory_stage_status_tx(
         &mut tx,
         job.paperless_document_id,
@@ -6821,6 +6800,9 @@ pub async fn create_review_item(
         Some(job.run_id),
     )
     .await?;
+    // #439: the badge used to stay on `running` while the run waited for a
+    // decision, breaking the #303 mirror invariant.
+    mirror_run_status_tx(&mut tx, &[job.run_id], None).await?;
     append_audit_tx(
         &mut tx,
         AuditEventInput {
@@ -7251,7 +7233,11 @@ pub async fn review_decision(
     edited_patch: Option<Value>,
     actor_id: Uuid,
 ) -> Result<()> {
-    if !matches!(status, "approved" | "rejected" | "edited") {
+    // #439: legal decision targets come from the review transition table.
+    if ReviewStatus::parse(status)
+        .and_then(|to| ReviewTransition::Decided(to).to())
+        .is_none()
+    {
         return Err(anyhow!("invalid review decision status"));
     }
     let mut tx = pool.begin().await?;
@@ -8091,43 +8077,11 @@ async fn finalize_review_aggregate_tx(
             Some(run_id),
         )
         .await?;
-        sqlx::query(
-            r#"
-            update jobs
-               set status = 'cancelled',
-                   lease_owner = null,
-                   lease_until = null,
-                   updated_at = now()
-             where run_id = $1
-               and status in ('queued', 'running', 'waiting_review')
-            "#,
-        )
-        .bind(run_id)
-        .execute(&mut **tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'rejected', finished_at = now(), updated_at = now()
-             where id = $1
-               and status not in ('succeeded', 'failed', 'cancelled', 'rejected')
-            "#,
-        )
-        .bind(run_id)
-        .execute(&mut **tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'rejected',
-                   complete = has_full_completion_tag, -- #410
-                   updated_at = now()
-             where paperless_document_id = $1
-            "#,
-        )
-        .bind(document_id)
-        .execute(&mut **tx)
-        .await?;
+        cancel_active_run_jobs_tx(tx, run_id, None).await?;
+        transition_run_tx(tx, run_id, RunTransition::Rejected, None).await?;
+        // `set_inventory_stage_status_tx` just pointed `last_run_id` at this
+        // run, so the guarded mirror always reaches the row. #410/#414
+        mirror_run_status_tx(tx, &[run_id], None).await?;
     } else {
         set_inventory_stage_status_tx(
             tx,
@@ -8139,52 +8093,7 @@ async fn finalize_review_aggregate_tx(
             Some(run_id),
         )
         .await?;
-        if no_remaining_jobs_tx(tx, run_id).await? {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'succeeded', finished_at = now(), updated_at = now()
-                 where id = $1
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut **tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'succeeded',
-                       complete = has_full_completion_tag, -- #410
-                       updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut **tx)
-            .await?;
-        } else {
-            sqlx::query(
-                r#"
-                update pipeline_runs
-                   set status = 'queued', updated_at = now()
-                 where id = $1
-                   and status not in ('succeeded', 'failed', 'cancelled', 'rejected')
-                "#,
-            )
-            .bind(run_id)
-            .execute(&mut **tx)
-            .await?;
-            sqlx::query(
-                r#"
-                update document_inventory
-                   set current_run_status = 'queued', updated_at = now()
-                 where paperless_document_id = $1
-                "#,
-            )
-            .bind(document_id)
-            .execute(&mut **tx)
-            .await?;
-        }
+        settle_run_after_stage_tx(tx, run_id).await?;
     }
 
     append_audit_tx(
@@ -8218,10 +8127,21 @@ async fn finalize_review_aggregate_tx(
 }
 
 pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid) -> Result<()> {
+    settle_review_applied(pool, review_id, Some(actor_id)).await
+}
+
+/// [`ReviewTransition::Applied`] for both apply owners: a human apply
+/// (`actor_id = Some`, audited as the user) and the autopilot drain
+/// (`None`, audited as the worker with `trigger = "autopilot_drain"`).
+/// Gated on `applying`: the caller claimed the row before patching
+/// Paperless, so the terminal transition is only valid from that owned
+/// state; a missing row means another actor already finished it. #253, #439
+async fn settle_review_applied(
+    pool: &DbPool,
+    review_id: Uuid,
+    actor_id: Option<Uuid>,
+) -> Result<()> {
     let mut tx = pool.begin().await?;
-    // Gate on `applying`: the caller claimed the row via `claim_review_for_apply`
-    // before patching Paperless, so a terminal transition is only valid from
-    // that owned state. A missing row means another actor already finished it.
     let Some(row) = sqlx::query(
         r#"
         update review_items
@@ -8250,18 +8170,30 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
     // runs only) — decoded defensively since migration 0041 made the column
     // nullable; the run-progress block below is skipped without a run.
     let run_id: Option<Uuid> = row.try_get("run_id")?;
+    let (actor_type, actor, metadata) = match actor_id {
+        Some(actor_id) => (
+            "user",
+            Some(actor_id.to_string()),
+            json!({ "stage": stage }),
+        ),
+        None => (
+            "worker",
+            None,
+            json!({ "stage": stage, "trigger": "autopilot_drain" }),
+        ),
+    };
     append_audit_tx(
         &mut tx,
         AuditEventInput {
             event_type: "review.applied".to_owned(),
-            actor_type: "user".to_owned(),
-            actor_id: Some(actor_id.to_string()),
+            actor_type: actor_type.to_owned(),
+            actor_id: actor.clone(),
             run_id,
             job_id,
             paperless_document_id: Some(document_id),
             before: None,
             after: Some(json!({ "review_id": review_id })),
-            metadata: Some(json!({ "stage": stage })),
+            metadata: Some(metadata),
             outcome: "success".to_owned(),
             error_message: None,
             source_ip: None,
@@ -8270,14 +8202,7 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
     )
     .await?;
     if let Some(job_id) = job_id {
-        finalize_review_aggregate_tx(
-            &mut tx,
-            job_id,
-            review_id,
-            "user",
-            Some(actor_id.to_string()),
-        )
-        .await?;
+        finalize_review_aggregate_tx(&mut tx, job_id, review_id, actor_type, actor).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -8375,7 +8300,7 @@ pub async fn latest_terminal_run_finished_at(
     if paperless_document_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"
         select paperless_document_id, finished_at
           from (
@@ -8386,9 +8311,11 @@ pub async fn latest_terminal_run_finished_at(
              where paperless_document_id = any($1)
              order by paperless_document_id, created_at desc, id desc
           ) latest
-         where status in ('succeeded', 'rejected', 'failed', 'cancelled')
-        "#,
-    )
+         where status in ("#,
+        sql_terminal_run_statuses!(),
+        r#")
+        "#
+    ))
     .bind(paperless_document_ids)
     .fetch_all(pool)
     .await?;
@@ -8546,93 +8473,11 @@ pub async fn claim_pending_review_for_autopilot_drain(
     Ok(Some(record))
 }
 
-/// Mark a review_item as applied via the autopilot drain.
-///
-/// Mirrors [`mark_review_applied`] but with worker-actor audit (no user ID)
-/// and a `trigger = "autopilot_drain"` metadata marker. Updates job and run
-/// status to keep the dashboard counters consistent with the existing
-/// human-approve path.
+/// Mark a review_item as applied via the autopilot drain: the worker-actor
+/// variant of [`mark_review_applied`] (same transition, `trigger =
+/// "autopilot_drain"` audit metadata).
 pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<()> {
-    let mut tx = pool.begin().await?;
-    // Gate on `applying` (the status the drain claims into), mirroring
-    // `mark_review_applied`. #253.
-    let Some(row) = sqlx::query(
-        r#"
-        update review_items
-           set status = 'applied',
-               reviewed_at = coalesce(reviewed_at, now()),
-               conflict_fields = '[]'::jsonb,
-               conflicted_at = null
-         where id = $1 and status = 'applying'
-        returning run_id, job_id, paperless_document_id, stage
-        "#,
-    )
-    .bind(review_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    else {
-        tx.rollback().await?;
-        return Ok(());
-    };
-
-    let job_id: Option<Uuid> = row.try_get("job_id")?;
-    let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
-    let document_id: i32 = row.try_get("paperless_document_id")?;
-    // None only when the originating run was pruned by retention (terminal
-    // runs only) — decoded defensively since migration 0041 made the column
-    // nullable; the run-progress block below is skipped without a run.
-    let run_id: Option<Uuid> = row.try_get("run_id")?;
-    append_audit_tx(
-        &mut tx,
-        AuditEventInput {
-            event_type: "review.applied".to_owned(),
-            actor_type: "worker".to_owned(),
-            actor_id: None,
-            run_id,
-            job_id,
-            paperless_document_id: Some(document_id),
-            before: None,
-            after: Some(json!({ "review_id": review_id })),
-            metadata: Some(json!({
-                "stage": stage,
-                "trigger": "autopilot_drain"
-            })),
-            outcome: "success".to_owned(),
-            error_message: None,
-            source_ip: None,
-            user_agent: None,
-        },
-    )
-    .await?;
-    if let Some(job_id) = job_id {
-        finalize_review_aggregate_tx(&mut tx, job_id, review_id, "worker", None).await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-/// Roll a review item back to `pending` after a failed autopilot drain apply.
-///
-/// Used when the Paperless PATCH (or any subsequent step) errors after
-/// [`claim_pending_review_for_autopilot_drain`] has already flipped the row
-/// to `approved`. Without rollback the row would be stuck in `approved`
-/// status with no apply ever performed.
-pub async fn revert_review_to_pending_after_failed_drain(
-    pool: &DbPool,
-    review_id: Uuid,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        update review_items
-           set status = 'pending',
-               reviewed_at = null
-         where id = $1 and status = 'applying'
-        "#,
-    )
-    .bind(review_id)
-    .execute(pool)
-    .await?;
-    Ok(())
+    settle_review_applied(pool, review_id, None).await
 }
 
 /// Record a field-level optimistic-concurrency conflict without exposing the
@@ -8646,29 +8491,13 @@ pub async fn mark_review_apply_conflict(
     actor_type: &str,
     actor_id: Option<String>,
 ) -> Result<bool> {
-    if !matches!(to_status, "pending" | "approved" | "edited") {
-        return Err(anyhow!("invalid review conflict revert status"));
-    }
+    let to = review_revert_target(to_status)?;
     let mut fields = fields.to_vec();
     fields.sort();
     fields.dedup();
     let mut tx = pool.begin().await?;
-    let Some(row) = sqlx::query(
-        r#"
-        update review_items
-           set status = $2,
-               reviewed_at = case when $2 = 'pending' then null else reviewed_at end,
-               conflict_fields = $3,
-               conflicted_at = now()
-         where id = $1 and status = 'applying'
-        returning run_id, job_id, paperless_document_id, stage
-        "#,
-    )
-    .bind(review_id)
-    .bind(to_status)
-    .bind(json!(fields))
-    .fetch_optional(&mut *tx)
-    .await?
+    let Some(row) =
+        revert_review_from_applying_tx(&mut tx, review_id, to, Some(&json!(fields))).await?
     else {
         tx.rollback().await?;
         return Ok(false);
@@ -8710,27 +8539,22 @@ pub async fn mark_review_apply_conflict(
     Ok(true)
 }
 
-/// Release a human-apply claim after the Paperless PATCH failed: move the row
-/// from `applying` back to `to_status` so the operator can retry. The API
-/// reverts to `pending` (#388); `approved`/`edited` remain accepted for
-/// legacy intents persisted with that revert status. #253.
+/// Release an apply claim after the Paperless PATCH failed: move the row
+/// from `applying` back to `to_status` so it can be retried. The single
+/// revert for the human apply (API), the autopilot drain (worker) and the
+/// intent recovery (`archivist-apply`); conflicts use
+/// [`mark_review_apply_conflict`], which shares the same transition. The API
+/// and the drain revert to `pending` (#388); `approved`/`edited` remain
+/// accepted for legacy intents persisted with that revert status. #253, #439
 pub async fn revert_review_from_applying(
     pool: &DbPool,
     review_id: Uuid,
     to_status: &str,
 ) -> Result<()> {
-    sqlx::query(
-        r#"
-        update review_items
-           set status = $2,
-               reviewed_at = case when $2 = 'pending' then null else reviewed_at end
-         where id = $1 and status = 'applying'
-        "#,
-    )
-    .bind(review_id)
-    .bind(to_status)
-    .execute(pool)
-    .await?;
+    let to = review_revert_target(to_status)?;
+    let mut tx = pool.begin().await?;
+    revert_review_from_applying_tx(&mut tx, review_id, to, None).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -9243,14 +9067,16 @@ pub async fn read_metric_counters(pool: &DbPool) -> Result<HashMap<String, i64>>
 
 pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
     let row = sqlx::query(
-        r#"
+        concat!(r#"
         select
           (select count(*)::bigint from jobs where status = 'queued') as jobs_queued,
           (select count(*)::bigint from jobs where status = 'running') as jobs_running,
           (select count(*)::bigint from jobs where status = 'failed') as jobs_failed,
           (select count(*)::bigint from jobs where status = 'succeeded') as jobs_succeeded,
           (select count(*)::bigint from review_items where status = 'pending') as reviews_pending,
-          (select count(*)::bigint from pipeline_runs where status in ('queued', 'running', 'waiting_review', 'applying')) as runs_active,
+          (select count(*)::bigint from pipeline_runs where status in ("#,
+sql_active_run_statuses!(),
+r#")) as runs_active,
           -- Total event count keeps an exact count(*); switch to a pg_class
           -- reltuples estimate if this scan ever becomes a hot spot.
           -- Planner estimate instead of a full count(*): audit_events is
@@ -9337,7 +9163,7 @@ pub async fn metrics_snapshot(pool: &DbPool) -> Result<MetricsSnapshot> {
               from jobs
              where status = 'queued'
           ), 0) as oldest_queued_age_seconds
-        "#,
+        "#),
     )
     .fetch_one(pool)
     .await?;
@@ -9370,7 +9196,7 @@ pub async fn recovery_candidates(
     pool: &DbPool,
     older_than_seconds: i64,
 ) -> Result<Vec<RecoveryCandidate>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"
         select j.run_id,
                j.id as job_id,
@@ -9401,12 +9227,14 @@ pub async fn recovery_candidates(
              select 1
                from jobs j
               where j.run_id = r.id
-                and j.status in ('queued', 'running', 'waiting_review')
+                and j.status in ("#,
+        sql_active_job_statuses!(),
+        r#")
            )
          order by updated_at asc
          limit 100
-        "#,
-    )
+        "#
+    ))
     .bind(older_than_seconds as f64)
     .fetch_all(pool)
     .await?;
@@ -9463,41 +9291,13 @@ pub async fn recover_stale_leases(
         .iter()
         .map(|row| row.try_get::<Uuid, _>("run_id"))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let document_ids = rows
-        .iter()
-        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
     let job_ids = rows
         .iter()
         .map(|row| row.try_get::<Uuid, _>("id"))
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    if !run_ids.is_empty() {
-        sqlx::query(
-            r#"
-            update pipeline_runs
-               set status = 'queued',
-                   updated_at = now()
-             where id = any($1)
-               and status = 'running'
-            "#,
-        )
-        .bind(&run_ids)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'queued',
-                   updated_at = now()
-             where paperless_document_id = any($1)
-               and current_run_status = 'running'
-            "#,
-        )
-        .bind(&document_ids)
-        .execute(&mut *tx)
-        .await?;
-    }
+    transition_runs_tx(&mut tx, &run_ids, RunTransition::StaleLeaseRequeued, None).await?;
+    mirror_run_status_tx(&mut tx, &run_ids, None).await?;
 
     append_audit_tx(
         &mut tx,
@@ -9533,116 +9333,68 @@ pub async fn recover_stuck_runs(
     actor_id: Uuid,
 ) -> Result<RecoverySummary> {
     let mut tx = pool.begin().await?;
-    let completed = sqlx::query(
+    // #439: select the stuck runs, then move them through the transition
+    // table (which re-checks the source status) and mirror the result.
+    let completed_candidates: Vec<Uuid> = sqlx::query_scalar(
         r#"
-        with stuck as (
-          select r.id, r.paperless_document_id
-            from pipeline_runs r
-           where r.status in ('queued', 'running', 'applying')
-             and r.updated_at < now() - make_interval(secs => $1)
-             and exists (select 1 from jobs j where j.run_id = r.id)
-             and not exists (
-               select 1
-                 from jobs j
-                where j.run_id = r.id
-                  and j.status <> 'succeeded'
-             )
-           for update
-        )
-        update pipeline_runs r
-           set status = 'succeeded',
-               finished_at = coalesce(finished_at, now()),
-               updated_at = now()
-          from stuck
-         where r.id = stuck.id
-        returning r.id, r.paperless_document_id
+        select r.id
+          from pipeline_runs r
+         where r.status in ('queued', 'running', 'applying')
+           and r.updated_at < now() - make_interval(secs => $1)
+           and exists (select 1 from jobs j where j.run_id = r.id)
+           and not exists (
+             select 1
+               from jobs j
+              where j.run_id = r.id
+                and j.status <> 'succeeded'
+           )
+         for update
         "#,
     )
     .bind(older_than_seconds as f64)
     .fetch_all(&mut *tx)
     .await?;
-
-    let failed = sqlx::query(
-        r#"
-        with stuck as (
-          select r.id, r.paperless_document_id
-            from pipeline_runs r
-           where r.status in ('queued', 'running', 'applying')
-             and r.updated_at < now() - make_interval(secs => $1)
-             and not exists (
-               select 1
-                 from jobs j
-                where j.run_id = r.id
-                  and j.status in ('queued', 'running', 'waiting_review')
-             )
-           for update
-        )
-        update pipeline_runs r
-           set status = 'failed',
-               error_message = 'Recovered stuck run with no active jobs',
-               finished_at = coalesce(finished_at, now()),
-               updated_at = now()
-          from stuck
-         where r.id = stuck.id
-        returning r.id, r.paperless_document_id
-        "#,
+    let completed_run_ids = transition_runs_tx(
+        &mut tx,
+        &completed_candidates,
+        RunTransition::RecoveredSucceeded,
+        None,
     )
+    .await?;
+
+    let failed_candidates: Vec<Uuid> = sqlx::query_scalar(concat!(
+        r#"
+        select r.id
+          from pipeline_runs r
+         where r.status in ('queued', 'running', 'applying')
+           and r.updated_at < now() - make_interval(secs => $1)
+           and not exists (
+             select 1
+               from jobs j
+              where j.run_id = r.id
+                and j.status in ("#,
+        sql_active_job_statuses!(),
+        r#")
+           )
+         for update
+        "#
+    ))
     .bind(older_than_seconds as f64)
     .fetch_all(&mut *tx)
     .await?;
-
-    let completed_document_ids = completed
-        .iter()
-        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let failed_document_ids = failed
-        .iter()
-        .map(|row| row.try_get::<i32, _>("paperless_document_id"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let completed_run_ids = completed
-        .iter()
-        .map(|row| row.try_get::<Uuid, _>("id"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let failed_run_ids = failed
-        .iter()
-        .map(|row| row.try_get::<Uuid, _>("id"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let failed_run_ids = transition_runs_tx(
+        &mut tx,
+        &failed_candidates,
+        RunTransition::RecoveredFailed,
+        Some(RECOVERED_STUCK_RUN_ERROR),
+    )
+    .await?;
 
     // #414: recovering a superseded run must not overwrite the inventory
-    // status of the run the row now points at, so both updates are guarded on
+    // status of the run the row now points at — the mirror is guarded on
     // `last_run_id`. #410: `complete` mirrors the Paperless completion tag.
-    if !completed_document_ids.is_empty() {
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'succeeded',
-                   complete = has_full_completion_tag,
-                   updated_at = now()
-             where paperless_document_id = any($1)
-               and last_run_id = any($2)
-            "#,
-        )
-        .bind(&completed_document_ids)
-        .bind(&completed_run_ids)
-        .execute(&mut *tx)
-        .await?;
-    }
-    if !failed_document_ids.is_empty() {
-        sqlx::query(
-            r#"
-            update document_inventory
-               set current_run_status = 'failed',
-                   last_error = 'Recovered stuck run with no active jobs',
-                   updated_at = now()
-             where paperless_document_id = any($1)
-               and last_run_id = any($2)
-            "#,
-        )
-        .bind(&failed_document_ids)
-        .bind(&failed_run_ids)
-        .execute(&mut *tx)
-        .await?;
-    }
+    mirror_run_status_tx(&mut tx, &completed_run_ids, None).await?;
+    mirror_run_status_tx(&mut tx, &failed_run_ids, Some(RECOVERED_STUCK_RUN_ERROR)).await?;
 
     append_audit_tx(
         &mut tx,
@@ -9672,8 +9424,8 @@ pub async fn recover_stuck_runs(
     tx.commit().await?;
     Ok(RecoverySummary {
         stale_leases_requeued: 0,
-        stuck_runs_failed: failed_document_ids.len() as i64,
-        stuck_runs_completed: completed_document_ids.len() as i64,
+        stuck_runs_failed: failed_run_ids.len() as i64,
+        stuck_runs_completed: completed_run_ids.len() as i64,
     })
 }
 
@@ -9688,6 +9440,8 @@ async fn append_audit_tx(
     tx: &mut Transaction<'_, Postgres>,
     mut event: AuditEventInput,
 ) -> Result<()> {
+    // Fill request context before hashing so audit hash v2 binds it. #441
+    apply_audit_request_context(&mut event);
     if let Some(value) = &mut event.before {
         redact_sensitive_json(value);
     }
@@ -10325,17 +10079,19 @@ pub async fn apply_security_retention(
     // rules flipped/added in migration 0041 BEFORE this code first ran.
     let mut pipeline_runs_deleted: i64 = 0;
     loop {
-        let deleted = sqlx::query(
+        let deleted = sqlx::query(concat!(
             r#"
             delete from pipeline_runs
              where ctid in (
                select ctid from pipeline_runs
-                where status in ('succeeded', 'rejected', 'failed', 'cancelled')
+                where status in ("#,
+            sql_terminal_run_statuses!(),
+            r#")
                   and created_at < $1
                 limit 5000
              )
-            "#,
-        )
+            "#
+        ))
         .bind(runs_cutoff)
         .execute(pool)
         .await?
@@ -10386,15 +10142,17 @@ pub async fn apply_security_retention(
 }
 
 async fn no_remaining_jobs_tx(tx: &mut Transaction<'_, Postgres>, run_id: Uuid) -> Result<bool> {
-    let row = sqlx::query(
+    let row = sqlx::query(concat!(
         r#"
         select not exists(
           select 1 from jobs
            where run_id = $1
-             and status in ('queued', 'running', 'waiting_review')
+             and status in ("#,
+        sql_active_job_statuses!(),
+        r#")
         ) as done
-        "#,
-    )
+        "#
+    ))
     .bind(run_id)
     .fetch_one(&mut **tx)
     .await?;
@@ -10445,6 +10203,130 @@ fn status_column_for_stage(stage: Stage) -> Result<&'static str> {
         .ok_or_else(|| anyhow!("stage does not map to inventory status: {stage}"))
 }
 
+/// A one-shot worker startup repair, identified by `name` and `version`
+/// (#443). The worker runs a repair at most once per (name, version): the
+/// marker in `startup_repairs` (migration 0054) is written after a
+/// successful pass. Bump `version` when a repair's logic changes and it has
+/// to run once more (e.g. a raised num_ctx floor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupRepair {
+    pub name: &'static str,
+    pub version: i32,
+}
+
+impl StartupRepair {
+    /// `bump_vision_num_ctx_if_too_small`.
+    pub const VISION_NUM_CTX_FLOOR: StartupRepair = StartupRepair {
+        name: "ollama_vision_num_ctx_floor",
+        version: 1,
+    };
+    /// `bump_text_num_ctx_if_too_small`.
+    pub const TEXT_NUM_CTX_FLOOR: StartupRepair = StartupRepair {
+        name: "ollama_text_num_ctx_floor",
+        version: 1,
+    };
+    /// `requeue_vision_crashed_jobs` (only recorded while the runtime
+    /// setting `requeue_vision_crashes_on_startup` enables it).
+    pub const VISION_CRASH_REQUEUE: StartupRepair = StartupRepair {
+        name: "vision_crash_requeue",
+        version: 1,
+    };
+    /// `backfill_metadata_stage_for_ocr_only_runs`.
+    pub const METADATA_STAGE_BACKFILL: StartupRepair = StartupRepair {
+        name: "metadata_stage_backfill",
+        version: 1,
+    };
+    /// `rebalance_backfilled_metadata_priorities`.
+    pub const METADATA_PRIORITY_REBALANCE: StartupRepair = StartupRepair {
+        name: "metadata_priority_rebalance",
+        version: 1,
+    };
+    /// `reset_stuck_running_pipeline_runs`.
+    pub const STUCK_RUNNING_RUNS_RESET: StartupRepair = StartupRepair {
+        name: "stuck_running_runs_reset",
+        version: 1,
+    };
+
+    pub const ALL: &'static [StartupRepair] = &[
+        StartupRepair::VISION_NUM_CTX_FLOOR,
+        StartupRepair::TEXT_NUM_CTX_FLOOR,
+        StartupRepair::VISION_CRASH_REQUEUE,
+        StartupRepair::METADATA_STAGE_BACKFILL,
+        StartupRepair::METADATA_PRIORITY_REBALANCE,
+        StartupRepair::STUCK_RUNNING_RUNS_RESET,
+    ];
+}
+
+/// Whether `repair` already ran at its current version. #443
+pub async fn startup_repair_applied(pool: &DbPool, repair: StartupRepair) -> Result<bool> {
+    sqlx::query_scalar(
+        "select exists (select 1 from startup_repairs where name = $1 and version = $2)",
+    )
+    .bind(repair.name)
+    .bind(repair.version)
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Record that `repair` ran successfully, with the running `app_version` and
+/// the repair's summary as `details`, plus a `worker.startup_repair_applied`
+/// audit event in the same transaction. Returns `false` when another replica
+/// recorded the marker first (both passes are idempotent, so a concurrent
+/// double run is harmless). #443
+pub async fn record_startup_repair(
+    pool: &DbPool,
+    repair: StartupRepair,
+    app_version: &str,
+    details: Value,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query(
+        r#"
+        insert into startup_repairs (name, version, app_version, details)
+        values ($1, $2, $3, $4)
+        on conflict (name, version) do nothing
+        "#,
+    )
+    .bind(repair.name)
+    .bind(repair.version)
+    .bind(app_version)
+    .bind(&details)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    append_audit_tx(
+        &mut tx,
+        AuditEventInput {
+            event_type: "worker.startup_repair_applied".to_owned(),
+            actor_type: "worker".to_owned(),
+            actor_id: None,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: None,
+            after: Some(details),
+            metadata: Some(json!({
+                "repair": repair.name,
+                "version": repair.version,
+                "app_version": app_version,
+            })),
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// SQL `ilike` patterns matching the vision-runtime-crash error-message
 /// signatures (`GGML_ASSERT(...)`, "runner process no longer running", "signal
 /// arrived during cgo execution"). Kept in sync with
@@ -10478,7 +10360,7 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
     // A failed run becomes active again below. Discover candidate documents
     // without locking rows, then take the same canonical document locks used
     // by run creation before changing jobs or acquiring the audit-chain lock.
-    let candidate_document_ids = sqlx::query_scalar::<_, i32>(
+    let candidate_document_ids = sqlx::query_scalar::<_, i32>(concat!(
         r#"
         select distinct j.paperless_document_id
           from jobs j
@@ -10499,11 +10381,13 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
                from pipeline_runs active
               where active.paperless_document_id = j.paperless_document_id
                 and active.id <> j.run_id
-                and active.status in ('queued', 'running', 'waiting_review', 'applying')
+                and active.status in ("#,
+        sql_active_run_statuses!(),
+        r#")
            )
          order by j.paperless_document_id
-        "#,
-    )
+        "#
+    ))
     .bind(VISION_CRASH_SQL_PATTERNS[0])
     .bind(VISION_CRASH_SQL_PATTERNS[1])
     .bind(VISION_CRASH_SQL_PATTERNS[2])
@@ -10511,7 +10395,7 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
     .await?;
     lock_active_run_documents_tx(&mut tx, &candidate_document_ids).await?;
 
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"
         with eligible_runs as (
           select distinct on (j.paperless_document_id)
@@ -10534,7 +10418,9 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
                  from pipeline_runs active
                 where active.paperless_document_id = j.paperless_document_id
                   and active.id <> j.run_id
-                  and active.status in ('queued', 'running', 'waiting_review', 'applying')
+                  and active.status in ("#,
+        sql_active_run_statuses!(),
+        r#")
              )
            order by j.paperless_document_id, pr.created_at desc, pr.id desc
         ),
@@ -10564,8 +10450,8 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
           from crashed
          where j.id = crashed.id
         returning j.id, j.run_id, j.paperless_document_id
-        "#,
-    )
+        "#
+    ))
     .bind(VISION_CRASH_SQL_PATTERNS[0])
     .bind(VISION_CRASH_SQL_PATTERNS[1])
     .bind(VISION_CRASH_SQL_PATTERNS[2])
@@ -10591,20 +10477,7 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
         .map(|row| row.try_get::<Uuid, _>("id"))
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    sqlx::query(
-        r#"
-        update pipeline_runs
-           set status = 'queued',
-               error_message = null,
-               finished_at = null,
-               updated_at = now()
-         where id = any($1)
-           and status = 'failed'
-        "#,
-    )
-    .bind(&run_ids)
-    .execute(&mut *tx)
-    .await?;
+    transition_runs_tx(&mut tx, &run_ids, RunTransition::VisionCrashRequeued, None).await?;
 
     // #406: `fail_job` cancelled the run's later-stage siblings (metadata)
     // when OCR failed. Restore them too, otherwise the OCR job looks like the
@@ -10630,7 +10503,6 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
         r#"
         update document_inventory
            set ocr_status = 'queued',
-               current_run_status = 'queued',
                updated_at = now()
          where paperless_document_id = any($1)
            and ocr_status = 'failed'
@@ -10639,6 +10511,7 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
     .bind(&document_ids)
     .execute(&mut *tx)
     .await?;
+    mirror_run_status_tx(&mut tx, &run_ids, None).await?;
 
     append_audit_tx(
         &mut tx,
@@ -10714,13 +10587,15 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
     // Succeeded OCR-only runs are reactivated below. Coordinate that
     // terminal-to-active transition with concurrent creates, and take every
     // document lock before any row or audit-chain lock.
-    let candidate_document_ids = sqlx::query_scalar::<_, i32>(
+    let candidate_document_ids = sqlx::query_scalar::<_, i32>(concat!(
         r#"
         select distinct pr.paperless_document_id
           from pipeline_runs pr
          where pr.stages @> '["ocr"]'::jsonb
            and not (pr.stages @> '["metadata"]'::jsonb)
-           and pr.status in ('queued', 'running', 'waiting_review', 'applying', 'succeeded')
+           and pr.status in ("#,
+        sql_active_run_statuses!(),
+        r#", 'succeeded')
            and not exists (
              select 1 from jobs j
               where j.run_id = pr.id and j.stage = 'metadata'
@@ -10732,19 +10607,21 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
                  from pipeline_runs active
                 where active.paperless_document_id = pr.paperless_document_id
                   and active.id <> pr.id
-                  and active.status in ('queued', 'running', 'waiting_review', 'applying')
+                  and active.status in ("#,
+        sql_active_run_statuses!(),
+        r#")
              )
            )
          order by pr.paperless_document_id
-        "#,
-    )
+        "#
+    ))
     .fetch_all(&mut *tx)
     .await?;
     lock_active_run_documents_tx(&mut tx, &candidate_document_ids).await?;
 
     // Step 1: identify the target runs. Lock them for update so a parallel
     // worker doesn't race us into queueing duplicate metadata jobs.
-    let target_rows = sqlx::query(
+    let target_rows = sqlx::query(concat!(
         r#"
         with ranked_targets as (
           select pr.id,
@@ -10752,7 +10629,9 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
                    partition by pr.paperless_document_id
                    order by
                      case
-                       when pr.status in ('queued', 'running', 'waiting_review', 'applying')
+                       when pr.status in ("#,
+        sql_active_run_statuses!(),
+        r#")
                        then 0 else 1
                      end,
                      pr.created_at desc,
@@ -10762,7 +10641,9 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
            where pr.paperless_document_id = any($1)
              and pr.stages @> '["ocr"]'::jsonb
              and not (pr.stages @> '["metadata"]'::jsonb)
-             and pr.status in ('queued', 'running', 'waiting_review', 'applying', 'succeeded')
+             and pr.status in ("#,
+        sql_active_run_statuses!(),
+        r#", 'succeeded')
              and not exists (
                select 1 from jobs j
                 where j.run_id = pr.id and j.stage = 'metadata'
@@ -10774,7 +10655,9 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
                    from pipeline_runs active
                   where active.paperless_document_id = pr.paperless_document_id
                     and active.id <> pr.id
-                    and active.status in ('queued', 'running', 'waiting_review', 'applying')
+                    and active.status in ("#,
+        sql_active_run_statuses!(),
+        r#")
                )
              )
         )
@@ -10786,8 +10669,8 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
             on target.id = pr.id
            and target.document_rank = 1
         for update of pr skip locked
-        "#,
-    )
+        "#
+    ))
     .bind(&candidate_document_ids)
     .fetch_all(&mut *tx)
     .await?;
@@ -10815,8 +10698,6 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
                      select 'metadata' as s, 2 as s_order
                    ) ordered
                ),
-               status = case when status = 'succeeded' then 'queued' else status end,
-               finished_at = case when status = 'succeeded' then null else finished_at end,
                updated_at = now()
          where id = any($1)
         "#,
@@ -10824,6 +10705,9 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
     .bind(&run_ids)
     .execute(&mut *tx)
     .await?;
+    // Succeeded runs reopen through the transition table (#439); active runs
+    // are left alone by its `succeeded`-only source guard.
+    transition_runs_tx(&mut tx, &run_ids, RunTransition::MetadataBackfilled, None).await?;
 
     // Step 3: insert a queued metadata job per run, with stage_priority=20
     // so it claims AFTER the OCR job (stage_priority=10). The cross-run
@@ -10865,24 +10749,10 @@ pub async fn backfill_metadata_stage_for_ocr_only_runs(
     .await?;
     let jobs_inserted = inserted.rows_affected() as i64;
 
-    // Step 4: nudge document_inventory.current_run_status for the formerly-
-    // succeeded runs that just got flipped back to queued, so the dashboard
-    // status badges match the new pipeline_runs state.
-    sqlx::query(
-        r#"
-        update document_inventory di
-           set current_run_status = 'queued',
-               complete = has_full_completion_tag, -- #410
-               updated_at = now()
-          from pipeline_runs pr
-         where pr.id = any($1)
-           and pr.id = di.last_run_id
-           and pr.status = 'queued'
-        "#,
-    )
-    .bind(&run_ids)
-    .execute(&mut *tx)
-    .await?;
+    // Step 4: mirror the (possibly reopened) runs onto
+    // document_inventory.current_run_status so the dashboard status badges
+    // match the new pipeline_runs state. #303/#410/#414
+    mirror_run_status_tx(&mut tx, &run_ids, None).await?;
 
     append_audit_tx(
         &mut tx,
@@ -11175,44 +11045,58 @@ pub async fn reset_stuck_running_pipeline_runs(pool: &DbPool) -> Result<StuckRun
     // Two phases: (a) flip to 'queued' if there's at least one queued job for
     // the run that has no blocking prior-stage job; (b) otherwise (all jobs
     // succeeded/failed/cancelled), flip to 'succeeded' and set finished_at.
-    let to_queued = sqlx::query(
+    // #439: candidates are selected here; the transition table re-checks the
+    // `running` source status and that no job of the run is running.
+    let queued_candidates: Vec<Uuid> = sqlx::query_scalar(
         r#"
-        update pipeline_runs pr
-           set status = 'queued', updated_at = now()
+        select pr.id
+          from pipeline_runs pr
          where pr.status = 'running'
-           and not exists (
-             select 1 from jobs j
-              where j.run_id = pr.id and j.status = 'running'
-           )
            and exists (
              select 1 from jobs j
               where j.run_id = pr.id and j.status in ('queued', 'waiting_review')
            )
-        returning pr.id
+         for update
         "#,
     )
     .fetch_all(&mut *tx)
     .await?;
-    let to_succeeded = sqlx::query(
+    let to_queued = transition_runs_tx(
+        &mut tx,
+        &queued_candidates,
+        RunTransition::StuckRunningRequeued,
+        None,
+    )
+    .await?;
+    let succeeded_candidates: Vec<Uuid> = sqlx::query_scalar(concat!(
         r#"
-        update pipeline_runs pr
-           set status = 'succeeded', finished_at = now(), updated_at = now()
+        select pr.id
+          from pipeline_runs pr
          where pr.status = 'running'
            and not exists (
              select 1 from jobs j
               where j.run_id = pr.id
-                and j.status in ('queued', 'running', 'waiting_review', 'failed')
+                and j.status in ("#,
+        sql_active_job_statuses!(),
+        r#", 'failed')
            )
-        returning pr.id
-        "#,
-    )
+         for update
+        "#
+    ))
     .fetch_all(&mut *tx)
     .await?;
-    let flipped_run_ids = to_queued
+    let to_succeeded = transition_runs_tx(
+        &mut tx,
+        &succeeded_candidates,
+        RunTransition::StuckRunningSucceeded,
+        None,
+    )
+    .await?;
+    let flipped_run_ids: Vec<Uuid> = to_queued
         .iter()
         .chain(to_succeeded.iter())
-        .map(|row| row.try_get::<Uuid, _>("id"))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .copied()
+        .collect();
 
     // Mirror the new run status onto document_inventory.current_run_status.
     // Pre-#303 this helper skipped the mirror, so every cooldown-released
@@ -11221,22 +11105,7 @@ pub async fn reset_stuck_running_pipeline_runs(pool: &DbPool) -> Result<StuckRun
     // filter, the dashboard stage running counts and the running KPI. Only
     // rows whose last_run_id points at a flipped run are touched — if a newer
     // run owns the row, that run's own write sites govern the mirror. #303.
-    if !flipped_run_ids.is_empty() {
-        sqlx::query(
-            r#"
-            update document_inventory di
-               set current_run_status = pr.status,
-                   updated_at = now()
-              from pipeline_runs pr
-             where pr.id = any($1)
-               and di.last_run_id = pr.id
-               and di.current_run_status is distinct from pr.status
-            "#,
-        )
-        .bind(&flipped_run_ids)
-        .execute(&mut *tx)
-        .await?;
-    }
+    mirror_run_status_tx(&mut tx, &flipped_run_ids, None).await?;
     let runs_reset = (to_queued.len() + to_succeeded.len()) as i64;
 
     if runs_reset > 0 {
