@@ -11,7 +11,7 @@ use archivist_db::{
 use archivist_paperless::{PaperlessClient, PaperlessDocumentSummary, PaperlessTag};
 use chrono::{Duration as ChronoDuration, Utc};
 
-use crate::ensure_tag_cached;
+use crate::drain::ensure_tag_cached;
 
 pub(crate) struct PaperlessSyncSnapshot {
     pub(crate) tags: Vec<PaperlessTag>,
