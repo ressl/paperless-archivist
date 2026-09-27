@@ -108,7 +108,7 @@ UPDATED_SETTINGS="$(echo "${CURRENT_SETTINGS}" | jq \
   .paperless.base_url = $base
   | .paperless.public_url = $pub
   | .paperless.timeout_seconds = 60
-  # `paperless_client_from_settings` (archivist-api/src/main.rs) picks the active
+  # `paperless_client_from_settings` (archivist-api/src/state.rs) picks the active
   # archive profile’s base_url FIRST and only falls back to the top-level value
   # when no profile matches. The normalizer stamps the legacy default profile on
   # first save, so we must also rewrite the active profile to keep things in
