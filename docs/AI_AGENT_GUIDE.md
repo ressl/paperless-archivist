@@ -54,7 +54,7 @@ Key responsibilities:
 | Area | Files |
 | --- | --- |
 | API routes, auth, orchestration | `crates/archivist-api/src/main.rs` |
-| Worker jobs and apply flow | `crates/archivist-worker/src/main.rs` |
+| Worker jobs and apply flow | `crates/archivist-worker/src/` (`main.rs` tick loop, `claim_loop.rs`, `ocr_stage.rs`, `metadata_stage.rs`, `apply.rs`, `providers.rs`, ...) |
 | Domain settings, roles, validation, prompts | `crates/archivist-core/src/lib.rs` |
 | Database repositories | `crates/archivist-db/src/lib.rs` |
 | SQL migrations | `migrations/*.sql` |
@@ -437,7 +437,7 @@ Start here for common tasks:
 | Change runtime settings | `crates/archivist-core/src/lib.rs`, `crates/archivist-db/src/lib.rs`, Settings UI |
 | Change provider logic | `crates/archivist-ai/src/lib.rs`, worker/API call sites |
 | Change Paperless writes | `crates/archivist-paperless/src/lib.rs`, worker apply code |
-| Change job behavior | `crates/archivist-worker/src/main.rs`, DB job functions |
+| Change job behavior | `crates/archivist-worker/src/` (stage modules, `claim_loop.rs`), DB job functions |
 | Change dashboard | DB stats functions, `frontend/src/App.tsx`, Recharts sections |
 | Change Document Chat | chat routes, DB chat functions, core prompt helpers, Chat UI |
 | Review security | `docs/SECURITY_DESIGN.md`, auth middleware, role permissions |
