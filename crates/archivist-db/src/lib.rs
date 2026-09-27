@@ -29,6 +29,10 @@ use uuid::Uuid;
 
 mod transitions;
 
+mod pool;
+
+pub use pool::*;
+
 pub use transitions::{
     JobStatus, JobTransition, RECOVERED_STUCK_RUN_ERROR, ReviewStatus, ReviewTransition, RunStatus,
     RunTransition,
@@ -123,26 +127,6 @@ fn apply_audit_request_context(event: &mut AuditEventInput) {
             event.user_agent.clone_from(&context.user_agent);
         }
     });
-}
-
-pub async fn connect(database_url: &str, max_connections: u32) -> Result<DbPool> {
-    PgPoolOptions::new()
-        .max_connections(max_connections)
-        .acquire_timeout(Duration::from_secs(10))
-        .connect(database_url)
-        .await
-        .context("connect to PostgreSQL")
-}
-
-pub async fn migrate(pool: &DbPool) -> Result<()> {
-    let migrations_dir =
-        std::env::var("ARCHIVIST_MIGRATIONS_DIR").unwrap_or_else(|_| "migrations".to_owned());
-    sqlx::migrate::Migrator::new(Path::new(&migrations_dir))
-        .await
-        .with_context(|| format!("load database migrations from {migrations_dir}"))?
-        .run(pool)
-        .await
-        .context("run database migrations")
 }
 
 pub fn hash_token(token: &str) -> String {
