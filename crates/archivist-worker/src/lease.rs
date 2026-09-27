@@ -88,7 +88,7 @@ pub(crate) fn lease_keepalive_interval(lease_seconds: i64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve_target_concurrency;
+    use crate::claim_loop::resolve_target_concurrency;
 
     #[test]
     fn ocr_setup_lease_keepalive_renews_well_within_the_lease() {
