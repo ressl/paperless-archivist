@@ -260,4 +260,14 @@ assert.throws(
   /webhook_url_secret_id must be a UUID/,
   'contract validator must enforce declared formats'
 );
+// #450: the dashboard budget alert settings keep their Rust domain.
+const budgetFixture = structuredClone(fixture);
+budgetFixture.ui.monthly_cost_budget_usd = null;
+validate(budgetFixture, runtimeSchema, '$budgetDisabled');
+budgetFixture.ui.cost_budget_warning_percent = 101;
+assert.throws(
+  () => validate(budgetFixture, runtimeSchema),
+  /cost_budget_warning_percent must be <= 100/,
+  'budget warning percentage must stay within 1-100'
+);
 console.log('RuntimeSettings response/input fixtures match the closed OpenAPI schemas.');

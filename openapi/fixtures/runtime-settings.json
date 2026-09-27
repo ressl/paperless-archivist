@@ -173,5 +173,9 @@
       }
     ]
   },
-  "ui": { "debug_console_enabled": true }
+  "ui": {
+    "debug_console_enabled": true,
+    "monthly_cost_budget_usd": 50.0,
+    "cost_budget_warning_percent": 80
+  }
 }

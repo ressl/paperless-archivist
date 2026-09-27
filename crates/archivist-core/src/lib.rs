@@ -814,7 +814,7 @@ pub struct RuntimeSettings {
 /// settings because flipping them never changes the worker's processing
 /// behaviour — they only affect what the operator sees in the dashboard
 /// shell.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiSettings {
     /// Show a Debug tab in the left sidebar with a live activity feed
     /// (active runs, active jobs, recent LLM events, recent failures,
@@ -824,6 +824,83 @@ pub struct UiSettings {
     /// toggle is purely a UI-visibility convenience.
     #[serde(default)]
     pub debug_console_enabled: bool,
+    /// Monthly AI cost budget in USD for the dashboard budget alert (#450).
+    /// `None` disables the alert. The value is informational only: nothing
+    /// is throttled when it is exceeded, so it lives with the other UI-only
+    /// settings. Month-to-date cost is estimated from recorded AI usage and
+    /// the per-provider token prices, exactly like the dashboard cost KPIs.
+    #[serde(default)]
+    pub monthly_cost_budget_usd: Option<f64>,
+    /// Percentage of `monthly_cost_budget_usd` at which the dashboard starts
+    /// warning (1-100). Reaching 100 % always reports "exceeded". (#450)
+    #[serde(default = "default_cost_budget_warning_percent")]
+    pub cost_budget_warning_percent: u8,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            debug_console_enabled: false,
+            monthly_cost_budget_usd: None,
+            cost_budget_warning_percent: default_cost_budget_warning_percent(),
+        }
+    }
+}
+
+fn default_cost_budget_warning_percent() -> u8 {
+    80
+}
+
+impl UiSettings {
+    /// Clamp the budget fields into their valid domain (#450): a non-finite
+    /// or non-positive budget disables the alert, the warning percentage is
+    /// kept within 1-100.
+    pub fn normalized(mut self) -> Self {
+        self.monthly_cost_budget_usd = self
+            .monthly_cost_budget_usd
+            .filter(|budget| budget.is_finite() && *budget > 0.0);
+        self.cost_budget_warning_percent = self.cost_budget_warning_percent.clamp(1, 100);
+        self
+    }
+}
+
+/// Budget alert level reported on the dashboard (#450).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostBudgetLevel {
+    /// Below the warning threshold.
+    Ok,
+    /// At or above the warning threshold but below the budget.
+    Warning,
+    /// At or above 100 % of the budget.
+    Exceeded,
+    /// A budget is configured, but no provider has token prices, so the
+    /// month-to-date cost cannot be estimated.
+    Unknown,
+}
+
+/// Classify month-to-date spend against a configured budget (#450). Returns
+/// the alert level and the used percentage (None when the cost is unknown).
+pub fn cost_budget_level(
+    budget_usd: f64,
+    warning_percent: u8,
+    month_to_date_cost_usd: Option<f64>,
+) -> (CostBudgetLevel, Option<f64>) {
+    let Some(cost) = month_to_date_cost_usd else {
+        return (CostBudgetLevel::Unknown, None);
+    };
+    if !(budget_usd.is_finite() && budget_usd > 0.0) {
+        return (CostBudgetLevel::Unknown, None);
+    }
+    let percent = cost / budget_usd * 100.0;
+    let level = if percent >= 100.0 {
+        CostBudgetLevel::Exceeded
+    } else if percent >= f64::from(warning_percent.clamp(1, 100)) {
+        CostBudgetLevel::Warning
+    } else {
+        CostBudgetLevel::Ok
+    };
+    (level, Some(percent))
 }
 
 impl RuntimeSettings {
@@ -846,6 +923,7 @@ impl RuntimeSettings {
         self.metadata = self.metadata.normalized();
         self.tagging = self.tagging.normalized();
         self.ocr = self.ocr.normalized();
+        self.ui = self.ui.normalized();
         self
     }
 
@@ -6245,5 +6323,59 @@ mod tests {
             serde_json::from_str::<StructuredOutputMode>("\"off\"").unwrap(),
             StructuredOutputMode::Off
         );
+    }
+
+    #[test]
+    fn cost_budget_level_classifies_month_to_date_spend() {
+        // #450
+        assert_eq!(
+            cost_budget_level(100.0, 80, Some(10.0)),
+            (CostBudgetLevel::Ok, Some(10.0))
+        );
+        assert_eq!(
+            cost_budget_level(100.0, 80, Some(80.0)).0,
+            CostBudgetLevel::Warning
+        );
+        assert_eq!(
+            cost_budget_level(100.0, 80, Some(100.0)).0,
+            CostBudgetLevel::Exceeded
+        );
+        assert_eq!(
+            cost_budget_level(100.0, 80, None),
+            (CostBudgetLevel::Unknown, None)
+        );
+        assert_eq!(
+            cost_budget_level(0.0, 80, Some(1.0)).0,
+            CostBudgetLevel::Unknown
+        );
+        // A 100 % warning threshold only ever reports ok or exceeded.
+        assert_eq!(
+            cost_budget_level(10.0, 100, Some(9.99)).0,
+            CostBudgetLevel::Ok
+        );
+    }
+
+    #[test]
+    fn ui_settings_normalize_budget_fields() {
+        // #450
+        let settings = UiSettings {
+            debug_console_enabled: false,
+            monthly_cost_budget_usd: Some(-5.0),
+            cost_budget_warning_percent: 0,
+        }
+        .normalized();
+        assert_eq!(settings.monthly_cost_budget_usd, None);
+        assert_eq!(settings.cost_budget_warning_percent, 1);
+        let settings = UiSettings {
+            debug_console_enabled: true,
+            monthly_cost_budget_usd: Some(25.0),
+            cost_budget_warning_percent: 250,
+        }
+        .normalized();
+        assert_eq!(settings.monthly_cost_budget_usd, Some(25.0));
+        assert_eq!(settings.cost_budget_warning_percent, 100);
+        let defaulted: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaulted, UiSettings::default());
+        assert_eq!(defaulted.cost_budget_warning_percent, 80);
     }
 }
