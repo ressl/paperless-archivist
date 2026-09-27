@@ -61,6 +61,13 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
+    NotConfigured:
+      description: >-
+        A required integration (Paperless token, AI provider) is not
+        configured; an operator must complete the settings first
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
     TooManyRequests:
       description: A concurrency or rate limit was reached; retry later
       content:
@@ -2451,6 +2458,7 @@ components:
 paths:
   /healthz:
     get:
+      x-archivist-permission: public
       security: []
       responses:
         "200":
@@ -2460,6 +2468,7 @@ paths:
               schema: { type: string }
   /readyz:
     get:
+      x-archivist-permission: public
       security: []
       responses:
         "200":
@@ -2469,6 +2478,7 @@ paths:
               schema: { type: string }
   /metrics:
     get:
+      x-archivist-permission: public
       description: Returns Prometheus exposition only when the dedicated metrics bearer token is configured and valid.
       security:
         - metricsToken: []
@@ -2482,6 +2492,7 @@ paths:
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /api/auth/login:
     post:
+      x-archivist-permission: public
       security: []
       requestBody:
         required: true
@@ -2496,6 +2507,7 @@ paths:
               schema: { $ref: "#/components/schemas/MeResponse" }
   /api/auth/paperless-login:
     post:
+      x-archivist-permission: public
       security: []
       requestBody:
         required: true
@@ -2510,6 +2522,7 @@ paths:
               schema: { $ref: "#/components/schemas/MeResponse" }
   /api/auth/oidc/config:
     get:
+      x-archivist-permission: public
       security: []
       responses:
         "200":
@@ -2519,6 +2532,7 @@ paths:
               schema: { $ref: "#/components/schemas/OidcConfigResponse" }
   /api/auth/oidc/login:
     get:
+      x-archivist-permission: public
       security: []
       description: >-
         Redirects to the OIDC provider and sets the short-lived HttpOnly
@@ -2531,6 +2545,7 @@ paths:
         "307": { description: Redirect to OIDC provider }
   /api/auth/oidc/callback:
     get:
+      x-archivist-permission: public
       security: []
       parameters:
         - name: code
@@ -2555,6 +2570,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
   /api/webhooks/paperless/document-consumed:
     post:
+      x-archivist-permission: public
       summary: Queue newly consumed Paperless documents immediately
       description: >-
         Machine-to-machine endpoint outside user authentication. The shared
@@ -2581,10 +2597,12 @@ paths:
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /api/auth/logout:
     post:
+      x-archivist-permission: authenticated
       responses:
         "200": { description: Logged out }
   /api/auth/me:
     get:
+      x-archivist-permission: authenticated
       responses:
         "200":
           description: Current principal
@@ -2593,6 +2611,9 @@ paths:
               schema: { $ref: "#/components/schemas/MeResponse" }
   /api/auth/change-password:
     post:
+      x-archivist-permission: authenticated
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -2607,6 +2628,7 @@ paths:
         "200": { description: Password changed and sessions revoked }
   /api/auth/sessions:
     get:
+      x-archivist-permission: authenticated
       description: List browser sessions. Requires an interactive cookie session; bearer tokens are always rejected regardless of scope.
       security:
         - cookieSession: []
@@ -2624,6 +2646,7 @@ paths:
         "403": { description: Interactive cookie session required }
   /api/auth/sessions/{id}/revoke:
     post:
+      x-archivist-permission: manage_users
       description: Revoke a browser session as an administrator. Requires an interactive cookie session; bearer tokens are always rejected regardless of scope.
       security:
         - cookieSession: []
@@ -2637,6 +2660,7 @@ paths:
         "403": { description: Interactive administrator cookie session required }
   /api/settings:
     get:
+      x-archivist-permission: read_settings
       responses:
         "200":
           description: Runtime settings
@@ -2644,6 +2668,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/RuntimeSettings" }
     put:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -2657,16 +2684,23 @@ paths:
               schema: { $ref: "#/components/schemas/RuntimeSettings" }
   /api/settings/test-paperless:
     post:
+      x-archivist-permission: read_settings
       responses:
         "200":
           description: Paperless connection result
   /api/notifications/test:
     post:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       responses:
         "200":
           description: Notification webhook delivery test result
   /api/model-providers/test:
     post:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -2680,6 +2714,9 @@ paths:
               schema: { $ref: "#/components/schemas/ProviderTestResponse" }
   /api/model-providers/{name}/models:
     post:
+      x-archivist-permission: read_settings
+      security:
+        - cookieSession: []
       parameters:
         - name: name
           in: path
@@ -2693,11 +2730,13 @@ paths:
               schema: { $ref: "#/components/schemas/OllamaInstalledModelsResponse" }
   /api/secret-references:
     get:
+      x-archivist-permission: read_settings
       responses:
         "200":
           description: Secret references
   /api/prompts:
     get:
+      x-archivist-permission: read_settings
       responses:
         "200":
           description: Prompts
@@ -2710,6 +2749,9 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Prompt" }
     post:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -2727,6 +2769,7 @@ paths:
         "200": { description: Created prompt }
   /api/prompts/usage:
     get:
+      x-archivist-permission: read_settings
       responses:
         "200":
           description: Prompt usage summaries
@@ -2740,6 +2783,7 @@ paths:
                     items: { $ref: "#/components/schemas/PromptUsage" }
   /api/prompts/experiments:
     get:
+      x-archivist-permission: read_settings
       summary: Aggregate prompt experiment review outcomes
       description: Requires the settings:read permission.
       responses:
@@ -2753,6 +2797,9 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/prompts/{id}/activate:
     post:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -2760,8 +2807,12 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200": { description: Prompt activated }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/prompts/test:
     post:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -2773,24 +2824,30 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TestPromptResponse" }
+        "409": { $ref: "#/components/responses/NotConfigured" }
   /api/paperless/sync-metadata:
     post:
+      x-archivist-permission: write_batches
       responses:
         "200":
           description: Sync summary
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PaperlessSyncResponse" }
+        "409": { $ref: "#/components/responses/NotConfigured" }
   /api/paperless/consistency:
     get:
+      x-archivist-permission: read_inventory
       responses:
         "200":
           description: Paperless metadata consistency report
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PaperlessConsistencyResponse" }
+        "409": { $ref: "#/components/responses/NotConfigured" }
   /api/paperless/completion-tags/reconcile:
     post:
+      x-archivist-permission: write_batches
       description: >-
         Dry-run or apply the global completion tag when every enabled stage is
         proven terminal either by the complete set of Paperless stage tags or
@@ -2809,8 +2866,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReconcileCompletionTagsResponse" }
+        "409": { $ref: "#/components/responses/NotConfigured" }
   /api/dashboard:
     get:
+      x-archivist-permission: read_dashboard
       parameters:
         - name: range
           in: query
@@ -2826,6 +2885,7 @@ paths:
               schema: { $ref: "#/components/schemas/DashboardResponse" }
   /api/dashboard/live:
     get:
+      x-archivist-permission: read_dashboard
       responses:
         "200":
           description: Live processing and lightweight debug status
@@ -2834,6 +2894,7 @@ paths:
               schema: { $ref: "#/components/schemas/DashboardLiveStatus" }
   /api/statistics:
     get:
+      x-archivist-permission: read_dashboard
       description: >-
         Usage, cost and pipeline-throughput analytics over a custom time range
         for the Statistics page. Defaults apply only when a parameter is
@@ -2871,6 +2932,9 @@ paths:
           description: Unparseable from/to, from not before to, or unknown bucket
   /api/workflow/mode:
     put:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -2884,6 +2948,9 @@ paths:
               schema: { $ref: "#/components/schemas/RuntimeSettings" }
   /api/workflow/controls:
     patch:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -2899,6 +2966,7 @@ paths:
     get:
       summary: List inventory documents matching the filters
       description: Requires the inventory:read permission. All filters are AND-ed.
+      x-archivist-permission: read_inventory
       parameters:
         - name: limit
           in: query
@@ -2935,6 +3003,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/inventory/facets:
     get:
+      x-archivist-permission: read_inventory
       summary: Filter vocabularies for the inventory
       description: >-
         Requires the inventory:read permission. Lists the synced Paperless
@@ -2950,6 +3019,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/inventory/export:
     get:
+      x-archivist-permission: read_inventory
       summary: Export the filtered inventory as CSV or JSON
       description: >-
         Requires the inventory:read permission and accepts the same filters as
@@ -2995,6 +3065,9 @@ paths:
         "429": { $ref: "#/components/responses/TooManyRequests" }
   /api/inventory/views:
     get:
+      x-archivist-permission: read_inventory
+      security:
+        - cookieSession: []
       summary: List the caller's saved inventory views
       description: >-
         Requires the inventory:read permission and a user session (API tokens
@@ -3014,6 +3087,9 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
+      x-archivist-permission: read_inventory
+      security:
+        - cookieSession: []
       summary: Save the current inventory filters as a named view
       description: >-
         Requires the inventory:read permission and a user session. The query is
@@ -3051,6 +3127,9 @@ paths:
         required: true
         schema: { type: string, format: uuid }
     put:
+      x-archivist-permission: read_inventory
+      security:
+        - cookieSession: []
       summary: Rename or re-point one of the caller's saved views
       parameters:
         - { $ref: "#/components/parameters/RequiredCsrfToken" }
@@ -3082,6 +3161,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
     delete:
+      x-archivist-permission: read_inventory
+      security:
+        - cookieSession: []
       summary: Delete one of the caller's saved views
       parameters:
         - { $ref: "#/components/parameters/RequiredCsrfToken" }
@@ -3104,6 +3186,7 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
   /api/inventory/duplicates:
     get:
+      x-archivist-permission: read_inventory
       summary: List OCR-content duplicate groups
       description: Requires the inventory:read permission; results are capped at 200 groups.
       responses:
@@ -3117,6 +3200,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/ai/runtime-hints:
     get:
+      x-archivist-permission: read_settings
       summary: Live runtime hints for a provider (loaded model, VRAM, version)
       parameters:
         - name: provider
@@ -3132,6 +3216,7 @@ paths:
               schema: { $ref: "#/components/schemas/AiRuntimeHints" }
   /api/inventory/{document_id}/metadata-trace:
     get:
+      x-archivist-permission: read_inventory
       summary: Diagnostic trace of the most recent metadata-stage run
       parameters:
         - name: document_id
@@ -3148,6 +3233,9 @@ paths:
           description: No metadata run exists for this document
   /api/chat/sessions:
     get:
+      x-archivist-permission: use_chat
+      security:
+        - cookieSession: []
       responses:
         "200":
           description: Document chat sessions
@@ -3160,6 +3248,9 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/DocumentChatSession" }
     post:
+      x-archivist-permission: use_chat
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -3178,6 +3269,9 @@ paths:
                   title: { type: string }
   /api/chat/sessions/{id}:
     get:
+      x-archivist-permission: use_chat
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -3196,6 +3290,9 @@ paths:
                     items: { $ref: "#/components/schemas/DocumentChatMessage" }
   /api/chat/sessions/{id}/messages:
     post:
+      x-archivist-permission: use_chat
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -3212,8 +3309,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PostDocumentChatMessageResponse" }
+        "409": { $ref: "#/components/responses/NotConfigured" }
   /api/documents/{paperless_document_id}/trigger:
     post:
+      x-archivist-permission: write_runs
       parameters:
         - name: paperless_document_id
           in: path
@@ -3234,14 +3333,17 @@ paths:
         "200": { description: Created or reused run }
   /api/batches/ocr:
     post:
+      x-archivist-permission: write_batches
       responses:
         "200": { description: Queued missing OCR jobs }
   /api/batches/full:
     post:
+      x-archivist-permission: write_batches
       responses:
         "200": { description: Queued missing full pipeline jobs }
   /api/batches/rerun:
     post:
+      x-archivist-permission: write_batches
       summary: Queue selected documents and stages again
       description: >-
         Requires the batches:write permission. At most 500 positive document
@@ -3268,6 +3370,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/batches/rerun-failed:
     post:
+      x-archivist-permission: write_batches
       summary: Queue every currently failed document again
       description: Requires the batches:write permission; active reruns are skipped.
       parameters:
@@ -3283,6 +3386,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews:
     get:
+      x-archivist-permission: read_reviews
       parameters:
         - name: status
           in: query
@@ -3294,6 +3398,7 @@ paths:
         "200": { description: Review queue }
   /api/reviews/auto-fix-preview:
     post:
+      x-archivist-permission: write_reviews
       summary: Preview deterministic cleanup of pending reviews
       description: Requires the reviews:write permission; bearer tokens are accepted.
       parameters:
@@ -3318,6 +3423,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/auto-fix:
     post:
+      x-archivist-permission: write_reviews
       summary: Apply deterministic cleanup to pending reviews
       description: Requires the reviews:write permission and an interactive user session.
       security:
@@ -3344,6 +3450,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/{id}/approve:
     post:
+      x-archivist-permission: write_reviews
       summary: Approve a pending review and apply it to Paperless
       description: >-
         Requires the reviews:write permission and an interactive user session.
@@ -3368,6 +3475,9 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/batch:
     post:
+      x-archivist-permission: write_reviews
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -3387,6 +3497,7 @@ paths:
         "200": { description: Batch review result }
   /api/reviews/{id}/reject:
     post:
+      x-archivist-permission: write_reviews
       summary: Reject a pending review
       description: >-
         Requires the reviews:write permission and an interactive user session.
@@ -3409,6 +3520,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/{id}/edit:
     post:
+      x-archivist-permission: write_reviews
       summary: Edit a pending review and apply the edited patch
       description: >-
         Requires the reviews:write permission and an interactive user session.
@@ -3444,6 +3556,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/reviews/{id}/auto-fix:
     post:
+      x-archivist-permission: write_reviews
       summary: Apply deterministic cleanup to one pending review
       description: Requires the reviews:write permission and an interactive user session.
       security:
@@ -3464,8 +3577,10 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "500": { $ref: "#/components/responses/InternalServerError" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/operations/recovery:
     get:
+      x-archivist-permission: read_runs
       parameters:
         - name: older_than_seconds
           in: query
@@ -3478,6 +3593,9 @@ paths:
               schema: { $ref: "#/components/schemas/RecoveryStatusResponse" }
   /api/operations/recovery/stale-leases:
     post:
+      x-archivist-permission: write_runs
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -3491,6 +3609,9 @@ paths:
               schema: { $ref: "#/components/schemas/RecoveryActionResponse" }
   /api/operations/recovery/stuck-runs:
     post:
+      x-archivist-permission: write_runs
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -3504,6 +3625,7 @@ paths:
               schema: { $ref: "#/components/schemas/RecoveryActionResponse" }
   /api/operations/unblock-jobs:
     post:
+      x-archivist-permission: write_runs
       summary: Requeue failed predecessor jobs and optionally clear provider cooldowns
       description: Requires the runs:write permission and an interactive user session.
       security:
@@ -3530,6 +3652,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/operations/provider-cooldowns:
     get:
+      x-archivist-permission: read_dashboard
       summary: List active AI provider cooldowns
       description: Requires the runs:read permission.
       responses:
@@ -3543,6 +3666,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/operations/provider-cooldowns/clear:
     post:
+      x-archivist-permission: write_runs
       summary: Clear one or all provider cooldowns and wake deferred jobs
       description: Requires the runs:write permission and an interactive user session.
       security:
@@ -3569,6 +3693,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalServerError" }
   /api/operations/release-scheduled-retries:
     post:
+      x-archivist-permission: write_runs
       summary: Wake jobs deferred by a cooldown or another backoff
       description: Requires the runs:write permission and an interactive user session.
       security:
@@ -3591,6 +3716,7 @@ paths:
         Requires the audit:read permission. Newest first. All filters are
         AND-ed. Pass `next_cursor` of a page as `cursor` to fetch the next
         (older) page; `next_cursor` is null on the last page.
+      x-archivist-permission: read_audit
       parameters:
         - in: query
           name: limit
@@ -3650,6 +3776,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/audit/export.csv:
     get:
+      x-archivist-permission: read_audit
       description: >-
         Requires the audit:read permission. Each export is itself audited, is
         limited to one concurrent export per actor (and a small global cap),
@@ -3665,6 +3792,7 @@ paths:
         "429": { $ref: "#/components/responses/TooManyRequests" }
   /api/audit/{id}:
     get:
+      x-archivist-permission: read_audit
       summary: One audit event with its before/after snapshots
       description: >-
         Requires the audit:read permission. Backs the before/after diff view.
@@ -3686,6 +3814,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
   /api/audit/integrity:
     get:
+      x-archivist-permission: read_audit
       responses:
         "200":
           description: Audit hash-chain verification
@@ -3694,6 +3823,9 @@ paths:
               schema: { $ref: "#/components/schemas/AuditIntegrityReport" }
   /api/audit/retention/apply:
     post:
+      x-archivist-permission: write_settings
+      security:
+        - cookieSession: []
       responses:
         "200":
           description: Applied configured audit and AI artifact retention
@@ -3702,9 +3834,15 @@ paths:
               schema: { $ref: "#/components/schemas/RetentionResult" }
   /api/users:
     get:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       responses:
         "200": { description: Users }
     post:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       description: Create a user. Usernames and non-empty emails share one trimmed, case-insensitive identity namespace.
       requestBody:
         required: true
@@ -3726,6 +3864,9 @@ paths:
         "409": { description: Normalized username or email is already assigned }
   /api/users/{id}/enable:
     post:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -3733,8 +3874,12 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200": { description: Enabled user }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/users/{id}/disable:
     post:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -3743,8 +3888,12 @@ paths:
       responses:
         "200": { description: Disabled user and revoked sessions }
         "409": { description: Rejected because this is the last enabled administrator }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/users/{id}/roles:
     post:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -3764,8 +3913,12 @@ paths:
       responses:
         "200": { description: Updated user roles }
         "409": { description: Rejected because this is the last enabled administrator }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/users/{id}/reset-password:
     post:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -3784,9 +3937,15 @@ paths:
         "200": { description: Reset password and revoked sessions }
   /api/api-tokens:
     get:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       responses:
         "200": { description: API tokens }
     post:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       requestBody:
         required: true
         content:
@@ -3806,17 +3965,17 @@ paths:
                       - runs:write
                       - inventory:read
                       - batches:write
-                      - chat:write
                       - reviews:read
                       - reviews:write
                       - settings:read
-                      - settings:write
-                      - users:manage
                       - audit:read
       responses:
         "200": { description: "Created token, raw token shown once" }
   /api/api-tokens/{id}/rotate:
     post:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path
@@ -3832,8 +3991,12 @@ paths:
                 expires_in_days: { type: [integer, "null"] }
       responses:
         "200": { description: "Rotated token, raw token shown once" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/api-tokens/{id}:
     delete:
+      x-archivist-permission: manage_users
+      security:
+        - cookieSession: []
       parameters:
         - name: id
           in: path

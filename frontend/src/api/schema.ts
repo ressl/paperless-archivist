@@ -953,6 +953,7 @@ export interface paths {
                     };
                     content?: never;
                 };
+                404: components["responses"]["NotFound"];
             };
         };
         delete?: never;
@@ -992,6 +993,7 @@ export interface paths {
                         "application/json": components["schemas"]["TestPromptResponse"];
                     };
                 };
+                409: components["responses"]["NotConfigured"];
             };
         };
         delete?: never;
@@ -1027,6 +1029,7 @@ export interface paths {
                         "application/json": components["schemas"]["PaperlessSyncResponse"];
                     };
                 };
+                409: components["responses"]["NotConfigured"];
             };
         };
         delete?: never;
@@ -1060,6 +1063,7 @@ export interface paths {
                         "application/json": components["schemas"]["PaperlessConsistencyResponse"];
                     };
                 };
+                409: components["responses"]["NotConfigured"];
             };
         };
         put?: never;
@@ -1102,6 +1106,7 @@ export interface paths {
                         "application/json": components["schemas"]["ReconcileCompletionTagsResponse"];
                     };
                 };
+                409: components["responses"]["NotConfigured"];
             };
         };
         delete?: never;
@@ -1619,6 +1624,7 @@ export interface paths {
                         "application/json": components["schemas"]["PostDocumentChatMessageResponse"];
                     };
                 };
+                409: components["responses"]["NotConfigured"];
             };
         };
         delete?: never;
@@ -2209,6 +2215,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                409: components["responses"]["Conflict"];
                 500: components["responses"]["InternalServerError"];
             };
         };
@@ -2772,6 +2779,7 @@ export interface paths {
                     };
                     content?: never;
                 };
+                404: components["responses"]["NotFound"];
             };
         };
         delete?: never;
@@ -2807,6 +2815,7 @@ export interface paths {
                     };
                     content?: never;
                 };
+                404: components["responses"]["NotFound"];
                 /** @description Rejected because this is the last enabled administrator */
                 409: {
                     headers: {
@@ -2855,6 +2864,7 @@ export interface paths {
                     };
                     content?: never;
                 };
+                404: components["responses"]["NotFound"];
                 /** @description Rejected because this is the last enabled administrator */
                 409: {
                     headers: {
@@ -2950,7 +2960,7 @@ export interface paths {
                     "application/json": {
                         name: string;
                         expires_in_days?: number | null;
-                        scopes: ("runs:read" | "runs:write" | "inventory:read" | "batches:write" | "chat:write" | "reviews:read" | "reviews:write" | "settings:read" | "settings:write" | "users:manage" | "audit:read")[];
+                        scopes: ("runs:read" | "runs:write" | "inventory:read" | "batches:write" | "reviews:read" | "reviews:write" | "settings:read" | "audit:read")[];
                     };
                 };
             };
@@ -3003,6 +3013,7 @@ export interface paths {
                     };
                     content?: never;
                 };
+                404: components["responses"]["NotFound"];
             };
         };
         delete?: never;
@@ -4669,6 +4680,15 @@ export interface components {
         };
         /** @description Resource is no longer in a state that accepts this request */
         Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description A required integration (Paperless token, AI provider) is not configured; an operator must complete the settings first */
+        NotConfigured: {
             headers: {
                 [name: string]: unknown;
             };

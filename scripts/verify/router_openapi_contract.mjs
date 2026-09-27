@@ -233,6 +233,9 @@ function mountedRouterPrefixes(initializers) {
   return mounted;
 }
 
+// Local Router::new() variable each runtime route is declared on. #442
+const routerOfPair = new Map();
+
 function runtimeRoutePairs() {
   for (const unsupported of ['route_service', 'nest_service']) {
     assert.equal(
@@ -274,7 +277,9 @@ function runtimeRoutePairs() {
       assert.ok(methods.length > 0, `${name} ${path} has no recognized HTTP method`);
       for (const prefix of prefixes) {
         for (const method of methods) {
-          pairs.add(`${method.toUpperCase()} ${joinPath(prefix, path)}`);
+          const pair = `${method.toUpperCase()} ${joinPath(prefix, path)}`;
+          pairs.add(pair);
+          routerOfPair.set(pair, name);
         }
       }
     }
@@ -326,6 +331,117 @@ assert.deepEqual(
   `Axum/OpenAPI path-method drift detected\n${JSON.stringify({ undocumented, stale }, null, 2)}`
 );
 
+// ----- #442: declarative route permissions ---------------------------------
+//
+// Every runtime route must have exactly one entry in ROUTE_POLICIES
+// (crates/archivist-api/src/route_policy.rs). Routes on the `protected`
+// router must require a principal; every other router must be public. The
+// OpenAPI operation must mirror the declaration: `x-archivist-permission`
+// names the permission and `security` the allowed auth kinds.
+
+const policySource = await readFile(
+  new URL('crates/archivist-api/src/route_policy.rs', repositoryRoot),
+  'utf8'
+);
+const PROTECTED_ROUTER = 'protected';
+
+function snakeCase(identifier) {
+  return identifier.replace(/(?<!^)([A-Z])/g, '_$1').toLowerCase();
+}
+
+function routePolicies() {
+  const tableStart = policySource.indexOf('pub(crate) const ROUTE_POLICIES');
+  assert.notEqual(tableStart, -1, 'ROUTE_POLICIES table not found');
+  const tableEnd = policySource.indexOf('\n];', tableStart);
+  assert.notEqual(tableEnd, -1, 'unterminated ROUTE_POLICIES table');
+  const table = policySource.slice(tableStart, tableEnd);
+  const sessionConstants = new Set(
+    [...policySource.matchAll(/const\s+(\w+):\s*AuthKinds\s*=\s*SessionOnly\(/g)].map(
+      (match) => match[1]
+    )
+  );
+  const policies = new Map();
+  let entries = 0;
+  for (const line of table.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('route(')) continue;
+    entries += 1;
+    const match = trimmed.match(
+      /^route\((Get|Post|Put|Patch|Delete),\s*"([^"]+)",\s*(Public|AnyPrincipal|Require\((\w+)\)),\s*(.+)\),$/
+    );
+    assert.ok(match, `unparseable route policy (one entry per line): ${trimmed}`);
+    const [, verb, path, access, permission, authSource] = match;
+    let auth;
+    if (authSource === 'SessionOrToken') auth = 'session_or_token';
+    else if (authSource === 'Unauthenticated') auth = 'unauthenticated';
+    else if (authSource.startsWith('SessionOnly(') || sessionConstants.has(authSource))
+      auth = 'session_only';
+    else assert.fail(`unknown auth kinds ${authSource} for ${verb} ${path}`);
+    const declaredPermission =
+      access === 'Public' ? 'public' : access === 'AnyPrincipal' ? 'authenticated' : snakeCase(permission);
+    const pair = `${verb.toUpperCase()} ${path}`;
+    assert.ok(!policies.has(pair), `duplicate route policy: ${pair}`);
+    policies.set(pair, { permission: declaredPermission, auth });
+  }
+  assert.ok(entries > 0, 'ROUTE_POLICIES is empty');
+  return policies;
+}
+
+const policies = routePolicies();
+const undeclared = difference(runtimePairs, new Set(policies.keys()));
+const stalePolicies = difference(new Set(policies.keys()), runtimePairs);
+assert.deepEqual(
+  { undeclared, stalePolicies },
+  { undeclared: [], stalePolicies: [] },
+  `Axum routes and ROUTE_POLICIES drift (every route needs a permission declaration)\n${JSON.stringify(
+    { undeclared, stalePolicies },
+    null,
+    2
+  )}`
+);
+
+const globalSecurity = openapi.security ?? [];
+
+function schemeNames(security) {
+  return security.flatMap((requirement) => Object.keys(requirement ?? {})).sort();
+}
+
+const policyProblems = [];
+for (const [pair, policy] of policies) {
+  const onProtectedRouter = routerOfPair.get(pair) === PROTECTED_ROUTER;
+  if (onProtectedRouter === (policy.auth === 'unauthenticated')) {
+    policyProblems.push(
+      `${pair}: declared ${policy.auth} but mounted on router ${routerOfPair.get(pair)}`
+    );
+  }
+  if (internalPairs.has(pair)) continue;
+  const [method, path] = pair.split(' ');
+  const operation = openapi.paths?.[path]?.[method.toLowerCase()];
+  if (!operation) continue;
+  if (operation['x-archivist-permission'] !== policy.permission) {
+    policyProblems.push(
+      `${pair}: x-archivist-permission ${operation['x-archivist-permission']} != ${policy.permission}`
+    );
+  }
+  const schemes = schemeNames(operation.security ?? globalSecurity);
+  const expected = {
+    session_or_token: ['bearerToken', 'cookieSession'],
+    session_only: ['cookieSession']
+  }[policy.auth];
+  if (expected && JSON.stringify(schemes) !== JSON.stringify(expected)) {
+    policyProblems.push(`${pair}: OpenAPI security [${schemes}] != [${expected}] for ${policy.auth}`);
+  }
+  if (
+    policy.auth === 'unauthenticated' &&
+    (operation.security === undefined ||
+      schemes.includes('cookieSession') ||
+      schemes.includes('bearerToken'))
+  ) {
+    policyProblems.push(`${pair}: public route must declare its own (or empty) security`);
+  }
+}
+assert.deepEqual(policyProblems, [], `Route policy contract violated\n${policyProblems.join('\n')}`);
+
 console.log(
-  `Axum/OpenAPI route contract valid: ${documentedPairs.size} documented, ${internalPairs.size} internal`
+  `Axum/OpenAPI route contract valid: ${documentedPairs.size} documented, ${internalPairs.size} internal, ${policies.size} route policies`
 );

@@ -25,14 +25,14 @@ use archivist_core::{
     score_document_chat_source,
 };
 use archivist_db::{
-    AmbiguousUserIdentityLinkError, AuthUser, DbPool, DocumentChatCandidate,
+    AmbiguousUserIdentityLinkError, AuditRequestContext, AuthUser, DbPool, DocumentChatCandidate,
     InvalidUserIdentityError, LastEnabledAdminError, MetadataApplyAudit, MetadataArtifact,
-    MetadataReviewItem, MetadataRunHeader, OidcUserInput, ProviderBucketEntry, ReviewDecisionError,
-    ReviewItemRecord, UserIdentityConflictError, append_audit, apply_security_retention, connect,
-    consume_oidc_login_state, count_reviews, create_document_chat_session, create_oidc_login_state,
-    create_run_with_jobs_with_priority, create_runs_for_documents, create_session,
-    create_user_with_roles, dashboard_bucket_labels, dashboard_range_start,
-    document_chat_session_visible, failed_document_ids, find_api_token,
+    MetadataReviewItem, MetadataRunHeader, NotFoundError, OidcUserInput, ProviderBucketEntry,
+    ReviewDecisionError, ReviewItemRecord, UserIdentityConflictError, append_audit,
+    apply_security_retention, connect, consume_oidc_login_state, count_reviews,
+    create_document_chat_session, create_oidc_login_state, create_run_with_jobs_with_priority,
+    create_runs_for_documents, create_session, create_user_with_roles, dashboard_bucket_labels,
+    dashboard_range_start, document_chat_session_visible, failed_document_ids, find_api_token,
     find_or_create_paperless_bridge_user, find_paperless_bridge_user, find_session,
     find_user_for_login, get_backlog_counts, get_dashboard_live_status, get_dashboard_stats,
     get_runtime_settings, has_any_user, hash_token, insert_document_chat_message,
@@ -50,7 +50,7 @@ use archivist_db::{
     update_paperless_sync_cursor, update_runtime_settings, update_user_password_hash,
     upsert_encrypted_secret, upsert_inventory_item, upsert_oidc_user,
     upsert_paperless_custom_field, upsert_paperless_named_entity, upsert_paperless_tag,
-    verify_audit_integrity,
+    verify_audit_integrity, with_audit_request_context,
 };
 use archivist_paperless::{PaperlessClient, PaperlessTag};
 use argon2::password_hash::rand_core::OsRng;
@@ -86,6 +86,11 @@ use tracing::{Span, info, warn};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 use uuid::Uuid;
+
+mod route_policy;
+use route_policy::{
+    authorize_route, effective_token_scopes, require_user_session, validate_api_token_scopes,
+};
 
 const SESSION_COOKIE: &str = "pa_session";
 const CSRF_COOKIE: &str = "pa_csrf";
@@ -521,6 +526,12 @@ fn router(state: AppState) -> Router {
         .nest("/api/webhooks", webhooks)
         .nest("/api", protected)
         .fallback_service(spa)
+        // Every audit event written while serving a request inherits its
+        // source IP and User-Agent. #441
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            audit_context_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -1643,17 +1654,15 @@ async fn revoke_session_endpoint(
     auth: Authenticated,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    let actor_id = require_user_session(&auth.0, "session revocation requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     revoke_session_by_admin(&state.pool, id, actor_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn settings(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<RuntimeSettings>> {
-    require(&auth.0, Permission::ReadSettings)?;
     Ok(Json(get_runtime_settings(&state.pool).await?))
 }
 
@@ -1720,8 +1729,7 @@ async fn update_settings(
     auth: Authenticated,
     Json(mut request): Json<UpdateSettingsRequest>,
 ) -> ApiResult<Json<RuntimeSettings>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    let actor_id = require_user_session(&auth.0, "settings updates require a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
 
     // Validate and canonicalize every name-based AI reference before the
@@ -1940,24 +1948,21 @@ async fn update_settings(
 
 async fn secret_references(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadSettings)?;
     Ok(Json(
         json!({ "items": list_secret_references(&state.pool).await? }),
     ))
 }
 
-async fn prompts(State(state): State<AppState>, auth: Authenticated) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadSettings)?;
+async fn prompts(State(state): State<AppState>, _auth: Authenticated) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "items": list_prompts(&state.pool).await? })))
 }
 
 async fn prompt_usage(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadSettings)?;
     Ok(Json(
         json!({ "items": list_prompt_usage(&state.pool).await? }),
     ))
@@ -1965,9 +1970,8 @@ async fn prompt_usage(
 
 async fn prompt_experiments(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadSettings)?;
     Ok(Json(
         json!({ "items": list_prompt_experiments(&state.pool).await? }),
     ))
@@ -1987,8 +1991,7 @@ async fn create_prompt_endpoint(
     auth: Authenticated,
     Json(request): Json<CreatePromptRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    let actor_id = require_user_session(&auth.0, "prompt management requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     let id = archivist_db::create_prompt(
         &state.pool,
         request.stage,
@@ -2009,8 +2012,7 @@ async fn activate_prompt_endpoint(
     auth: Authenticated,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    let actor_id = require_user_session(&auth.0, "prompt management requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     archivist_db::activate_prompt(&state.pool, id, actor_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -2030,8 +2032,7 @@ async fn test_prompt_endpoint(
     auth: Authenticated,
     Json(request): Json<TestPromptRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    let actor_id = require_user_session(&auth.0, "prompt tests require a user session")?;
+    let actor_id = auth.session_user_id()?;
     if request.content.trim().is_empty() {
         return Err(ApiError::bad_request("prompt content must not be empty"));
     }
@@ -2361,9 +2362,8 @@ fn parse_metadata_prompt_test_output(text: &str) -> PromptTestParsed {
 
 async fn test_paperless(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadSettings)?;
     let result = async {
         let settings = get_runtime_settings(&state.pool).await?;
         let (base_url, _) = settings.paperless.active_connection();
@@ -2394,11 +2394,9 @@ struct TestProviderRequest {
 
 async fn test_provider(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Json(request): Json<TestProviderRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    require_user_session(&auth.0, "provider tests require a user session")?;
     let settings = get_runtime_settings(&state.pool).await?;
     let provider = provider_test_target(&settings, &request)?;
     let secret = provider_test_secret(&state, &settings, &provider, request.secret).await;
@@ -2420,10 +2418,8 @@ async fn test_provider(
 
 async fn test_notification(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    require_user_session(&auth.0, "notification tests require a user session")?;
     let settings = get_runtime_settings(&state.pool).await?;
     let result = async {
         let webhook_url = notification_webhook_url(&state, &settings).await?;
@@ -2608,11 +2604,9 @@ struct OllamaInstalledModel {
 
 async fn model_provider_models(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Path(name): Path<String>,
 ) -> ApiResult<Json<OllamaInstalledModelsResponse>> {
-    require(&auth.0, Permission::ReadSettings)?;
-    require_user_session(&auth.0, "model discovery requires a user session")?;
     let settings = get_runtime_settings(&state.pool).await?;
     let provider = provider_by_name(&settings, &name)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
@@ -2815,10 +2809,9 @@ const OLLAMA_RUNTIME_HINT: &str = "NUM_PARALLEL, MAX_LOADED_MODELS, KEEP_ALIVE a
 
 async fn ai_runtime_hints(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Query(query): Query<AiRuntimeHintsQuery>,
 ) -> ApiResult<Json<AiRuntimeHintsResponse>> {
-    require(&auth.0, Permission::ReadSettings)?;
     let settings = get_runtime_settings(&state.pool).await?;
     // Pick the requested provider, falling back to the active default.
     let provider_name = query
@@ -3229,7 +3222,7 @@ fn provider_by_name(settings: &RuntimeSettings, name: &str) -> Result<ApiProvide
                 None
             }
         })
-        .ok_or_else(|| anyhow!("AI provider '{name}' is not configured"))?;
+        .ok_or_else(|| not_configured(format!("AI provider '{name}' is not configured")))?;
     if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
@@ -3266,10 +3259,10 @@ fn provider_for_default_text(settings: &RuntimeSettings) -> Result<ApiProvider> 
             }
         })
         .ok_or_else(|| {
-            anyhow!(
+            not_configured(format!(
                 "AI provider '{}' is not configured or disabled",
                 settings.ai.default_provider
-            )
+            ))
         })?;
     if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
@@ -3309,7 +3302,11 @@ fn provider_for_stage_text(settings: &RuntimeSettings, stage: Stage) -> Result<A
                 None
             }
         })
-        .ok_or_else(|| anyhow!("AI provider '{provider_name}' is not configured or disabled"))?;
+        .ok_or_else(|| {
+            not_configured(format!(
+                "AI provider '{provider_name}' is not configured or disabled"
+            ))
+        })?;
     if provider.name.eq_ignore_ascii_case("ollama") {
         provider.base_url = settings.ai.ollama_base_url.clone();
     }
@@ -3616,7 +3613,6 @@ async fn sync_paperless(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteBatches)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -3695,7 +3691,6 @@ async fn paperless_consistency(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadInventory)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -3784,7 +3779,6 @@ async fn reconcile_completion_tags(
     auth: Authenticated,
     request: Option<Json<ReconcileCompletionTagsRequest>>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteBatches)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -4013,10 +4007,9 @@ struct DashboardQuery {
 
 async fn dashboard(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Query(query): Query<DashboardQuery>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadDashboard)?;
     let range = query
         .range
         .as_deref()
@@ -4039,9 +4032,8 @@ async fn dashboard(
 
 async fn dashboard_live(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadDashboard)?;
     let settings = get_runtime_settings(&state.pool).await?;
     Ok(Json(json!(
         get_dashboard_live_status(&state.pool, &settings).await?
@@ -4244,10 +4236,9 @@ impl UsageAgg {
 /// per-model / per-stage breakdowns + pipeline throughput, over a custom range.
 async fn statistics(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Query(query): Query<StatisticsQuery>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadDashboard)?;
     let now = Utc::now();
     let (from, to) = resolve_stat_range(query.from.as_deref(), query.to.as_deref(), now)?;
     let bucket = match query.bucket.as_deref().unwrap_or("day") {
@@ -4396,8 +4387,7 @@ async fn update_workflow_mode(
     auth: Authenticated,
     Json(request): Json<UpdateWorkflowModeRequest>,
 ) -> ApiResult<Json<RuntimeSettings>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    let actor_id = require_user_session(&auth.0, "workflow mode updates require a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     Span::current().record("mode", tracing::field::debug(request.mode));
     let mut settings = get_runtime_settings(&state.pool).await?;
@@ -4424,9 +4414,7 @@ async fn update_workflow_controls(
     auth: Authenticated,
     Json(request): Json<UpdateWorkflowControlsRequest>,
 ) -> ApiResult<Json<RuntimeSettings>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    let actor_id =
-        require_user_session(&auth.0, "workflow control updates require a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     let before = get_runtime_settings(&state.pool).await?;
     let mut settings = before.clone();
@@ -4713,10 +4701,9 @@ fn parse_inventory_date_filter(
 
 async fn inventory(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Query(query): Query<InventoryQueryParams>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadInventory)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let offset = query.offset.unwrap_or(0).max(0);
     let inventory_query = inventory_query_from_params(query)?;
@@ -4872,7 +4859,6 @@ async fn inventory_facets(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadInventory)?;
     Ok(Json(json!(
         archivist_db::list_inventory_facets(&state.pool).await?
     )))
@@ -4913,16 +4899,14 @@ fn inventory_view_error(error: anyhow::Error) -> ApiError {
     }
 }
 
-// Saved inventory views (#447) are UI state private to one user: they need a
-// user session (an API token has no personal views) plus inventory:read.
-const INVENTORY_VIEWS_SESSION_MESSAGE: &str = "saved inventory views require a user session";
-
+// Saved inventory views (#447) are UI state private to one user: the route
+// table admits them for sessions only (an API token has no personal views)
+// with inventory:read.
 async fn inventory_views(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadInventory)?;
-    let user_id = require_user_session(&auth.0, INVENTORY_VIEWS_SESSION_MESSAGE)?;
+    let user_id = auth.session_user_id()?;
     Ok(Json(json!({
         "items": archivist_db::list_inventory_views(&state.pool, user_id).await?
     })))
@@ -4933,8 +4917,7 @@ async fn create_inventory_view_endpoint(
     auth: Authenticated,
     Json(request): Json<InventoryViewRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadInventory)?;
-    let user_id = require_user_session(&auth.0, INVENTORY_VIEWS_SESSION_MESSAGE)?;
+    let user_id = auth.session_user_id()?;
     let (name, query) = validate_inventory_view(&request)?;
     let view = archivist_db::create_inventory_view(&state.pool, user_id, &name, &query)
         .await
@@ -4948,8 +4931,7 @@ async fn update_inventory_view_endpoint(
     Path(id): Path<Uuid>,
     Json(request): Json<InventoryViewRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadInventory)?;
-    let user_id = require_user_session(&auth.0, INVENTORY_VIEWS_SESSION_MESSAGE)?;
+    let user_id = auth.session_user_id()?;
     let (name, query) = validate_inventory_view(&request)?;
     let view = archivist_db::update_inventory_view(&state.pool, user_id, id, &name, &query)
         .await
@@ -4962,8 +4944,7 @@ async fn delete_inventory_view_endpoint(
     auth: Authenticated,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadInventory)?;
-    let user_id = require_user_session(&auth.0, INVENTORY_VIEWS_SESSION_MESSAGE)?;
+    let user_id = auth.session_user_id()?;
     archivist_db::delete_inventory_view(&state.pool, user_id, id)
         .await
         .map_err(inventory_view_error)?;
@@ -5007,7 +4988,6 @@ async fn inventory_export(
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::ReceiverStream;
 
-    require(&auth.0, Permission::ReadInventory)?;
     let (format, canonical, inventory_query) =
         parse_inventory_export_query(raw_query.as_deref().unwrap_or_default())?;
 
@@ -5084,14 +5064,7 @@ async fn inventory_export(
 /// and must not live across an await in the handler.
 fn parse_inventory_export_query(
     raw_query: &str,
-) -> Result<
-    (
-        InventoryExportFormat,
-        String,
-        archivist_db::InventoryQuery,
-    ),
-    ApiError,
-> {
+) -> Result<(InventoryExportFormat, String, archivist_db::InventoryQuery), ApiError> {
     let mut format = InventoryExportFormat::Csv;
     let mut filters = url::form_urlencoded::Serializer::new(String::new());
     for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
@@ -5248,9 +5221,8 @@ fn inventory_csv_row(item: &DocumentInventoryItem) -> String {
 // result is truncated so operators know the view is incomplete.
 async fn inventory_duplicates(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadInventory)?;
     let settings = get_runtime_settings(&state.pool).await?;
     let groups = archivist_db::list_inventory_duplicates(&state.pool).await?;
     if groups.len() as i64 >= archivist_db::DUPLICATE_GROUP_LIMIT {
@@ -5836,7 +5808,6 @@ async fn inventory_metadata_trace(
     auth: Authenticated,
     Path(paperless_document_id): Path<i32>,
 ) -> ApiResult<Response> {
-    require(&auth.0, Permission::ReadInventory)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -5928,8 +5899,7 @@ async fn chat_sessions(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::UseChat)?;
-    let user_id = require_user_session(&auth.0, "document chat requires a user session")?;
+    let user_id = auth.session_user_id()?;
     let include_all = roles_have_permission(&auth.0.roles, Permission::ManageUsers);
     Ok(Json(json!({
         "items": list_document_chat_sessions(&state.pool, Some(user_id), include_all, 100).await?
@@ -5941,8 +5911,7 @@ async fn create_chat_session(
     auth: Authenticated,
     Json(request): Json<CreateChatSessionRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::UseChat)?;
-    let user_id = require_user_session(&auth.0, "document chat requires a user session")?;
+    let user_id = auth.session_user_id()?;
     let title = chat_title(request.title.as_deref().unwrap_or("New document chat"));
     let id = create_document_chat_session(&state.pool, &title, Some(user_id)).await?;
     append_audit(
@@ -5972,8 +5941,7 @@ async fn chat_messages(
     auth: Authenticated,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::UseChat)?;
-    let user_id = require_user_session(&auth.0, "document chat requires a user session")?;
+    let user_id = auth.session_user_id()?;
     let include_all = roles_have_permission(&auth.0.roles, Permission::ManageUsers);
     ensure_chat_visible(&state.pool, session_id, Some(user_id), include_all).await?;
     Ok(Json(json!({
@@ -5994,8 +5962,7 @@ async fn post_chat_message(
     Path(session_id): Path<Uuid>,
     Json(request): Json<PostChatMessageRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::UseChat)?;
-    let user_id = require_user_session(&auth.0, "document chat requires a user session")?;
+    let user_id = auth.session_user_id()?;
     let include_all = roles_have_permission(&auth.0.roles, Permission::ManageUsers);
     ensure_chat_visible(&state.pool, session_id, Some(user_id), include_all).await?;
 
@@ -6142,7 +6109,6 @@ async fn trigger_document(
     Path(document_id): Path<i32>,
     Json(request): Json<TriggerRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteRuns)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -6266,7 +6232,6 @@ async fn queue_ocr_batch(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteBatches)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -6293,7 +6258,6 @@ async fn queue_full_batch(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteBatches)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -6355,7 +6319,6 @@ async fn rerun_batch(
     auth: Authenticated,
     Json(request): Json<RerunBatchRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteBatches)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -6407,7 +6370,6 @@ async fn rerun_failed_batch(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteBatches)?;
     if let Some(user_id) = auth.0.user_id {
         Span::current().record("user_id", tracing::field::display(user_id));
     }
@@ -6450,10 +6412,9 @@ struct ReviewQuery {
 
 async fn reviews(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Query(query): Query<ReviewQuery>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadReviews)?;
     let settings = get_runtime_settings(&state.pool).await?;
     let items = list_reviews(
         &state.pool,
@@ -6514,8 +6475,7 @@ async fn batch_review(
     auth: Authenticated,
     Json(request): Json<BatchReviewRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteReviews)?;
-    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
+    let actor_id = auth.session_user_id()?;
     if request.ids.is_empty() {
         return Err(ApiError::bad_request("ids must not be empty"));
     }
@@ -6591,12 +6551,11 @@ async fn approve_review(
     auth: Authenticated,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteReviews)?;
     // Token requests carry the creator's user_id, so accepting them here
     // attributed automation decisions to that admin in the audit trail and
     // apply intents. All review decision endpoints now require an
     // interactive session, matching batch/auto-fix. #393
-    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     review_decision(&state.pool, id, "approved", None, actor_id).await?;
     apply_review_patch(&state, id, actor_id).await?;
@@ -6613,12 +6572,11 @@ async fn reject_review(
     auth: Authenticated,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteReviews)?;
     // Token requests carry the creator's user_id, so accepting them here
     // attributed automation decisions to that admin in the audit trail and
     // apply intents. All review decision endpoints now require an
     // interactive session, matching batch/auto-fix. #393
-    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     review_decision(&state.pool, id, "rejected", None, actor_id).await?;
     info!(review_id = %id, %actor_id, "review rejected");
@@ -6762,10 +6720,9 @@ struct AutoFixRequest {
 
 async fn auto_fix_preview(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Json(request): Json<AutoFixRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteReviews)?;
     let limit = request.limit.unwrap_or(500).clamp(1, 2000);
     let items = archivist_db::list_reviews(&state.pool, Some("pending"), limit).await?;
     let mut apply_count = 0_i64;
@@ -6801,8 +6758,7 @@ async fn auto_fix_bulk(
     auth: Authenticated,
     Json(request): Json<AutoFixRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteReviews)?;
-    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
+    let actor_id = auth.session_user_id()?;
     let limit = request.limit.unwrap_or(500).clamp(1, 2000);
     let items = archivist_db::list_reviews(&state.pool, Some("pending"), limit).await?;
     let mut applied = 0_i64;
@@ -6835,8 +6791,7 @@ async fn auto_fix_single(
     auth: Authenticated,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteReviews)?;
-    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
+    let actor_id = auth.session_user_id()?;
     // Look the review up by ID instead of scanning the newest 2000 pending
     // rows, which missed older items in a large backlog. #395
     let Some(item) = archivist_db::get_pending_review(&state.pool, id).await? else {
@@ -6937,12 +6892,11 @@ async fn edit_review(
     Path(id): Path<Uuid>,
     Json(request): Json<EditReviewRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteReviews)?;
     // Token requests carry the creator's user_id, so accepting them here
     // attributed automation decisions to that admin in the audit trail and
     // apply intents. All review decision endpoints now require an
     // interactive session, matching batch/auto-fix. #393
-    let actor_id = require_user_session(&auth.0, "review decisions require a user session")?;
+    let actor_id = auth.session_user_id()?;
     review_decision(
         &state.pool,
         id,
@@ -6971,10 +6925,9 @@ fn recovery_window_seconds(value: Option<i64>) -> i64 {
 
 async fn recovery_status(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Query(query): Query<RecoveryQuery>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadRuns)?;
     let older_than_seconds = recovery_window_seconds(query.older_than_seconds);
     Ok(Json(json!({
         "older_than_seconds": older_than_seconds,
@@ -6991,8 +6944,7 @@ async fn recover_stale_leases_endpoint(
     auth: Authenticated,
     Json(request): Json<RecoveryRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteRuns)?;
-    let actor_id = require_user_session(&auth.0, "recovery requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     let older_than_seconds = recovery_window_seconds(request.older_than_seconds);
     Span::current().record("older_than_seconds", older_than_seconds);
@@ -7018,8 +6970,7 @@ async fn recover_stuck_runs_endpoint(
     auth: Authenticated,
     Json(request): Json<RecoveryRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteRuns)?;
-    let actor_id = require_user_session(&auth.0, "recovery requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     let older_than_seconds = recovery_window_seconds(request.older_than_seconds);
     Span::current().record("older_than_seconds", older_than_seconds);
@@ -7062,8 +7013,7 @@ async fn unblock_jobs_endpoint(
     auth: Authenticated,
     Json(request): Json<UnblockJobsRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteRuns)?;
-    let actor_id = require_user_session(&auth.0, "unblock requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     let summary = archivist_db::unblock_jobs_from_failed_predecessors(
         &state.pool,
@@ -7127,9 +7077,8 @@ async fn unblock_jobs_endpoint(
 
 async fn provider_cooldowns_endpoint(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadDashboard)?;
     let cooldowns = archivist_db::list_active_provider_cooldowns(&state.pool).await?;
     let payload = cooldowns
         .into_iter()
@@ -7163,8 +7112,7 @@ async fn clear_provider_cooldowns_endpoint(
     // recovery, and unblock_jobs_endpoint already wipes cooldowns under
     // WriteRuns — requiring more here only forced operators through the
     // unblock detour for the exact same effect (#313).
-    require(&auth.0, Permission::WriteRuns)?;
-    let actor_id = require_user_session(&auth.0, "clearing cooldowns requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     let cleared = match request.provider_name.as_deref() {
         Some(name) => archivist_db::clear_provider_cooldown(&state.pool, name).await?,
@@ -7209,11 +7157,7 @@ async fn release_scheduled_retries_endpoint(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteRuns)?;
-    let actor_id = require_user_session(
-        &auth.0,
-        "releasing scheduled retries requires a user session",
-    )?;
+    let actor_id = auth.session_user_id()?;
     Span::current().record("user_id", tracing::field::display(actor_id));
     let released = archivist_db::release_scheduled_retries(&state.pool).await?;
     info!(%actor_id, released, "operator released scheduled job retries");
@@ -7332,10 +7276,9 @@ fn decode_audit_cursor(raw: &str) -> Result<(DateTime<Utc>, Uuid), ApiError> {
 // same as the first one.
 async fn audit_events(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadAudit)?;
     // Clamp so a caller that only needs a handful of rows (the debug console)
     // doesn't pull the full 200, and a large value can't be requested. (#277)
     let limit = query.limit.unwrap_or(200).clamp(1, 500);
@@ -7398,7 +7341,6 @@ async fn audit_event_detail(
     auth: Authenticated,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadAudit)?;
     let Some(mut detail) = archivist_db::get_audit_event(&state.pool, id).await? else {
         return Err(ApiError::not_found("audit event not found"));
     };
@@ -7462,7 +7404,6 @@ async fn audit_export(State(state): State<AppState>, auth: Authenticated) -> Api
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::ReceiverStream;
 
-    require(&auth.0, Permission::ReadAudit)?;
     let actor = format!(
         "{}:{}",
         auth.0.actor_type,
@@ -7662,9 +7603,8 @@ fn audit_csv_row(row: &sqlx::postgres::PgRow) -> Result<String, sqlx::Error> {
 
 async fn audit_integrity(
     State(state): State<AppState>,
-    auth: Authenticated,
+    _auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ReadAudit)?;
     Ok(Json(json!(verify_audit_integrity(&state.pool).await?)))
 }
 
@@ -7672,8 +7612,7 @@ async fn apply_audit_retention(
     State(state): State<AppState>,
     auth: Authenticated,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::WriteSettings)?;
-    let actor_id = require_user_session(&auth.0, "audit retention requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     let settings = get_runtime_settings(&state.pool).await?;
     Ok(Json(json!(
         apply_security_retention(&state.pool, &settings, actor_id).await?
@@ -7702,9 +7641,7 @@ fn csv_escape(value: &str) -> String {
     }
 }
 
-async fn users(State(state): State<AppState>, auth: Authenticated) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    require_user_session(&auth.0, "user management requires a user session")?;
+async fn users(State(state): State<AppState>, _auth: Authenticated) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "items": list_users(&state.pool).await? })))
 }
 
@@ -7721,8 +7658,7 @@ async fn create_user(
     auth: Authenticated,
     Json(request): Json<CreateUserRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    let actor_id = require_user_session(&auth.0, "user management requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     validate_password_strength(&request.password).map_err(ApiError::bad_request)?;
     let password_hash = hash_password(&request.password)?;
     let id = create_user_with_roles(
@@ -7759,8 +7695,7 @@ async fn update_user_enabled(
     id: Uuid,
     enabled: bool,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    let actor_id = require_user_session(&auth.0, "user management requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     set_user_enabled(&state.pool, id, enabled, actor_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -7776,8 +7711,7 @@ async fn update_user_roles_endpoint(
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateUserRolesRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    let actor_id = require_user_session(&auth.0, "user management requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     set_user_roles(&state.pool, id, &request.roles, actor_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -7793,8 +7727,7 @@ async fn reset_user_password(
     Path(id): Path<Uuid>,
     Json(request): Json<ResetPasswordRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    let actor_id = require_user_session(&auth.0, "password reset requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     validate_password_strength(&request.password).map_err(ApiError::bad_request)?;
     let password_hash = hash_password(&request.password)?;
     update_user_password_hash(
@@ -7808,9 +7741,7 @@ async fn reset_user_password(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn api_tokens(State(state): State<AppState>, auth: Authenticated) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    require_user_session(&auth.0, "API token management requires a user session")?;
+async fn api_tokens(State(state): State<AppState>, _auth: Authenticated) -> ApiResult<Json<Value>> {
     Ok(Json(
         json!({ "items": archivist_db::list_api_tokens(&state.pool).await? }),
     ))
@@ -7828,8 +7759,7 @@ async fn create_api_token(
     auth: Authenticated,
     Json(request): Json<CreateApiTokenRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    let actor_id = require_user_session(&auth.0, "API token creation requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     validate_api_token_name(&request.name)?;
     validate_api_token_scopes(&request.scopes)?;
     let settings = get_runtime_settings(&state.pool).await?;
@@ -7861,8 +7791,7 @@ async fn rotate_api_token_endpoint(
     Path(id): Path<Uuid>,
     Json(request): Json<RotateApiTokenRequest>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    let actor_id = require_user_session(&auth.0, "API token rotation requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     let settings = get_runtime_settings(&state.pool).await?;
     let expires_at = api_token_expiry(&settings, request.expires_in_days)?;
     let token = format!("pa_{}", random_token());
@@ -7878,8 +7807,7 @@ async fn revoke_api_token(
     auth: Authenticated,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::ManageUsers)?;
-    let actor_id = require_user_session(&auth.0, "API token revocation requires a user session")?;
+    let actor_id = auth.session_user_id()?;
     archivist_db::revoke_api_token(&state.pool, id, actor_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -8224,11 +8152,11 @@ async fn paperless_client_from_settings(
     // The global token is only inherited by a same-origin profile. #396
     let (base_url, secret_id) = settings.paperless.active_connection();
     let secret_id = secret_id.ok_or_else(|| {
-        anyhow!("Paperless token is not configured for the active archive profile")
+        not_configured("Paperless token is not configured for the active archive profile")
     })?;
     let token = resolve_secret(pool, &config.secret_key, secret_id)
         .await?
-        .ok_or_else(|| anyhow!("Paperless token secret reference does not exist"))?;
+        .ok_or_else(|| not_configured("Paperless token secret reference does not exist"))?;
     PaperlessClient::new(base_url, token, settings.paperless.timeout_seconds)
 }
 
@@ -8812,6 +8740,26 @@ fn parse_oidc_roles(value: &str) -> Result<Vec<Role>> {
     Ok(roles)
 }
 
+/// Scope the request with its audit context (source IP honoring
+/// `trust_proxy`, capped User-Agent) so `archivist_db` fills both fields of
+/// every audit event the request writes, including events written deep in
+/// DB helpers. Explicit values on an event still win. #441
+async fn audit_context_middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| *peer);
+    let context = AuditRequestContext {
+        source_ip: request_source_ip(&state, request.headers(), peer),
+        user_agent: request_user_agent(request.headers()),
+    };
+    with_audit_request_context(context, next.run(request)).await
+}
+
 async fn auth_middleware(
     State(state): State<AppState>,
     mut request: Request<Body>,
@@ -8819,6 +8767,13 @@ async fn auth_middleware(
 ) -> Result<Response, ApiError> {
     let auth = authenticate(&state.pool, request.headers()).await?;
     enforce_csrf(&auth, request.method(), request.headers())?;
+    // Declarative per-route permission + auth-kind check, before any
+    // extractor or handler runs. #442
+    authorize_route(
+        &auth,
+        request.method(),
+        request.extensions().get::<axum::extract::MatchedPath>(),
+    )?;
     request.extensions_mut().insert(auth);
     Ok(next.run(request).await)
 }
@@ -8884,74 +8839,6 @@ fn enforce_csrf(auth: &AuthContext, method: &Method, headers: &HeaderMap) -> Res
     Ok(())
 }
 
-fn require(auth: &AuthContext, permission: Permission) -> Result<(), ApiError> {
-    if roles_have_permission(&auth.roles, permission)
-        || auth
-            .scopes
-            .iter()
-            .any(|scope| scope == scope_for_permission(permission))
-    {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden("insufficient permissions"))
-    }
-}
-
-fn require_user_session(auth: &AuthContext, message: &'static str) -> Result<Uuid, ApiError> {
-    if !auth.cookie_auth {
-        return Err(ApiError::forbidden(message));
-    }
-    auth.user_id.ok_or_else(|| ApiError::forbidden(message))
-}
-
-const ALL_PERMISSIONS: [Permission; 12] = [
-    Permission::ReadDashboard,
-    Permission::ReadRuns,
-    Permission::WriteRuns,
-    Permission::ReadInventory,
-    Permission::WriteBatches,
-    Permission::UseChat,
-    Permission::ReadReviews,
-    Permission::WriteReviews,
-    Permission::ReadSettings,
-    Permission::WriteSettings,
-    Permission::ManageUsers,
-    Permission::ReadAudit,
-];
-
-/// A token can never do more than its creator currently may: keep only the
-/// scopes backed by a permission the creator's *current* roles still grant,
-/// so demoting a user (OIDC role replace #289, `set_user_roles`) immediately
-/// narrows every token they created. #392
-fn effective_token_scopes(scopes: &[String], creator_roles: &[Role]) -> Vec<String> {
-    scopes
-        .iter()
-        .filter(|scope| {
-            ALL_PERMISSIONS.iter().any(|permission| {
-                scope_for_permission(*permission) == scope.as_str()
-                    && roles_have_permission(creator_roles, *permission)
-            })
-        })
-        .cloned()
-        .collect()
-}
-
-fn scope_for_permission(permission: Permission) -> &'static str {
-    match permission {
-        Permission::ReadDashboard | Permission::ReadRuns => "runs:read",
-        Permission::WriteRuns => "runs:write",
-        Permission::ReadInventory => "inventory:read",
-        Permission::WriteBatches => "batches:write",
-        Permission::UseChat => "chat:write",
-        Permission::ReadReviews => "reviews:read",
-        Permission::WriteReviews => "reviews:write",
-        Permission::ReadSettings => "settings:read",
-        Permission::WriteSettings => "settings:write",
-        Permission::ManageUsers => "users:manage",
-        Permission::ReadAudit => "audit:read",
-    }
-}
-
 fn validate_api_token_name(name: &str) -> Result<(), ApiError> {
     let trimmed = name.trim();
     if trimmed.is_empty() || trimmed.len() > 80 {
@@ -8983,35 +8870,6 @@ fn api_token_expiry(
         )));
     }
     Ok(Some(Utc::now() + Duration::days(days)))
-}
-
-fn validate_api_token_scopes(scopes: &[String]) -> Result<(), ApiError> {
-    const ALLOWED: &[&str] = &[
-        "runs:read",
-        "runs:write",
-        "inventory:read",
-        "batches:write",
-        "chat:write",
-        "reviews:read",
-        "reviews:write",
-        "settings:read",
-        "settings:write",
-        "users:manage",
-        "audit:read",
-    ];
-    if scopes.is_empty() {
-        return Err(ApiError::bad_request(
-            "API token requires at least one scope",
-        ));
-    }
-    for scope in scopes {
-        if !ALLOWED.contains(&scope.as_str()) {
-            return Err(ApiError::bad_request(format!(
-                "unsupported API token scope: {scope}"
-            )));
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -9793,8 +9651,8 @@ mod tests {
         assert!(
             validate_api_token_scopes(&[
                 "runs:read".to_owned(),
-                "users:manage".to_owned(),
-                "chat:write".to_owned()
+                "reviews:write".to_owned(),
+                "audit:read".to_owned()
             ])
             .is_ok()
         );
@@ -9805,34 +9663,37 @@ mod tests {
         let invalid_error =
             validate_api_token_scopes(&["admin:*".to_owned()]).expect_err("unknown scopes fail");
         assert_eq!(invalid_error.status, StatusCode::BAD_REQUEST);
+
+        // #442: scopes whose every route is session-only could never
+        // authorize a request, so they are no longer issued.
+        for unusable in ["chat:write", "settings:write", "users:manage"] {
+            let error = validate_api_token_scopes(&[unusable.to_owned()])
+                .expect_err("unusable scope is rejected");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{unusable}");
+        }
     }
 
     #[test]
     fn permission_scopes_are_explicit_and_accepted() {
-        let permissions = [
-            Permission::ReadDashboard,
-            Permission::ReadRuns,
-            Permission::WriteRuns,
-            Permission::ReadInventory,
-            Permission::WriteBatches,
-            Permission::UseChat,
-            Permission::ReadReviews,
-            Permission::WriteReviews,
-            Permission::ReadSettings,
-            Permission::WriteSettings,
-            Permission::ManageUsers,
-            Permission::ReadAudit,
-        ];
-        for permission in permissions {
-            let scope = scope_for_permission(permission).to_owned();
-            assert!(
-                validate_api_token_scopes(&[scope]).is_ok(),
-                "permission {permission:?} maps to unsupported scope"
-            );
+        for permission in route_policy::ALL_PERMISSIONS {
+            if let Some(scope) = route_policy::token_scope_for_permission(permission) {
+                assert!(
+                    validate_api_token_scopes(&[scope.to_owned()]).is_ok(),
+                    "permission {permission:?} maps to unsupported scope"
+                );
+            }
         }
         assert_eq!(
-            scope_for_permission(Permission::ManageUsers),
-            "users:manage"
+            route_policy::token_scope_for_permission(Permission::ManageUsers),
+            None
+        );
+        // Legacy scopes on existing tokens grant nothing, even for an admin.
+        assert!(
+            effective_token_scopes(
+                &["users:manage".to_owned(), "settings:write".to_owned()],
+                &[Role::Admin]
+            )
+            .is_empty()
         );
     }
 
@@ -11184,45 +11045,6 @@ mod tests {
         }
     }
 
-    /// Exercises the real `router()` (nesting included) instead of the limiter
-    /// struct, so a prefix-stripping regression is caught. Invalid JSON bodies
-    /// are rejected by the extractor before any database access. #385
-    #[tokio::test]
-    async fn auth_routes_are_rate_limited_through_the_nested_router() {
-        let mut state = api_text_test_state();
-        state.auth_rate_limiter = Arc::new(AuthRateLimiter::new(2, 3600));
-        let app = router(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .ok();
-        });
-        let client = reqwest::Client::new();
-        let mut statuses = Vec::new();
-        for path in ["login", "paperless-login", "login"] {
-            let response = client
-                .post(format!("http://{address}/api/auth/{path}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body("{}")
-                .send()
-                .await
-                .expect("auth request");
-            statuses.push(response.status().as_u16());
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                assert!(response.headers().contains_key(header::RETRY_AFTER));
-            }
-        }
-        handle.abort();
-        assert_ne!(statuses[0], 429, "first request must pass the limiter");
-        assert_ne!(statuses[1], 429, "second request must pass the limiter");
-        assert_eq!(statuses[2], 429, "third request must be rate limited");
-    }
-
     #[tokio::test]
     async fn prompt_tester_and_document_chat_send_selected_provider_tuning_on_wire() {
         let prompt_capture = ProviderProbeCapture::default();
@@ -11969,7 +11791,8 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(apply_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // #441: a missing Paperless token is operator state, not a 500.
+        assert_eq!(apply_error.status(), StatusCode::CONFLICT);
         assert_eq!(review_status_of(&pool, failing).await, "pending");
 
         // #393: a token cannot make review decisions attributed to its creator.
@@ -12127,6 +11950,582 @@ mod tests {
         .expect("export audit");
         assert_eq!(exported, 1);
         handle.abort();
+    }
+
+    // ----- #440: HTTP-level harness: router() + tower oneshot ---------------
+
+    use tower::ServiceExt as _;
+
+    const HARNESS_PEER: &str = "198.51.100.7:40000";
+    const HARNESS_USER_AGENT: &str = "archivist-harness/1.0";
+
+    /// Drives the fully composed `router()` (nesting, layers, fallbacks, auth
+    /// and route-policy middleware) in-process through `oneshot`, without a
+    /// TCP listener. Every request carries a fixed peer address and
+    /// User-Agent so audit request context can be asserted. #440
+    struct TestApi {
+        app: Router,
+    }
+
+    struct TestResponse {
+        status: StatusCode,
+        headers: HeaderMap,
+        body: Value,
+    }
+
+    #[derive(Clone)]
+    enum Principal {
+        Anonymous,
+        Session { token: String, csrf: String },
+        Token(String),
+    }
+
+    impl TestApi {
+        fn new(state: AppState) -> Self {
+            Self { app: router(state) }
+        }
+
+        async fn send(
+            &self,
+            method: Method,
+            path: &str,
+            principal: &Principal,
+            body: Option<Value>,
+        ) -> TestResponse {
+            let mut builder = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::USER_AGENT, HARNESS_USER_AGENT)
+                .extension(ConnectInfo(
+                    HARNESS_PEER.parse::<SocketAddr>().expect("peer address"),
+                ));
+            match principal {
+                Principal::Anonymous => {}
+                Principal::Session { token, csrf } => {
+                    builder = builder
+                        .header(header::COOKIE, format!("{SESSION_COOKIE}={token}"))
+                        .header("x-csrf-token", csrf);
+                }
+                Principal::Token(token) => {
+                    builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+                }
+            }
+            let request = match body {
+                Some(body) => builder
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string())),
+                None => builder.body(Body::empty()),
+            }
+            .expect("build request");
+            let response = self
+                .app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("router is infallible");
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            let body = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+            TestResponse {
+                status,
+                headers,
+                body,
+            }
+        }
+    }
+
+    async fn harness_user(pool: &DbPool, label: &str, roles: &[Role]) -> (Uuid, Principal) {
+        let suffix = Uuid::now_v7().simple().to_string();
+        let user_id = create_user_with_roles(
+            pool,
+            &format!("harness-{label}-{suffix}"),
+            None,
+            "hash",
+            roles,
+            None,
+        )
+        .await
+        .expect("harness user");
+        let token = random_token();
+        let csrf = random_token();
+        create_session(
+            pool,
+            user_id,
+            &hash_token(&token),
+            &hash_token(&csrf),
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .expect("harness session");
+        (user_id, Principal::Session { token, csrf })
+    }
+
+    async fn harness_token(pool: &DbPool, creator: Uuid, scopes: &[&str]) -> Principal {
+        let token = format!("pa_{}", random_token());
+        archivist_db::create_api_token(
+            pool,
+            &format!("harness-{}", Uuid::now_v7().simple()),
+            &hash_token(&token),
+            &scopes
+                .iter()
+                .map(|scope| (*scope).to_owned())
+                .collect::<Vec<_>>(),
+            creator,
+            None,
+        )
+        .await
+        .expect("harness token");
+        Principal::Token(token)
+    }
+
+    fn policy_method(verb: route_policy::Verb) -> Method {
+        match verb {
+            route_policy::Verb::Get => Method::GET,
+            route_policy::Verb::Post => Method::POST,
+            route_policy::Verb::Put => Method::PUT,
+            route_policy::Verb::Patch => Method::PATCH,
+            route_policy::Verb::Delete => Method::DELETE,
+        }
+    }
+
+    /// Concrete request path for a route template. Unknown ids keep the
+    /// handlers on their cheap not-found / validation paths.
+    fn concrete_path(template: &str) -> String {
+        template
+            .replace("{id}", &Uuid::now_v7().to_string())
+            .replace("{name}", "harness-missing-provider")
+            .replace("{document_id}", "440440")
+            .replace("{paperless_document_id}", "440440")
+    }
+
+    /// 401, or a 403 produced by the route policy (as opposed to a
+    /// handler's own resource-level 403 such as a foreign chat session).
+    fn is_auth_or_policy_denial(
+        response: &TestResponse,
+        policy: &route_policy::RoutePolicy,
+    ) -> bool {
+        if response.status == StatusCode::UNAUTHORIZED {
+            return true;
+        }
+        if response.status != StatusCode::FORBIDDEN {
+            return false;
+        }
+        let error = response.body["error"].as_str().unwrap_or_default();
+        error == "insufficient permissions"
+            || error == "this endpoint requires a user session"
+            || matches!(
+                policy.auth,
+                route_policy::AuthKinds::SessionOnly(message) if message == error
+            )
+    }
+
+    fn is_router_not_found(response: &TestResponse) -> bool {
+        response.status == StatusCode::NOT_FOUND && response.body["error"] == "not found"
+    }
+
+    /// Exercises the real `router()` (nesting included) instead of the limiter
+    /// struct, so a prefix-stripping regression is caught. Invalid JSON bodies
+    /// are rejected by the extractor before any database access. #385, #440
+    #[tokio::test]
+    async fn auth_routes_are_rate_limited_through_the_nested_router() {
+        let mut state = api_text_test_state();
+        state.auth_rate_limiter = Arc::new(AuthRateLimiter::new(2, 3600));
+        let api = TestApi::new(state);
+        let mut statuses = Vec::new();
+        for path in ["login", "paperless-login", "login"] {
+            let response = api
+                .send(
+                    Method::POST,
+                    &format!("/api/auth/{path}"),
+                    &Principal::Anonymous,
+                    Some(json!({})),
+                )
+                .await;
+            statuses.push(response.status);
+            if response.status == StatusCode::TOO_MANY_REQUESTS {
+                assert!(response.headers.contains_key(header::RETRY_AFTER));
+                assert!(response.body["error"].is_string(), "JSON 429 body");
+            }
+        }
+        assert_ne!(statuses[0], 429, "first request must pass the limiter");
+        assert_ne!(statuses[1], 429, "second request must pass the limiter");
+        assert_eq!(statuses[2], 429, "third request must be rate limited");
+    }
+
+    /// Every declared authenticated route is mounted behind the auth
+    /// middleware (anonymous -> 401 JSON, never the SPA or a router 404),
+    /// and undeclared paths still get the JSON 404. #440, #442
+    #[tokio::test]
+    async fn every_declared_route_is_mounted_behind_authentication() {
+        let api = TestApi::new(api_text_test_state());
+        for policy in route_policy::ROUTE_POLICIES {
+            if policy.auth == route_policy::AuthKinds::Unauthenticated {
+                continue;
+            }
+            let path = concrete_path(policy.path);
+            let response = api
+                .send(
+                    policy_method(policy.verb),
+                    &path,
+                    &Principal::Anonymous,
+                    None,
+                )
+                .await;
+            assert_eq!(
+                response.status,
+                StatusCode::UNAUTHORIZED,
+                "{:?} {path}",
+                policy.verb
+            );
+            assert_eq!(response.body["error"], "authentication required");
+        }
+        let unknown = api
+            .send(
+                Method::GET,
+                "/api/not-a-declared-route",
+                &Principal::Anonymous,
+                None,
+            )
+            .await;
+        assert!(is_router_not_found(&unknown));
+    }
+
+    /// Permission matrix token vs. session over the whole route table:
+    /// anonymous, admin session, role-less session, fully scoped token and a
+    /// token holding only a retired scope. #440, #442
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn harness_route_permission_matrix_token_vs_session() {
+        use route_policy::{Access, AuthKinds, ROUTE_POLICIES, TOKEN_SCOPES};
+
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        let (admin, admin_session) = harness_user(&pool, "admin", &[Role::Admin]).await;
+        let (_, roleless_session) = harness_user(&pool, "roleless", &[]).await;
+        let full_token = harness_token(&pool, admin, TOKEN_SCOPES).await;
+        // Retired scope (#442): accepted before, grants nothing now.
+        let legacy_token = harness_token(&pool, admin, &["users:manage"]).await;
+        let api = TestApi::new(state);
+
+        for policy in ROUTE_POLICIES {
+            if policy.auth == AuthKinds::Unauthenticated {
+                continue;
+            }
+            let method = policy_method(policy.verb);
+            let label = format!("{method} {}", policy.path);
+            // Logging out would revoke the shared sessions; covered below.
+            let skip_session = policy.path == "/api/auth/logout";
+
+            if !skip_session {
+                let response = api
+                    .send(
+                        method.clone(),
+                        &concrete_path(policy.path),
+                        &admin_session,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    !is_auth_or_policy_denial(&response, policy),
+                    "admin session {label}: {} {}",
+                    response.status,
+                    response.body
+                );
+                assert!(!is_router_not_found(&response), "admin session {label}");
+
+                let response = api
+                    .send(
+                        method.clone(),
+                        &concrete_path(policy.path),
+                        &roleless_session,
+                        None,
+                    )
+                    .await;
+                match policy.access {
+                    Access::Require(_) => {
+                        assert_eq!(response.status, StatusCode::FORBIDDEN, "roleless {label}");
+                        assert_eq!(response.body["error"], "insufficient permissions");
+                    }
+                    Access::Authenticated => {
+                        assert_ne!(response.status, StatusCode::FORBIDDEN, "roleless {label}")
+                    }
+                    Access::Public => unreachable!("public routes are skipped"),
+                }
+            }
+
+            let full = api
+                .send(
+                    method.clone(),
+                    &concrete_path(policy.path),
+                    &full_token,
+                    None,
+                )
+                .await;
+            let legacy = api
+                .send(method, &concrete_path(policy.path), &legacy_token, None)
+                .await;
+            match (policy.access, policy.auth) {
+                (_, AuthKinds::SessionOnly(message)) => {
+                    assert_eq!(full.status, StatusCode::FORBIDDEN, "token {label}");
+                    let expected = match policy.access {
+                        Access::Require(permission)
+                            if route_policy::token_scope_for_permission(permission).is_none() =>
+                        {
+                            "insufficient permissions"
+                        }
+                        _ => message,
+                    };
+                    assert_eq!(full.body["error"], expected, "token {label}");
+                    assert_eq!(legacy.status, StatusCode::FORBIDDEN, "legacy {label}");
+                }
+                (Access::Require(_), AuthKinds::SessionOrToken) => {
+                    assert!(
+                        !is_auth_or_policy_denial(&full, policy),
+                        "token {label}: {} {}",
+                        full.status,
+                        full.body
+                    );
+                    assert!(!is_router_not_found(&full), "token {label}");
+                    assert_eq!(legacy.status, StatusCode::FORBIDDEN, "legacy {label}");
+                }
+                (Access::Authenticated, AuthKinds::SessionOrToken) => {
+                    assert!(full.status.is_success(), "token {label}: {}", full.status);
+                    assert!(legacy.status.is_success(), "legacy {label}");
+                }
+                (Access::Public, _) | (_, AuthKinds::Unauthenticated) => {
+                    unreachable!("public routes are skipped")
+                }
+            }
+        }
+
+        // Token logout is a no-op; session logout revokes the session.
+        let logout = api
+            .send(Method::POST, "/api/auth/logout", &roleless_session, None)
+            .await;
+        assert_eq!(logout.status, StatusCode::OK);
+        let after = api
+            .send(Method::GET, "/api/auth/me", &roleless_session, None)
+            .await;
+        assert_eq!(after.status, StatusCode::UNAUTHORIZED);
+
+        // CSRF is still enforced before the route policy.
+        let Principal::Session { token, .. } = &admin_session else {
+            unreachable!()
+        };
+        let no_csrf = api
+            .send(
+                Method::POST,
+                "/api/batches/rerun-failed",
+                &Principal::Session {
+                    token: token.clone(),
+                    csrf: "wrong".to_owned(),
+                },
+                None,
+            )
+            .await;
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf.body["error"], "invalid CSRF token");
+    }
+
+    /// Expected domain conditions are 4xx, and audit events written deep in
+    /// DB helpers inherit the request's source IP / User-Agent. #441
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn harness_domain_errors_are_4xx_and_audit_events_carry_request_context() {
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        let (_, admin_session) = harness_user(&pool, "admin", &[Role::Admin]).await;
+        let (target, _) = harness_user(&pool, "target", &[Role::Viewer]).await;
+        let api = TestApi::new(state);
+        let unknown = Uuid::now_v7();
+
+        for (path, body, message) in [
+            (
+                format!("/api/users/{unknown}/roles"),
+                json!({ "roles": ["viewer"] }),
+                "user does not exist",
+            ),
+            (
+                format!("/api/users/{unknown}/disable"),
+                json!({}),
+                "user does not exist",
+            ),
+            (
+                format!("/api/api-tokens/{unknown}/rotate"),
+                json!({}),
+                "API token not found or already revoked",
+            ),
+            (
+                format!("/api/prompts/{unknown}/activate"),
+                json!({}),
+                "prompt does not exist",
+            ),
+        ] {
+            let response = api
+                .send(Method::POST, &path, &admin_session, Some(body))
+                .await;
+            assert_eq!(response.status, StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(response.body["error"], message, "{path}");
+        }
+
+        // No Paperless token configured: operator state, not a 500.
+        let consistency = api
+            .send(
+                Method::GET,
+                "/api/paperless/consistency",
+                &admin_session,
+                None,
+            )
+            .await;
+        assert_eq!(consistency.status, StatusCode::CONFLICT);
+        assert_eq!(
+            consistency.body["error"],
+            "Paperless token is not configured for the active archive profile"
+        );
+
+        let changed = api
+            .send(
+                Method::POST,
+                &format!("/api/users/{target}/roles"),
+                &admin_session,
+                Some(json!({ "roles": ["reviewer"] })),
+            )
+            .await;
+        assert_eq!(changed.status, StatusCode::OK);
+        let row = sqlx::query(
+            "select source_ip, user_agent from audit_events where event_type = 'user.roles_changed' and after->>'user_id' = $1",
+        )
+        .bind(target.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("roles audit event");
+        let source_ip: Option<String> = row.try_get("source_ip").unwrap();
+        let user_agent: Option<String> = row.try_get("user_agent").unwrap();
+        assert_eq!(source_ip.as_deref(), Some("198.51.100.7"));
+        assert_eq!(user_agent.as_deref(), Some(HARNESS_USER_AGENT));
+        let integrity = verify_audit_integrity(&pool)
+            .await
+            .expect("verify audit chain");
+        assert!(
+            integrity.ok,
+            "request context is bound into the audit hash chain"
+        );
+    }
+
+    async fn spawn_mock_paperless(documents: Value) -> (String, tokio::task::JoinHandle<()>) {
+        async fn list(State(documents): State<Value>) -> Json<Value> {
+            let count = documents.as_array().map_or(0, Vec::len);
+            Json(json!({ "count": count, "next": null, "previous": null, "results": documents }))
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/api/documents/", get(list))
+            .with_state(documents);
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (format!("http://{address}/"), handle)
+    }
+
+    /// Consistency through the router against real inventory rows and a
+    /// mocked Paperless: typed document dates decode (#386) and every
+    /// difference class is reported. #440
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn harness_consistency_compares_real_inventory_rows() {
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        let (admin, _) = harness_user(&pool, "admin", &[Role::Admin]).await;
+        let (_, viewer_session) = harness_user(&pool, "viewer", &[Role::Viewer]).await;
+        let (paperless_url, paperless_handle) = spawn_mock_paperless(json!([
+            { "id": 440001, "title": "Rechnung", "created": "2026-09-27T00:00:00+02:00",
+              "tags": [1, 3], "correspondent": 7, "document_type": 9 },
+            { "id": 440002, "title": "Remote title", "created": "2026-09-01",
+              "tags": [], "correspondent": null, "document_type": null },
+            { "id": 440003, "title": "Only remote", "created": null,
+              "tags": [], "correspondent": null, "document_type": null }
+        ]))
+        .await;
+        sqlx::query("delete from document_inventory")
+            .execute(&pool)
+            .await
+            .expect("clear inventory");
+        sqlx::query(
+            r#"
+            insert into document_inventory (
+              paperless_document_id, title, current_tag_ids, correspondent_id,
+              document_type_id, document_date
+            ) values
+              (440001, 'Rechnung', '{3,1}', 7, 9, date '2026-09-27'),
+              (440002, 'Local title', '{}', null, null, date '2026-09-01'),
+              (440004, 'Only local', '{}', null, null, null)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("insert inventory fixtures");
+
+        let original = get_runtime_settings(&pool).await.expect("settings");
+        let secret_id = upsert_encrypted_secret(
+            &pool,
+            &state.config.secret_key,
+            &format!("harness-paperless-{}", Uuid::now_v7().simple()),
+            &SecretString::from("harness-paperless-token".to_owned()),
+            admin,
+        )
+        .await
+        .expect("paperless secret");
+        let mut settings = original.clone();
+        settings.paperless.base_url = paperless_url;
+        settings.paperless.token_secret_id = Some(secret_id);
+        settings.paperless.active_archive = String::new();
+        settings.paperless.archive_profiles = Vec::new();
+        update_runtime_settings(&pool, &settings, admin)
+            .await
+            .expect("point settings at mock Paperless");
+
+        let api = TestApi::new(state);
+        let response = api
+            .send(
+                Method::GET,
+                "/api/paperless/consistency",
+                &viewer_session,
+                None,
+            )
+            .await;
+        // Restore before asserting so a failure cannot leak the mock
+        // Paperless configuration into later tests.
+        update_runtime_settings(&pool, &original, admin)
+            .await
+            .expect("restore settings");
+        sqlx::query(
+            "delete from document_inventory where paperless_document_id between 440001 and 440004",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean inventory fixtures");
+        paperless_handle.abort();
+
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        assert_eq!(response.body["documents_checked"], 3);
+        assert_eq!(response.body["missing_local"], json!([440003]));
+        assert_eq!(response.body["stale_local"], json!([440004]));
+        assert_eq!(
+            response.body["mismatches"],
+            json!([{ "paperless_document_id": 440002, "fields": ["title"] }])
+        );
+        assert_eq!(response.body["ok"], false);
     }
 }
 
@@ -12308,8 +12707,28 @@ async fn json_error_body(response: Response) -> Response {
     rewritten
 }
 
+/// A feature the request depends on is not configured (Paperless token, AI
+/// provider). Operator state rather than a server fault: 409 without an
+/// ERROR log. #441
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct NotConfiguredError(String);
+
+fn not_configured(message: impl Into<String>) -> anyhow::Error {
+    NotConfiguredError(message.into()).into()
+}
+
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        // Expected domain conditions are client-visible states, not server
+        // faults: 4xx and no ERROR log. #441
+        if let Some(not_found) = error.downcast_ref::<NotFoundError>() {
+            return Self::not_found(not_found.to_string());
+        }
+        if let Some(not_configured) = error.downcast_ref::<NotConfiguredError>() {
+            warn!(reason = %not_configured, "request rejected: dependency not configured");
+            return Self::conflict(not_configured.to_string());
+        }
         if error.downcast_ref::<LastEnabledAdminError>().is_some() {
             warn!("user mutation rejected to preserve the enabled administrator invariant");
             return Self {

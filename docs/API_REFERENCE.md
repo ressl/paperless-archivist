@@ -27,6 +27,11 @@ Automation can use API tokens:
 - scopes are checked against the same internal permission model as roles
 - mutable user, token, prompt, and settings operations still require an
   interactive user session for defense-in-depth
+- every route declares its permission and the allowed principal kinds once, in
+  `crates/archivist-api/src/route_policy.rs`; the OpenAPI operation mirrors it
+  as `x-archivist-permission` plus `security` (`cookieSession` only means a
+  browser session is required, tokens get `403` regardless of scope), and
+  `pnpm contract:routes` fails when a route is undeclared or the two drift
 
 Error responses use JSON:
 
@@ -39,7 +44,13 @@ Common status codes:
 - `400`: invalid JSON or invalid request shape
 - `401`: missing or invalid authentication
 - `403`: authenticated principal lacks permission
+- `404`: unknown path or referenced resource (user, API token, prompt, review)
+- `409`: the resource is no longer in a state that accepts the request, or a
+  required integration (Paperless token, AI provider) is not configured
 - `500`: backend, database, Paperless, or provider failure
+
+Audit events written while serving a request record its source IP (honoring
+`ARCHIVIST_TRUST_PROXY`) and User-Agent.
 
 ## Public Endpoints
 
@@ -403,8 +414,11 @@ Batch review returns per-item failures for partial failures and writes a
 | `DELETE` | `/api/api-tokens/{id}` | Revoke an API token. |
 
 Supported API token scopes are `runs:read`, `runs:write`, `inventory:read`,
-`batches:write`, `chat:write`, `reviews:read`, `reviews:write`, `settings:read`,
-`settings:write`, `users:manage`, and `audit:read`.
+`batches:write`, `reviews:read`, `reviews:write` (auto-fix preview only;
+decisions need a session), `settings:read`, and `audit:read`. The former
+`chat:write`, `settings:write` and `users:manage` scopes could never authorize a
+request because every route needing them is session-only; they are rejected on
+creation and ignored on existing tokens.
 
 Token creation accepts `expires_in_days`. When omitted, the configured default
 TTL is used. Rotation accepts the same field and preserves the original scopes.
