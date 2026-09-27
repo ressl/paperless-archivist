@@ -21,7 +21,7 @@ vi.mock('../api/client', async () => {
       users: vi.fn(),
       sessions: vi.fn(async () => ({ items: [] })),
       apiTokens: vi.fn(async () => ({ items: [] })),
-      audit: vi.fn(async () => ({ items: [] })),
+      auditSearch: vi.fn(async () => ({ items: [], next_cursor: null })),
       auditIntegrity: vi.fn(async () => integrity)
     }
   };
@@ -29,7 +29,7 @@ vi.mock('../api/client', async () => {
 
 beforeEach(() => {
   vi.mocked(api.users).mockReset();
-  vi.mocked(api.audit).mockClear();
+  vi.mocked(api.auditSearch).mockClear();
   vi.mocked(api.auditIntegrity).mockClear();
 });
 afterEach(() => cleanup());
@@ -57,9 +57,9 @@ describe('pages built on useResource (#444)', () => {
       </I18nProvider>
     );
     expect(await screen.findByText('Audit chain verified')).toBeInTheDocument();
-    expect(api.audit).toHaveBeenCalledTimes(1);
+    expect(api.auditSearch).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Verify chain' }));
     await waitFor(() => expect(api.auditIntegrity).toHaveBeenCalledTimes(2));
-    expect(api.audit).toHaveBeenCalledTimes(1);
+    expect(api.auditSearch).toHaveBeenCalledTimes(1);
   });
 });

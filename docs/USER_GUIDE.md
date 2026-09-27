@@ -360,6 +360,25 @@ Admins can also use the Paperless maintenance panel:
 Completion-tag reconcile only adds the full completion tag when all enabled
 stage completion tags already exist on the Paperless document.
 
+### Filter, Save And Export The Inventory
+
+`Advanced filters` in `Inventory` also filter by Paperless correspondent and
+document type (including "Not set" for documents without one); the names come
+from the last metadata sync and are shown under each document title. The active
+filters are part of the page URL, so a reload or a shared link keeps them.
+
+- `Save view` stores the current filters under a name. Saved views are private
+  to your user account and stored on the server, so they are available after a
+  reload and in other browsers. Pick a view to apply it, `Update view` to
+  overwrite it with the current filters, or `Delete view` (with confirmation).
+  Each user can keep up to 50 views.
+- `Export CSV` / `Export JSON` download every document matching the current
+  filters (not just the loaded page). Exports need the same permission as the
+  inventory itself, are recorded in the audit log (`inventory.exported`, with
+  the filters used), and run one at a time per user. In CSV files, cells that
+  start with `=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets do not
+  execute them.
+
 ## Dashboard
 
 Use the dashboard to understand operational state:
@@ -673,6 +692,19 @@ Use `Audit` to inspect important actions:
 
 Secrets are redacted before they are stored in audit metadata.
 Use `Export CSV` when an auditor needs the recent audit trail outside the UI.
+
+Filter the log by actor (username, user ID or API token name), event type,
+document ID, outcome and date range, then `Apply filters`. Filters are kept in
+the page URL. The newest 100 matching events are shown; `Load older events`
+continues from the last row without re-reading earlier pages, so this stays
+fast on large audit tables. Dates are interpreted in UTC; the `To` date
+includes that whole day.
+
+Events that recorded a before/after snapshot (for example metadata applied to
+Paperless, settings, roles or language detection) have a `Show changes`
+button. It opens a field-by-field comparison that lists only fields that were
+added, removed or changed, with the raw snapshots below. Credential-like fields
+are always shown as `[REDACTED]`.
 
 ## Troubleshooting
 
