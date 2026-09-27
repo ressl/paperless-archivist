@@ -7495,6 +7495,13 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
 /// front (and any "stuck for hours" rows leave the dashboard first). The
 /// returned shape is identical to [`pending_review_for_apply`] so the worker
 /// drain can reuse the same apply path.
+///
+/// Items that failed validation are never drained (#403): the worker stores
+/// hard `ValidationError`s (`{"LowConfidence": ...}`, `"EmptyOutput"`, ...)
+/// in `validation_warnings`, and such a suggestion needs a human decision.
+/// Free-text soft warnings (e.g. the dry-run notice or a date-format note on
+/// an otherwise valid suggestion) do not block the drain. A non-array value
+/// is treated as blocking because its shape cannot be classified.
 pub async fn list_pending_review_items_for_autopilot_drain(
     pool: &DbPool,
     limit: i64,
@@ -7506,6 +7513,19 @@ pub async fn list_pending_review_items_for_autopilot_drain(
                conflict_fields, conflicted_at, validation_warnings, created_at
           from review_items
          where status = 'pending'
+           and (
+             validation_warnings is null
+             or jsonb_typeof(validation_warnings) = 'null'
+             or (
+               jsonb_typeof(validation_warnings) = 'array'
+               and not exists (
+                 select 1
+                   from jsonb_array_elements(validation_warnings) as warning(value)
+                  where jsonb_typeof(warning.value) = 'object'
+                     or warning.value #>> '{}' in ('EmptyOutput', 'InvalidTitle')
+               )
+             )
+           )
          order by created_at asc
          limit $1
         "#,
@@ -7534,6 +7554,109 @@ pub async fn list_pending_review_items_for_autopilot_drain(
                 paperless_title: None,
                 created_at: row.try_get("created_at")?,
             })
+        })
+        .collect()
+}
+
+/// For each document, the finish time of its most recent pipeline run when
+/// that run is terminal (`succeeded`, `rejected`, `failed`, `cancelled`).
+/// Documents whose latest run is still active, or that never had a run, are
+/// absent from the map. The trigger poller uses this to skip documents whose
+/// trigger tag survived a terminal run without any later Paperless change,
+/// so a trigger tag that could not be removed (dry-run, Paperless error,
+/// review rejected) no longer requeues the document every poll (#400).
+pub async fn latest_terminal_run_finished_at(
+    pool: &DbPool,
+    paperless_document_ids: &[i32],
+) -> Result<HashMap<i32, DateTime<Utc>>> {
+    if paperless_document_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        select paperless_document_id, finished_at
+          from (
+            select distinct on (paperless_document_id)
+                   paperless_document_id, status,
+                   coalesce(finished_at, updated_at) as finished_at
+              from pipeline_runs
+             where paperless_document_id = any($1)
+             order by paperless_document_id, created_at desc, id desc
+          ) latest
+         where status in ('succeeded', 'rejected', 'failed', 'cancelled')
+        "#,
+    )
+    .bind(paperless_document_ids)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("paperless_document_id")?,
+                row.try_get("finished_at")?,
+            ))
+        })
+        .collect()
+}
+
+/// Tag ids that Archivist itself added to a document through a landed
+/// Paperless apply (`patch.tags` minus the recorded `before_state.tags`),
+/// excluding workflow tags. This is the "AI-managed" set that the
+/// `replace_ai_managed` tag strategy may replace (#411). Intents pruned by
+/// retention are forgotten, which errs on the side of keeping tags.
+pub async fn ai_managed_tag_ids_for_document(
+    pool: &DbPool,
+    paperless_document_id: i32,
+) -> Result<Vec<i32>> {
+    let rows = sqlx::query(
+        r#"
+        select distinct (added.value)::integer as tag_id
+          from paperless_apply_intents intent
+          cross join lateral jsonb_array_elements(intent.patch -> 'tags') as added(value)
+         where intent.paperless_document_id = $1
+           and intent.state in ('confirmed', 'reconciled', 'finalized')
+           and jsonb_typeof(intent.patch -> 'tags') = 'array'
+           and jsonb_typeof(intent.before_state -> 'tags') = 'array'
+           and jsonb_typeof(added.value) = 'number'
+           and not (intent.before_state -> 'tags') @> jsonb_build_array(added.value)
+           and not exists (
+             select 1 from paperless_tags tag
+              where tag.id = (added.value)::integer
+                and tag.is_workflow
+           )
+         order by tag_id
+        "#,
+    )
+    .bind(paperless_document_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| row.try_get("tag_id").context("ai-managed tag id"))
+        .collect()
+}
+
+/// `(id, name, is_workflow)` for the given tag ids from the local Paperless
+/// tag mirror. Ids missing from the mirror are simply absent.
+pub async fn tag_catalog_entries_for_ids(
+    pool: &DbPool,
+    ids: &[i32],
+) -> Result<Vec<(i32, String, bool)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "select id, name, is_workflow from paperless_tags where id = any($1) order by id",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("id")?,
+                row.try_get("name")?,
+                row.try_get("is_workflow")?,
+            ))
         })
         .collect()
 }

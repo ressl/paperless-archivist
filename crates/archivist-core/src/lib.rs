@@ -712,6 +712,44 @@ impl WorkflowTags {
         }
     }
 
+    /// Every trigger tag that can request `stage`. Unlike
+    /// `trigger_tag_for_stage` this includes the legacy per-field metadata
+    /// triggers (`ai-tags`, `ai-title`, ...), which all funnel into the
+    /// consolidated metadata stage and therefore must be retired together
+    /// once that stage reaches a terminal outcome (#400).
+    pub fn trigger_tags_requesting_stage(&self, stage: Stage) -> Vec<&str> {
+        match stage {
+            Stage::Ocr => vec![&self.trigger_ocr],
+            Stage::Metadata => vec![
+                &self.trigger_tags,
+                &self.trigger_title,
+                &self.trigger_correspondent,
+                &self.trigger_document_type,
+                &self.trigger_document_date,
+                &self.trigger_fields,
+            ],
+            Stage::Apply => Vec::new(),
+        }
+    }
+
+    /// All trigger tags, including the whole-pipeline `trigger_process`.
+    pub fn all_trigger_tags(&self) -> Vec<&str> {
+        let mut tags = vec![self.trigger_process.as_str()];
+        tags.extend(self.trigger_tags_requesting_stage(Stage::Ocr));
+        tags.extend(self.trigger_tags_requesting_stage(Stage::Metadata));
+        tags
+    }
+
+    /// Stage-specific failure marker set when a stage fails permanently, so
+    /// the failure is visible in Paperless (#400).
+    pub fn failed_tag_for_stage(&self, stage: Stage) -> &str {
+        match stage {
+            Stage::Ocr => &self.failed_ocr,
+            Stage::Metadata => &self.failed_tagging,
+            Stage::Apply => &self.failed,
+        }
+    }
+
     pub fn stages_requested_by_tags(&self, tag_names: &[String]) -> Vec<Stage> {
         let normalized: HashSet<String> = tag_names
             .iter()
@@ -4773,6 +4811,31 @@ mod tests {
         let tags = WorkflowTags::default();
         let stages = tags.stages_requested_by_tags(&["ai-title".to_owned()]);
         assert_eq!(stages, vec![Stage::Metadata]);
+    }
+
+    #[test]
+    fn every_trigger_that_requests_a_stage_is_retired_with_it() {
+        // #400: each trigger tag that `stages_requested_by_tags` maps to a
+        // stage must be listed by `trigger_tags_requesting_stage`, otherwise
+        // a terminal outcome leaves it behind and the poller requeues forever.
+        let tags = WorkflowTags::default();
+        for trigger in tags.all_trigger_tags() {
+            for stage in tags.stages_requested_by_tags(&[trigger.to_owned()]) {
+                let retired = trigger.eq_ignore_ascii_case(&tags.trigger_process)
+                    || tags
+                        .trigger_tags_requesting_stage(stage)
+                        .iter()
+                        .any(|tag| tag.eq_ignore_ascii_case(trigger));
+                assert!(retired, "{trigger} requests {stage:?} but is never retired");
+            }
+        }
+        assert_eq!(tags.all_trigger_tags().len(), 8);
+        assert_eq!(tags.failed_tag_for_stage(Stage::Ocr), "ai-failed-ocr");
+        assert_eq!(
+            tags.failed_tag_for_stage(Stage::Metadata),
+            tags.failed_tagging
+        );
+        assert!(tags.is_workflow_tag(tags.failed_tag_for_stage(Stage::Apply)));
     }
 
     #[test]
