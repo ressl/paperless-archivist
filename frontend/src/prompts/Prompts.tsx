@@ -11,7 +11,7 @@ type PendingPromptSelection =
   | { kind: 'prompt'; promptId: string | null };
 
 export function Prompts({ setError }: { setError: (error: string | null) => void }) {
-  const { t, formatDateTime } = useI18n();
+  const { t, formatDateTime, formatPercent } = useI18n();
   const [items, setItems] = useState<Prompt[]>([]);
   const [usage, setUsage] = useState<PromptUsage[]>([]);
   const [experiments, setExperiments] = useState<PromptExperiment[]>([]);
@@ -259,7 +259,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                       });
                       await load();
                       setSelectedPromptId(result.id);
-                    })
+                    }, t)
                   }
                 >
                   {saving ? t('prompts.saving') : t('prompts.save_new_version')}
@@ -285,7 +285,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                     run(setActivating, setError, async () => {
                       await api.activatePrompt(selectedPrompt.id);
                       await load();
-                    })
+                    }, t)
                   }
                 >
                   {activating ? t('prompts.activating') : t('prompts.activate_selected')}
@@ -388,7 +388,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                 paperless_document_id: documentId && Number.isFinite(documentId) ? documentId : null
               });
               setTestResult(result);
-            })}
+            }, t)}
           >
             {testing ? t('prompts.testing') : t('prompts.test_current_editor')}
           </Button>
@@ -490,8 +490,8 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   <td>{row.rejected}</td>
                   <td>{row.edited}</td>
                   <td>{row.applied}</td>
-                  <td>{formatRate(row.approved, row.total)}</td>
-                  <td>{row.mean_confidence == null ? '-' : `${(row.mean_confidence * 100).toFixed(1)}%`}</td>
+                  <td>{row.total > 0 ? formatPercent(row.approved / row.total, 1) : '-'}</td>
+                  <td>{row.mean_confidence == null ? '-' : formatPercent(row.mean_confidence, 1)}</td>
                 </tr>
               ))}
             </tbody>
@@ -553,11 +553,6 @@ function PromptDraftDialog({ onCancel, onDiscard }: { onCancel: () => void; onDi
       </section>
     </div>
   );
-}
-
-function formatRate(part: number, total: number) {
-  if (total <= 0) return '-';
-  return `${((part / total) * 100).toFixed(1)}%`;
 }
 
 function promptOptionLabel(prompt: Prompt, t: TFunction) {

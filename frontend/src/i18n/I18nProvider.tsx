@@ -28,8 +28,9 @@ type I18nContextValue = {
   setLocale: (locale: string) => void;
   localeOptions: UiLocaleOption[];
   t: TFunction;
-  formatNumber: (value: number) => string;
-  formatPercent: (value: number) => string;
+  formatNumber: (value: number, options?: Intl.NumberFormatOptions) => string;
+  /** Locale-aware percentage of a 0..1 ratio; `fractionDigits` defaults to 0. */
+  formatPercent: (value: number, fractionDigits?: number) => string;
   formatDateTime: (value?: string | null) => string;
   formatRelativeTime: (value?: string | null) => string;
 };
@@ -94,15 +95,16 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   );
 
   const formatNumber = useCallback(
-    (value: number) => new Intl.NumberFormat(locale).format(value),
+    (value: number, options?: Intl.NumberFormatOptions) => new Intl.NumberFormat(locale, options).format(value),
     [locale]
   );
 
   const formatPercent = useCallback(
-    (value: number) =>
+    (value: number, fractionDigits = 0) =>
       new Intl.NumberFormat(locale, {
         style: 'percent',
-        maximumFractionDigits: 0
+        minimumFractionDigits: fractionDigits,
+        maximumFractionDigits: fractionDigits
       }).format(Number.isFinite(value) ? value : 0),
     [locale]
   );

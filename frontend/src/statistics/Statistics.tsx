@@ -76,7 +76,7 @@ export function presetParams(preset: RangePreset, now: Date = new Date()): { fro
 }
 
 export function Statistics({ setError }: { setError: (error: string | null) => void }) {
-  const { t, formatNumber, formatDateTime } = useI18n();
+  const { t, formatNumber, formatDateTime, locale } = useI18n();
   const [range, setRange] = useState<RangeSelection>({ kind: 'preset', preset: '30d' });
   const [bucket, setBucket] = useState<StatisticsBucket>('day');
   const [data, setData] = useState<StatisticsResponse | null>(null);
@@ -131,17 +131,18 @@ export function Statistics({ setError }: { setError: (error: string | null) => v
   const onFromChange = (value: string) => setRange({ kind: 'custom', from: value, to: displayTo });
   const onToChange = (value: string) => setRange({ kind: 'custom', from: displayFrom, to: value });
 
-  // Short, locale-aware axis labels keyed off the bucket granularity.
+  // Short axis labels keyed off the bucket granularity, in the app locale
+  // (not the browser default) so they match the rest of the UI. (#434)
   const formatAxis = useCallback(
     (value: string) => {
       const date = new Date(value);
       if (!Number.isFinite(date.getTime())) return value;
       if (bucket === 'month') {
-        return new Intl.DateTimeFormat(undefined, { month: 'short', year: '2-digit' }).format(date);
+        return new Intl.DateTimeFormat(locale, { month: 'short', year: '2-digit' }).format(date);
       }
-      return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
+      return new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' }).format(date);
     },
-    [bucket]
+    [bucket, locale]
   );
 
   const usageSeries = useMemo(

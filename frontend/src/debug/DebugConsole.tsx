@@ -5,6 +5,14 @@ import { useI18n } from '../i18n/I18nProvider';
 import { ActionButton, Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
 
 const POLL_INTERVAL_MS = 2_500;
+// LLM call durations as locale-aware seconds (en "1.23s", de "1,23 Sek."). (#434)
+const SECONDS_FORMAT: Intl.NumberFormatOptions = {
+  style: 'unit',
+  unit: 'second',
+  unitDisplay: 'narrow',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+};
 
 function formatRelative(iso: string, t: ReturnType<typeof useI18n>['t']): string {
   const then = new Date(iso).getTime();
@@ -16,7 +24,7 @@ function formatRelative(iso: string, t: ReturnType<typeof useI18n>['t']): string
 }
 
 export function DebugConsole({ setError }: { setError: (error: string | null) => void }) {
-  const { t } = useI18n();
+  const { t, formatNumber } = useI18n();
   const [live, setLive] = useState<DashboardLiveStatus | null>(null);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [busy, setBusy] = useState(false);
@@ -191,7 +199,7 @@ export function DebugConsole({ setError }: { setError: (error: string | null) =>
                     <td>{ev.stage}</td>
                     <td>{ev.provider}</td>
                     <td>{ev.model}</td>
-                    <td>{ev.duration_ms != null ? `${(ev.duration_ms / 1000).toFixed(2)}s` : '-'}</td>
+                    <td>{ev.duration_ms != null ? formatNumber(ev.duration_ms / 1000, SECONDS_FORMAT) : '-'}</td>
                     <td>{formatRelative(ev.created_at, t)}</td>
                   </tr>
                 ))}

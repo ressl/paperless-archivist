@@ -112,7 +112,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
             className="chat-session-form"
             onSubmit={(event) => {
               event.preventDefault();
-              void run(setBusy, setError, createSession);
+              void run(setBusy, setError, createSession, t);
             }}
           >
             <input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} aria-label={t('chat.new_chat')} />
@@ -162,7 +162,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
             className="chat-composer"
             onSubmit={(event) => {
               event.preventDefault();
-              void run(setBusy, setError, sendMessage);
+              void run(setBusy, setError, sendMessage, t);
             }}
           >
             <label>

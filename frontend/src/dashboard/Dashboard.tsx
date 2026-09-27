@@ -309,7 +309,7 @@ export function Dashboard({
             variant="primary"
             icon={<RefreshCw size={16} />}
             disabled={busy}
-            onClick={() => void run(setBusy, setError, async () => Promise.all([load(), loadLive()]))}
+            onClick={() => void run(setBusy, setError, async () => Promise.all([load(), loadLive()]), t)}
           >
             {busy ? t('generic.refreshing') : t('generic.refresh')}
           </Button>

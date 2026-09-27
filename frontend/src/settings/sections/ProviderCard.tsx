@@ -12,6 +12,9 @@ import type { OllamaModelLoadState } from './types';
 type Provider = RuntimeSettings['ai']['providers'][number];
 export type ProviderFieldErrors = { name?: string; baseUrl?: string };
 
+// Every backend provider kind, in menu order; labels come from i18n. (#434)
+const PROVIDER_KINDS: readonly AiProviderKind[] = ['ollama', 'openai', 'anthropic', 'openai_compatible', 'mineru'];
+
 export function ProviderCard({
   provider,
   catalog,
@@ -83,11 +86,11 @@ export function ProviderCard({
             });
           }}
         >
-          <option value="ollama">ollama</option>
-          <option value="openai">openai</option>
-          <option value="anthropic">anthropic</option>
-          <option value="openai_compatible">openai compatible</option>
-          <option value="mineru">mineru (OCR)</option>
+          {PROVIDER_KINDS.map((kind) => (
+            <option key={kind} value={kind}>
+              {t(`settings.provider.kind.${kind}`)}
+            </option>
+          ))}
         </select>
       </FormField>
       <FormField

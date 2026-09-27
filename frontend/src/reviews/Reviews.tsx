@@ -200,6 +200,7 @@ type ReviewCardProps = {
 };
 
 function ReviewCard({ item, selected, focused, onSelect, onReload, onAutoFix, setError, t }: ReviewCardProps) {
+  const { formatPercent } = useI18n();
   const patch = asReviewPatch(item.suggested_patch);
   const metadata = asReviewPatch(patch?.standard_metadata);
   const [edit, setEdit] = useState<ReviewEditState>(() => reviewEditStateFromPatch(patch));
@@ -280,7 +281,7 @@ function ReviewCard({ item, selected, focused, onSelect, onReload, onAutoFix, se
               </div>
               <div>
                 <span>{t('review.suggestion', { value: row.suggested ?? t('generic.empty') })}</span>
-                {row.confidence !== null && <small>{t('review.confidence', { value: `${(row.confidence * 100).toFixed(0)}%` })}</small>}
+                {row.confidence !== null && <small>{t('review.confidence', { value: formatPercent(row.confidence) })}</small>}
                 {row.evidence && <small>{t('review.evidence', { value: row.evidence })}</small>}
               </div>
               {row.editableKey && (

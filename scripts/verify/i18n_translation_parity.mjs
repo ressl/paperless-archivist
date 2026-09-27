@@ -32,7 +32,11 @@ const identicalAllowlist = new Map([
   ['inventory.ocr', 'standard technical abbreviation'],
   ['stage.ocr', 'standard technical abbreviation'],
   ['prompts.help.ocr.label', 'standard technical abbreviation'],
-  ['prompts.help.ocr.short_label', 'standard technical abbreviation']
+  ['prompts.help.ocr.short_label', 'standard technical abbreviation'],
+  ['settings.provider.kind.ollama', 'product name'],
+  ['settings.provider.kind.openai', 'product name'],
+  ['settings.provider.kind.anthropic', 'product name'],
+  ['settings.provider.kind.mineru', 'product name']
 ]);
 
 const structuralErrors = [];
