@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 async fn fixture() -> Option<(DbPool, Uuid, Uuid, Uuid, Uuid)> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = connect(&url, 10).await.expect("connect test database");
+    let pool = connect(&url, 10).await.expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"

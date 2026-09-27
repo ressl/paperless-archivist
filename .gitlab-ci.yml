@@ -139,6 +139,7 @@ public:kubernetes:monitoring:contract:
     - .default_retry
   script:
     - node --test ../scripts/verify/kubernetes_monitoring_contract.test.mjs
+    - node --test ../scripts/verify/kubernetes_image_version_contract.test.mjs
 
 public:kubernetes:monitoring:render:
   stage: test

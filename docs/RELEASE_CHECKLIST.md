@@ -12,6 +12,8 @@ Keep the three version identities in lockstep with the release tag `vX.Y.Z`:
       inherit it via `version.workspace = true`)
 - [ ] `info.version` in `openapi/openapi.yaml`
 - [ ] `version` in `frontend/package.json`
+- [ ] `images[].newTag` in `deploy/kubernetes/base/kustomization.yaml` and
+      `image.tag` in `deploy/kubernetes/values.example.yaml`
 
 ## Code And Tests
 

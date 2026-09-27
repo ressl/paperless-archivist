@@ -92,7 +92,7 @@ async fn mock_client(invalid_first_response: bool) -> (PaperlessClient, Arc<Mute
 
 async fn fresh_pool() -> Option<DbPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = connect(&url, 10).await.expect("connect test database");
+    let pool = connect(&url, 10).await.expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         "truncate paperless_apply_intents, review_items, pipeline_runs, document_inventory, audit_events, metrics_counters restart identity cascade",

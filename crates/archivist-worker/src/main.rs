@@ -5119,7 +5119,7 @@ mod tests {
         };
         let pool = connect(&database_url, 10)
             .await
-            .expect("connect test database");
+            .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
         archivist_db::migrate(&pool)
             .await
             .expect("apply migrations");

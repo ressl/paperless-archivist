@@ -13,7 +13,7 @@ async fn dashboard_pending_excludes_full_tagged_and_rejected_documents() {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL test database");
     let pool = connect(&database_url, 10)
         .await
-        .expect("connect test database");
+        .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"

@@ -52,7 +52,7 @@ async fn completion_candidates_require_every_enabled_stage_to_be_terminal() {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL test database");
     let pool = connect(&database_url, 10)
         .await
-        .expect("connect test database");
+        .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"
@@ -98,7 +98,7 @@ async fn completion_reconcile_guard_rechecks_after_candidate_selection() {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL test database");
     let pool = connect(&database_url, 10)
         .await
-        .expect("connect test database");
+        .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"
@@ -146,7 +146,7 @@ async fn completion_reconcile_guard_serializes_parallel_run_creation() {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL test database");
     let pool = connect(&database_url, 10)
         .await
-        .expect("connect test database");
+        .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"

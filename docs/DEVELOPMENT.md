@@ -96,6 +96,27 @@ If a local Compose database reports a modified migration checksum, check
 `_sqlx_migrations`; the usual cause is accidentally reusing an existing
 migration number. Add a new migration instead of editing an applied one.
 
+### Database integration tests
+
+Tests that need PostgreSQL are marked `#[ignore]` and read `DATABASE_URL`.
+They truncate and assert on shared tables, and each test opens its own
+connection pool, so they must run **serially** against a disposable
+PostgreSQL 18 database:
+
+```bash
+# Starts a throwaway postgres:18 container when DATABASE_URL is unset and
+# checks that every ignored test actually ran.
+bash scripts/verify/migration_smoke.sh
+
+# Or against your own disposable database:
+DATABASE_URL=postgres://user@127.0.0.1:5432/archivist_test \
+  cargo test --workspace --tests --locked -- --ignored --test-threads=1
+```
+
+Running them with the default parallel test threads fails with
+`connect test database` (connection limit) or with flaky assertions from
+concurrent truncates.
+
 ## Frontend Development
 
 The frontend is a React + TypeScript Vite app. It uses:
