@@ -920,6 +920,31 @@ const frMessages: Record<MessageKey, string> = {
   'stats.col.avg_latency': 'Latence moy.',
   'stats.col.cost': 'Coût est.',
 
+  // --- audit 2026-09 frontend UX (#417-#429) ---
+  'generic.cancel': 'Annuler',
+  'generic.retry': 'Réessayer',
+  'unsaved.dialog.title': 'Quitter avec des modifications non enregistrées ?',
+  'unsaved.dialog.description': 'Les modifications non enregistrées de cette page seront perdues si vous la quittez maintenant.',
+  'unsaved.dialog.stay': 'Rester sur la page',
+  'unsaved.dialog.leave': 'Abandonner et quitter',
+  'prompts.activate_confirm.title': 'Activer la version du prompt ?',
+  'prompts.activate_confirm.description': 'Désormais, chaque nouvelle exécution {stage} utilise {name} v{version}.',
+  'prompts.activate_confirm.replaces': 'Remplace la version actuellement active {name} v{version}.',
+  'settings.provider.remove_dialog_title': 'Supprimer le fournisseur {provider} ?',
+  'settings.save_bar': 'Enregistrer les paramètres',
+  'settings.unsaved_changes': 'Modifications non enregistrées',
+  'settings.all_saved': 'Toutes les modifications sont enregistrées',
+  'review.batch_confirm.approve_title': 'Approuver {count} élément(s) de revue ?',
+  'review.batch_confirm.approve_description': 'Les suggestions pour {count} document(s) seront écrites dans Paperless.',
+  'review.batch_confirm.reject_title': 'Rejeter {count} élément(s) de revue ?',
+  'review.batch_confirm.reject_description': 'Les suggestions pour {count} document(s) seront abandonnées et non écrites dans Paperless.',
+  'review.auto_fix_confirm_title': 'Corriger automatiquement {count} élément(s) de revue ?',
+  'review.auto_fix_confirm_breakdown': '{apply} seront appliqués, {reject} seront rejetés.',
+  'review.auto_fix_nothing': 'Aucun élément de revue en attente à corriger automatiquement.',
+  'review.selected_count': '{count} sélectionné(s)',
+  'review.loading': 'Chargement de la file de revue…',
+  'review.load_error': 'Impossible de charger la file de revue.',
+  'review.empty': 'Aucune revue en attente.',
 };
 
 export default frMessages;

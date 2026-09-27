@@ -920,6 +920,31 @@ const esMessages: Record<MessageKey, string> = {
   'stats.col.avg_latency': 'Latencia media',
   'stats.col.cost': 'Coste est.',
 
+  // --- audit 2026-09 frontend UX (#417-#429) ---
+  'generic.cancel': 'Cancelar',
+  'generic.retry': 'Reintentar',
+  'unsaved.dialog.title': '¿Salir con cambios sin guardar?',
+  'unsaved.dialog.description': 'Los cambios no guardados de esta página se perderán si sales ahora.',
+  'unsaved.dialog.stay': 'Quedarse en la página',
+  'unsaved.dialog.leave': 'Descartar y salir',
+  'prompts.activate_confirm.title': '¿Activar la versión del prompt?',
+  'prompts.activate_confirm.description': 'A partir de ahora, cada nueva ejecución de {stage} usará {name} v{version}.',
+  'prompts.activate_confirm.replaces': 'Sustituye la versión activa actual {name} v{version}.',
+  'settings.provider.remove_dialog_title': '¿Eliminar el proveedor {provider}?',
+  'settings.save_bar': 'Guardar ajustes',
+  'settings.unsaved_changes': 'Cambios sin guardar',
+  'settings.all_saved': 'Todos los cambios guardados',
+  'review.batch_confirm.approve_title': '¿Aprobar {count} elemento(s) de revisión?',
+  'review.batch_confirm.approve_description': 'Las sugerencias para {count} documento(s) se escribirán en Paperless.',
+  'review.batch_confirm.reject_title': '¿Rechazar {count} elemento(s) de revisión?',
+  'review.batch_confirm.reject_description': 'Las sugerencias para {count} documento(s) se descartarán y no se escribirán en Paperless.',
+  'review.auto_fix_confirm_title': '¿Autocorregir {count} elemento(s) de revisión?',
+  'review.auto_fix_confirm_breakdown': 'Se aplicarán {apply} y se rechazarán {reject}.',
+  'review.auto_fix_nothing': 'No hay elementos de revisión pendientes para autocorregir.',
+  'review.selected_count': '{count} seleccionados',
+  'review.loading': 'Cargando la cola de revisión…',
+  'review.load_error': 'No se pudo cargar la cola de revisión.',
+  'review.empty': 'No hay revisiones pendientes.',
 };
 
 export default esMessages;

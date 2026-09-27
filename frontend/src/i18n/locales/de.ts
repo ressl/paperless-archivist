@@ -920,6 +920,31 @@ const deMessages: Record<MessageKey, string> = {
   'stats.col.avg_latency': 'Ø Latenz',
   'stats.col.cost': 'Gesch. Kosten',
 
+  // --- audit 2026-09 frontend UX (#417-#429) ---
+  'generic.cancel': 'Abbrechen',
+  'generic.retry': 'Erneut versuchen',
+  'unsaved.dialog.title': 'Mit ungespeicherten Änderungen verlassen?',
+  'unsaved.dialog.description': 'Deine ungespeicherten Änderungen auf dieser Seite gehen verloren, wenn du sie jetzt verlässt.',
+  'unsaved.dialog.stay': 'Auf der Seite bleiben',
+  'unsaved.dialog.leave': 'Verwerfen und verlassen',
+  'prompts.activate_confirm.title': 'Prompt-Version aktivieren?',
+  'prompts.activate_confirm.description': 'Ab sofort verwendet jeder neue {stage}-Lauf {name} v{version}.',
+  'prompts.activate_confirm.replaces': 'Ersetzt die aktuell aktive Version {name} v{version}.',
+  'settings.provider.remove_dialog_title': 'Provider {provider} entfernen?',
+  'settings.save_bar': 'Einstellungen speichern',
+  'settings.unsaved_changes': 'Ungespeicherte Änderungen',
+  'settings.all_saved': 'Alle Änderungen gespeichert',
+  'review.batch_confirm.approve_title': '{count} Review-Einträge freigeben?',
+  'review.batch_confirm.approve_description': 'Die Vorschläge für {count} Dokument(e) werden nach Paperless geschrieben.',
+  'review.batch_confirm.reject_title': '{count} Review-Einträge ablehnen?',
+  'review.batch_confirm.reject_description': 'Die Vorschläge für {count} Dokument(e) werden verworfen und nicht nach Paperless geschrieben.',
+  'review.auto_fix_confirm_title': '{count} Review-Einträge automatisch korrigieren?',
+  'review.auto_fix_confirm_breakdown': '{apply} werden übernommen, {reject} werden abgelehnt.',
+  'review.auto_fix_nothing': 'Keine offenen Review-Einträge zum automatischen Korrigieren.',
+  'review.selected_count': '{count} ausgewählt',
+  'review.loading': 'Review-Warteschlange wird geladen…',
+  'review.load_error': 'Die Review-Warteschlange konnte nicht geladen werden.',
+  'review.empty': 'Keine Reviews ausstehend.',
 };
 
 export default deMessages;

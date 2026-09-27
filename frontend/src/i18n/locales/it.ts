@@ -920,6 +920,31 @@ const itMessages: Record<MessageKey, string> = {
   'stats.col.avg_latency': 'Latenza media',
   'stats.col.cost': 'Costo st.',
 
+  // --- audit 2026-09 frontend UX (#417-#429) ---
+  'generic.cancel': 'Annulla',
+  'generic.retry': 'Riprova',
+  'unsaved.dialog.title': 'Uscire con modifiche non salvate?',
+  'unsaved.dialog.description': 'Le modifiche non salvate in questa pagina andranno perse se esci ora.',
+  'unsaved.dialog.stay': 'Resta nella pagina',
+  'unsaved.dialog.leave': 'Scarta ed esci',
+  'prompts.activate_confirm.title': 'Attivare la versione del prompt?',
+  'prompts.activate_confirm.description': 'D\'ora in poi ogni nuova esecuzione {stage} userà {name} v{version}.',
+  'prompts.activate_confirm.replaces': 'Sostituisce la versione attualmente attiva {name} v{version}.',
+  'settings.provider.remove_dialog_title': 'Rimuovere il provider {provider}?',
+  'settings.save_bar': 'Salva impostazioni',
+  'settings.unsaved_changes': 'Modifiche non salvate',
+  'settings.all_saved': 'Tutte le modifiche salvate',
+  'review.batch_confirm.approve_title': 'Approvare {count} elemento/i in revisione?',
+  'review.batch_confirm.approve_description': 'I suggerimenti per {count} documento/i verranno scritti in Paperless.',
+  'review.batch_confirm.reject_title': 'Rifiutare {count} elemento/i in revisione?',
+  'review.batch_confirm.reject_description': 'I suggerimenti per {count} documento/i verranno scartati e non scritti in Paperless.',
+  'review.auto_fix_confirm_title': 'Correggere automaticamente {count} elemento/i in revisione?',
+  'review.auto_fix_confirm_breakdown': '{apply} verranno applicati, {reject} verranno rifiutati.',
+  'review.auto_fix_nothing': 'Nessun elemento in revisione in attesa da correggere automaticamente.',
+  'review.selected_count': '{count} selezionati',
+  'review.loading': 'Caricamento della coda di revisione…',
+  'review.load_error': 'Impossibile caricare la coda di revisione.',
+  'review.empty': 'Nessuna revisione in attesa.',
 };
 
 export default itMessages;

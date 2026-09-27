@@ -7,6 +7,16 @@ import {
   type RuntimeSettings
 } from '../api/client';
 import { I18nProvider } from '../i18n/I18nProvider';
+import { axe, toHaveNoViolations } from 'jest-axe';
+
+expect.extend(toHaveNoViolations);
+
+async function answerRemoveDialog(answer: 'Cancel' | 'Remove Provider') {
+  const dialog = await screen.findByRole('alertdialog');
+  fireEvent.click(within(dialog).getByRole('button', { name: answer }));
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  return dialog;
+}
 
 const apiState = vi.hoisted(() => ({ savedSettings: null as RuntimeSettings | null }));
 
@@ -252,7 +262,6 @@ describe('<SettingsPage> provider draft test', () => {
   });
 
   it('removes an unreferenced custom provider without shifting successor drafts and persists on reload', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValue(true);
     const { SettingsPage, shiftIndexedProviderState } = await import('./SettingsPage');
     expect(
       shiftIndexedProviderState(
@@ -295,16 +304,17 @@ describe('<SettingsPage> provider draft test', () => {
 
     const removedCard = screen.getByRole('group', { name: removedName });
     fireEvent.click(within(removedCard).getByRole('button', { name: 'Remove Provider' }));
+    await answerRemoveDialog('Cancel');
     expect(screen.getByRole('group', { name: removedName })).toBeInTheDocument();
     expect(saveSettingsMock).not.toHaveBeenCalled();
 
     fireEvent.click(within(removedCard).getByRole('button', { name: 'Remove Provider' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveAccessibleDescription(new RegExp(`${removedName}.*Save`, 's'));
+    expect(await axe(dialog)).toHaveNoViolations();
+    await answerRemoveDialog('Remove Provider');
 
-    expect(confirm).toHaveBeenNthCalledWith(
-      2,
-      expect.stringMatching(new RegExp(`${removedName}.*Save`, 's'))
-    );
-    expect(screen.queryByRole('group', { name: removedName })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('group', { name: removedName })).not.toBeInTheDocument());
     const successorCard = screen.getByRole('group', { name: successorName });
     expect(within(successorCard).getByLabelText('API key')).toHaveValue('successor-draft-secret');
 
@@ -324,11 +334,9 @@ describe('<SettingsPage> provider draft test', () => {
     );
     expect(await screen.findByRole('group', { name: successorName })).toBeInTheDocument();
     expect(screen.queryByRole('group', { name: removedName })).not.toBeInTheDocument();
-    confirm.mockRestore();
   });
 
   it('keeps built-ins disable-only and explains why referenced custom providers cannot be removed', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const { SettingsPage } = await import('./SettingsPage');
     render(
       <I18nProvider>
@@ -339,13 +347,12 @@ describe('<SettingsPage> provider draft test', () => {
     const referenced = await screen.findByRole('group', { name: 'draft-provider' });
     fireEvent.click(within(referenced).getByRole('button', { name: 'Remove Provider' }));
     expect(within(referenced).getByText(/cannot be removed.*default provider/i)).toBeInTheDocument();
-    expect(confirm).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
 
     const builtIn = screen.getByRole('group', { name: 'ollama-cloud' });
     expect(within(builtIn).queryByRole('button', { name: 'Remove Provider' })).not.toBeInTheDocument();
     expect(within(builtIn).getByText(/built-in providers cannot be removed.*disable/i)).toBeInTheDocument();
     expect(within(builtIn).getByRole('textbox', { name: 'Name' })).toBeDisabled();
-    confirm.mockRestore();
   });
 
   it('renders the disabled SGLang MiniMax M3 preset and blocks enabling it without a URL', async () => {
@@ -444,7 +451,6 @@ describe('<SettingsPage> provider draft test', () => {
       { stage: 'metadata', provider: 'draft-provider', model: 'saved-model' }
     ];
     apiState.savedSettings = fixture;
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const { SettingsPage } = await import('./SettingsPage');
     render(
       <I18nProvider>
@@ -455,8 +461,7 @@ describe('<SettingsPage> provider draft test', () => {
     const referenced = await screen.findByRole('group', { name: 'draft-provider' });
     fireEvent.click(within(referenced).getByRole('button', { name: 'Remove Provider' }));
     expect(within(referenced).getByText(/cannot be removed.*stage metadata/i)).toBeInTheDocument();
-    expect(confirm).not.toHaveBeenCalled();
-    confirm.mockRestore();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   });
 
   it('keeps a custom provider editable and removable after a reserved-name draft', async () => {
@@ -509,7 +514,6 @@ describe('<SettingsPage> provider draft test', () => {
       resolveInitialLoad = resolve;
     });
     ollamaModelsMock.mockReturnValueOnce(initialLoad);
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const { SettingsPage } = await import('./SettingsPage');
     render(
       <I18nProvider>
@@ -528,6 +532,7 @@ describe('<SettingsPage> provider draft test', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
     const removable = screen.getByRole('group', { name: /^provider-\d+$/ });
     fireEvent.click(within(removable).getByRole('button', { name: 'Remove Provider' }));
+    await answerRemoveDialog('Remove Provider');
 
     await waitFor(() => expect(ollamaModelsMock).toHaveBeenCalledTimes(2));
     await waitFor(() =>
@@ -538,7 +543,6 @@ describe('<SettingsPage> provider draft test', () => {
       ).toBeEnabled()
     );
     resolveInitialLoad({ provider: 'draft-provider', models: [] });
-    confirm.mockRestore();
   });
 
   it('recognizes a case-renamed cloud preset without injecting an unfixable duplicate', async () => {

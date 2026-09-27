@@ -918,6 +918,31 @@ export const enMessages = {
   'stats.col.avg_latency': 'Avg latency',
   'stats.col.cost': 'Est. cost',
 
+  // --- audit 2026-09 frontend UX (#417-#429) ---
+  'generic.cancel': 'Cancel',
+  'generic.retry': 'Retry',
+  'unsaved.dialog.title': 'Leave with unsaved changes?',
+  'unsaved.dialog.description': 'Your unsaved changes on this page will be lost if you leave now.',
+  'unsaved.dialog.stay': 'Stay on page',
+  'unsaved.dialog.leave': 'Discard and leave',
+  'prompts.activate_confirm.title': 'Activate prompt version?',
+  'prompts.activate_confirm.description': 'From now on, every new {stage} run uses {name} v{version}.',
+  'prompts.activate_confirm.replaces': 'Replaces the currently active version {name} v{version}.',
+  'settings.provider.remove_dialog_title': 'Remove provider {provider}?',
+  'settings.save_bar': 'Save settings',
+  'settings.unsaved_changes': 'Unsaved changes',
+  'settings.all_saved': 'All changes saved',
+  'review.batch_confirm.approve_title': 'Approve {count} review item(s)?',
+  'review.batch_confirm.approve_description': 'The suggestions for {count} document(s) will be written to Paperless.',
+  'review.batch_confirm.reject_title': 'Reject {count} review item(s)?',
+  'review.batch_confirm.reject_description': 'The suggestions for {count} document(s) will be discarded and not written to Paperless.',
+  'review.auto_fix_confirm_title': 'Auto-fix {count} review item(s)?',
+  'review.auto_fix_confirm_breakdown': '{apply} will be applied, {reject} will be rejected.',
+  'review.auto_fix_nothing': 'No pending review items to auto-fix.',
+  'review.selected_count': '{count} selected',
+  'review.loading': 'Loading review queue…',
+  'review.load_error': 'Could not load the review queue.',
+  'review.empty': 'No reviews are waiting.',
 } as const;
 
 export type MessageKey = keyof typeof enMessages;

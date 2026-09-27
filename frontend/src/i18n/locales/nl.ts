@@ -920,6 +920,31 @@ const nlMessages: Record<MessageKey, string> = {
   'stats.col.avg_latency': 'Gem. latentie',
   'stats.col.cost': 'Gesch. kosten',
 
+  // --- audit 2026-09 frontend UX (#417-#429) ---
+  'generic.cancel': 'Annuleren',
+  'generic.retry': 'Opnieuw proberen',
+  'unsaved.dialog.title': 'Verlaten met niet-opgeslagen wijzigingen?',
+  'unsaved.dialog.description': 'Je niet-opgeslagen wijzigingen op deze pagina gaan verloren als je nu weggaat.',
+  'unsaved.dialog.stay': 'Op pagina blijven',
+  'unsaved.dialog.leave': 'Verwerpen en verlaten',
+  'prompts.activate_confirm.title': 'Promptversie activeren?',
+  'prompts.activate_confirm.description': 'Vanaf nu gebruikt elke nieuwe {stage}-run {name} v{version}.',
+  'prompts.activate_confirm.replaces': 'Vervangt de momenteel actieve versie {name} v{version}.',
+  'settings.provider.remove_dialog_title': 'Provider {provider} verwijderen?',
+  'settings.save_bar': 'Instellingen opslaan',
+  'settings.unsaved_changes': 'Niet-opgeslagen wijzigingen',
+  'settings.all_saved': 'Alle wijzigingen opgeslagen',
+  'review.batch_confirm.approve_title': '{count} reviewitem(s) goedkeuren?',
+  'review.batch_confirm.approve_description': 'De suggesties voor {count} document(en) worden naar Paperless geschreven.',
+  'review.batch_confirm.reject_title': '{count} reviewitem(s) afwijzen?',
+  'review.batch_confirm.reject_description': 'De suggesties voor {count} document(en) worden verworpen en niet naar Paperless geschreven.',
+  'review.auto_fix_confirm_title': '{count} reviewitem(s) automatisch herstellen?',
+  'review.auto_fix_confirm_breakdown': '{apply} worden toegepast, {reject} worden afgewezen.',
+  'review.auto_fix_nothing': 'Geen openstaande reviewitems om automatisch te herstellen.',
+  'review.selected_count': '{count} geselecteerd',
+  'review.loading': 'Reviewwachtrij laden…',
+  'review.load_error': 'De reviewwachtrij kon niet worden geladen.',
+  'review.empty': 'Er wachten geen reviews.',
 };
 
 export default nlMessages;

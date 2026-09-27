@@ -920,6 +920,31 @@ const plMessages: Record<MessageKey, string> = {
   'stats.col.avg_latency': 'Śr. opóźnienie',
   'stats.col.cost': 'Szac. koszt',
 
+  // --- audit 2026-09 frontend UX (#417-#429) ---
+  'generic.cancel': 'Anuluj',
+  'generic.retry': 'Ponów',
+  'unsaved.dialog.title': 'Opuścić stronę z niezapisanymi zmianami?',
+  'unsaved.dialog.description': 'Niezapisane zmiany na tej stronie zostaną utracone, jeśli ją teraz opuścisz.',
+  'unsaved.dialog.stay': 'Zostań na stronie',
+  'unsaved.dialog.leave': 'Odrzuć i opuść',
+  'prompts.activate_confirm.title': 'Aktywować wersję promptu?',
+  'prompts.activate_confirm.description': 'Od teraz każde nowe uruchomienie {stage} używa {name} v{version}.',
+  'prompts.activate_confirm.replaces': 'Zastępuje obecnie aktywną wersję {name} v{version}.',
+  'settings.provider.remove_dialog_title': 'Usunąć dostawcę {provider}?',
+  'settings.save_bar': 'Zapisz ustawienia',
+  'settings.unsaved_changes': 'Niezapisane zmiany',
+  'settings.all_saved': 'Wszystkie zmiany zapisane',
+  'review.batch_confirm.approve_title': 'Zatwierdzić {count} element(y) przeglądu?',
+  'review.batch_confirm.approve_description': 'Sugestie dla {count} dokumentu(ów) zostaną zapisane w Paperless.',
+  'review.batch_confirm.reject_title': 'Odrzucić {count} element(y) przeglądu?',
+  'review.batch_confirm.reject_description': 'Sugestie dla {count} dokumentu(ów) zostaną odrzucone i nie trafią do Paperless.',
+  'review.auto_fix_confirm_title': 'Automatycznie poprawić {count} element(y) przeglądu?',
+  'review.auto_fix_confirm_breakdown': '{apply} zostanie zastosowanych, {reject} zostanie odrzuconych.',
+  'review.auto_fix_nothing': 'Brak oczekujących elementów przeglądu do automatycznej poprawy.',
+  'review.selected_count': 'Zaznaczono: {count}',
+  'review.loading': 'Ładowanie kolejki przeglądu…',
+  'review.load_error': 'Nie udało się wczytać kolejki przeglądu.',
+  'review.empty': 'Brak oczekujących przeglądów.',
 };
 
 export default plMessages;

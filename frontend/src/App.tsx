@@ -19,6 +19,7 @@ import { useI18n } from './i18n/I18nProvider';
 import { ErrorBoundary } from './lib/ErrorBoundary';
 import { Banner, PageHeader, localizedErrorMessage } from './lib/ui';
 import { LanguageSelector } from './lib/LanguageSelector';
+import { useNavigationGuard } from './lib/unsavedChanges';
 
 // Dashboard pulls in Recharts; keep it (and the other tab pages) out of the
 // critical shell/login chunk by loading them lazily on first navigation.
@@ -43,6 +44,10 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [debugConsoleEnabled, setDebugConsoleEnabled] = useState(false);
+  // Unsaved-changes guard hook-in point (#423): every navigation that unmounts
+  // the current page goes through `requestNavigation`, which asks first when a
+  // page (Settings, Prompts) has registered an unsaved draft.
+  const requestNavigation = useNavigationGuard();
 
   useEffect(() => {
     // When any request sees a 401 (expired session), drop back to the login
@@ -130,9 +135,14 @@ export function App() {
   // Switch tabs and drop any stale global error so a banner from one tab does
   // not bleed into the next one.
   const selectTab = (next: Tab) => {
-    setError(null);
-    setSuccess(null);
-    setTab(next);
+    const apply = () => {
+      setError(null);
+      setSuccess(null);
+      setTab(next);
+    };
+    // Re-selecting the current tab unmounts nothing, so it needs no guard.
+    if (next === tab) apply();
+    else requestNavigation(apply);
   };
 
   const lazyFallback = (
