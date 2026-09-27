@@ -5806,48 +5806,67 @@ fn stage_needs_work(status: &str) -> bool {
     !matches!(status, "succeeded" | "skipped" | "not_needed" | "rejected")
 }
 
-pub async fn claim_jobs(
-    pool: &DbPool,
-    limit: i64,
-    lease_owner: &str,
-    lease_seconds: i64,
-) -> Result<Vec<JobRecord>> {
-    // v1.4.0: `priority` now carries the cross-run (age-derived) value while `stage_priority`
-    // enforces within-run stage ordering. The inner subquery uses stage_priority so all jobs
-    // of one run share the same `priority` value without losing OCR -> Metadata ordering. The
-    // outer ORDER BY claims newer documents first (smaller priority), then earlier stages
-    // (smaller stage_priority), then FIFO as a tiebreaker. The retry bias (failed jobs first)
-    // stays first in the order so a stuck retry never starves out.
-    // Both `priority` and `stage_priority` are STORED generated columns (0019/0030), so the
-    // partial `idx_jobs_claim` (priority, stage_priority, run_after, created_at) where
-    // status='queued' backs this ordering — the column names and values are unchanged.
-    // The claim and its run/inventory follow-ups run in one TX so a crash between them can't
-    // leave jobs `running` while their run/inventory rows stay `queued`.
-    let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
-        r#"
-        with claimed as (
-          select id,
-                 status as prior_status,
-                 lease_owner as prior_lease_owner,
-                 attempts as prior_attempts
-            from jobs
-           where ((status = 'queued' and run_after <= now())
-              or (status = 'running' and lease_until < now()))
+/// One index-ordered pass of [`claim_jobs`]. #412.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimPass {
+    /// `running` jobs whose lease expired (worker crash/OOM) with attempts left.
+    StaleLease,
+    /// `queued` jobs that already failed at least once (retry bias).
+    Retry,
+    /// Every other runnable `queued` job.
+    Queued,
+}
+
+/// Predicate shared by every claim pass: a job may only run once all earlier
+/// stages of its run are resolved.
+const CLAIM_STAGE_ORDER_GUARD: &str = r#"
              and not exists (
                select 1
                  from jobs prev
                 where prev.run_id = jobs.run_id
                   and prev.stage_priority < jobs.stage_priority
                   and prev.status in ('queued', 'running', 'waiting_review', 'failed')
-             )
-           order by case when error_message is not null and attempts > 0 then 0 else 1 end,
-                    priority,
-                    stage_priority,
-                    run_after,
-                    created_at
+             )"#;
+
+/// The candidate SELECT for one claim pass: filter and ORDER BY are shaped so
+/// the planner can walk an index in order and stop after `limit` rows instead
+/// of sorting the backlog. #412. Public so the DB tests can `EXPLAIN` it.
+pub fn claim_jobs_candidate_sql(pass: ClaimPass) -> String {
+    let (filter, order) = match pass {
+        ClaimPass::StaleLease => (
+            // #402: exhausted rows are failed by `fail_exhausted_stale_jobs_tx`
+            // and never re-leased here.
+            "status = 'running' and lease_until < now() and attempts < max_attempts",
+            "lease_until",
+        ),
+        ClaimPass::Retry => (
+            "status = 'queued' and error_message is not null and attempts > 0 and run_after <= now()",
+            "priority, stage_priority, run_after, created_at",
+        ),
+        ClaimPass::Queued => (
+            "status = 'queued' and run_after <= now()",
+            "priority, stage_priority, run_after, created_at",
+        ),
+    };
+    format!(
+        r#"
+          select id,
+                 status as prior_status,
+                 lease_owner as prior_lease_owner,
+                 attempts as prior_attempts
+            from jobs
+           where {filter}{CLAIM_STAGE_ORDER_GUARD}
+           order by {order}
            for update skip locked
-           limit $1
+           limit $1"#
+    )
+}
+
+fn claim_jobs_pass_sql(pass: ClaimPass) -> String {
+    let candidates = claim_jobs_candidate_sql(pass);
+    format!(
+        r#"
+        with claimed as ({candidates}
         ),
         updated as (
           update jobs j
@@ -5867,13 +5886,185 @@ pub async fn claim_jobs(
                u.prior_status, u.prior_lease_owner, u.prior_attempts
           from updated u
           join pipeline_runs r on r.id = u.run_id
+        "#
+    )
+}
+
+/// #402: fail `running` jobs whose lease expired after they had already used
+/// their last attempt. Such a job took the worker down (OOM kill, abort) before
+/// `fail_job` could enforce the retry budget; reclaiming it again would just
+/// crash the next worker. Returns the number of jobs failed.
+async fn fail_exhausted_stale_jobs_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    limit: i64,
+) -> Result<usize> {
+    let rows = sqlx::query(
+        r#"
+        with exhausted as (
+          select id
+            from jobs
+           where status = 'running'
+             and lease_until < now()
+             and attempts >= max_attempts
+           order by lease_until
+           for update skip locked
+           limit $1
+        )
+        update jobs j
+           set status = 'failed',
+               error_message = format(
+                 'lease expired after attempt %s of %s without a result; the worker likely crashed (OOM/panic) while processing this job',
+                 j.attempts, j.max_attempts
+               ),
+               lease_owner = null,
+               lease_until = null,
+               updated_at = now()
+          from exhausted
+         where j.id = exhausted.id
+        returning j.id, j.run_id, j.paperless_document_id, j.stage, j.attempts,
+                  j.max_attempts, j.error_message
         "#,
     )
     .bind(limit)
-    .bind(lease_owner)
-    .bind(lease_seconds as f64)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
+    for row in &rows {
+        let job_id: Uuid = row.try_get("id")?;
+        let run_id: Uuid = row.try_get("run_id")?;
+        let document_id: i32 = row.try_get("paperless_document_id")?;
+        let stage: Stage = row.try_get::<String, _>("stage")?.parse()?;
+        let error: String = row.try_get("error_message")?;
+        tracing::warn!(
+            job_id = %job_id,
+            run_id = %run_id,
+            stage = %stage,
+            "failing job with expired lease and exhausted retry budget"
+        );
+        apply_permanent_job_failure_tx(tx, job_id, run_id, document_id, stage, &error).await?;
+        append_audit_tx(
+            tx,
+            AuditEventInput {
+                event_type: "job.failed".to_owned(),
+                actor_type: "worker".to_owned(),
+                actor_id: None,
+                run_id: Some(run_id),
+                job_id: Some(job_id),
+                paperless_document_id: Some(document_id),
+                before: None,
+                after: Some(json!({ "status": "failed", "retry": false })),
+                metadata: Some(json!({
+                    "stage": stage,
+                    "reason": "lease_expired_attempts_exhausted",
+                    "attempts": row.try_get::<i32, _>("attempts")?,
+                    "max_attempts": row.try_get::<i32, _>("max_attempts")?,
+                })),
+                outcome: "failed".to_owned(),
+                error_message: Some(error),
+                source_ip: None,
+                user_agent: None,
+            },
+        )
+        .await?;
+    }
+    if !rows.is_empty() {
+        increment_metric_counter_tx(tx, "job_failures_total", rows.len() as i64).await?;
+    }
+    Ok(rows.len())
+}
+
+/// Permanent-failure follow-ups shared by `fail_job` and the #402 stale-lease
+/// path: inventory stage `failed`, run `failed`, and cancel the run's siblings.
+async fn apply_permanent_job_failure_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    run_id: Uuid,
+    paperless_document_id: i32,
+    stage: Stage,
+    error: &str,
+) -> Result<()> {
+    set_inventory_stage_status_tx(
+        tx,
+        paperless_document_id,
+        stage,
+        "failed",
+        Some(error),
+        false,
+        Some(run_id),
+    )
+    .await?;
+    sqlx::query(
+        "update pipeline_runs set status = 'failed', error_message = $2, finished_at = now(), updated_at = now() where id = $1",
+    )
+    .bind(run_id)
+    .bind(error)
+    .execute(&mut **tx)
+    .await?;
+    // A permanent failure aborts the whole run, so cancel the sibling jobs in the same TX.
+    // Mirrors the reject path: leaving them `queued` makes them unclaimable (the claim guard
+    // blocks them behind the failed stage) yet still scanned on every poll, inflating
+    // `jobs_queued` forever.
+    sqlx::query(
+        r#"
+        update jobs
+           set status = 'cancelled',
+               lease_owner = null,
+               lease_until = null,
+               updated_at = now()
+         where run_id = $1
+           and id <> $2
+           and status in ('queued', 'running', 'waiting_review')
+        "#,
+    )
+    .bind(run_id)
+    .bind(job_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub async fn claim_jobs(
+    pool: &DbPool,
+    limit: i64,
+    lease_owner: &str,
+    lease_seconds: i64,
+) -> Result<Vec<JobRecord>> {
+    // v1.4.0: `priority` now carries the cross-run (age-derived) value while `stage_priority`
+    // enforces within-run stage ordering. The inner subquery uses stage_priority so all jobs
+    // of one run share the same `priority` value without losing OCR -> Metadata ordering. The
+    // outer ORDER BY claims newer documents first (smaller priority), then earlier stages
+    // (smaller stage_priority), then FIFO as a tiebreaker. The retry bias (failed jobs first)
+    // stays first in the order so a stuck retry never starves out.
+    // #412: the former single query ORed `queued`/`running` in WHERE and led the ORDER BY with
+    // a CASE retry-bias expression, so no index could serve it and every poll sorted the whole
+    // backlog. The claim now runs as up to three index-ordered passes in one TX, each taking
+    // only what the previous passes left of `limit`:
+    //   1. stale-lease reclaim (`jobs_lease_until_idx`), budget-exhausted rows excluded (#402);
+    //   2. queued retries (`idx_jobs_claim_retry`, migration 0053) — keeps the retry bias;
+    //   3. regular queued jobs (`idx_jobs_claim`) in (priority, stage_priority, run_after,
+    //      created_at) order.
+    // The claim and its run/inventory follow-ups run in one TX so a crash between them can't
+    // leave jobs `running` while their run/inventory rows stay `queued`.
+    let mut tx = pool.begin().await?;
+    // #402: a job whose lease expired after it already consumed its last attempt (worker
+    // OOM-killed or crashed mid-job) is failed here instead of being reclaimed forever.
+    fail_exhausted_stale_jobs_tx(&mut tx, limit.max(1)).await?;
+    let mut rows = Vec::new();
+    for pass in [ClaimPass::StaleLease, ClaimPass::Retry, ClaimPass::Queued] {
+        let remaining = limit - rows.len() as i64;
+        if remaining <= 0 {
+            break;
+        }
+        let query = claim_jobs_pass_sql(pass);
+        // SAFETY: `query` is assembled from static per-pass fragments only; all
+        // caller data flows through bind parameters.
+        let pass_rows = sqlx::query(sqlx::AssertSqlSafe(query))
+            .bind(remaining)
+            .bind(lease_owner)
+            .bind(lease_seconds as f64)
+            .fetch_all(&mut *tx)
+            .await?;
+        rows.extend(pass_rows);
+    }
 
     let mut jobs = Vec::new();
     // (job_id, run_id, document_id, prior_lease_owner, prior_attempts) for stale-lease reclaims.
@@ -6014,6 +6205,24 @@ pub async fn bump_job_lease(
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Current `lease_until` of a job while `lease_owner` still holds it; `None`
+/// once the lease was released, completed or taken over. Used by the worker's
+/// no-progress watchdog. #407
+pub async fn job_lease_until(
+    pool: &DbPool,
+    job_id: Uuid,
+    lease_owner: &str,
+) -> Result<Option<DateTime<Utc>>> {
+    let lease_until: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+        "select lease_until from jobs where id = $1 and lease_owner = $2 and status in ('running', 'waiting_review')",
+    )
+    .bind(job_id)
+    .bind(lease_owner)
+    .fetch_optional(pool)
+    .await?;
+    Ok(lease_until.flatten())
 }
 
 /// Mark a single run + inventory row as running. `claim_jobs` issues equivalent updates in bulk;
@@ -6256,42 +6465,14 @@ pub async fn fail_job(
     }
 
     if !retry {
-        set_inventory_stage_status_tx(
+        apply_permanent_job_failure_tx(
             &mut tx,
+            job.id,
+            job.run_id,
             job.paperless_document_id,
             job.stage,
-            "failed",
-            Some(error),
-            false,
-            Some(job.run_id),
+            error,
         )
-        .await?;
-        sqlx::query(
-            "update pipeline_runs set status = 'failed', error_message = $2, finished_at = now(), updated_at = now() where id = $1",
-        )
-        .bind(job.run_id)
-        .bind(error)
-        .execute(&mut *tx)
-        .await?;
-        // A permanent failure aborts the whole run, so cancel the sibling jobs in the same TX.
-        // Mirrors the reject path: leaving them `queued` makes them unclaimable (the claim guard
-        // blocks them behind the failed stage) yet still scanned on every poll, inflating
-        // `jobs_queued` forever.
-        sqlx::query(
-            r#"
-            update jobs
-               set status = 'cancelled',
-                   lease_owner = null,
-                   lease_until = null,
-                   updated_at = now()
-             where run_id = $1
-               and id <> $2
-               and status in ('queued', 'running', 'waiting_review')
-            "#,
-        )
-        .bind(job.run_id)
-        .bind(job.id)
-        .execute(&mut *tx)
         .await?;
     }
 

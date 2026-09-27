@@ -351,10 +351,12 @@ async fn auto_selector_skips_failed_documents_within_cooloff() {
         .execute(&pool)
         .await
         .expect("drop doc 2 runs");
-    sqlx::query("update document_inventory set ocr_status = 'unknown' where paperless_document_id = 2")
-        .execute(&pool)
-        .await
-        .expect("reset doc 2");
+    sqlx::query(
+        "update document_inventory set ocr_status = 'unknown' where paperless_document_id = 2",
+    )
+    .execute(&pool)
+    .await
+    .expect("reset doc 2");
     seed_failed_runs(&pool, 2, 1, 0.01).await;
     let created = queue_missing_pipeline(
         &pool,
