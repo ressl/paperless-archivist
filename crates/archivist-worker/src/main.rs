@@ -2620,6 +2620,25 @@ async fn process_metadata(
     job: &JobRecord,
     lease_owner: &str,
 ) -> Result<()> {
+    // #445: a review "retry with ..." job carries a provider/model/prompt
+    // choice in its payload. It applies to this job only (and forces manual
+    // review so the result returns to the reviewer); runtime settings stay
+    // untouched.
+    let retry_overrides = archivist_core::MetadataRetryOverrides::from_job_payload(&job.payload);
+    let retry_settings = retry_overrides
+        .as_ref()
+        .map(|overrides| overrides.apply_to_settings(settings));
+    let settings = retry_settings.as_ref().unwrap_or(settings);
+    if let Some(overrides) = &retry_overrides {
+        info!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            provider = overrides.provider_name.as_deref().unwrap_or("-"),
+            model = overrides.model.as_deref().unwrap_or("-"),
+            prompt_id = ?overrides.prompt_id,
+            "metadata job runs with review retry overrides"
+        );
+    }
     let enabled = MetadataFieldFlags::from_enabled_stages(&settings.workflow.enabled_stages);
     if !enabled.any() {
         if !complete_job(
@@ -2812,9 +2831,17 @@ async fn process_metadata(
         settings.effective_tuning().max_tags as usize,
         settings.fields.max_fields,
     );
+    let retry_prompt_id = retry_overrides
+        .as_ref()
+        .and_then(|overrides| overrides.prompt_id);
     let (prompt_id, prompt_experiment_group) =
-        apply_active_prompt_with_experiment(pool, Stage::Metadata, job.run_id, &mut request)
-            .await?;
+        match apply_retry_prompt(pool, retry_prompt_id, &mut request).await? {
+            Some(prompt_id) => (Some(prompt_id), None),
+            None => {
+                apply_active_prompt_with_experiment(pool, Stage::Metadata, job.run_id, &mut request)
+                    .await?
+            }
+        };
     // Heartbeat the lease before each long LLM call. The metadata stage can
     // chain classifier + main call + consensus (each up to the configured
     // request timeout) under one lease window; without renewing, a second
@@ -5049,6 +5076,29 @@ async fn apply_active_prompt_with_experiment(
     };
     request.system_prompt = prompt.content;
     Ok((Some(prompt.id), label))
+}
+
+/// #445: use the prompt version a review retry pinned instead of the active
+/// one. Returns `None` (caller falls back to the active prompt) when no
+/// version was pinned or it no longer exists / is not a metadata prompt.
+async fn apply_retry_prompt(
+    pool: &DbPool,
+    prompt_id: Option<Uuid>,
+    request: &mut ChatRequest,
+) -> Result<Option<Uuid>> {
+    let Some(prompt_id) = prompt_id else {
+        return Ok(None);
+    };
+    match archivist_db::get_prompt_by_id(pool, prompt_id).await? {
+        Some(prompt) if prompt.stage == Stage::Metadata => {
+            request.system_prompt = prompt.content;
+            Ok(Some(prompt.id))
+        }
+        _ => {
+            warn!(%prompt_id, "retry prompt version is missing or not a metadata prompt; using the active prompt");
+            Ok(None)
+        }
+    }
 }
 
 /// Cheap one-shot LLM pre-pass that classifies the document into one of

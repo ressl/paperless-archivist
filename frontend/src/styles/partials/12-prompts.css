@@ -422,3 +422,24 @@
   border-color: var(--danger);
   background: var(--danger);
 }
+
+/* #446: side-by-side test of two prompt versions. */
+.prompt-compare-results {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.prompt-compare-results .prompt-diff div {
+  align-content: start;
+}
+
+.prompt-compare-results table caption {
+  text-align: left;
+  font-weight: 700;
+  padding-bottom: var(--space-1);
+}
+
+.prompt-compare-results td {
+  overflow-wrap: anywhere;
+}

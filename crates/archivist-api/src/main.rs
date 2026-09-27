@@ -376,6 +376,14 @@ fn router(state: AppState) -> Router {
         .route("/paperless/sync-metadata", post(sync_paperless))
         .route("/paperless/consistency", get(paperless_consistency))
         .route(
+            "/paperless/correspondents",
+            get(paperless_correspondent_options),
+        )
+        .route(
+            "/paperless/document-types",
+            get(paperless_document_type_options),
+        )
+        .route(
             "/paperless/completion-tags/reconcile",
             post(reconcile_completion_tags),
         )
@@ -425,6 +433,10 @@ fn router(state: AppState) -> Router {
         .route("/reviews/{id}/reject", post(reject_review))
         .route("/reviews/{id}/edit", post(edit_review))
         .route("/reviews/{id}/auto-fix", post(auto_fix_single))
+        .route("/reviews/retry-options", get(review_retry_options))
+        .route("/reviews/{id}/retry", post(retry_review))
+        .route("/reviews/{id}/thumbnail", get(review_thumbnail))
+        .route("/reviews/{id}/preview", get(review_document_preview))
         .route("/operations/recovery", get(recovery_status))
         .route(
             "/operations/recovery/stale-leases",
@@ -6434,6 +6446,246 @@ async fn reviews(
     })))
 }
 
+/// Upper bound for one metadata option list. Archives with more entries get
+/// `truncated: true`; the review select then still offers the first page. #420
+const MAX_METADATA_OPTIONS: usize = 5000;
+
+fn metadata_options_body(mut items: Vec<archivist_db::PaperlessNamedOption>) -> Json<Value> {
+    let truncated = items.len() > MAX_METADATA_OPTIONS;
+    items.truncate(MAX_METADATA_OPTIONS);
+    Json(json!({ "items": items, "truncated": truncated }))
+}
+
+/// Synced Paperless correspondents `{id, name}` from the local mirror, for
+/// the review edit select. No Paperless round-trip. #420
+async fn paperless_correspondent_options(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    let items = archivist_db::list_paperless_correspondent_options(
+        &state.pool,
+        MAX_METADATA_OPTIONS as i64 + 1,
+    )
+    .await?;
+    Ok(metadata_options_body(items))
+}
+
+/// Synced Paperless document types `{id, name}` from the local mirror. #420
+async fn paperless_document_type_options(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    let items = archivist_db::list_paperless_document_type_options(
+        &state.pool,
+        MAX_METADATA_OPTIONS as i64 + 1,
+    )
+    .await?;
+    Ok(metadata_options_body(items))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewPreviewKind {
+    Thumbnail,
+    Document,
+}
+
+/// Content-Security-Policy for proxied preview bytes. Stricter than the SPA
+/// policy (no scripts, no connections); `object-src 'self'` keeps the
+/// browser's built-in PDF viewer working for the top-level PDF tab. #445
+const REVIEW_PREVIEW_CSP: &str = "default-src 'none'; object-src 'self'; img-src 'self'; \
+     style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// Proxy the Paperless thumbnail of a review's document. The browser never
+/// talks to Paperless: Archivist fetches with its server-side token from the
+/// configured (SSRF-validated) base URL, keyed by review id so only documents
+/// in the review queue are reachable. #445
+async fn review_thumbnail(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Response> {
+    review_preview_response(&state, id, ReviewPreviewKind::Thumbnail).await
+}
+
+/// Proxy the inline Paperless preview (archive PDF or image). #445
+async fn review_document_preview(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Response> {
+    review_preview_response(&state, id, ReviewPreviewKind::Document).await
+}
+
+async fn review_preview_response(
+    state: &AppState,
+    review_id: Uuid,
+    kind: ReviewPreviewKind,
+) -> ApiResult<Response> {
+    let document_id = archivist_db::review_document_id(&state.pool, review_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("review item does not exist"))?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    // Missing token/profile -> 409 NotConfigured like every Paperless route.
+    let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
+    let fetched = match kind {
+        ReviewPreviewKind::Thumbnail => client.download_thumbnail(document_id).await,
+        ReviewPreviewKind::Document => client.download_preview(document_id).await,
+    };
+    let preview = fetched.map_err(|error| review_preview_upstream_error(document_id, error))?;
+    let extension = match preview.content_type {
+        "application/pdf" => "pdf",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        _ => "webp",
+    };
+    let disposition = format!("inline; filename=\"document-{document_id}.{extension}\"");
+    let cache_control = match kind {
+        // Thumbnails are re-requested while triaging; the document is not.
+        ReviewPreviewKind::Thumbnail => "private, max-age=300",
+        ReviewPreviewKind::Document => "private, no-store",
+    };
+    let mut response = (StatusCode::OK, preview.bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(preview.content_type),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(REVIEW_PREVIEW_CSP),
+    );
+    if let Ok(value) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, value);
+    }
+    Ok(response)
+}
+
+/// Map a failed Paperless preview fetch without leaking upstream text. #445
+fn review_preview_upstream_error(document_id: i32, error: anyhow::Error) -> ApiError {
+    if let Some(archivist_paperless::PaperlessError::Client { status: 404, .. }) =
+        error.downcast_ref::<archivist_paperless::PaperlessError>()
+    {
+        return ApiError::not_found("document not found in Paperless");
+    }
+    warn!(document_id, error = %error, "review preview: Paperless fetch failed");
+    ApiError {
+        status: StatusCode::BAD_GATEWAY,
+        message: "could not load the preview from Paperless".to_owned(),
+    }
+}
+
+/// Choices for "retry with ...": enabled text providers (with the model the
+/// metadata stage would use) and the metadata prompt versions, without prompt
+/// content, so reviewers without settings access can pick one. #445
+async fn review_retry_options(
+    State(state): State<AppState>,
+    _auth: Authenticated,
+) -> ApiResult<Json<Value>> {
+    let settings = get_runtime_settings(&state.pool).await?;
+    let default_provider = settings
+        .ai
+        .stage_models
+        .iter()
+        .find(|entry| entry.stage == Stage::Metadata)
+        .map(|entry| entry.provider.clone())
+        .unwrap_or_else(|| settings.ai.default_provider.clone());
+    let prompts: Vec<Value> = list_prompts(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|prompt| prompt.stage == Stage::Metadata)
+        .map(|prompt| {
+            json!({
+                "id": prompt.id,
+                "name": prompt.name,
+                "version": prompt.version,
+                "active": prompt.active,
+                "created_at": prompt.created_at
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "providers": settings.ai.metadata_retry_providers(),
+        "default_provider": default_provider,
+        "prompts": prompts
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetryReviewRequest {
+    #[serde(default)]
+    provider_name: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    prompt_id: Option<Uuid>,
+}
+
+/// "Retry with provider/model/prompt": reject the pending metadata review
+/// (and its pending siblings) and queue a new metadata run whose job uses the
+/// chosen configuration once. Requires a reviewer session like every other
+/// review decision. #445
+#[tracing::instrument(
+    skip(state, auth, request),
+    fields(review_id = %id, user_id = tracing::field::Empty)
+)]
+async fn retry_review(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RetryReviewRequest>,
+) -> ApiResult<Json<Value>> {
+    let actor_id = auth.session_user_id()?;
+    Span::current().record("user_id", tracing::field::display(actor_id));
+    let overrides = archivist_core::MetadataRetryOverrides {
+        provider_name: request.provider_name,
+        model: request.model,
+        prompt_id: request.prompt_id,
+    }
+    .normalized();
+    let settings = get_runtime_settings(&state.pool).await?;
+    overrides
+        .validate(&settings.ai)
+        .map_err(ApiError::bad_request)?;
+    if let Some(prompt_id) = overrides.prompt_id {
+        match archivist_db::get_prompt_by_id(&state.pool, prompt_id).await? {
+            Some(prompt) if prompt.stage == Stage::Metadata => {}
+            _ => {
+                return Err(ApiError::bad_request(
+                    "prompt_id must reference a metadata prompt version",
+                ));
+            }
+        }
+    }
+    let payload = serde_json::to_value(&overrides)
+        .map_err(|_| ApiError::internal("could not encode retry overrides"))?;
+    match archivist_db::retry_review_with_overrides(&state.pool, id, actor_id, &payload).await? {
+        archivist_db::ReviewRetryOutcome::Queued {
+            run_id,
+            rejected_review_ids,
+        } => {
+            info!(review_id = %id, %run_id, "review retried with overrides");
+            Ok(Json(json!({
+                "run_id": run_id,
+                "rejected_review_ids": rejected_review_ids
+            })))
+        }
+        archivist_db::ReviewRetryOutcome::UnsupportedStage => Err(ApiError::bad_request(
+            "only metadata reviews can be retried with another model or prompt",
+        )),
+        archivist_db::ReviewRetryOutcome::SiblingInFlight => Err(ApiError::conflict(
+            "another suggestion for this document is being applied; retry once it has finished",
+        )),
+        archivist_db::ReviewRetryOutcome::ActiveRun => {
+            Err(ApiError::conflict("the document already has an active run"))
+        }
+    }
+}
+
 fn review_with_debug(review: ReviewItemRecord, settings: &RuntimeSettings) -> Result<Value> {
     let mut value = serde_json::to_value(review)?;
     if let Some(object) = value.as_object_mut() {
@@ -11848,6 +12100,298 @@ mod tests {
         assert_eq!(demoted.status(), StatusCode::FORBIDDEN);
 
         handle.abort();
+    }
+
+    /// Session cookie + CSRF pair for a fresh user with `roles`.
+    async fn session_for_roles(pool: &DbPool, label: &str, roles: &[Role]) -> (String, String) {
+        let suffix = Uuid::now_v7().simple().to_string();
+        let user = create_user_with_roles(
+            pool,
+            &format!("{label}-{suffix}"),
+            None,
+            "hash",
+            roles,
+            None,
+        )
+        .await
+        .expect("user");
+        let session_token = random_token();
+        let csrf_token = random_token();
+        create_session(
+            pool,
+            user,
+            &hash_token(&session_token),
+            &hash_token(&csrf_token),
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .expect("session");
+        (session_token, csrf_token)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn review_metadata_options_retry_and_preview_proxy_follow_permissions() {
+        // #420 / #445
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        sqlx::query("delete from settings where key = 'runtime'")
+            .execute(&pool)
+            .await
+            .expect("reset settings");
+        sqlx::query("truncate paperless_correspondents, paperless_document_types")
+            .execute(&pool)
+            .await
+            .expect("truncate mirrors");
+        sqlx::query(
+            "insert into paperless_correspondents (id, name) values (4, 'ACME'), (2, 'bank')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed correspondents");
+        sqlx::query("insert into paperless_document_types (id, name) values (5, 'Invoice')")
+            .execute(&pool)
+            .await
+            .expect("seed document types");
+
+        let (reviewer, reviewer_csrf) =
+            session_for_roles(&pool, "retry-reviewer", &[Role::Reviewer]).await;
+        let (viewer, _) = session_for_roles(&pool, "retry-viewer", &[Role::Viewer]).await;
+        let (auditor, _) = session_for_roles(&pool, "retry-auditor", &[Role::Auditor]).await;
+
+        // Mock Paperless serving a thumbnail and a PDF preview for any id.
+        let paperless = Router::new()
+            .route(
+                "/api/documents/{id}/thumb/",
+                get(|| async { ([(header::CONTENT_TYPE, "image/webp")], "webp-bytes") }),
+            )
+            .route(
+                "/api/documents/{id}/preview/",
+                get(|| async { ([(header::CONTENT_TYPE, "application/pdf")], "%PDF-1.7") }),
+            );
+        let paperless_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let paperless_addr = paperless_listener.local_addr().unwrap();
+        let paperless_handle = tokio::spawn(async move {
+            axum::serve(paperless_listener, paperless).await.ok();
+        });
+
+        let (base, handle) = spawn_api_router(state.clone()).await;
+        let client = no_redirect_client();
+        let get_as = |session: &str, path: &str| {
+            client.get(format!("{base}{path}")).header(
+                reqwest::header::COOKIE,
+                format!("{SESSION_COOKIE}={session}"),
+            )
+        };
+
+        // #420: reviewers and viewers read the mirror; auditors cannot.
+        for session in [&reviewer, &viewer] {
+            let response = get_as(session, "/api/paperless/correspondents")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(
+                body["items"],
+                json!([{ "id": 4, "name": "ACME" }, { "id": 2, "name": "bank" }])
+            );
+            assert_eq!(body["truncated"], false);
+        }
+        let types: Value = get_as(&reviewer, "/api/paperless/document-types")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(types["items"], json!([{ "id": 5, "name": "Invoice" }]));
+        for path in [
+            "/api/paperless/correspondents",
+            "/api/paperless/document-types",
+        ] {
+            let response = get_as(&auditor, path).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+
+        // #445 preview proxy: 404 for unknown reviews, 503 while Paperless is
+        // not configured, vetted bytes once it is.
+        let review = seed_pending_review(&pool).await;
+        let unknown = get_as(
+            &reviewer,
+            &format!("/api/reviews/{}/thumbnail", Uuid::now_v7()),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let unconfigured = get_as(&reviewer, &format!("/api/reviews/{review}/thumbnail"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unconfigured.status(), StatusCode::CONFLICT);
+        let viewer_preview = get_as(&viewer, &format!("/api/reviews/{review}/preview"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(viewer_preview.status(), StatusCode::FORBIDDEN);
+
+        let actor = create_user_with_roles(
+            &pool,
+            &format!("retry-settings-{}", Uuid::now_v7().simple()),
+            None,
+            "hash",
+            &[Role::Admin],
+            None,
+        )
+        .await
+        .expect("settings actor");
+        let secret_id = upsert_encrypted_secret(
+            &pool,
+            &state.config.secret_key,
+            "paperless-api-token",
+            &SecretString::from("paperless-token".to_owned()),
+            actor,
+        )
+        .await
+        .expect("secret");
+        let mut settings = RuntimeSettings::default();
+        settings.paperless.base_url = format!("http://{paperless_addr}");
+        settings.paperless.token_secret_id = Some(secret_id);
+        let settings = settings.normalized();
+        update_runtime_settings(&pool, &settings, actor)
+            .await
+            .expect("store settings");
+
+        let thumb = get_as(&reviewer, &format!("/api/reviews/{review}/thumbnail"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(thumb.status(), StatusCode::OK);
+        assert_eq!(thumb.headers()[reqwest::header::CONTENT_TYPE], "image/webp");
+        assert!(
+            thumb.headers()[reqwest::header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .starts_with("default-src 'none'")
+        );
+        assert_eq!(thumb.bytes().await.unwrap().as_ref(), b"webp-bytes");
+        let pdf = get_as(&reviewer, &format!("/api/reviews/{review}/preview"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pdf.status(), StatusCode::OK);
+        assert_eq!(
+            pdf.headers()[reqwest::header::CONTENT_TYPE],
+            "application/pdf"
+        );
+        assert_eq!(
+            pdf.headers()[reqwest::header::CACHE_CONTROL],
+            "private, no-store"
+        );
+
+        // #445 retry: options for reviewers, validated overrides, one new run.
+        let options: Value = get_as(&reviewer, "/api/reviews/retry-options")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            options["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|provider| provider["name"] == "ollama"),
+            "{options}"
+        );
+        let viewer_options = get_as(&viewer, "/api/reviews/retry-options")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(viewer_options.status(), StatusCode::FORBIDDEN);
+
+        // Retries need a job-backed review (the sibling aggregate closes the
+        // original run before the new one is created).
+        archivist_db::create_run_with_jobs_with_priority(
+            &pool,
+            44_501,
+            &[Stage::Metadata],
+            ProcessingMode::ManualReview,
+            "test",
+            "test",
+            Some(0),
+        )
+        .await
+        .expect("metadata run");
+        let job = archivist_db::claim_jobs(&pool, 1, "retry-test-worker", 300)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("metadata job");
+        let retry_target = archivist_db::create_review_item(
+            &pool,
+            &job,
+            json!({ "correspondent": 4 }),
+            json!([]),
+            json!({}),
+            "retry-test-worker",
+        )
+        .await
+        .expect("review")
+        .expect("review id");
+        let post_retry = |body: Value| {
+            client
+                .post(format!("{base}/api/reviews/{retry_target}/retry"))
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("{SESSION_COOKIE}={reviewer}"),
+                )
+                .header("x-csrf-token", &reviewer_csrf)
+                .json(&body)
+        };
+        let bad_provider = post_retry(json!({ "provider_name": "does-not-exist" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_provider.status(), StatusCode::BAD_REQUEST);
+        let bad_prompt = post_retry(json!({ "prompt_id": Uuid::now_v7() }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_prompt.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(review_status_of(&pool, retry_target).await, "pending");
+
+        let retried = post_retry(json!({ "provider_name": "ollama", "model": "qwen3:14b" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retried.status(), StatusCode::OK);
+        let body: Value = retried.json().await.unwrap();
+        let run_id: Uuid = body["run_id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(review_status_of(&pool, retry_target).await, "rejected");
+        let payload: Value = sqlx::query_scalar("select payload from jobs where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("retry job");
+        assert_eq!(
+            payload["retry_overrides"],
+            json!({ "provider_name": "ollama", "model": "qwen3:14b" })
+        );
+        let again = post_retry(json!({})).send().await.unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+
+        sqlx::query("delete from settings where key = 'runtime'")
+            .execute(&pool)
+            .await
+            .expect("restore default settings");
+        handle.abort();
+        paperless_handle.abort();
     }
 
     #[tokio::test]

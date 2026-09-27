@@ -154,6 +154,9 @@ audit events.
 `POST /api/prompts/test` calls the configured text provider, parses the output
 for the selected stage, runs Rust-side validation, returns raw and parsed
 output, and writes a `prompt.tested` audit event. It never patches Paperless.
+The optional `provider_name` and `model` select any configured provider/model
+for the test; the Prompts page exposes both and uses them for its side-by-side
+version comparison (two sequential test calls with the same input).
 
 ## Paperless Inventory And Jobs
 
@@ -174,6 +177,8 @@ with the existing inventory/review permissions.
 | --- | --- | --- |
 | `POST` | `/api/paperless/sync-metadata` | Synchronize document metadata, tags, correspondents, document types, document dates, modified timestamps, and custom fields from Paperless. Uses configured delta sync when enabled. |
 | `GET` | `/api/paperless/consistency` | Compare the Paperless document list with Archivist inventory and report missing local rows, stale local rows, and metadata mismatches. |
+| `GET` | `/api/paperless/correspondents` | `{items: [{id, name}], truncated}` from the local metadata mirror (no Paperless call), ordered by name, at most 5000 entries. `inventory:read`. |
+| `GET` | `/api/paperless/document-types` | Same for document types. `inventory:read`. |
 | `POST` | `/api/paperless/completion-tags/reconcile` | Dry-run or apply completion-tag reconciliation for documents that miss the full completion tag and either have all enabled stage tags or terminal local status (`succeeded`, `skipped`, `not_needed`, `rejected`) for every enabled stage. Status-based writes are rechecked under the per-document run lock; active or review-waiting runs are excluded. An optional `document_ids` list pins apply to a prior dry-run plan. |
 | `GET` | `/api/inventory?limit=100&offset=0` | List the local document inventory and per-stage status. |
 | `POST` | `/api/documents/{paperless_document_id}/trigger` | Queue selected stages for one Paperless document. |
@@ -371,6 +376,30 @@ permission. Chat session creation and messages write audit events.
 | `POST` | `/api/reviews/{id}/reject` | Reject the suggestion. |
 | `POST` | `/api/reviews/{id}/edit` | Apply a reviewer-edited patch. |
 | `POST` | `/api/reviews/batch` | Approve/apply or reject up to 100 review items. |
+| `GET` | `/api/reviews/{id}/thumbnail` | Proxied Paperless thumbnail of the review's document (WebP/PNG/JPEG, max 4 MiB). `reviews:read`. |
+| `GET` | `/api/reviews/{id}/preview` | Proxied Paperless preview (archive PDF or image, max 32 MiB), `Cache-Control: private, no-store`. `reviews:read`. |
+| `GET` | `/api/reviews/retry-options` | Enabled text providers with their metadata default model, the current metadata provider, and metadata prompt versions (without content). `reviews:write`. |
+| `POST` | `/api/reviews/{id}/retry` | Reject a pending metadata review and its pending siblings, then queue a manual-review metadata run using the given `provider_name`, `model` and `prompt_id` once. Session only. |
+
+The preview proxy is keyed by review id, so only documents in the review queue
+can be fetched with Archivist's Paperless token. The browser never contacts
+Paperless; upstream content types outside the allow-list are refused (502), a
+document missing in Paperless returns 404, and a missing Paperless connection
+409 `NotConfigured`.
+
+Retry body (every field optional; omitted fields keep the current
+configuration):
+
+```json
+{ "provider_name": "ollama", "model": "qwen3:14b", "prompt_id": "0199…" }
+```
+
+Unknown or disabled providers, OCR-only providers, non-metadata prompt versions
+and non-metadata reviews return 400. An already decided review, a sibling that
+is being applied, or another active run for the document returns 409; nothing
+changes in that case. The response carries the new `run_id` and the rejected
+review ids; audit events `review.rejected` (reason `retry`), `run.created` and
+`review.retried` are written in the same transaction.
 
 Edit body:
 

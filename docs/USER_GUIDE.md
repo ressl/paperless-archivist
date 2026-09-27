@@ -411,10 +411,36 @@ applied automatically.
 2. Inspect the suggested patch. Standard metadata review items show current
    value, suggested value, confidence, evidence, and warnings.
 3. Approve, reject, or edit the suggestion. For correspondent and document type
-   reviews, edit the Paperless numeric ID if the reviewer needs a different
-   existing value. For document date reviews, edit the ISO date directly.
+   reviews, pick a different existing value by name in the searchable select
+   (type to filter, arrow keys and Enter to choose, `None` to clear); the list
+   comes from the last Paperless metadata sync. For document date reviews, edit
+   the ISO date directly.
 4. Approved changes are applied through the Paperless REST API.
 5. The action writes an audit event.
+
+Each card shows a thumbnail of the document. Click it to open the full preview
+(archive PDF or image) in a new tab. Archivist fetches both from Paperless on
+the server side, so reviewers do not need Paperless access or a direct network
+path to it; previews larger than 32 MiB are not proxied.
+
+Keyboard triage (press `?` or use `Keyboard shortcuts` for the overlay):
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | Next / previous review card |
+| `a` | Approve the current card |
+| `r` | Reject the current card |
+| `e` | Move focus into the current card's edit field |
+| `?` | Show the shortcut help |
+
+Shortcuts are ignored while focus is in a text field, select or dialog and
+when Ctrl, Alt or Cmd is held.
+
+`Retry with…` (metadata reviews) rejects the suggestion, together with the
+run's other still-pending suggestions for that document, and queues a new
+metadata run with a chosen provider, model and prompt version. The choice
+applies to that one run only; runtime settings are not changed, and the result
+always comes back to the review queue, even in full-auto mode.
 
 For high-volume queues, select multiple review items and use `Approve selected`
 or `Reject selected`. Batch review reports partial failures without hiding which
@@ -478,10 +504,13 @@ activating it:
 4. Edit the prompt content. Saving creates a new immutable version; it never
    overwrites older versions.
 5. Compare the editor content with another version when tuning changes.
-6. Provide sample text or a Paperless document ID and click `Test Current
-   Editor`.
+6. Provide sample text or a Paperless document ID, optionally pick a provider
+   and model (empty uses the stage default), and click `Test Current Editor`.
 7. Review raw model output, parsed output, validation errors, warnings,
    provider/model, and duration.
+   `Test both versions` in the comparison panel runs the compared version and
+   the editor content one after the other with the same input, provider and
+   model and lists the parsed fields that differ.
 8. Activate the version only after the test result matches your archive rules.
 
 Prompt tests call the configured model provider and write audit events, but they

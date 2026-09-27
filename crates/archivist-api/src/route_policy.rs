@@ -142,6 +142,9 @@ pub(crate) const ROUTE_POLICIES: &[RoutePolicy] = &[
     // Paperless sync and consistency.
     route(Post, "/api/paperless/sync-metadata", Require(WriteBatches), SessionOrToken),
     route(Get, "/api/paperless/consistency", Require(ReadInventory), SessionOrToken),
+    // #420: synced correspondent / document type names for the review edit select.
+    route(Get, "/api/paperless/correspondents", Require(ReadInventory), SessionOrToken),
+    route(Get, "/api/paperless/document-types", Require(ReadInventory), SessionOrToken),
     route(Post, "/api/paperless/completion-tags/reconcile", Require(WriteBatches), SessionOrToken),
     // Dashboard, statistics, inventory.
     route(Get, "/api/dashboard", Require(ReadDashboard), SessionOrToken),
@@ -176,6 +179,11 @@ pub(crate) const ROUTE_POLICIES: &[RoutePolicy] = &[
     route(Post, "/api/reviews/{id}/reject", Require(WriteReviews), REVIEW_SESSION),
     route(Post, "/api/reviews/{id}/edit", Require(WriteReviews), REVIEW_SESSION),
     route(Post, "/api/reviews/{id}/auto-fix", Require(WriteReviews), REVIEW_SESSION),
+    // #445: retry with provider/model/prompt, document preview proxy.
+    route(Get, "/api/reviews/retry-options", Require(WriteReviews), SessionOrToken),
+    route(Post, "/api/reviews/{id}/retry", Require(WriteReviews), REVIEW_SESSION),
+    route(Get, "/api/reviews/{id}/thumbnail", Require(ReadReviews), SessionOrToken),
+    route(Get, "/api/reviews/{id}/preview", Require(ReadReviews), SessionOrToken),
     // Operations.
     route(Get, "/api/operations/recovery", Require(ReadRuns), SessionOrToken),
     route(Post, "/api/operations/recovery/stale-leases", Require(WriteRuns), RECOVERY_SESSION),
