@@ -1,12 +1,28 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Check, ChevronDown, ListChecks, Save, Wrench, X } from 'lucide-react';
-import { api, ReviewItem, Stage } from '../api/client';
+import { AlertTriangle, Check, ChevronDown, ListChecks, RefreshCw, Save, Wrench, X } from 'lucide-react';
+import { api, ReviewItem, Stage, type PaperlessNamedOption } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
 import { useConfirm } from '../lib/ConfirmDialog';
 import { EmptyState, ErrorState, LoadingState } from '../lib/states';
 import { stageLabel } from '../lib/format';
 import { DebugContextDetails } from '../lib/DebugContextDetails';
+import { SearchableSelect } from '../lib/SearchableSelect';
+import { useResource } from '../lib/useResource';
+import {
+  RetryReviewDialog,
+  ReviewPreview,
+  ShortcutHelpButton,
+  ShortcutHelpDialog,
+  useReviewShortcuts,
+  type ReviewShortcutAction
+} from './ReviewTriage';
+
+/** Synced Paperless names for the correspondent / document type select (#420). */
+export type ReviewMetadataOptions = {
+  correspondent: PaperlessNamedOption[];
+  document_type: PaperlessNamedOption[];
+};
 
 export type ReviewPatchRecord = Record<string, unknown> & {
   standard_metadata?: Record<string, unknown>;
@@ -55,6 +71,27 @@ export function Reviews({
   // all reload; only the newest response may replace the list, so a slower,
   // older response can never resurrect an item that was just decided.
   const requestIdRef = useRef(0);
+  // #420: names for the id-based edit fields. Optional: without them (e.g.
+  // no permission / not synced yet) the fields fall back to numeric input.
+  const metadataResource = useResource<ReviewMetadataOptions | null>(
+    async (signal) => {
+      try {
+        const [correspondents, documentTypes] = await Promise.all([
+          api.paperlessCorrespondents({ signal }),
+          api.paperlessDocumentTypes({ signal })
+        ]);
+        return { correspondent: correspondents.items, document_type: documentTypes.items };
+      } catch {
+        return null;
+      }
+    },
+    []
+  );
+  const metadataOptions = metadataResource.data ?? null;
+  // #445: keyboard triage state, help overlay and retry dialog.
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [retryId, setRetryId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -192,6 +229,56 @@ export function Reviews({
     }, t);
   };
 
+  const focusCard = useCallback((id: string) => {
+    setActiveId(id);
+    const card = document.getElementById(reviewAnchorId(id));
+    card?.scrollIntoView?.({ block: 'nearest' });
+    card?.focus();
+  }, []);
+
+  // #445: j/k move between cards, a/r/e act on the current card (through the
+  // card's own buttons, so busy guards and error handling stay identical), ?
+  // opens the help. Ignored while typing or while a dialog is open.
+  const onShortcut = useCallback(
+    (action: ReviewShortcutAction) => {
+      if (action === 'help') {
+        setHelpOpen(true);
+        return;
+      }
+      if (items.length === 0) return;
+      const currentIndex = items.findIndex((item) => item.id === activeId);
+      if (action === 'next' || action === 'previous') {
+        const nextIndex =
+          currentIndex < 0
+            ? 0
+            : Math.min(Math.max(currentIndex + (action === 'next' ? 1 : -1), 0), items.length - 1);
+        focusCard(items[nextIndex].id);
+        return;
+      }
+      if (currentIndex < 0) return;
+      const card = document.getElementById(reviewAnchorId(items[currentIndex].id));
+      if (!card) return;
+      if (action === 'edit') {
+        card.querySelector<HTMLElement>('[data-review-edit] input')?.focus();
+        return;
+      }
+      card.querySelector<HTMLButtonElement>(`[data-review-action="${action}"]`)?.click();
+    },
+    [activeId, focusCard, items]
+  );
+  useReviewShortcuts(!helpOpen && retryId === null, onShortcut);
+
+  const onRetried = useCallback(
+    async (id: string) => {
+      setRetryId(null);
+      setSuccess(t('review.retry.queued'));
+      await onItemDecided(id);
+    },
+    [onItemDecided, setSuccess, t]
+  );
+  const closeRetry = useCallback(() => setRetryId(null), []);
+  const closeHelp = useCallback(() => setHelpOpen(false), []);
+
   const autoFixOne = useCallback(
     async (id: string) => {
       await run(setBusy, setError, async () => {
@@ -226,6 +313,7 @@ export function Reviews({
         <button disabled={busy || items.length === 0} onClick={() => void autoFixAll()} title={t('review.auto_fix_all')}>
           <Wrench size={16} /> {t('review.auto_fix_all')}
         </button>
+        <ShortcutHelpButton onClick={() => setHelpOpen(true)} t={t} />
         <small className="field-hint">{t('reviews.count', { shown: items.length, total })}</small>
         {visibleSelected.length > 0 && (
           <small className="field-hint">{t('review.selected_count', { count: visibleSelected.length })}</small>
@@ -252,9 +340,13 @@ export function Reviews({
               item={item}
               selected={selected.includes(item.id)}
               focused={item.id === focusReviewId}
+              active={item.id === activeId}
+              metadataOptions={metadataOptions}
               onSelect={toggleSelected}
               onDecided={onItemDecided}
               onAutoFix={autoFixOne}
+              onActivate={setActiveId}
+              onRetry={setRetryId}
               setError={setError}
               t={t}
             />
@@ -269,6 +361,8 @@ export function Reviews({
         </div>
       )}
       {confirmDialog}
+      {helpOpen && <ShortcutHelpDialog onClose={closeHelp} t={t} />}
+      {retryId && <RetryReviewDialog reviewId={retryId} onClose={closeRetry} onRetried={onRetried} t={t} />}
     </section>
   );
 }
@@ -277,14 +371,32 @@ type ReviewCardProps = {
   item: ReviewItem;
   selected: boolean;
   focused: boolean;
+  /** Current card of the keyboard triage (#445). */
+  active: boolean;
+  metadataOptions: ReviewMetadataOptions | null;
   onSelect: (id: string) => void;
   onDecided: (id: string) => Promise<void>;
   onAutoFix: (id: string) => void;
+  onActivate: (id: string) => void;
+  onRetry: (id: string) => void;
   setError: (error: string | null) => void;
   t: TFunction;
 };
 
-function ReviewCard({ item, selected, focused, onSelect, onDecided, onAutoFix, setError, t }: ReviewCardProps) {
+function ReviewCard({
+  item,
+  selected,
+  focused,
+  active,
+  metadataOptions,
+  onSelect,
+  onDecided,
+  onAutoFix,
+  onActivate,
+  onRetry,
+  setError,
+  t
+}: ReviewCardProps) {
   const { formatPercent } = useI18n();
   const patch = asReviewPatch(item.suggested_patch);
   const metadata = asReviewPatch(patch?.standard_metadata);
@@ -353,7 +465,13 @@ function ReviewCard({ item, selected, focused, onSelect, onDecided, onAutoFix, s
   const rows = standardMetadataRows(item.stage, patch, metadata, t);
 
   return (
-    <article id={reviewAnchorId(item.id)} tabIndex={-1} className={focused ? 'review-item review-item--focused' : 'review-item'}>
+    <article
+      id={reviewAnchorId(item.id)}
+      tabIndex={-1}
+      aria-current={active ? 'true' : undefined}
+      onFocus={() => onActivate(item.id)}
+      className={['review-item', focused ? 'review-item--focused' : '', active ? 'review-item--active' : ''].filter(Boolean).join(' ')}
+    >
       <header>
         <label className="inline">
           <input type="checkbox" checked={selected} onChange={handleSelect} />
@@ -362,6 +480,8 @@ function ReviewCard({ item, selected, focused, onSelect, onDecided, onAutoFix, s
         </label>
         <span>{stageLabel(item.stage as Stage, t) ?? item.stage}</span>
       </header>
+
+      <ReviewPreview reviewId={item.id} documentId={item.paperless_document_id} t={t} />
 
       {conflictFields.length > 0 && (
         <div className="review-conflict" role="alert">
@@ -383,8 +503,22 @@ function ReviewCard({ item, selected, focused, onSelect, onDecided, onAutoFix, s
                 {row.confidence !== null && <small>{t('review.confidence', { value: formatPercent(row.confidence) })}</small>}
                 {row.evidence && <small>{t('review.evidence', { value: row.evidence })}</small>}
               </div>
-              {row.editableKey && (
-                <label>
+              {row.editableKey && (row.editableKey === 'correspondent' || row.editableKey === 'document_type') && metadataOptions ? (
+                // #420: pick by name, send the Paperless id.
+                <div data-review-edit>
+                  <SearchableSelect
+                    label={t('review.edit_field', { field: row.label })}
+                    options={metadataOptions[row.editableKey]}
+                    value={parseReviewId(edit[row.editableKey])}
+                    onChange={(id) => setEdit((current) => ({ ...current, [row.editableKey!]: id === null ? '' : String(id) }))}
+                    noneLabel={t('review.select.none')}
+                    noMatchesLabel={t('review.select.no_matches')}
+                    moreLabel={(count) => t('review.select.more', { count })}
+                    placeholder={t('review.select.placeholder')}
+                  />
+                </div>
+              ) : row.editableKey ? (
+                <label data-review-edit>
                   {t('review.edit')}
                   <input
                     type={row.editableKey === 'created' ? 'date' : 'text'}
@@ -393,7 +527,7 @@ function ReviewCard({ item, selected, focused, onSelect, onDecided, onAutoFix, s
                     placeholder={row.placeholder}
                   />
                 </label>
-              )}
+              ) : null}
             </div>
           ))}
         </div>
@@ -415,7 +549,7 @@ function ReviewCard({ item, selected, focused, onSelect, onDecided, onAutoFix, s
       </details>
 
       <footer>
-        <button title={t('review.approve')} disabled={busy} onClick={approve}>
+        <button title={t('review.approve')} disabled={busy} onClick={approve} data-review-action="approve" aria-keyshortcuts="a">
           <Check size={16} /> {t('review.approve')}
         </button>
         {patch && Object.keys(edit).length > 0 && (
@@ -426,7 +560,12 @@ function ReviewCard({ item, selected, focused, onSelect, onDecided, onAutoFix, s
         <button title={t('review.auto_fix_one')} disabled={busy} onClick={() => onAutoFix(item.id)}>
           <Wrench size={16} /> {t('review.auto_fix_one')}
         </button>
-        <button title={t('review.reject')} disabled={busy} onClick={reject}>
+        {item.stage === 'metadata' && (
+          <button title={t('review.retry.button')} disabled={busy} onClick={() => onRetry(item.id)}>
+            <RefreshCw size={16} /> {t('review.retry.button')}
+          </button>
+        )}
+        <button title={t('review.reject')} disabled={busy} onClick={reject} data-review-action="reject" aria-keyshortcuts="r">
           <X size={16} /> {t('review.reject')}
         </button>
       </footer>
@@ -440,6 +579,10 @@ const ReviewCardMemo = memo(
     if (prev.t !== next.t) return false;
     if (prev.selected !== next.selected) return false;
     if (prev.focused !== next.focused) return false;
+    if (prev.active !== next.active) return false;
+    if (prev.metadataOptions !== next.metadataOptions) return false;
+    if (prev.onActivate !== next.onActivate) return false;
+    if (prev.onRetry !== next.onRetry) return false;
     if (prev.onSelect !== next.onSelect) return false;
     if (prev.onDecided !== next.onDecided) return false;
     if (prev.onAutoFix !== next.onAutoFix) return false;
@@ -497,6 +640,13 @@ export function buildEditedReviewPatch(patch: ReviewPatchRecord, edit: ReviewEdi
     edited[key] = numeric;
   }
   return edited;
+}
+
+/** Edit-state id string -> numeric Paperless id, or null for empty/invalid. */
+function parseReviewId(value: string | undefined): number | null {
+  if (value === undefined || value.trim() === '') return null;
+  const numeric = Number(value.trim());
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
 }
 
 function reviewWarnings(value: unknown): string[] {

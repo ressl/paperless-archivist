@@ -20,6 +20,13 @@ export type Stage = Exclude<PipelineStage, 'apply'>;
 export type ProcessingMode = components['schemas']['ProcessingMode'];
 export type AiProviderKind = components['schemas']['AiProviderKind'];
 export type AiProvider = components['schemas']['AiProviderSettings'];
+// #420: synced Paperless metadata options for the review edit select.
+export type PaperlessNamedOption = components['schemas']['PaperlessNamedOption'];
+export type PaperlessNamedOptionList = components['schemas']['PaperlessNamedOptionList'];
+// #445: "retry with provider/model/prompt" for review items.
+export type ReviewRetryOptions = components['schemas']['ReviewRetryOptions'];
+export type ReviewRetryRequest = components['schemas']['ReviewRetryRequest'];
+export type ReviewRetryResponse = components['schemas']['ReviewRetryResponse'];
 
 export type OllamaInstalledModel = {
   name: string;
@@ -867,6 +874,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ patch })
     }),
+  paperlessCorrespondents: (options?: RequestOptions) =>
+    request<PaperlessNamedOptionList>('/api/paperless/correspondents', options),
+  paperlessDocumentTypes: (options?: RequestOptions) =>
+    request<PaperlessNamedOptionList>('/api/paperless/document-types', options),
+  reviewRetryOptions: (options?: RequestOptions) =>
+    request<ReviewRetryOptions>('/api/reviews/retry-options', options),
+  retryReview: (id: string, input: ReviewRetryRequest) =>
+    request<ReviewRetryResponse>(`/api/reviews/${encodeURIComponent(id)}/retry`, {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }),
+  // #445: same-origin proxy URLs; the browser never talks to Paperless.
+  reviewThumbnailUrl: (id: string) => `/api/reviews/${encodeURIComponent(id)}/thumbnail`,
+  reviewPreviewUrl: (id: string) => `/api/reviews/${encodeURIComponent(id)}/preview`,
   recoveryStatus: (olderThanSeconds = 600) =>
     request<{ older_than_seconds: number; items: RecoveryCandidate[] }>(
       `/api/operations/recovery?older_than_seconds=${encodeURIComponent(String(olderThanSeconds))}`
