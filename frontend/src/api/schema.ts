@@ -4104,6 +4104,11 @@ export interface components {
             created?: string;
             custom_fields?: unknown;
             standard_metadata?: components["schemas"]["StandardMetadataSuggestion"];
+            /** @description Names of model-proposed Paperless objects that do not exist yet. They are created only when the review is applied, subject to allow_new_tags / allow_new_correspondents and per-document caps. */
+            archivist_new_objects?: {
+                tags?: string[];
+                correspondent?: string;
+            };
         };
         ReviewItem: {
             /** Format: uuid */

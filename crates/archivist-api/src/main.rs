@@ -6870,7 +6870,10 @@ async fn apply_claimed_review(
         .edited_patch
         .clone()
         .unwrap_or_else(|| review.suggested_patch.clone());
-    let patch: DocumentPatch = serde_json::from_value(patch_value)?;
+    let settings = get_runtime_settings(&state.pool).await?;
+    let pending_new_objects =
+        archivist_apply::PendingNewObjects::from_patch_value(&patch_value, &settings.workflow.tags);
+    let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
     // run_id is None only for review items whose run was pruned by retention
     // (terminal runs only — a pending review keeps its run alive).
     let final_run_stage = if let (Some(run_id), Some(job_id)) = (review.run_id, review.job_id) {
@@ -6878,10 +6881,21 @@ async fn apply_claimed_review(
     } else {
         false
     };
-    let settings = get_runtime_settings(&state.pool).await?;
     let client = paperless_client_from_settings(&state.pool, &state.config, &settings).await?;
-    let tag_operations =
+    let mut tag_operations =
         review_workflow_tag_operations(&client, &settings, review.stage, final_run_stage).await?;
+    // #404: model-proposed tags/correspondent exist only as names until the
+    // review is approved; create them now and add them via the tag merge.
+    let new_tag_ids = archivist_apply::materialize_pending_new_objects(
+        &client,
+        &pending_new_objects,
+        archivist_apply::NewObjectPolicy::from_settings(&settings),
+        &mut patch,
+    )
+    .await?;
+    tag_operations.additions.extend(new_tag_ids);
+    tag_operations.additions.sort_unstable();
+    tag_operations.additions.dedup();
     let apply_started = std::time::Instant::now();
     let execution = apply_document(
         &state.pool,
@@ -6931,7 +6945,8 @@ async fn review_workflow_tag_operations(
 ) -> Result<ReviewTagOperations> {
     let all_tags = client.list_tags().await?;
     let completion = settings.workflow.tags.completion_tag_for_stage(stage);
-    let trigger = settings.workflow.tags.trigger_tag_for_stage(stage);
+    // #400: all triggers that requested the stage, incl. per-field metadata ones.
+    let triggers = settings.workflow.tags.trigger_tags_requesting_stage(stage);
     let mut additions = Vec::new();
     let mut removals = Vec::new();
     if let Some(completion_name) = completion {
@@ -6944,12 +6959,13 @@ async fn review_workflow_tag_operations(
             .await?;
         additions.push(tag.id);
     }
-    if let Some(trigger_name) = trigger
-        && let Some(tag) = all_tags
+    for trigger_name in triggers {
+        if let Some(tag) = all_tags
             .iter()
             .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
-    {
-        removals.push(tag.id);
+        {
+            removals.push(tag.id);
+        }
     }
     if final_run_stage
         && let Some(tag) = all_tags.iter().find(|tag| {
