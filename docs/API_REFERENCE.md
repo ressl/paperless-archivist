@@ -320,6 +320,13 @@ usage/token/cost/latency/feedback tables. The quality object summarizes review
 acceptance, edits, rejections, and uncertainty routing for the selected range.
 Cost estimates use optional per-provider pricing fields in runtime settings.
 
+`GET /api/dashboard` also returns `budget` (#450): `null` unless
+`ui.monthly_cost_budget_usd` is set, otherwise the calendar-month (UTC)
+estimate `{monthly_budget_usd, warning_percent, month_start,
+month_to_date_cost_usd, percent_used, level}` with `level` one of `ok`,
+`warning` (>= `ui.cost_budget_warning_percent`, default 80), `exceeded`
+(>= 100 %) or `unknown` (no provider has token prices).
+
 ## Document Chat
 
 | Method | Path | Purpose |
@@ -327,7 +334,10 @@ Cost estimates use optional per-provider pricing fields in runtime settings.
 | `GET` | `/api/chat/sessions` | List document chat sessions visible to the current user. |
 | `POST` | `/api/chat/sessions` | Create a document chat session. |
 | `GET` | `/api/chat/sessions/{id}` | List messages and stored sources for a chat session. |
+| `PATCH` | `/api/chat/sessions/{id}` | Rename a session (`{"title": "..."}`). |
+| `DELETE` | `/api/chat/sessions/{id}` | Delete a session with its messages and sources. |
 | `POST` | `/api/chat/sessions/{id}/messages` | Ask a question and store the assistant response. |
+| `POST` | `/api/chat/sessions/{id}/messages/stream` | Same, but stream the answer as server-sent events. |
 
 Message body:
 
@@ -359,8 +369,35 @@ contains the answer plus stored source snippets:
 }
 ```
 
+`GET /api/chat/sessions` also returns `paperless_base`, the browser-facing
+Paperless URL (`public_url`, else `base_url`) for source links
+`{paperless_base}/documents/{id}/details`.
+
+Streaming (`POST .../messages/stream`, #449) takes the same body and applies the
+same validation; validation and permission errors are ordinary JSON errors
+before the stream starts. The `text/event-stream` response carries single-line
+JSON payloads:
+
+```text
+event: sources
+data: {"sources":[{"paperless_document_id":12,"title":"ACME invoice",...}]}
+
+event: delta
+data: {"text":"ACME appears in "}
+
+event: done
+data: {"session_id":"...","user_message_id":"...","assistant_message_id":"...","answer":"...","sources":[...]}
+```
+
+A failure after the stream started ends it with `event: error` and
+`data: {"error":"..."}`. The provider is called only by the API; the answer is
+generated in a background task and stored even when the client disconnects.
+The buffered endpoint stays available.
+
 Chat requires an authenticated browser session with a role that has chat
-permission. Chat session creation and messages write audit events.
+permission. Chat session creation, renames, deletions and messages write audit
+events (`chat.session_created`, `chat.session_renamed`, `chat.session_deleted`,
+`chat.message_created`).
 
 ## Review Queue
 

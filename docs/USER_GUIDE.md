@@ -62,6 +62,17 @@ with native names and marked as fallback languages. They keep locale-aware
 number/date formatting but use the English UI text until a full translation
 catalog is contributed.
 
+### Theme And Notifications
+
+The sidebar `Theme` selector switches between `System` (follows the operating
+system's light/dark setting), `Light` and `Dark`. The choice is stored in the
+browser, like the UI language.
+
+Messages appear as notifications in the lower right corner. Several messages
+are queued instead of replacing each other; repeats of the same message are
+counted (`×3`). Errors stay until you dismiss them; confirmations disappear
+after a few seconds (not while the pointer or keyboard focus is on them).
+
 UI language is independent from document language. Document language is detected
 from OCR/content for prompt context. The language used for newly generated
 Paperless business tags is configured separately as `Tag output language` in
@@ -386,6 +397,15 @@ The provider usage table shows provider/model/stage request counts, average and
 P95 latency, token totals when the provider returns usage data, and estimated
 cost when per-provider token pricing is configured in Settings.
 
+Monthly AI budget: set `Monthly AI cost budget (USD)` and the warning threshold
+(default 80 %) in `Settings` > `UI`. The dashboard then shows a notice once the
+estimated cost of the current calendar month (UTC) reaches the threshold or the
+budget, plus one notification per browser session per level. The estimate uses
+the same token prices as the cost panel, so it needs prices on the providers;
+without them the notice says the cost cannot be estimated. Document Chat
+answers are not part of the recorded usage. The budget is informational:
+processing is never paused or throttled.
+
 ## Run OCR And Tagging
 
 From the dashboard or inventory:
@@ -594,6 +614,20 @@ retrieved Paperless document content.
 3. Ask a question.
 4. Optionally restrict retrieval to specific Paperless document IDs.
 5. Review citations in the answer, for example `[doc:123]`.
+
+The answer is written into the transcript while the model generates it. It is
+formatted as Markdown (lists, emphasis, code, links to `http(s)` URLs); HTML in
+an answer is shown as text, never executed. Citations such as `[doc:123]` and
+the listed sources link to the document in Paperless (the `Public URL` from
+the Paperless settings, else the base URL); the browser only opens the link,
+it never fetches from Paperless itself. The answer is stored even if you leave
+the page while it is being written.
+
+Use the pencil and trash icons next to a session to rename or delete it.
+Deleting removes the session with all its messages after a confirmation.
+
+From `Inventory`, select up to 50 documents and choose `Ask in chat` to start a
+new chat that is limited to those documents.
 
 Archivist retrieves candidate documents from the local inventory, fetches
 document content through Paperless REST, builds bounded snippets, and sends only
