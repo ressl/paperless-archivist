@@ -1,4 +1,4 @@
-import type { InventoryFacetValue, InventoryFacets } from '../api/client';
+import type { PaperlessNamedOption } from '../api/client';
 import type { languageOptions } from '../data/worldLanguages';
 import { useI18n } from '../i18n/I18nProvider';
 import { CommaListInput, FormField } from '../lib/ui';
@@ -10,6 +10,12 @@ type AdvancedPanelProps = {
   languages: ReturnType<typeof languageOptions>;
   /** Correspondent / document type vocabularies (#447); null while loading or unavailable. */
   facets: InventoryFacets | null;
+};
+
+/** Synced Paperless vocabularies offered by the correspondent / document type pickers (#447). */
+export type InventoryFacets = {
+  correspondents: PaperlessNamedOption[];
+  document_types: PaperlessNamedOption[];
 };
 
 /**
@@ -25,7 +31,7 @@ function FacetSelect({
 }: {
   label: string;
   value: string[];
-  options: InventoryFacetValue[];
+  options: PaperlessNamedOption[];
   onChange: (value: string[]) => void;
 }) {
   const { t } = useI18n();

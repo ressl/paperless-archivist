@@ -359,8 +359,6 @@ export function inventoryFilterSearchParams(params: InventoryQueryParams): URLSe
   return qs;
 }
 
-export type InventoryFacetValue = components['schemas']['InventoryFacetValue'];
-export type InventoryFacets = components['schemas']['InventoryFacets'];
 export type InventorySavedView = components['schemas']['InventorySavedView'];
 export type InventoryExportFormat = 'csv' | 'json';
 
@@ -858,7 +856,6 @@ export const api = {
       `/api/inventory?${qs.toString()}`, options
     );
   },
-  inventoryFacets: (options?: RequestOptions) => request<InventoryFacets>('/api/inventory/facets', options),
   /** Download URL of the filtered inventory export (#447); a plain link, like the audit CSV. */
   inventoryExportUrl: (params: InventoryQueryParams, format: InventoryExportFormat) => {
     const qs = inventoryFilterSearchParams(params);

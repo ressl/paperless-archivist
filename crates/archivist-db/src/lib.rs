@@ -5085,60 +5085,6 @@ pub async fn count_inventory(pool: &DbPool, query: &InventoryQuery) -> Result<i6
     Ok(count)
 }
 
-/// One synced Paperless object offered as an inventory filter value (#447).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct InventoryFacetValue {
-    pub id: i32,
-    pub name: String,
-}
-
-/// Filter vocabularies for the inventory (#447): the synced Paperless
-/// correspondents and document types, ordered by name.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct InventoryFacets {
-    pub correspondents: Vec<InventoryFacetValue>,
-    pub document_types: Vec<InventoryFacetValue>,
-}
-
-/// Upper bound per facet list; a Paperless instance with more objects than
-/// this still filters correctly by id, the picker just lists the first ones.
-pub const INVENTORY_FACET_LIMIT: i64 = 5000;
-
-async fn list_inventory_facet(
-    pool: &DbPool,
-    sql: &'static str,
-) -> Result<Vec<InventoryFacetValue>> {
-    let rows = sqlx::query(sql)
-        .bind(INVENTORY_FACET_LIMIT)
-        .fetch_all(pool)
-        .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(InventoryFacetValue {
-                id: row.try_get("id")?,
-                name: row.try_get("name")?,
-            })
-        })
-        .collect()
-}
-
-pub async fn list_inventory_facets(pool: &DbPool) -> Result<InventoryFacets> {
-    let (correspondents, document_types) = tokio::try_join!(
-        list_inventory_facet(
-            pool,
-            "select id, name from paperless_correspondents order by lower(name), id limit $1"
-        ),
-        list_inventory_facet(
-            pool,
-            "select id, name from paperless_document_types order by lower(name), id limit $1"
-        ),
-    )?;
-    Ok(InventoryFacets {
-        correspondents,
-        document_types,
-    })
-}
-
 /// A named inventory filter, private to the user who saved it (#447).
 /// `query` is the canonical `/api/inventory` filter query string (no
 /// leading `?`), validated by the API before it is stored.

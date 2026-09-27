@@ -1765,22 +1765,6 @@ components:
         total: { type: integer, format: int64 }
         offset: { type: integer, format: int64 }
         limit: { type: integer, format: int64 }
-    InventoryFacetValue:
-      type: object
-      required: [id, name]
-      properties:
-        id: { type: integer }
-        name: { type: string }
-    InventoryFacets:
-      type: object
-      required: [correspondents, document_types]
-      properties:
-        correspondents:
-          type: array
-          items: { $ref: "#/components/schemas/InventoryFacetValue" }
-        document_types:
-          type: array
-          items: { $ref: "#/components/schemas/InventoryFacetValue" }
     InventoryViewRequest:
       type: object
       additionalProperties: false
@@ -3115,22 +3099,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-  /api/inventory/facets:
-    get:
-      x-archivist-permission: read_inventory
-      summary: Filter vocabularies for the inventory
-      description: >-
-        Requires the inventory:read permission. Lists the synced Paperless
-        correspondents and document types (id and name, ordered by name,
-        at most 5000 each) for the correspondent/document_type filters.
-      responses:
-        "200":
-          description: Correspondents and document types
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/InventoryFacets" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/inventory/export:

@@ -13,7 +13,7 @@ import { useI18n } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
 import { useConfirm } from '../lib/ConfirmDialog';
 import { useResource } from '../lib/useResource';
-import { AdvancedPanel } from './AdvancedPanel';
+import { AdvancedPanel, type InventoryFacets } from './AdvancedPanel';
 import { DiagnoseDrawer } from './DiagnoseDrawer';
 import { DuplicatesPanel } from './DuplicatesPanel';
 import { InventoryFiltersBar } from './InventoryFiltersBar';
@@ -58,9 +58,19 @@ export function Inventory({ setError }: { setError: (error: string | null) => vo
   const [pendingRows, setPendingRows] = useState<ReadonlySet<number>>(() => new Set());
   const { confirm, dialog: confirmDialog } = useConfirm();
   const languages = useMemo(() => languageOptions(locale), [locale]);
-  // #447: correspondent / document type vocabularies for the filter pickers.
-  // Optional: on failure the pickers just offer "any" / "not set".
-  const facets = useResource((signal) => api.inventoryFacets({ signal }), []);
+  // #447: correspondent / document type vocabularies for the filter pickers,
+  // from the synced Paperless mirror. Optional: on failure the pickers just
+  // offer "any" / "not set".
+  const facets = useResource(
+    (signal): Promise<InventoryFacets> =>
+      Promise.all([api.paperlessCorrespondents({ signal }), api.paperlessDocumentTypes({ signal })]).then(
+        ([correspondents, documentTypes]) => ({
+          correspondents: correspondents.items,
+          document_types: documentTypes.items
+        })
+      ),
+    []
+  );
 
   // #447: apply a saved view — replace the filters and the search box text.
   const applyFilters = useCallback((next: Filters) => {

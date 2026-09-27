@@ -35,10 +35,8 @@ vi.mock('../api/client', async () => {
     api: {
       ...actual.api,
       inventory: vi.fn(async () => ({ items: [doc], total: 1, offset: 0, limit: 500 })),
-      inventoryFacets: vi.fn(async () => ({
-        correspondents: [{ id: 7, name: 'ACME Bank' }],
-        document_types: [{ id: 3, name: 'Invoice' }]
-      })),
+      paperlessCorrespondents: vi.fn(async () => ({ items: [{ id: 7, name: 'ACME Bank' }], truncated: false })),
+      paperlessDocumentTypes: vi.fn(async () => ({ items: [{ id: 3, name: 'Invoice' }], truncated: false })),
       inventoryViews: vi.fn(async () => ({ items: [savedView] })),
       createInventoryView: vi.fn(async (name: string, query: string) => ({ ...savedView, id: 'view-2', name, query })),
       deleteInventoryView: vi.fn(async () => ({ ok: true }))

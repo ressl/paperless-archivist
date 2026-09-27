@@ -79,8 +79,7 @@ export type GeneratedRouteContract = ExpectAll<[
   HasRequiredCsrf<paths['/api/reviews/{id}/approve']['post']>,
   HasRequiredCsrf<paths['/api/reviews/{id}/reject']['post']>,
   HasRequiredCsrf<paths['/api/reviews/{id}/edit']['post']>,
-  // #447: inventory facets, export and per-user saved views.
-  HasOperation<'/api/inventory/facets', 'get'>,
+  // #447: inventory export and per-user saved views.
   HasOperation<'/api/inventory/export', 'get'>,
   HasOperation<'/api/inventory/views', 'get'>,
   HasRequiredCsrf<paths['/api/inventory/views']['post']>,

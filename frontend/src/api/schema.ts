@@ -1434,47 +1434,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/inventory/facets": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Filter vocabularies for the inventory
-         * @description Requires the inventory:read permission. Lists the synced Paperless correspondents and document types (id and name, ordered by name, at most 5000 each) for the correspondent/document_type filters.
-         */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Correspondents and document types */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["InventoryFacets"];
-                    };
-                };
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-            };
-        };
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/inventory/export": {
         parameters: {
             query?: never;
@@ -4737,14 +4696,6 @@ export interface components {
             offset: number;
             /** Format: int64 */
             limit: number;
-        };
-        InventoryFacetValue: {
-            id: number;
-            name: string;
-        };
-        InventoryFacets: {
-            correspondents: components["schemas"]["InventoryFacetValue"][];
-            document_types: components["schemas"]["InventoryFacetValue"][];
         };
         InventoryViewRequest: {
             name: string;

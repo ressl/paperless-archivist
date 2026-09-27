@@ -394,7 +394,6 @@ fn router(state: AppState) -> Router {
         .route("/workflow/controls", patch(update_workflow_controls))
         .route("/inventory", get(inventory))
         .route("/inventory/duplicates", get(inventory_duplicates))
-        .route("/inventory/facets", get(inventory_facets))
         .route("/inventory/export", get(inventory_export))
         .route(
             "/inventory/views",
@@ -4863,17 +4862,6 @@ fn canonical_inventory_filter_query(
     let Query(params) = Query::<InventoryQueryParams>::try_from_uri(&uri)
         .map_err(|error| ApiError::bad_request(format!("invalid inventory filter: {error}")))?;
     Ok((canonical, inventory_query_from_params(params)?))
-}
-
-// `GET /api/inventory/facets` (#447): filter vocabularies (synced Paperless
-// correspondents and document types) for the inventory filter pickers.
-async fn inventory_facets(
-    State(state): State<AppState>,
-    _auth: Authenticated,
-) -> ApiResult<Json<Value>> {
-    Ok(Json(json!(
-        archivist_db::list_inventory_facets(&state.pool).await?
-    )))
 }
 
 #[derive(Debug, Deserialize)]

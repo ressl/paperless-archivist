@@ -152,7 +152,6 @@ pub(crate) const ROUTE_POLICIES: &[RoutePolicy] = &[
     route(Get, "/api/statistics", Require(ReadDashboard), SessionOrToken),
     route(Get, "/api/inventory", Require(ReadInventory), SessionOrToken),
     route(Get, "/api/inventory/duplicates", Require(ReadInventory), SessionOrToken),
-    route(Get, "/api/inventory/facets", Require(ReadInventory), SessionOrToken),
     route(Get, "/api/inventory/export", Require(ReadInventory), SessionOrToken),
     route(Get, "/api/inventory/views", Require(ReadInventory), INVENTORY_VIEW_SESSION),
     route(Post, "/api/inventory/views", Require(ReadInventory), INVENTORY_VIEW_SESSION),

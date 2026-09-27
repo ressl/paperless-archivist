@@ -8,8 +8,8 @@ use archivist_db::{
     AuditEventFilter, DbPool, INVENTORY_SAVED_VIEW_LIMIT, InventoryIdFilter, InventoryQuery,
     InventoryViewError, append_audit, audit_events_query_builder, connect, count_inventory,
     create_inventory_view, create_user_with_roles, delete_inventory_view, find_user_id_by_username,
-    get_audit_event, list_audit_events, list_inventory, list_inventory_facets,
-    list_inventory_keyset, list_inventory_views, migrate, update_inventory_view,
+    get_audit_event, list_audit_events, list_inventory, list_inventory_keyset,
+    list_inventory_views, migrate, update_inventory_view,
 };
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::json;
@@ -142,15 +142,6 @@ async fn inventory_filters_by_correspondent_and_document_type_with_names() {
     assert_eq!(ids(&first), vec![5, 4]);
     assert_eq!(ids(&second), vec![3, 2]);
     assert_eq!(ids(&third), vec![1]);
-
-    let facets = list_inventory_facets(&pool).await.expect("facets");
-    let names: Vec<_> = facets
-        .correspondents
-        .iter()
-        .map(|f| f.name.as_str())
-        .collect();
-    assert_eq!(names, vec!["ACME Bank", "Zeta Insurance"]);
-    assert_eq!(facets.document_types.len(), 2);
 }
 
 #[tokio::test]
