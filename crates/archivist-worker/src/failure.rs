@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::json;
 use tracing::warn;
 
-use crate::provider_name_for_stage;
+use crate::providers::provider_name_for_stage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProcessingFailureClass {
