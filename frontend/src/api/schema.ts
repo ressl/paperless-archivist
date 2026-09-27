@@ -1506,7 +1506,9 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            items?: components["schemas"]["DocumentChatSession"][];
+                            items: components["schemas"]["DocumentChatSession"][];
+                            /** @description Browser-facing Paperless base URL (public_url, else base_url, no trailing slash; empty when unset) for source deep links `{paperless_base}/documents/{id}/details` (#449). */
+                            paperless_base: string;
                         };
                     };
                 };
@@ -1580,10 +1582,83 @@ export interface paths {
         };
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete a document chat session
+         * @description Deletes a session owned by the caller (user managers may delete any session) together with its messages and stored sources. Writes a `chat.session_deleted` audit event with the id and title only. (#449)
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted session */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: uuid */
+                            id: string;
+                            deleted: boolean;
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Rename a document chat session
+         * @description Renames a session owned by the caller (user managers may rename any session). Whitespace is collapsed and titles are capped at 80 characters; an empty title is rejected. Writes a `chat.session_renamed` audit event. (#449)
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RenameDocumentChatSessionRequest"];
+                };
+            };
+            responses: {
+                /** @description Renamed session */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: uuid */
+                            id: string;
+                            title: string;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
         trace?: never;
     };
     "/api/chat/sessions/{id}/messages": {
@@ -1619,6 +1694,57 @@ export interface paths {
                         "application/json": components["schemas"]["PostDocumentChatMessageResponse"];
                     };
                 };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/chat/sessions/{id}/messages/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask a question and stream the answer
+         * @description Same request, validation and storage as `POST /api/chat/sessions/{id}/messages`, but the answer is streamed as server-sent events (#449). Validation and permission errors are returned as JSON before the stream starts. Events, each with a single-line JSON `data` payload: `sources` (`{"sources": [...]}`), zero or more `delta` (`{"text": "..."}`), then exactly one of `done` (the `PostDocumentChatMessageResponse` body) or `error` (`{"error": "..."}`). The provider is called by the API only; the answer is stored even when the client disconnects mid-stream.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    /** @description CSRF token paired with the interactive pa_session cookie. */
+                    "X-CSRF-Token": components["parameters"]["RequiredCsrfToken"];
+                };
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PostDocumentChatMessageRequest"];
+                };
+            };
+            responses: {
+                /** @description Server-sent event stream of the answer */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/event-stream": string;
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
             };
         };
         delete?: never;
@@ -3354,6 +3480,13 @@ export interface components {
         };
         UiSettings: {
             debug_console_enabled: boolean;
+            /**
+             * Format: double
+             * @description Monthly AI cost budget in USD for the dashboard budget alert (#450). Null disables the alert; nothing is throttled.
+             */
+            monthly_cost_budget_usd: number | null;
+            /** @description Share of the monthly budget at which the dashboard starts warning. */
+            cost_budget_warning_percent: number;
         };
         LoginRequest: {
             username: string;
@@ -3649,6 +3782,9 @@ export interface components {
         };
         UiSettingsInput: {
             debug_console_enabled?: boolean;
+            /** Format: double */
+            monthly_cost_budget_usd?: number | null;
+            cost_budget_warning_percent?: number;
         };
         /** @description Backward-compatible partial settings document accepted by Serde defaults. */
         RuntimeSettingsInput: {
@@ -4053,6 +4189,25 @@ export interface components {
         DashboardResponse: {
             counts: components["schemas"]["BacklogCounts"];
             stats: components["schemas"]["DashboardStats"];
+            /** @description Month-to-date cost against `ui.monthly_cost_budget_usd`; null when no budget is set (#450). */
+            budget: components["schemas"]["CostBudgetStatus"] | null;
+        };
+        /** @description Calendar-month (UTC) AI cost estimate against the configured budget (#450). Uses the same per-provider token prices as the dashboard cost KPIs; Document Chat answers are not part of the recorded usage. */
+        CostBudgetStatus: {
+            /** Format: double */
+            monthly_budget_usd: number;
+            warning_percent: number;
+            /** Format: date-time */
+            month_start: string;
+            /**
+             * Format: double
+             * @description Null when no provider has token prices configured.
+             */
+            month_to_date_cost_usd: number | null;
+            /** Format: double */
+            percent_used: number | null;
+            /** @enum {string} */
+            level: "ok" | "warning" | "exceeded" | "unknown";
         };
         StatisticsSummary: {
             /** Format: int64 */
@@ -4594,6 +4749,9 @@ export interface components {
             question: string;
             document_ids?: number[] | null;
             max_sources?: number;
+        };
+        RenameDocumentChatSessionRequest: {
+            title: string;
         };
         PostDocumentChatMessageResponse: {
             /** Format: uuid */

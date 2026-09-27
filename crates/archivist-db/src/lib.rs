@@ -5023,6 +5023,71 @@ pub async fn insert_document_chat_sources(
     Ok(())
 }
 
+/// Rename a document chat session (#449). Returns the previous title, or
+/// `None` when the session does not exist. `updated_at` is left alone so a
+/// rename does not reorder the session list (it tracks conversation activity).
+pub async fn rename_document_chat_session(
+    pool: &DbPool,
+    session_id: Uuid,
+    title: &str,
+) -> Result<Option<String>> {
+    let row = sqlx::query(
+        r#"
+        update document_chat_sessions s
+           set title = $2
+          from (select id, title from document_chat_sessions where id = $1 for update) previous
+         where s.id = previous.id
+        returning previous.title as previous_title
+        "#,
+    )
+    .bind(session_id)
+    .bind(title)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| row.try_get("previous_title"))
+        .transpose()
+        .context("read previous chat session title")
+}
+
+/// What a deleted chat session contained, for the audit trail (#449).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedDocumentChatSession {
+    pub title: String,
+    pub message_count: i64,
+}
+
+/// Delete a document chat session together with its messages and sources
+/// (FK `on delete cascade`, migration 0007). Returns `None` when the session
+/// does not exist (#449).
+pub async fn delete_document_chat_session(
+    pool: &DbPool,
+    session_id: Uuid,
+) -> Result<Option<DeletedDocumentChatSession>> {
+    let row = sqlx::query(
+        r#"
+        with deleted as (
+          delete from document_chat_sessions
+           where id = $1
+          returning id, title
+        )
+        select deleted.title,
+               (select count(*) from document_chat_messages m where m.session_id = deleted.id)
+                 as message_count
+          from deleted
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| -> Result<DeletedDocumentChatSession> {
+        Ok(DeletedDocumentChatSession {
+            title: row.try_get("title")?,
+            message_count: row.try_get("message_count")?,
+        })
+    })
+    .transpose()
+}
+
 pub async fn list_document_chat_messages(
     pool: &DbPool,
     session_id: Uuid,

@@ -574,10 +574,22 @@ components:
           items: { $ref: "#/components/schemas/CustomFieldMapping" }
     UiSettings:
       type: object
-      required: [debug_console_enabled]
+      required: [debug_console_enabled, monthly_cost_budget_usd, cost_budget_warning_percent]
       additionalProperties: false
       properties:
         debug_console_enabled: { type: boolean }
+        monthly_cost_budget_usd:
+          type: [number, "null"]
+          format: double
+          minimum: 0
+          description: >-
+            Monthly AI cost budget in USD for the dashboard budget alert
+            (#450). Null disables the alert; nothing is throttled.
+        cost_budget_warning_percent:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Share of the monthly budget at which the dashboard starts warning.
     LoginRequest:
       type: object
       required: [username, password]
@@ -946,6 +958,8 @@ components:
       additionalProperties: false
       properties:
         debug_console_enabled: { type: boolean }
+        monthly_cost_budget_usd: { type: [number, "null"], format: double, minimum: 0 }
+        cost_budget_warning_percent: { type: integer, minimum: 1, maximum: 100 }
     RuntimeSettingsInput:
       type: object
       description: Backward-compatible partial settings document accepted by Serde defaults.
@@ -1474,10 +1488,40 @@ components:
           type: [string, "null"]
     DashboardResponse:
       type: object
-      required: [counts, stats]
+      required: [counts, stats, budget]
       properties:
         counts: { $ref: "#/components/schemas/BacklogCounts" }
         stats: { $ref: "#/components/schemas/DashboardStats" }
+        budget:
+          description: Month-to-date cost against `ui.monthly_cost_budget_usd`; null when no budget is set (#450).
+          oneOf:
+            - { $ref: "#/components/schemas/CostBudgetStatus" }
+            - { type: "null" }
+    CostBudgetStatus:
+      type: object
+      description: >-
+        Calendar-month (UTC) AI cost estimate against the configured budget
+        (#450). Uses the same per-provider token prices as the dashboard cost
+        KPIs; Document Chat answers are not part of the recorded usage.
+      required:
+        - monthly_budget_usd
+        - warning_percent
+        - month_start
+        - month_to_date_cost_usd
+        - percent_used
+        - level
+      properties:
+        monthly_budget_usd: { type: number, format: double }
+        warning_percent: { type: integer, minimum: 1, maximum: 100 }
+        month_start: { type: string, format: date-time }
+        month_to_date_cost_usd:
+          type: [number, "null"]
+          format: double
+          description: Null when no provider has token prices configured.
+        percent_used: { type: [number, "null"], format: double }
+        level:
+          type: string
+          enum: [ok, warning, exceeded, unknown]
     StatisticsSummary:
       type: object
       required: [request_count, input_tokens, output_tokens, jobs_succeeded, jobs_failed, jobs_cancelled]
@@ -2240,6 +2284,11 @@ components:
           type: integer
           minimum: 1
           maximum: 10
+    RenameDocumentChatSessionRequest:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1 }
     PostDocumentChatMessageResponse:
       type: object
       required: [session_id, user_message_id, assistant_message_id, answer, sources]
@@ -2785,10 +2834,18 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items, paperless_base]
                 properties:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/DocumentChatSession" }
+                  paperless_base:
+                    type: string
+                    description: >-
+                      Browser-facing Paperless base URL (public_url, else
+                      base_url, no trailing slash; empty when unset) for
+                      source deep links `{paperless_base}/documents/{id}/details`
+                      (#449).
     post:
       requestBody:
         required: true
@@ -2824,6 +2881,67 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/DocumentChatMessage" }
+    patch:
+      summary: Rename a document chat session
+      description: >-
+        Renames a session owned by the caller (user managers may rename any
+        session). Whitespace is collapsed and titles are capped at 80
+        characters; an empty title is rejected. Writes a
+        `chat.session_renamed` audit event. (#449)
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RenameDocumentChatSessionRequest" }
+      responses:
+        "200":
+          description: Renamed session
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, title]
+                properties:
+                  id: { type: string, format: uuid }
+                  title: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      summary: Delete a document chat session
+      description: >-
+        Deletes a session owned by the caller (user managers may delete any
+        session) together with its messages and stored sources. Writes a
+        `chat.session_deleted` audit event with the id and title only. (#449)
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Deleted session
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, deleted]
+                properties:
+                  id: { type: string, format: uuid }
+                  deleted: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/chat/sessions/{id}/messages:
     post:
       parameters:
@@ -2842,6 +2960,41 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PostDocumentChatMessageResponse" }
+  /api/chat/sessions/{id}/messages/stream:
+    post:
+      summary: Ask a question and stream the answer
+      description: >-
+        Same request, validation and storage as
+        `POST /api/chat/sessions/{id}/messages`, but the answer is streamed as
+        server-sent events (#449). Validation and permission errors are
+        returned as JSON before the stream starts. Events, each with a
+        single-line JSON `data` payload: `sources` (`{"sources": [...]}`),
+        zero or more `delta` (`{"text": "..."}`), then exactly one of `done`
+        (the `PostDocumentChatMessageResponse` body) or `error`
+        (`{"error": "..."}`). The provider is called by the API only; the
+        answer is stored even when the client disconnects mid-stream.
+      security:
+        - cookieSession: []
+      parameters:
+        - $ref: "#/components/parameters/RequiredCsrfToken"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PostDocumentChatMessageRequest" }
+      responses:
+        "200":
+          description: Server-sent event stream of the answer
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/documents/{paperless_document_id}/trigger:
     post:
       parameters:

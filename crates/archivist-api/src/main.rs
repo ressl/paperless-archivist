@@ -389,10 +389,19 @@ fn router(state: AppState) -> Router {
             "/chat/sessions",
             get(chat_sessions).post(create_chat_session),
         )
-        .route("/chat/sessions/{id}", get(chat_messages))
+        .route(
+            "/chat/sessions/{id}",
+            get(chat_messages)
+                .patch(rename_chat_session)
+                .delete(delete_chat_session),
+        )
         .route(
             "/chat/sessions/{id}/messages",
             post(post_chat_message).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
+        )
+        .route(
+            "/chat/sessions/{id}/messages/stream",
+            post(post_chat_message_stream).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
         )
         .route(
             "/documents/{paperless_document_id}/trigger",
@@ -1768,6 +1777,7 @@ async fn update_settings(
             }
         }
     }
+    validate_cost_budget_settings(&request.settings.ui)?;
     // Disabled providers/profiles may carry placeholder URLs (the seeded
     // `openai-compatible` example points at localhost); they are not active
     // outbound targets, and enabling one is itself a settings save — the
@@ -3498,6 +3508,22 @@ async fn ensure_chat_visible(
     }
 }
 
+/// Externally reachable Paperless base URL for browser deep links (#449):
+/// the configured `public_url`, else the internal `base_url`, without a
+/// trailing slash. Same rule as the duplicates view. Both URLs are
+/// scheme-validated (http/https) when settings are saved.
+fn paperless_browser_base(settings: &RuntimeSettings) -> String {
+    settings
+        .paperless
+        .public_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(settings.paperless.base_url.trim())
+        .trim_end_matches('/')
+        .to_owned()
+}
+
 fn chat_title(title: &str) -> String {
     let mut title = title.trim().replace(char::is_whitespace, " ");
     while title.contains("  ") {
@@ -4022,8 +4048,90 @@ async fn dashboard(
     let bucket_entries = provider_bucket_entries(&state.pool, start, now, range).await?;
     let bucket_labels = dashboard_bucket_labels(start, now, range);
     enrich_provider_sparklines(&mut stats, &bucket_entries, &bucket_labels, &settings);
+    let budget = dashboard_cost_budget(&state.pool, &settings, now).await?;
 
-    Ok(Json(json!({ "counts": counts, "stats": stats })))
+    Ok(Json(
+        json!({ "counts": counts, "stats": stats, "budget": budget }),
+    ))
+}
+
+/// Month-to-date AI cost against the configured monthly budget (#450).
+/// Independent of the selected dashboard range: budgets are calendar-month
+/// (UTC). `None` when no budget is configured. The cost uses the same
+/// estimate as the dashboard KPIs (recorded AI usage x per-provider token
+/// prices), so Document Chat answers, which are not recorded as AI
+/// artifacts, are not included.
+async fn dashboard_cost_budget(
+    pool: &DbPool,
+    settings: &RuntimeSettings,
+    now: DateTime<Utc>,
+) -> Result<Option<Value>> {
+    let Some(budget_usd) = settings.ui.monthly_cost_budget_usd else {
+        return Ok(None);
+    };
+    let month_start = Utc
+        .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+        .single()
+        .unwrap_or(now);
+    let mut usage = archivist_db::provider_usage(pool, month_start).await?;
+    enrich_provider_usage_costs(&mut usage, settings);
+    let month_to_date = month_to_date_cost(&usage);
+    Ok(Some(cost_budget_json(
+        budget_usd,
+        settings.ui.cost_budget_warning_percent,
+        month_to_date,
+        month_start,
+    )))
+}
+
+/// Reject budget values outside the documented domain instead of silently
+/// clamping them on save (#450).
+fn validate_cost_budget_settings(ui: &archivist_core::UiSettings) -> ApiResult<()> {
+    if let Some(budget) = ui.monthly_cost_budget_usd
+        && !(budget.is_finite() && (0.0..=1_000_000_000.0).contains(&budget))
+    {
+        return Err(ApiError::bad_request(
+            "monthly cost budget must be between 0 and 1000000000 USD",
+        ));
+    }
+    if !(1..=100).contains(&ui.cost_budget_warning_percent) {
+        return Err(ApiError::bad_request(
+            "cost budget warning percentage must be between 1 and 100",
+        ));
+    }
+    Ok(())
+}
+
+/// Sum of the priced usage rows; `None` when no row has a price, so an
+/// unpriced setup reports "unknown" instead of a misleading $0. (#450)
+fn month_to_date_cost(usage: &[ProviderUsageStats]) -> Option<f64> {
+    let priced = usage
+        .iter()
+        .filter_map(|item| item.estimated_cost_usd)
+        .collect::<Vec<_>>();
+    if priced.is_empty() {
+        None
+    } else {
+        Some(priced.iter().sum())
+    }
+}
+
+fn cost_budget_json(
+    budget_usd: f64,
+    warning_percent: u8,
+    month_to_date_cost_usd: Option<f64>,
+    month_start: DateTime<Utc>,
+) -> Value {
+    let (level, percent_used) =
+        archivist_core::cost_budget_level(budget_usd, warning_percent, month_to_date_cost_usd);
+    json!({
+        "monthly_budget_usd": budget_usd,
+        "warning_percent": warning_percent,
+        "month_start": month_start,
+        "month_to_date_cost_usd": month_to_date_cost_usd,
+        "percent_used": percent_used,
+        "level": level,
+    })
 }
 
 async fn dashboard_live(
@@ -5428,8 +5536,12 @@ async fn chat_sessions(
     require(&auth.0, Permission::UseChat)?;
     let user_id = require_user_session(&auth.0, "document chat requires a user session")?;
     let include_all = roles_have_permission(&auth.0.roles, Permission::ManageUsers);
+    let settings = get_runtime_settings(&state.pool).await?;
     Ok(Json(json!({
-        "items": list_document_chat_sessions(&state.pool, Some(user_id), include_all, 100).await?
+        "items": list_document_chat_sessions(&state.pool, Some(user_id), include_all, 100).await?,
+        // #449: lets the chat link sources to Paperless without the browser
+        // reading /api/settings (chat users may lack ReadSettings).
+        "paperless_base": paperless_browser_base(&settings)
     })))
 }
 
@@ -5485,15 +5597,28 @@ struct PostChatMessageRequest {
     max_sources: Option<usize>,
 }
 
-async fn post_chat_message(
-    State(state): State<AppState>,
-    auth: Authenticated,
-    Path(session_id): Path<Uuid>,
-    Json(request): Json<PostChatMessageRequest>,
-) -> ApiResult<Json<Value>> {
-    require(&auth.0, Permission::UseChat)?;
-    let user_id = require_user_session(&auth.0, "document chat requires a user session")?;
-    let include_all = roles_have_permission(&auth.0.roles, Permission::ManageUsers);
+/// A validated chat question, shared by the buffered and the streamed
+/// message endpoint so both enforce identical rules (#449).
+struct PreparedChatQuestion {
+    session_id: Uuid,
+    question: String,
+    document_ids: Option<Vec<i32>>,
+    max_sources: usize,
+    settings: RuntimeSettings,
+    provider: ApiProvider,
+    actor_type: String,
+    actor_id: Option<String>,
+}
+
+async fn prepare_chat_question(
+    state: &AppState,
+    auth: &AuthContext,
+    session_id: Uuid,
+    request: PostChatMessageRequest,
+) -> ApiResult<PreparedChatQuestion> {
+    require(auth, Permission::UseChat)?;
+    let user_id = require_user_session(auth, "document chat requires a user session")?;
+    let include_all = roles_have_permission(&auth.roles, Permission::ManageUsers);
     ensure_chat_visible(&state.pool, session_id, Some(user_id), include_all).await?;
 
     let question = request.question.trim();
@@ -5511,21 +5636,28 @@ async fn post_chat_message(
 
     let settings = get_runtime_settings(&state.pool).await?;
     let provider = provider_for_default_text(&settings)?;
-    let sources = retrieve_document_chat_sources(
-        &state,
-        &settings,
-        question,
-        document_ids.as_deref(),
-        request.max_sources.unwrap_or(6),
-    )
-    .await?;
-    let prompt = build_document_chat_prompt(question, &sources);
-    let response = chat_with_api_provider(
-        &state,
-        &provider,
-        build_document_chat_request(&provider, prompt.system_prompt, prompt.user_prompt),
-    )
-    .await?;
+    Ok(PreparedChatQuestion {
+        session_id,
+        question: question.to_owned(),
+        document_ids,
+        max_sources: request.max_sources.unwrap_or(6),
+        settings,
+        provider,
+        actor_type: auth.actor_type.clone(),
+        actor_id: auth.actor_id.clone(),
+    })
+}
+
+/// Store the question, the answer and its sources, write the audit event and
+/// build the response body both message endpoints return (#449).
+async fn persist_chat_exchange(
+    state: &AppState,
+    prepared: &PreparedChatQuestion,
+    sources: &[DocumentChatSource],
+    response: &AiResponse,
+    streamed: bool,
+) -> ApiResult<Value> {
+    let session_id = prepared.session_id;
     let answer = response.text.clone();
     let provider_name = response.provider.clone();
     let model = response.model.clone();
@@ -5533,10 +5665,10 @@ async fn post_chat_message(
         &state.pool,
         session_id,
         "user",
-        question,
+        &prepared.question,
         None,
         None,
-        Some(json!({ "document_ids": document_ids })),
+        Some(json!({ "document_ids": prepared.document_ids })),
     )
     .await?;
     let assistant_message_id = insert_document_chat_message(
@@ -5549,17 +5681,18 @@ async fn post_chat_message(
         Some(json!({
             "duration_ms": response.duration_ms,
             "source_count": sources.len(),
-            "user_message_id": user_message_id
+            "user_message_id": user_message_id,
+            "streamed": streamed
         })),
     )
     .await?;
-    insert_document_chat_sources(&state.pool, assistant_message_id, &sources).await?;
+    insert_document_chat_sources(&state.pool, assistant_message_id, sources).await?;
     append_audit(
         &state.pool,
         AuditEventInput {
             event_type: "chat.message_created".to_owned(),
-            actor_type: auth.0.actor_type,
-            actor_id: auth.0.actor_id,
+            actor_type: prepared.actor_type.clone(),
+            actor_id: prepared.actor_id.clone(),
             run_id: None,
             job_id: None,
             paperless_document_id: None,
@@ -5572,7 +5705,10 @@ async fn post_chat_message(
                 "model": model,
                 "source_documents": sources.iter().map(|source| source.paperless_document_id).collect::<Vec<_>>()
             })),
-            metadata: Some(json!({ "question_hash": hash_token(question) })),
+            metadata: Some(json!({
+                "question_hash": hash_token(&prepared.question),
+                "streamed": streamed
+            })),
             outcome: "success".to_owned(),
             error_message: None,
             source_ip: None,
@@ -5581,13 +5717,284 @@ async fn post_chat_message(
     )
     .await?;
 
-    Ok(Json(json!({
+    Ok(json!({
         "session_id": session_id,
         "user_message_id": user_message_id,
         "assistant_message_id": assistant_message_id,
         "answer": answer,
         "sources": sources
-    })))
+    }))
+}
+
+async fn post_chat_message(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(session_id): Path<Uuid>,
+    Json(request): Json<PostChatMessageRequest>,
+) -> ApiResult<Json<Value>> {
+    let prepared = prepare_chat_question(&state, &auth.0, session_id, request).await?;
+    let sources = retrieve_document_chat_sources(
+        &state,
+        &prepared.settings,
+        &prepared.question,
+        prepared.document_ids.as_deref(),
+        prepared.max_sources,
+    )
+    .await?;
+    let prompt = build_document_chat_prompt(&prepared.question, &sources);
+    let response = chat_with_api_provider(
+        &state,
+        &prepared.provider,
+        build_document_chat_request(&prepared.provider, prompt.system_prompt, prompt.user_prompt),
+    )
+    .await?;
+    Ok(Json(
+        persist_chat_exchange(&state, &prepared, &sources, &response, false).await?,
+    ))
+}
+
+/// One server-sent event of a streamed chat answer (#449).
+#[derive(Debug)]
+enum ChatStreamEvent {
+    /// The retrieved sources, sent before the provider is called.
+    Sources(Vec<DocumentChatSource>),
+    /// A piece of answer text.
+    Delta(String),
+    /// The stored exchange; same body as `POST .../messages`.
+    Done(Value),
+    /// The request failed after the stream started.
+    Error(String),
+}
+
+impl ChatStreamEvent {
+    /// Every event carries compact JSON, so multi-line answer text never
+    /// breaks the `data:` framing.
+    fn to_sse(&self) -> axum::response::sse::Event {
+        let (name, data) = match self {
+            Self::Sources(sources) => ("sources", json!({ "sources": sources })),
+            Self::Delta(text) => ("delta", json!({ "text": text })),
+            Self::Done(body) => ("done", body.clone()),
+            Self::Error(message) => ("error", json!({ "error": message })),
+        };
+        axum::response::sse::Event::default()
+            .event(name)
+            .data(data.to_string())
+    }
+}
+
+/// `POST /api/chat/sessions/{id}/messages/stream` (#449): same request and
+/// validation as the buffered endpoint, but the answer arrives as
+/// `text/event-stream` (`sources`, `delta`*, then `done` or `error`).
+/// Validation and permission failures are ordinary JSON errors before the
+/// stream starts. The provider is still called only by the API; the answer is
+/// generated in a detached task, so it is stored (and its cost accounted)
+/// even when the browser disconnects mid-stream.
+async fn post_chat_message_stream(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(session_id): Path<Uuid>,
+    Json(request): Json<PostChatMessageRequest>,
+) -> ApiResult<Response> {
+    use tokio_stream::StreamExt as _;
+
+    let prepared = prepare_chat_question(&state, &auth.0, session_id, request).await?;
+    let (events, receiver) = tokio::sync::mpsc::unbounded_channel::<ChatStreamEvent>();
+    tokio::spawn(async move {
+        if let Err(error) = stream_chat_answer(&state, &prepared, &events).await {
+            warn!(
+                session_id = %prepared.session_id,
+                status = %error.status,
+                "streamed document chat failed"
+            );
+            let _ = events.send(ChatStreamEvent::Error(error.message));
+        }
+    });
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(receiver)
+        .map(|event| Ok::<_, std::convert::Infallible>(event.to_sse()));
+    let mut response = axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response();
+    // `no-transform` keeps compressing proxies (Caddy `encode`) from
+    // buffering the stream; `X-Accel-Buffering` does the same for nginx.
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
+}
+
+async fn stream_chat_answer(
+    state: &AppState,
+    prepared: &PreparedChatQuestion,
+    events: &tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
+) -> ApiResult<()> {
+    let sources = retrieve_document_chat_sources(
+        state,
+        &prepared.settings,
+        &prepared.question,
+        prepared.document_ids.as_deref(),
+        prepared.max_sources,
+    )
+    .await?;
+    // A closed receiver only means the browser went away; keep generating so
+    // the answer is stored.
+    let _ = events.send(ChatStreamEvent::Sources(sources.clone()));
+    let prompt = build_document_chat_prompt(&prepared.question, &sources);
+    let delta_events = events.clone();
+    let mut on_delta = move |text: &str| {
+        let _ = delta_events.send(ChatStreamEvent::Delta(text.to_owned()));
+    };
+    let response = chat_stream_with_api_provider(
+        state,
+        &prepared.provider,
+        build_document_chat_request(&prepared.provider, prompt.system_prompt, prompt.user_prompt),
+        &mut on_delta,
+    )
+    .await?;
+    let body = persist_chat_exchange(state, prepared, &sources, &response, true).await?;
+    let _ = events.send(ChatStreamEvent::Done(body));
+    Ok(())
+}
+
+/// Streamed counterpart of [`chat_with_api_provider`] (#449).
+async fn chat_stream_with_api_provider(
+    state: &AppState,
+    provider: &ApiProvider,
+    request: ChatRequest,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> Result<AiResponse> {
+    let timeout =
+        std::time::Duration::from_secs(u64::from(provider.tuning.request_timeout_seconds));
+    match provider.kind {
+        AiProviderKind::Ollama => {
+            OllamaClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(state, provider).await?,
+                timeout,
+            )?
+            .chat_stream(request, on_delta)
+            .await
+        }
+        AiProviderKind::Openai | AiProviderKind::OpenaiCompatible => {
+            OpenAiCompatibleClient::new_with_timeout(
+                &provider.name,
+                &provider.base_url,
+                provider_secret(state, provider).await?,
+                timeout,
+            )?
+            .chat_stream(request, on_delta)
+            .await
+        }
+        AiProviderKind::Anthropic => {
+            let secret = provider_secret(state, provider).await?.ok_or_else(|| {
+                anyhow!("AI provider '{}' requires an API key secret", provider.name)
+            })?;
+            AnthropicClient::new_with_timeout(&provider.name, &provider.base_url, secret, timeout)?
+                .chat_stream(request, on_delta)
+                .await
+        }
+        AiProviderKind::Mineru => Err(anyhow!(
+            "AI provider '{}' uses kind \"mineru\" which is vision-only (OCR); \
+             select a text-capable provider for this stage",
+            provider.name
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RenameChatSessionRequest {
+    title: String,
+}
+
+/// `PATCH /api/chat/sessions/{id}` (#449): rename a session the caller may
+/// see (its owner, or a user manager). The title is normalized like on
+/// creation; an empty title is rejected instead of silently defaulted.
+async fn rename_chat_session(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(session_id): Path<Uuid>,
+    Json(request): Json<RenameChatSessionRequest>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::UseChat)?;
+    let user_id = require_user_session(&auth.0, "document chat requires a user session")?;
+    let include_all = roles_have_permission(&auth.0.roles, Permission::ManageUsers);
+    ensure_chat_visible(&state.pool, session_id, Some(user_id), include_all).await?;
+    if request.title.trim().is_empty() {
+        return Err(ApiError::bad_request("title must not be empty"));
+    }
+    let title = chat_title(&request.title);
+    let Some(before) =
+        archivist_db::rename_document_chat_session(&state.pool, session_id, &title).await?
+    else {
+        return Err(ApiError::forbidden("chat session is not available"));
+    };
+    append_audit(
+        &state.pool,
+        AuditEventInput {
+            event_type: "chat.session_renamed".to_owned(),
+            actor_type: auth.0.actor_type,
+            actor_id: auth.0.actor_id,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: Some(json!({ "session_id": session_id, "title": before })),
+            after: Some(json!({ "session_id": session_id, "title": title })),
+            metadata: None,
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "id": session_id, "title": title })))
+}
+
+/// `DELETE /api/chat/sessions/{id}` (#449): delete a session with its
+/// messages and stored sources (FK cascade). The audit event keeps only the
+/// id and title, never message content.
+async fn delete_chat_session(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    Path(session_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    require(&auth.0, Permission::UseChat)?;
+    let user_id = require_user_session(&auth.0, "document chat requires a user session")?;
+    let include_all = roles_have_permission(&auth.0.roles, Permission::ManageUsers);
+    ensure_chat_visible(&state.pool, session_id, Some(user_id), include_all).await?;
+    let Some(deleted) = archivist_db::delete_document_chat_session(&state.pool, session_id).await?
+    else {
+        return Err(ApiError::forbidden("chat session is not available"));
+    };
+    append_audit(
+        &state.pool,
+        AuditEventInput {
+            event_type: "chat.session_deleted".to_owned(),
+            actor_type: auth.0.actor_type,
+            actor_id: auth.0.actor_id,
+            run_id: None,
+            job_id: None,
+            paperless_document_id: None,
+            before: Some(json!({
+                "session_id": session_id,
+                "title": deleted.title,
+                "message_count": deleted.message_count
+            })),
+            after: None,
+            metadata: None,
+            outcome: "success".to_owned(),
+            error_message: None,
+            source_ip: None,
+            user_agent: None,
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "id": session_id, "deleted": true })))
 }
 
 fn normalize_chat_document_ids(document_ids: Option<Vec<i32>>) -> ApiResult<Option<Vec<i32>>> {
@@ -11219,6 +11626,305 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("review status")
+    }
+
+    #[test]
+    fn cost_budget_json_reports_level_and_unknown_cost() {
+        // #450
+        let month_start = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let warning = cost_budget_json(100.0, 80, Some(85.0), month_start);
+        assert_eq!(warning["level"], "warning");
+        assert_eq!(warning["percent_used"], 85.0);
+        assert_eq!(warning["monthly_budget_usd"], 100.0);
+        assert_eq!(warning["warning_percent"], 80);
+        let exceeded = cost_budget_json(10.0, 80, Some(12.5), month_start);
+        assert_eq!(exceeded["level"], "exceeded");
+        let unknown = cost_budget_json(10.0, 80, None, month_start);
+        assert_eq!(unknown["level"], "unknown");
+        assert!(unknown["percent_used"].is_null());
+        assert!(unknown["month_to_date_cost_usd"].is_null());
+    }
+
+    #[test]
+    fn month_to_date_cost_ignores_unpriced_rows() {
+        // #450
+        let row = |cost: Option<f64>| ProviderUsageStats {
+            provider: "p".to_owned(),
+            model: "m".to_owned(),
+            stage: "metadata".to_owned(),
+            request_count: 1,
+            avg_duration_ms: 0.0,
+            p95_duration_ms: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            estimated_cost_usd: cost,
+            feedback_count: 0,
+            positive_feedback: 0,
+            negative_feedback: 0,
+            acceptance_rate: None,
+            latency_history: Vec::new(),
+        };
+        assert_eq!(month_to_date_cost(&[row(None)]), None);
+        assert_eq!(month_to_date_cost(&[]), None);
+        assert_eq!(
+            month_to_date_cost(&[row(Some(1.5)), row(None), row(Some(2.0))]),
+            Some(3.5)
+        );
+    }
+
+    #[test]
+    fn cost_budget_settings_validation_rejects_out_of_range_values() {
+        // #450
+        let mut ui = archivist_core::UiSettings::default();
+        assert!(validate_cost_budget_settings(&ui).is_ok());
+        ui.monthly_cost_budget_usd = Some(-1.0);
+        assert!(validate_cost_budget_settings(&ui).is_err());
+        ui.monthly_cost_budget_usd = Some(25.0);
+        ui.cost_budget_warning_percent = 0;
+        assert!(validate_cost_budget_settings(&ui).is_err());
+        ui.cost_budget_warning_percent = 100;
+        assert!(validate_cost_budget_settings(&ui).is_ok());
+    }
+
+    #[test]
+    fn paperless_browser_base_prefers_public_url() {
+        // #449
+        let mut settings = RuntimeSettings::default();
+        settings.paperless.base_url = "http://paperless:8000/".to_owned();
+        assert_eq!(paperless_browser_base(&settings), "http://paperless:8000");
+        settings.paperless.public_url = Some(" https://docs.example.com/ ".to_owned());
+        assert_eq!(
+            paperless_browser_base(&settings),
+            "https://docs.example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_events_are_single_line_json() {
+        // #449: multi-line answer text must not break the SSE `data:` framing.
+        use tokio_stream::StreamExt as _;
+        let events = vec![
+            ChatStreamEvent::Delta("line one\nline two\n\n".to_owned()),
+            ChatStreamEvent::Error("boom".to_owned()),
+        ];
+        let stream = tokio_stream::iter(events)
+            .map(|event| Ok::<_, std::convert::Infallible>(event.to_sse()));
+        let response = axum::response::sse::Sse::new(stream).into_response();
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("event: delta\ndata: {\"text\":\"line one\\nline two\\n\\n\"}\n\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("event: error\ndata: {\"error\":\"boom\"}\n\n"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+    async fn chat_sessions_can_be_renamed_deleted_and_streamed_by_their_owner() {
+        // #449
+        let Some(state) = security_db_state().await else {
+            return;
+        };
+        let pool = state.pool.clone();
+        // Default runtime settings: no Paperless token, so a streamed answer
+        // fails after the stream started (source retrieval).
+        sqlx::query("delete from settings where key = 'runtime'")
+            .execute(&pool)
+            .await
+            .expect("reset runtime settings");
+        let suffix = Uuid::now_v7().simple().to_string();
+        let mut sessions = Vec::new();
+        for (name, role) in [("owner", Role::Reviewer), ("other", Role::Operator)] {
+            let user = create_user_with_roles(
+                &pool,
+                &format!("chat-{name}-{suffix}"),
+                None,
+                "hash",
+                &[role],
+                None,
+            )
+            .await
+            .expect("user");
+            let session_token = random_token();
+            let csrf_token = random_token();
+            create_session(
+                &pool,
+                user,
+                &hash_token(&session_token),
+                &hash_token(&csrf_token),
+                Utc::now() + Duration::hours(1),
+            )
+            .await
+            .expect("session");
+            sessions.push((session_token, csrf_token));
+        }
+        let (base, handle) = spawn_api_router(state).await;
+        let client = no_redirect_client();
+        let call = |method: reqwest::Method, path: String, who: usize| {
+            let (session_token, csrf_token) = &sessions[who];
+            client
+                .request(method, format!("{base}{path}"))
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("{SESSION_COOKIE}={session_token}"),
+                )
+                .header("x-csrf-token", csrf_token)
+        };
+
+        let created: Value = call(reqwest::Method::POST, "/api/chat/sessions".to_owned(), 0)
+            .json(&json!({ "title": "Steuern 2025" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = created["id"].as_str().expect("session id").to_owned();
+
+        let listed: Value = call(reqwest::Method::GET, "/api/chat/sessions".to_owned(), 0)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(listed["paperless_base"].is_string());
+
+        // Only the owner may rename; empty titles are rejected.
+        let foreign = call(
+            reqwest::Method::PATCH,
+            format!("/api/chat/sessions/{id}"),
+            1,
+        )
+        .json(&json!({ "title": "hijacked" }))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+        let empty = call(
+            reqwest::Method::PATCH,
+            format!("/api/chat/sessions/{id}"),
+            0,
+        )
+        .json(&json!({ "title": "   " }))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+        let renamed = call(
+            reqwest::Method::PATCH,
+            format!("/api/chat/sessions/{id}"),
+            0,
+        )
+        .json(&json!({ "title": "  Steuern   2026 " }))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(renamed.status(), StatusCode::OK);
+        let renamed: Value = renamed.json().await.unwrap();
+        assert_eq!(renamed["title"], "Steuern 2026");
+        let renamed_audits: i64 = sqlx::query_scalar(
+            "select count(*) from audit_events where event_type = 'chat.session_renamed' and after->>'session_id' = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("rename audit");
+        assert_eq!(renamed_audits, 1);
+
+        // Streamed answers validate before the stream starts ...
+        let short = call(
+            reqwest::Method::POST,
+            format!("/api/chat/sessions/{id}/messages/stream"),
+            0,
+        )
+        .json(&json!({ "question": "?" }))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+        assert!(is_json(&short));
+        let foreign_stream = call(
+            reqwest::Method::POST,
+            format!("/api/chat/sessions/{id}/messages/stream"),
+            1,
+        )
+        .json(&json!({ "question": "Welche Rechnungen?" }))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(foreign_stream.status(), StatusCode::FORBIDDEN);
+        // ... and report later failures as an `error` event.
+        let streamed = call(
+            reqwest::Method::POST,
+            format!("/api/chat/sessions/{id}/messages/stream"),
+            0,
+        )
+        .json(&json!({ "question": "Welche Rechnungen?" }))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(streamed.status(), StatusCode::OK);
+        assert!(
+            streamed.headers()[reqwest::header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        assert_eq!(
+            streamed.headers()[reqwest::header::CACHE_CONTROL],
+            "no-cache, no-transform"
+        );
+        let body = tokio::time::timeout(std::time::Duration::from_secs(10), streamed.text())
+            .await
+            .expect("stream ends after the error event")
+            .unwrap();
+        assert!(body.contains("event: error\ndata: {\"error\":"), "{body}");
+
+        // Delete: foreign users cannot, the owner can, and it is gone after.
+        let foreign_delete = call(
+            reqwest::Method::DELETE,
+            format!("/api/chat/sessions/{id}"),
+            1,
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(foreign_delete.status(), StatusCode::FORBIDDEN);
+        let deleted = call(
+            reqwest::Method::DELETE,
+            format!("/api/chat/sessions/{id}"),
+            0,
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let gone = call(reqwest::Method::GET, format!("/api/chat/sessions/{id}"), 0)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(gone.status(), StatusCode::FORBIDDEN);
+        let deleted_audits: i64 = sqlx::query_scalar(
+            "select count(*) from audit_events where event_type = 'chat.session_deleted' and before->>'session_id' = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("delete audit");
+        assert_eq!(deleted_audits, 1);
+
+        handle.abort();
     }
 
     #[tokio::test]

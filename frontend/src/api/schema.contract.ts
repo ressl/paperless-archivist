@@ -79,4 +79,9 @@ export type GeneratedRouteContract = ExpectAll<[
   HasRequiredCsrf<paths['/api/reviews/{id}/approve']['post']>,
   HasRequiredCsrf<paths['/api/reviews/{id}/reject']['post']>,
   HasRequiredCsrf<paths['/api/reviews/{id}/edit']['post']>,
+  // #449: streamed answers and session management are session-only.
+  HasOperation<'/api/chat/sessions/{id}/messages/stream', 'post'>,
+  HasRequiredCsrf<paths['/api/chat/sessions/{id}/messages/stream']['post']>,
+  HasRequiredCsrf<paths['/api/chat/sessions/{id}']['patch']>,
+  HasRequiredCsrf<paths['/api/chat/sessions/{id}']['delete']>,
 ]>
