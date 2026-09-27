@@ -138,7 +138,7 @@ For each of the 6 fields, in order:
 
 Tests in the backend issue assert each branch of this decision tree.
 
-## SQL helpers (new in `archivist-db/src/lib.rs`)
+## SQL helpers (in `archivist-db/src/runs.rs`)
 
 ```rust
 pub async fn latest_metadata_run_for_document(

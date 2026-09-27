@@ -56,7 +56,7 @@ Key responsibilities:
 | API routes, auth, orchestration | `crates/archivist-api/src/main.rs` |
 | Worker jobs and apply flow | `crates/archivist-worker/src/main.rs` |
 | Domain settings, roles, validation, prompts | `crates/archivist-core/src/lib.rs` |
-| Database repositories | `crates/archivist-db/src/lib.rs` |
+| Database repositories | `crates/archivist-db/src/*.rs` (one module per aggregate, re-exported from `lib.rs`) |
 | SQL migrations | `migrations/*.sql` |
 | Paperless REST client | `crates/archivist-paperless/src/lib.rs` |
 | AI provider clients and parsers | `crates/archivist-ai/src/lib.rs` |
@@ -434,7 +434,7 @@ Start here for common tasks:
 | --- | --- |
 | Understand product behavior | `README.md`, `docs/USER_GUIDE.md`, `docs/PROJECT_OVERVIEW.md` |
 | Add or change API endpoint | `crates/archivist-api/src/main.rs`, `openapi/openapi.yaml` |
-| Change runtime settings | `crates/archivist-core/src/lib.rs`, `crates/archivist-db/src/lib.rs`, Settings UI |
+| Change runtime settings | `crates/archivist-core/src/lib.rs`, `crates/archivist-db/src/settings.rs`, Settings UI |
 | Change provider logic | `crates/archivist-ai/src/lib.rs`, worker/API call sites |
 | Change Paperless writes | `crates/archivist-paperless/src/lib.rs`, worker apply code |
 | Change job behavior | `crates/archivist-worker/src/main.rs`, DB job functions |

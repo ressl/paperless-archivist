@@ -130,7 +130,7 @@ reproduction harness:
 
 1. **`/api/dashboard.stats.stage_status` returns the 7 legacy per-field rows
    instead of `["ocr","metadata"]`** — confirmed in
-   `archivist-db/src/lib.rs::stage_status` (~ line 3083). The SQL builds the
+   `archivist-db/src/stats.rs::stage_status`. The SQL builds the
    stage list from `union all select 'title' …` etc. and never references the
    v1.4.x `metadata_status` column.
 2. **`/api/batches/full` queues N single-stage runs per stage instead of one

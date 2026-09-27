@@ -87,7 +87,7 @@ fi
 
 # 5. dashboard stage_status — pull live & print, but ALSO note whether the
 #    query body itself still returns the legacy 7-row set (an outstanding bug
-#    in archivist-db/src/lib.rs::stage_status that needs the prod-fix agent).
+#    in archivist-db/src/stats.rs::stage_status that needs the prod-fix agent).
 echo
 echo "Dashboard stage_status (from prod source query):"
 STAGE_STATUS_JSON="$(curl -fsS -b "$(dirname "$0")/.dev-local-cookies.txt" http://127.0.0.1:18080/api/dashboard 2>/dev/null \
@@ -96,7 +96,7 @@ echo "  stages returned: ${STAGE_STATUS_JSON}"
 if echo "${STAGE_STATUS_JSON}" | grep -q '"metadata"'; then
   green "PASS  dashboard stage_status includes 'metadata' row"
 else
-  red   "FAIL  dashboard stage_status is missing 'metadata' (KNOWN prod bug in archivist-db/src/lib.rs::stage_status)"
+  red   "FAIL  dashboard stage_status is missing 'metadata' (KNOWN prod bug in archivist-db/src/stats.rs::stage_status)"
   fail=$((fail + 1))
 fi
 if echo "${STAGE_STATUS_JSON}" | grep -qE '"title"|"document_type"|"correspondent"|"document_date"|"fields"'; then
