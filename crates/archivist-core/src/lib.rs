@@ -694,7 +694,7 @@ impl WorkflowTags {
     pub fn is_workflow_tag(&self, tag_name: &str) -> bool {
         self.all()
             .iter()
-            .any(|tag| tag.eq_ignore_ascii_case(tag_name))
+            .any(|tag| catalog_names_equal(tag, tag_name))
     }
 
     pub fn completion_tag_for_stage(&self, stage: Stage) -> Option<&str> {
@@ -709,6 +709,44 @@ impl WorkflowTags {
         match stage {
             Stage::Ocr => Some(&self.trigger_ocr),
             Stage::Metadata | Stage::Apply => None,
+        }
+    }
+
+    /// Every trigger tag that can request `stage`. Unlike
+    /// `trigger_tag_for_stage` this includes the legacy per-field metadata
+    /// triggers (`ai-tags`, `ai-title`, ...), which all funnel into the
+    /// consolidated metadata stage and therefore must be retired together
+    /// once that stage reaches a terminal outcome (#400).
+    pub fn trigger_tags_requesting_stage(&self, stage: Stage) -> Vec<&str> {
+        match stage {
+            Stage::Ocr => vec![&self.trigger_ocr],
+            Stage::Metadata => vec![
+                &self.trigger_tags,
+                &self.trigger_title,
+                &self.trigger_correspondent,
+                &self.trigger_document_type,
+                &self.trigger_document_date,
+                &self.trigger_fields,
+            ],
+            Stage::Apply => Vec::new(),
+        }
+    }
+
+    /// All trigger tags, including the whole-pipeline `trigger_process`.
+    pub fn all_trigger_tags(&self) -> Vec<&str> {
+        let mut tags = vec![self.trigger_process.as_str()];
+        tags.extend(self.trigger_tags_requesting_stage(Stage::Ocr));
+        tags.extend(self.trigger_tags_requesting_stage(Stage::Metadata));
+        tags
+    }
+
+    /// Stage-specific failure marker set when a stage fails permanently, so
+    /// the failure is visible in Paperless (#400).
+    pub fn failed_tag_for_stage(&self, stage: Stage) -> &str {
+        match stage {
+            Stage::Ocr => &self.failed_ocr,
+            Stage::Metadata => &self.failed_tagging,
+            Stage::Apply => &self.failed,
         }
     }
 
@@ -1181,6 +1219,129 @@ impl PaperlessSettings {
         self.archive_profiles
             .dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
         self
+    }
+
+    /// The enabled profile named by `active_archive`, if any.
+    pub fn active_profile(&self) -> Option<&PaperlessArchiveProfile> {
+        self.archive_profiles.iter().find(|profile| {
+            profile.enabled && profile.name.eq_ignore_ascii_case(&self.active_archive)
+        })
+    }
+
+    /// Base URL and token secret every Paperless call (API, worker, login
+    /// bridge) must use. A profile without its own token only inherits the
+    /// global token when it points at the same origin as the global base URL;
+    /// otherwise no token is returned, so instance A's token is never sent to
+    /// host B. #396
+    pub fn active_connection(&self) -> (&str, Option<Uuid>) {
+        let Some(profile) = self.active_profile() else {
+            return (&self.base_url, self.token_secret_id);
+        };
+        let token = profile.token_secret_id.or_else(|| {
+            self.token_secret_id
+                .filter(|_| same_http_origin(&profile.base_url, &self.base_url))
+        });
+        (&profile.base_url, token)
+    }
+}
+
+/// Whether two http(s) URLs share scheme, host and effective port. Returns
+/// `false` for anything that does not parse as an absolute http(s) URL. #396
+pub fn same_http_origin(left: &str, right: &str) -> bool {
+    match (http_origin(left), http_origin(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn http_origin(url: &str) -> Option<(String, String, u16)> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (host, tail) = bracketed.split_once(']')?;
+        (host, tail.strip_prefix(':'))
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host_port, None),
+        }
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port {
+        Some("") | None => default_port,
+        Some(port) => port.parse().ok()?,
+    };
+    Some((
+        scheme,
+        host.trim_end_matches('.').to_ascii_lowercase(),
+        port,
+    ))
+}
+
+#[cfg(test)]
+mod paperless_connection_tests {
+    use super::*;
+
+    fn settings_with_profile(profile_url: &str, profile_token: Option<Uuid>) -> PaperlessSettings {
+        PaperlessSettings {
+            base_url: "https://paperless-a.example".to_owned(),
+            token_secret_id: Some(Uuid::from_u128(1)),
+            active_archive: "second".to_owned(),
+            archive_profiles: vec![PaperlessArchiveProfile {
+                name: "Second".to_owned(),
+                base_url: profile_url.to_owned(),
+                token_secret_id: profile_token,
+                enabled: true,
+            }],
+            ..PaperlessSettings::default()
+        }
+    }
+
+    #[test]
+    fn global_token_is_never_sent_to_another_origin() {
+        // #396: profile on host B without its own token.
+        let settings = settings_with_profile("https://paperless-b.example", None);
+        assert_eq!(
+            settings.active_connection(),
+            ("https://paperless-b.example", None)
+        );
+    }
+
+    #[test]
+    fn same_origin_profile_inherits_the_global_token() {
+        let settings = settings_with_profile("https://PAPERLESS-A.example:443/", None);
+        assert_eq!(
+            settings.active_connection(),
+            ("https://PAPERLESS-A.example:443/", Some(Uuid::from_u128(1)))
+        );
+        let own = settings_with_profile("https://paperless-b.example", Some(Uuid::from_u128(2)));
+        assert_eq!(own.active_connection().1, Some(Uuid::from_u128(2)));
+    }
+
+    #[test]
+    fn origin_comparison_covers_scheme_port_and_userinfo() {
+        assert!(same_http_origin("http://host:80/a", "http://HOST/b?c"));
+        assert!(same_http_origin("https://u:p@host/", "https://host:443"));
+        assert!(same_http_origin(
+            "http://[::1]:8000/",
+            "http://[::1]:8000/api/"
+        ));
+        assert!(!same_http_origin("http://host/", "https://host/"));
+        assert!(!same_http_origin("http://host:8000/", "http://host:8001/"));
+        assert!(!same_http_origin("http://host.evil/", "http://host/"));
+        assert!(!same_http_origin("ftp://host/", "ftp://host/"));
+        assert!(!same_http_origin("not a url", "not a url"));
     }
 }
 
@@ -2726,7 +2887,7 @@ pub fn validate_tag_suggestion(
     let mut warnings = Vec::new();
     let allowed: HashSet<String> = allowed_tags
         .iter()
-        .map(|tag| tag.to_ascii_lowercase())
+        .map(|tag| fold_catalog_name(tag))
         .collect();
     let mut seen = HashSet::new();
     let mut tags = Vec::new();
@@ -2736,7 +2897,7 @@ pub fn validate_tag_suggestion(
         if normalized.is_empty() {
             continue;
         }
-        let key = normalized.to_ascii_lowercase();
+        let key = fold_catalog_name(normalized);
         if !seen.insert(key.clone()) {
             continue;
         }
@@ -3537,6 +3698,20 @@ pub struct ValidatedFieldSuggestion {
     pub warnings: Vec<String>,
 }
 
+/// Case-fold a Paperless catalog name (tag, custom field, correspondent,
+/// document type) for comparison. Uses full Unicode lowercasing: ASCII-only
+/// folding left "Ärzte" and "ärzte" distinct, so the model's spelling failed
+/// validation or silently lost its id. Keep every catalog-name comparison on
+/// this helper; the SQL lookups fold with `lower()` on both sides. #409
+pub fn fold_catalog_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// Case-insensitive catalog name equality, see [`fold_catalog_name`].
+pub fn catalog_names_equal(left: &str, right: &str) -> bool {
+    left == right || fold_catalog_name(left) == fold_catalog_name(right)
+}
+
 pub fn validate_field_suggestion(
     suggestion: FieldSuggestion,
     allowed_field_names: &[String],
@@ -3545,7 +3720,7 @@ pub fn validate_field_suggestion(
 ) -> Result<ValidatedFieldSuggestion, Vec<ValidationError>> {
     let allowed: HashSet<String> = allowed_field_names
         .iter()
-        .map(|name| name.to_ascii_lowercase())
+        .map(|name| fold_catalog_name(name))
         .collect();
     let mut errors = Vec::new();
     let mut seen = HashSet::new();
@@ -3553,10 +3728,10 @@ pub fn validate_field_suggestion(
 
     for field in suggestion.fields {
         let name = field.name.trim();
-        if name.is_empty() || !seen.insert(name.to_ascii_lowercase()) {
+        if name.is_empty() || !seen.insert(fold_catalog_name(name)) {
             continue;
         }
-        if !allowed.contains(&name.to_ascii_lowercase()) {
+        if !allowed.contains(&fold_catalog_name(name)) {
             errors.push(ValidationError::UnknownChoice(name.to_owned()));
             continue;
         }
@@ -3615,7 +3790,7 @@ pub fn validate_choice_suggestion(
 ) -> Result<ChoiceSuggestion, Vec<ValidationError>> {
     let allowed: HashSet<String> = allowed_names
         .iter()
-        .map(|name| name.to_ascii_lowercase())
+        .map(|name| fold_catalog_name(name))
         .collect();
     let normalized = suggestion.name.trim();
     let mut errors = Vec::new();
@@ -3623,7 +3798,7 @@ pub fn validate_choice_suggestion(
     if normalized.is_empty() {
         errors.push(ValidationError::EmptyOutput);
     }
-    if !allowed.contains(&normalized.to_ascii_lowercase()) {
+    if !allowed.contains(&fold_catalog_name(normalized)) {
         errors.push(ValidationError::UnknownChoice(normalized.to_owned()));
     }
     if suggestion.confidence.unwrap_or(0.0) < confidence_threshold {
@@ -4762,6 +4937,31 @@ mod tests {
     }
 
     #[test]
+    fn every_trigger_that_requests_a_stage_is_retired_with_it() {
+        // #400: each trigger tag that `stages_requested_by_tags` maps to a
+        // stage must be listed by `trigger_tags_requesting_stage`, otherwise
+        // a terminal outcome leaves it behind and the poller requeues forever.
+        let tags = WorkflowTags::default();
+        for trigger in tags.all_trigger_tags() {
+            for stage in tags.stages_requested_by_tags(&[trigger.to_owned()]) {
+                let retired = trigger.eq_ignore_ascii_case(&tags.trigger_process)
+                    || tags
+                        .trigger_tags_requesting_stage(stage)
+                        .iter()
+                        .any(|tag| tag.eq_ignore_ascii_case(trigger));
+                assert!(retired, "{trigger} requests {stage:?} but is never retired");
+            }
+        }
+        assert_eq!(tags.all_trigger_tags().len(), 8);
+        assert_eq!(tags.failed_tag_for_stage(Stage::Ocr), "ai-failed-ocr");
+        assert_eq!(
+            tags.failed_tag_for_stage(Stage::Metadata),
+            tags.failed_tagging
+        );
+        assert!(tags.is_workflow_tag(tags.failed_tag_for_stage(Stage::Apply)));
+    }
+
+    #[test]
     fn stage_inventory_status_columns_cover_all_business_stages_and_skip_orchestration_stages() {
         // Every variant produces a deterministic answer — exhaustive match guards against
         // drift if a new Stage variant is added.
@@ -4805,6 +5005,54 @@ mod tests {
         // Without the metadata stage, no metadata fields are requested.
         let none = MetadataFieldFlags::from_enabled_stages(&[Stage::Ocr]);
         assert!(!none.any());
+    }
+
+    #[test]
+    fn catalog_name_validation_folds_non_ascii_capitals() {
+        // #409: "ärzte" must match the catalog's "Ärzte" like "rechnung"
+        // matches "Rechnung", and dedupe against it.
+        assert!(catalog_names_equal("Ärzte", "ärzte"));
+        assert!(!catalog_names_equal("Ärzte", "Aerzte"));
+
+        let validated = validate_tag_suggestion(
+            TagSuggestion {
+                tags: vec!["ärzte".to_owned(), "ÄRZTE".to_owned()],
+                new_tags: Vec::new(),
+                confidence: Some(0.9),
+            },
+            &["Ärzte".to_owned()],
+            &WorkflowTags::default(),
+            &TaggingSettings::default(),
+        )
+        .expect("non-ASCII tag in a different case is known");
+        assert_eq!(validated.tags.len(), 1, "case variants are deduplicated");
+
+        validate_choice_suggestion(
+            ChoiceSuggestion {
+                name: "ärztekammer".to_owned(),
+                confidence: Some(0.9),
+                evidence: None,
+            },
+            &["Ärztekammer".to_owned()],
+            0.5,
+        )
+        .expect("non-ASCII correspondent in a different case is known");
+
+        let fields = validate_field_suggestion(
+            FieldSuggestion {
+                fields: vec![FieldValueSuggestion {
+                    name: "größe".to_owned(),
+                    value: serde_json::json!("A4"),
+                    confidence: Some(0.9),
+                }],
+                confidence: Some(0.9),
+            },
+            &["Größe".to_owned()],
+            5,
+            0.5,
+        )
+        .expect("non-ASCII custom field in a different case is known");
+        assert_eq!(fields.fields.len(), 1);
     }
 
     #[test]

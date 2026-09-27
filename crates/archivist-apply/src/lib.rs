@@ -17,8 +17,8 @@ use archivist_db::{
     finalize_failed_apply_intent, get_apply_intent, get_recoverable_apply_intent_by_source_key,
     get_review_status, list_recoverable_review_apply_intents, mark_apply_intent_confirmed,
     mark_apply_intent_in_flight, mark_review_applied, mark_review_auto_applied,
-    prepare_apply_intent, reconcile_apply_intent, revert_review_from_applying,
-    revert_review_to_pending_after_failed_drain,
+    prepare_apply_intent, reconcile_apply_intent, release_transient_apply_intent,
+    revert_review_from_applying, revert_review_to_pending_after_failed_drain,
 };
 use archivist_paperless::{
     PaperlessClient, PaperlessDocumentDetail, PaperlessError, document_matches_patch,
@@ -580,6 +580,25 @@ async fn apply_document_inner(
                     let message = format!(
                         "ambiguous Paperless PATCH did not match current document: {patch_error:#}"
                     );
+                    // A 5xx/network/timeout whose follow-up GET shows the
+                    // document unchanged did not apply: keep the attempt
+                    // retryable (bounded) instead of blocking this patch
+                    // forever. Only definitive failures become terminal. #389
+                    if is_transient_paperless_error(&patch_error)
+                        && release_transient_apply_intent(
+                            pool,
+                            intent.attempt_id,
+                            &request.owner_id,
+                            &message,
+                            MAX_TRANSIENT_APPLY_RETRIES,
+                        )
+                        .await?
+                    {
+                        return Err(anyhow!(
+                            "transient Paperless PATCH failure; attempt {} will be retried: {patch_error:#}",
+                            intent.attempt_id
+                        ));
+                    }
                     fail_apply_intent(pool, intent.attempt_id, &request.owner_id, &message).await?;
 
                     if request.allow_custom_fields_fallback
@@ -751,6 +770,13 @@ async fn settle_failed_review(pool: &DbPool, intent: &ApplyIntentRecord) -> Resu
     let review_id = intent
         .review_id
         .ok_or_else(|| anyhow!("review apply intent has no review ID"))?;
+    // The API settles a human failure itself and a later decision may then
+    // re-prepare the same intent (#389). Never act on a stale snapshot: that
+    // would revert a review whose fresh attempt is already in progress.
+    let current = get_apply_intent(pool, intent.attempt_id).await?;
+    if !current.is_some_and(|current| current.state == "failed" && current.finalized_at.is_none()) {
+        return Ok(());
+    }
     let current_status = get_review_status(pool, review_id)
         .await?
         .ok_or_else(|| anyhow!("review apply intent references a missing review"))?;
@@ -854,6 +880,15 @@ async fn resume_existing(
     }
 }
 
+/// Transient PATCH failures an intent may retry before failing terminally. #389
+pub const MAX_TRANSIENT_APPLY_RETRIES: i32 = 5;
+
+fn is_transient_paperless_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<PaperlessError>()
+        .is_some_and(PaperlessError::is_transient)
+}
+
 fn is_custom_fields_bad_request(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<PaperlessError>(),
@@ -894,4 +929,157 @@ fn audit_before_for_patch(document: &PaperlessDocumentDetail, patch: &DocumentPa
         object.insert("custom_fields".to_owned(), json!({ "present": "redacted" }));
     }
     Value::Object(object)
+}
+
+/// Key under which a review item's `suggested_patch` carries the NAMES of
+/// Paperless objects (tags, correspondent) that do not exist yet. `DocumentPatch`
+/// ignores the key, so every existing consumer keeps deserializing the patch.
+/// The objects are created only by [`materialize_pending_new_objects`] at apply
+/// time, never while a suggestion is merely reviewed or in dry-run (#404).
+pub const PENDING_NEW_OBJECTS_KEY: &str = "archivist_new_objects";
+/// Hard cap on new tags Archivist creates for one document per apply (#404).
+pub const MAX_NEW_TAGS_PER_DOCUMENT: usize = 5;
+/// Paperless-ngx names are `CharField(max_length=128)`; longer model output is
+/// dropped rather than truncated so no partial garbage lands in the catalog.
+pub const MAX_NEW_OBJECT_NAME_CHARS: usize = 128;
+
+/// Not-yet-existing Paperless objects proposed by the model, kept as names
+/// until a human (or the validated full-auto path) applies the suggestion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct PendingNewObjects {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correspondent: Option<String>,
+}
+
+/// Apply-time gates for [`materialize_pending_new_objects`]; read from the
+/// live runtime settings so turning a toggle off also stops pending reviews.
+#[derive(Debug, Clone, Copy)]
+pub struct NewObjectPolicy<'a> {
+    pub allow_new_tags: bool,
+    pub allow_new_correspondents: bool,
+    pub workflow_tags: &'a archivist_core::WorkflowTags,
+}
+
+impl<'a> NewObjectPolicy<'a> {
+    pub fn from_settings(settings: &'a archivist_core::RuntimeSettings) -> Self {
+        Self {
+            allow_new_tags: settings.tagging.allow_new_tags,
+            allow_new_correspondents: settings.metadata.allow_new_correspondents,
+            workflow_tags: &settings.workflow.tags,
+        }
+    }
+}
+
+fn sanitized_new_object_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.chars().count() > MAX_NEW_OBJECT_NAME_CHARS
+        || name.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+impl PendingNewObjects {
+    /// Build a capped, de-duplicated set. Workflow tag names are refused so a
+    /// model (or a prompt-injected document) can never smuggle a trigger or
+    /// completion tag onto a document through the new-tag path.
+    pub fn new(
+        tags: impl IntoIterator<Item = String>,
+        correspondent: Option<String>,
+        workflow_tags: &archivist_core::WorkflowTags,
+    ) -> Self {
+        let mut seen = BTreeSet::new();
+        let tags = tags
+            .into_iter()
+            .filter_map(|name| sanitized_new_object_name(&name))
+            .filter(|name| !workflow_tags.is_workflow_tag(name))
+            .filter(|name| seen.insert(name.to_lowercase()))
+            .take(MAX_NEW_TAGS_PER_DOCUMENT)
+            .collect();
+        Self {
+            tags,
+            correspondent: correspondent.and_then(|name| sanitized_new_object_name(&name)),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty() && self.correspondent.is_none()
+    }
+
+    /// Read (and re-sanitize, since reviewers may edit the patch) the pending
+    /// objects from a review patch value. Missing or malformed → empty.
+    pub fn from_patch_value(patch: &Value, workflow_tags: &archivist_core::WorkflowTags) -> Self {
+        let raw = patch
+            .get(PENDING_NEW_OBJECTS_KEY)
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Self>(value).ok())
+            .unwrap_or_default();
+        Self::new(raw.tags, raw.correspondent, workflow_tags)
+    }
+
+    /// Attach to a review patch object (no-op when empty).
+    pub fn attach_to(&self, patch: &mut Value) {
+        if self.is_empty() {
+            return;
+        }
+        if let (Some(object), Ok(value)) = (patch.as_object_mut(), serde_json::to_value(self)) {
+            object.insert(PENDING_NEW_OBJECTS_KEY.to_owned(), value);
+        }
+    }
+}
+
+/// Create the pending objects in Paperless at apply time (#404) and wire
+/// them into the patch. Returns the ids of the tags to ADD to the document;
+/// callers merge them into their tag set (review applies pass them as
+/// `ReviewTagOperations::additions`, so the three-way tag merge keeps every
+/// concurrent Paperless change). A correspondent is only set when the patch
+/// does not already choose one. Existing objects are reused case-insensitively,
+/// so only genuinely missing names are created, bounded by the caps above.
+pub async fn materialize_pending_new_objects(
+    client: &PaperlessClient,
+    pending: &PendingNewObjects,
+    policy: NewObjectPolicy<'_>,
+    patch: &mut DocumentPatch,
+) -> Result<Vec<i32>> {
+    // Re-sanitize: the caller may have built `pending` by hand.
+    let pending = PendingNewObjects::new(
+        pending.tags.clone(),
+        pending.correspondent.clone(),
+        policy.workflow_tags,
+    );
+    let mut tag_ids = Vec::new();
+    if policy.allow_new_tags && !pending.tags.is_empty() {
+        let catalog = client.list_tags().await?;
+        for name in &pending.tags {
+            let wanted = name.to_lowercase();
+            let id = match catalog.iter().find(|tag| tag.name.to_lowercase() == wanted) {
+                Some(existing) => existing.id,
+                None => client.ensure_tag(name).await?.id,
+            };
+            if !tag_ids.contains(&id) {
+                tag_ids.push(id);
+            }
+        }
+    } else if !pending.tags.is_empty() {
+        tracing::warn!(
+            count = pending.tags.len(),
+            "new tags were proposed but allow_new_tags is off at apply time; not creating them"
+        );
+    }
+    if let Some(name) = pending.correspondent.as_deref() {
+        if !policy.allow_new_correspondents {
+            tracing::warn!(
+                "a new correspondent was proposed but allow_new_correspondents is off at apply time; not creating it"
+            );
+        } else if patch.correspondent.is_none() {
+            let entity = client.ensure_correspondent(name).await?;
+            patch.correspondent = Some(Some(entity.id));
+        }
+    }
+    tag_ids.sort_unstable();
+    Ok(tag_ids)
 }

@@ -1,0 +1,20 @@
+# Redocly CLI lint configuration for openapi/openapi.yaml.
+#
+# Without a config file, `redocly lint` falls back to its built-in
+# `recommended` ruleset, whose severities change between CLI releases; a newer
+# release turned `operation-summary` into an error and broke validate:openapi
+# without any spec change. Pin the ruleset here so the gate only moves when
+# this file does.
+#
+# Structural rules (`struct`, `no-unresolved-refs`, ...) stay errors. The
+# documentation-completeness rules below are warnings until the spec is filled
+# in; tracked in the Audit 2026-09 milestone.
+extends:
+  - recommended
+
+rules:
+  operation-summary: warn
+  operation-operationId: warn
+  operation-4xx-response: warn
+  operation-2xx-response: warn
+  info-license: warn

@@ -14,7 +14,7 @@ async fn migration_upgrades_seeded_default_prompts_to_v1_13_0() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         return;
     };
-    let pool = connect(&url, 5).await.expect("connect test database");
+    let pool = connect(&url, 5).await.expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
 
     let meta = get_active_prompt(&pool, Stage::Metadata)

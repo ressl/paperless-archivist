@@ -27,7 +27,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: api
-          image: ghcr.io/example/paperless-archivist:0.1.0
+          image: paperless-archivist
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

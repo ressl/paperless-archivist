@@ -48,7 +48,10 @@ use archivist_paperless::{
     PaperlessTag,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use futures::stream::{FuturesUnordered, StreamExt};
+use job_supervisor::{
+    InFlightGuard, JobSupervisor, WatchdogVerdict, catch_job_panic, watch_job_lease,
+    with_lease_keepalive,
+};
 use reqwest::Client as HttpClient;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
@@ -58,6 +61,8 @@ use tokio::time::{sleep, timeout};
 use tracing::{Instrument, error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+mod job_supervisor;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -120,6 +125,9 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
     // `process_available_jobs().await` until the whole batch finished, so
     // those maintenance checks fired far less often than the intended 5s.
     let job_processing_running = Arc::new(AtomicBool::new(false));
+    // #407: in-flight job registry + progress tracking for continuous
+    // claiming, the per-job watchdog and the liveness heartbeat.
+    let supervisor = Arc::new(JobSupervisor::new(Utc::now().timestamp()));
 
     // Write a fresh dashboard snapshot near startup so the read path has something current
     // before the periodic tick fires (snapshots used to be written on every /dashboard read).
@@ -267,12 +275,14 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 // in-flight job on deploy.
                 let drain_deadline = std::time::Instant::now() + Duration::from_secs(25);
                 while (job_processing_running.load(Ordering::Acquire)
+                    || supervisor.in_flight() > 0
                     || autopilot_drain_running.load(Ordering::Acquire))
                     && std::time::Instant::now() < drain_deadline
                 {
                     sleep(Duration::from_millis(250)).await;
                 }
                 if job_processing_running.load(Ordering::Acquire)
+                    || supervisor.in_flight() > 0
                     || autopilot_drain_running.load(Ordering::Acquire)
                 {
                     warn!(
@@ -295,6 +305,7 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                     let worker_id = worker_id.clone();
                     let last_observed_concurrency = Arc::clone(&last_observed_concurrency);
                     let job_processing_running = Arc::clone(&job_processing_running);
+                    let supervisor = Arc::clone(&supervisor);
                     tokio::spawn(async move {
                         let _guard = ReentryGuard(job_processing_running);
                         if let Err(error) = process_available_jobs(
@@ -302,11 +313,15 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                             &config,
                             &worker_id,
                             &last_observed_concurrency,
+                            &supervisor,
                         )
                         .await
                         {
                             error!(error = %error, "job processing tick failed");
                         }
+                        // #407: a completed claim cycle (even a failed or
+                        // empty one) proves the claim loop is not wedged.
+                        supervisor.claim_cycle_completed(Utc::now().timestamp());
                     });
                 }
                 if tick % 12 == 3
@@ -416,7 +431,18 @@ async fn run_worker(pool: DbPool, config: Arc<AppConfig>) -> Result<()> {
                 // server, so the Kubernetes livenessProbe checks the staleness of
                 // this file — a hung tick-loop (which keeps the binary present)
                 // stops updating it and is restarted. Cheap and non-fatal.
-                write_liveness_heartbeat().await;
+                // #407: only while work progresses — the claim loop completed
+                // recently and every in-flight job renewed its lease (or was
+                // aborted by its watchdog) in time. A job stuck where even the
+                // watchdog cannot abort it now fails liveness.
+                if supervisor.is_healthy(Utc::now().timestamp(), CLAIM_LOOP_STALL_LIMIT_SECONDS) {
+                    write_liveness_heartbeat().await;
+                } else {
+                    warn!(
+                        in_flight = supervisor.in_flight(),
+                        "job processing made no progress; withholding liveness heartbeat"
+                    );
+                }
             }
         }
     }
@@ -597,11 +623,23 @@ where
     Ok(Some(call.await))
 }
 
+/// Renewal cadence for [`with_lease_keepalive`]: a third of the lease window,
+/// so even a renewal that itself stalls for a while lands before expiry. #413
+fn lease_keepalive_interval(lease_seconds: i64) -> Duration {
+    Duration::from_secs((lease_seconds / 3).max(1) as u64)
+}
+
+/// Free job slots for the next claim cycle. #407
+fn claim_capacity(target_concurrency: u32, in_flight: usize) -> usize {
+    (target_concurrency as usize).saturating_sub(in_flight)
+}
+
 async fn process_available_jobs(
     pool: &DbPool,
     config: &Arc<AppConfig>,
     worker_id: &str,
     last_observed_concurrency: &AtomicU32,
+    supervisor: &Arc<JobSupervisor>,
 ) -> Result<()> {
     // v1.6.2 issue #127: per-cycle live-reload of worker pool size.
     //
@@ -611,10 +649,10 @@ async fn process_available_jobs(
     // emit `workflow.concurrency_changed` with both `from` and `to` so the
     // audit log shows when the pool resized and why.
     //
-    // Per-tick spawn-and-join semantics: tasks claimed in this tick run to
-    // completion before the next tick (we await the FuturesUnordered below).
-    // Pool downscale therefore never aborts in-flight work — surplus tasks
-    // are simply not spawned next tick. Pool upscale starts immediately.
+    // Continuous-claim semantics (#407): claimed jobs run detached and each
+    // tick only claims into free slots (`target - in_flight`). Pool downscale
+    // therefore never aborts in-flight work — surplus slots are simply not
+    // refilled. Pool upscale starts on the next tick.
     let settings = match get_runtime_settings(pool).await {
         Ok(settings) => Arc::new(settings),
         Err(error) => {
@@ -661,13 +699,20 @@ async fn process_available_jobs(
     if target_concurrency == 0 {
         // Defensive — the resolver clamps to ≥1, but if some operator
         // pinned concurrency to 0 the right behaviour is to skip the tick
-        // entirely rather than block on an empty FuturesUnordered.
+        // entirely rather than issue an empty claim.
         return Ok(());
     }
 
+    // #407: continuous claiming — only top up the slots that are free right
+    // now. Jobs still running from earlier cycles keep their slots; a
+    // downscale simply claims nothing until enough of them finish.
+    let free_slots = claim_capacity(target_concurrency, supervisor.in_flight());
+    if free_slots == 0 {
+        return Ok(());
+    }
     let jobs = claim_jobs(
         pool,
-        target_concurrency as i64,
+        free_slots as i64,
         worker_id,
         job_lease_seconds(&settings),
     )
@@ -692,9 +737,9 @@ async fn process_available_jobs(
         }
     };
 
-    let mut pending = FuturesUnordered::new();
+    let lease_seconds = job_lease_seconds(&settings);
     for job in jobs {
-        let pool = pool.clone();
+        let job_pool = pool.clone();
         let config = Arc::clone(config);
         let settings = Arc::clone(&settings);
         let paperless = Arc::clone(&paperless);
@@ -709,17 +754,31 @@ async fn process_available_jobs(
             stage = %job.stage,
             attempt = job.attempts
         );
-        pending.push(tokio::spawn(
+        // #407: register before spawning so the next claim cycle already sees
+        // this slot as occupied; the guard inside the task frees it on
+        // completion, panic or abort.
+        supervisor.touch(job.id, job_progress_deadline(lease_seconds));
+        let task_supervisor = Arc::clone(supervisor);
+        let watchdog_job = job.clone();
+        let handle = tokio::spawn(
             async move {
+                let _in_flight = InFlightGuard {
+                    supervisor: &task_supervisor,
+                    job_id: job.id,
+                };
+                let pool = job_pool;
                 let started = std::time::Instant::now();
-                let result = process_job(
+                // #402: a panic becomes an ordinary error so the failure path
+                // below records it via `fail_job` instead of losing it as a
+                // JoinError and leaving the lease to expire.
+                let result = catch_job_panic(process_job(
                     &pool,
                     &config,
                     settings.as_ref(),
                     paperless.as_ref(),
                     &job,
                     &lease_owner,
-                )
+                ))
                 .await;
                 if let Err(error) = &result {
                     let failure_class = classify_processing_failure(error);
@@ -819,15 +878,31 @@ async fn process_available_jobs(
                             "job processing failed"
                         );
                     }
-                    let _ = fail_job(
+                    let retryable = failure_class.is_retryable() || force_retryable;
+                    let recorded = fail_job(
                         &pool,
                         &job,
                         &lease_owner,
                         &format!("{:#}", error),
-                        failure_class.is_retryable() || force_retryable,
+                        retryable,
                         failure_class.retry_ceiling(),
                     )
                     .await;
+                    // #400: a permanent failure retires the trigger tags and
+                    // sets the failure marker so it is visible in Paperless
+                    // and the trigger poll does not requeue it every minute.
+                    if matches!(recorded, Ok(true))
+                        && failure_is_terminal(&job, retryable, failure_class.retry_ceiling())
+                    {
+                        retire_trigger_tags_after_terminal_outcome(
+                            &pool,
+                            paperless.as_ref(),
+                            settings.as_ref(),
+                            &job,
+                            true,
+                        )
+                        .await;
+                    }
                 } else {
                     info!(
                         duration_ms = started.elapsed().as_millis() as u64,
@@ -837,15 +912,77 @@ async fn process_available_jobs(
                 result
             }
             .instrument(span),
-        ));
+        );
+        spawn_job_watchdog(
+            pool.clone(),
+            Arc::clone(supervisor),
+            watchdog_job,
+            worker_id.to_owned(),
+            lease_seconds,
+            handle.abort_handle(),
+        );
     }
-
-    while let Some(result) = pending.next().await {
-        if let Err(error) = result {
-            warn!(error = %error, "worker task join failed");
-        }
-    }
+    // #407: jobs run detached; the next 5s tick claims into whatever slots are
+    // free, so one long job no longer holds the other slots idle.
     Ok(())
+}
+
+/// Interval at which the no-progress watchdog inspects a job's lease. #407
+const JOB_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
+/// Slack past `lease_until` before a job counts as hung, covering a renewal
+/// that is in flight right at the lease boundary. #407
+const JOB_WATCHDOG_GRACE_SECONDS: i64 = 60;
+/// The liveness heartbeat stops when the claim loop has not completed for
+/// this long. #407
+const CLAIM_LOOP_STALL_LIMIT_SECONDS: i64 = 600;
+
+/// Deadline (unix seconds) by which a job must show progress again: one lease
+/// window plus the watchdog grace and two watchdog intervals, i.e. strictly
+/// after the watchdog would have aborted a hung job. #407
+fn job_progress_deadline(lease_seconds: i64) -> i64 {
+    Utc::now().timestamp()
+        + lease_seconds
+        + JOB_WATCHDOG_GRACE_SECONDS
+        + 2 * JOB_WATCHDOG_INTERVAL.as_secs() as i64
+}
+
+/// Watch one in-flight job's lease. Lease renewals are the job's progress
+/// signal; a job whose lease lapsed (plus grace) while we still own it hung
+/// somewhere without its own bound, so abort the task and fail the job
+/// (retryable, bounded by `max_attempts`). A lost lease needs no action here:
+/// the job's own fencing stops it. #407
+fn spawn_job_watchdog(
+    pool: DbPool,
+    supervisor: Arc<JobSupervisor>,
+    job: JobRecord,
+    lease_owner: String,
+    lease_seconds: i64,
+    job_task: tokio::task::AbortHandle,
+) -> tokio::task::JoinHandle<()> {
+    let span = info_span!("archivist_job_watchdog", job_id = %job.id, run_id = %job.run_id);
+    tokio::spawn(
+        async move {
+        let verdict = watch_job_lease(
+            || archivist_db::job_lease_until(&pool, job.id, &lease_owner),
+            || job_task.is_finished(),
+            || supervisor.touch(job.id, job_progress_deadline(lease_seconds)),
+            JOB_WATCHDOG_INTERVAL,
+            ChronoDuration::seconds(JOB_WATCHDOG_GRACE_SECONDS),
+        )
+        .await;
+        if verdict == WatchdogVerdict::Stalled {
+            job_task.abort();
+            let message = format!(
+                "job made no progress within its {lease_seconds}s lease window and was aborted by the worker watchdog"
+            );
+            warn!(job_id = %job.id, "{message}");
+            if let Err(error) = fail_job(&pool, &job, &lease_owner, &message, true, None).await {
+                warn!(error = %error, job_id = %job.id, "failed to record watchdog abort");
+            }
+        }
+        }
+        .instrument(span),
+    )
 }
 
 /// Hard upper cap from `ARCHIVIST_WORKER_CONCURRENCY`. The settings-supplied
@@ -1829,20 +1966,43 @@ async fn process_ocr(
     job: &JobRecord,
     lease_owner: &str,
 ) -> Result<()> {
-    // Independent GETs — fetch the original bytes and the document detail
-    // concurrently instead of serially.
-    let (original, document) = tokio::try_join!(
-        paperless.download_original(job.paperless_document_id),
-        paperless.get_document(job.paperless_document_id),
-    )?;
-    let pages = render_document_pages(
-        &original,
-        document.original_file_name.as_deref(),
-        settings
-            .effective_tuning_for_stage(Stage::Ocr)
-            .ocr_page_limit,
+    // #413: download (up to 10x the Paperless timeout) plus pdfinfo/pdftoppm
+    // rendering (30s + 10s/page) used to run before the first lease renewal
+    // and could outlive the 300s default lease, letting another replica
+    // reclaim the job mid-render. Keep the lease alive every third of a lease
+    // window for the whole pre-page setup.
+    let lease_seconds = job_lease_seconds(settings);
+    let setup = with_lease_keepalive(
+        async {
+            // Independent GETs — fetch the document bytes and the document
+            // detail concurrently instead of serially.
+            let (original, document) = tokio::try_join!(
+                paperless.download_original(job.paperless_document_id),
+                paperless.get_document(job.paperless_document_id),
+            )?;
+            let pages = render_document_pages(
+                &original,
+                document.original_file_name.as_deref(),
+                settings
+                    .effective_tuning_for_stage(Stage::Ocr)
+                    .ocr_page_limit,
+            )
+            .await?;
+            anyhow::Ok((original, pages))
+        },
+        || archivist_db::bump_job_lease(pool, job.id, lease_owner, lease_seconds),
+        lease_keepalive_interval(lease_seconds),
     )
     .await?;
+    let Some(setup) = setup else {
+        warn!(
+            job_id = %job.id,
+            document_id = job.paperless_document_id,
+            "OCR lease lost during download/render; stopping so a replica isn't double-applied"
+        );
+        return Ok(());
+    };
+    let (original, pages) = setup?;
     // The original download bytes (up to the download cap) are only needed for
     // rendering and the artifact input hash. Compute the hash now and drop the
     // bytes so they aren't held in memory for the whole per-page vision loop —
@@ -2174,14 +2334,14 @@ fn diff_known_tag_names(
 ) -> (Vec<i32>, Vec<String>) {
     let known_lower: std::collections::HashSet<String> = known_pairs
         .iter()
-        .map(|(name, _)| name.to_ascii_lowercase())
+        .map(|(name, _)| archivist_core::fold_catalog_name(name))
         .collect();
     let mut ids: Vec<i32> = known_pairs.iter().map(|(_, id)| *id).collect();
     ids.sort_unstable();
     ids.dedup();
     let unknown: Vec<String> = requested
         .iter()
-        .filter(|name| !known_lower.contains(&name.to_ascii_lowercase()))
+        .filter(|name| !known_lower.contains(&archivist_core::fold_catalog_name(name)))
         .cloned()
         .collect();
     (ids, unknown)
@@ -2192,59 +2352,119 @@ fn diff_known_tag_names(
 /// review_item's `suggested_patch.tags` as `Vec<i32>`; raw names cause a 500 there and the
 /// autopilot drain then reverts the review forever).
 ///
-/// Resolution policy:
-/// * Look up known names case-insensitively in the local `paperless_tags` mirror.
-/// * For unknown names: if `allow_new_tags` is true, create them in Paperless and use the
-///   returned ID. Otherwise drop the name with a warn log — the review_item still ships,
-///   just with fewer tags, rather than blocking the whole document.
-async fn resolve_tag_names_to_ids(
+/// Only names already present in the local `paperless_tags` mirror resolve to ids; nothing
+/// is created here. Unknown names are returned so the caller can carry them as pending
+/// names that are created at apply time (#404). Workflow tags are dropped from both lists
+/// so model output can never set or re-add a trigger/completion tag (#403).
+async fn resolve_known_tag_names(
     pool: &DbPool,
-    paperless: &PaperlessClient,
     names: &[String],
-    allow_new_tags: bool,
-) -> Result<Vec<i32>> {
+    workflow_tags: &archivist_core::WorkflowTags,
+) -> Result<(Vec<i32>, Vec<String>)> {
+    let names: Vec<String> = names
+        .iter()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty() && !workflow_tags.is_workflow_tag(name))
+        .collect();
     if names.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
-    // Get (name, id) pairs for known tags so we can both build the initial id list and tell
-    // which names are unknown (need creation or dropping).
-    let known_pairs = tag_id_pairs_for_names(pool, names).await?;
-    let (mut ids, unknown) = diff_known_tag_names(names, &known_pairs);
-    if !unknown.is_empty() && allow_new_tags {
-        // Fetch the Paperless tag catalog ONCE and reuse it via
-        // `ensure_tag_cached`. Calling `paperless.ensure_tag()` per unknown
-        // name re-paginated the entire catalog every time — O(N × all_tags)
-        // per document — which is the same waste the drain path already fixed
-        // (worker:ensure_tag_cached). `ensure_tag_cached` checks the local
-        // snapshot first and only creates genuinely missing names.
-        let mut tag_cache = paperless.list_tags().await?;
-        for name in unknown {
-            match ensure_tag_cached(paperless, &mut tag_cache, &name).await {
-                Ok(tag) => {
-                    if !ids.contains(&tag.id) {
-                        ids.push(tag.id);
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        unknown_tag = %name,
-                        %error,
-                        "failed to create new Paperless tag for review_item; dropping"
-                    );
-                }
-            }
-        }
-    } else {
-        for name in unknown {
-            warn!(
-                unknown_tag = %name,
-                "dropping unknown tag from review_item suggested_patch (allow_new_tags is false)"
-            );
-        }
+    let known_pairs: Vec<(String, i32)> = tag_id_pairs_for_names(pool, &names)
+        .await?
+        .into_iter()
+        .filter(|(name, _)| !workflow_tags.is_workflow_tag(name))
+        .collect();
+    Ok(diff_known_tag_names(&names, &known_pairs))
+}
+
+/// Tag set a validated suggestion produces under the configured
+/// `old_tag_strategy` (#411). `protected` holds ids that no strategy may
+/// remove (workflow tags, include/exclude rule tags, ids unknown to the local
+/// mirror); `ai_managed` holds ids Archivist added in earlier applies.
+///
+/// * `keep_existing`      — current ∪ selected
+/// * `replace_ai_managed` — (current − unprotected AI-managed) ∪ selected
+/// * `remove_all_business`— (current ∩ protected) ∪ selected
+fn merge_tags_for_strategy(
+    strategy: &OldTagStrategy,
+    current: &[i32],
+    selected: &[i32],
+    protected: &std::collections::HashSet<i32>,
+    ai_managed: &std::collections::HashSet<i32>,
+) -> Vec<i32> {
+    let mut tags: Vec<i32> = current
+        .iter()
+        .copied()
+        .filter(|id| match strategy {
+            OldTagStrategy::KeepExisting => true,
+            OldTagStrategy::ReplaceAiManaged => protected.contains(id) || !ai_managed.contains(id),
+            OldTagStrategy::RemoveAllBusiness => protected.contains(id),
+        })
+        .collect();
+    tags.extend(selected.iter().copied());
+    tags.sort_unstable();
+    tags.dedup();
+    tags
+}
+
+/// Look up what `merge_tags_for_strategy` needs for this document and merge.
+/// `keep_existing` needs no lookups.
+async fn tags_for_old_tag_strategy(
+    pool: &DbPool,
+    settings: &RuntimeSettings,
+    document: &PaperlessDocumentDetail,
+    selected: &[i32],
+) -> Result<Vec<i32>> {
+    let strategy = &settings.tagging.old_tag_strategy;
+    if matches!(strategy, OldTagStrategy::KeepExisting) {
+        return Ok(merge_tags_for_strategy(
+            strategy,
+            &document.tags,
+            selected,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        ));
     }
-    ids.sort_unstable();
-    ids.dedup();
-    Ok(ids)
+    let catalog = archivist_db::tag_catalog_entries_for_ids(pool, &document.tags).await?;
+    let rules = &settings.workflow.rules;
+    let is_rule_tag = |name: &str| {
+        rules
+            .include_tags
+            .iter()
+            .chain(rules.exclude_tags.iter())
+            .any(|rule| rule.trim().eq_ignore_ascii_case(name.trim()))
+    };
+    let protected: std::collections::HashSet<i32> = document
+        .tags
+        .iter()
+        .copied()
+        .filter(|id| {
+            catalog
+                .iter()
+                .find(|(tag_id, _, _)| tag_id == id)
+                .is_none_or(|(_, name, is_workflow)| {
+                    *is_workflow
+                        || settings.workflow.tags.is_workflow_tag(name)
+                        || is_rule_tag(name)
+                })
+        })
+        .collect();
+    let ai_managed: std::collections::HashSet<i32> =
+        if matches!(strategy, OldTagStrategy::ReplaceAiManaged) {
+            archivist_db::ai_managed_tag_ids_for_document(pool, document.id)
+                .await?
+                .into_iter()
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+    Ok(merge_tags_for_strategy(
+        strategy,
+        &document.tags,
+        selected,
+        &protected,
+        &ai_managed,
+    ))
 }
 
 /// Pure split of `resolve_custom_field_values_to_ids`: build the
@@ -2260,7 +2480,7 @@ fn build_custom_field_value_patch(
         .filter_map(|field| {
             let (_, id, data_type) = id_pairs
                 .iter()
-                .find(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))?;
+                .find(|(name, _, _)| archivist_core::catalog_names_equal(name, &field.name))?;
             match archivist_core::coerce_custom_field_value(data_type.as_deref(), &field.value) {
                 Some(value) => Some(json!({ "field": id, "value": value })),
                 None => {
@@ -2292,7 +2512,7 @@ async fn resolve_custom_field_values_to_ids(
     for field in fields {
         if !id_pairs
             .iter()
-            .any(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))
+            .any(|(name, _, _)| archivist_core::catalog_names_equal(name, &field.name))
         {
             warn!(
                 unknown_custom_field = %field.name,
@@ -2330,6 +2550,9 @@ async fn process_metadata(
                 document_id = job.paperless_document_id,
                 "lease lost before completion; another worker owns this job — skipping"
             );
+        } else {
+            // #400: terminal without a patch — retire the trigger tags.
+            retire_trigger_tags_after_terminal_outcome(pool, paperless, settings, job, false).await;
         }
         return Ok(());
     }
@@ -2543,6 +2766,8 @@ async fn process_metadata(
     )
     .await?
     {
+        // #400: an omission completes the job without a patch.
+        retire_trigger_tags_after_terminal_outcome(pool, paperless, settings, job, false).await;
         return Ok(());
     }
 
@@ -2769,13 +2994,15 @@ async fn process_metadata(
         }
     }
 
-    // --- new correspondent (auto-create, gated) ---
+    // --- new correspondent (gated, created at apply time) ---
     // When the model found no closed-vocabulary match (it set `correspondent`
-    // null) but proposed a sender/issuer the document clearly names, create it
-    // in Paperless and assign it — mirroring how new_tags materialises unknown
-    // tags. `ensure_correspondent` reuses an existing case-insensitive match so
-    // this cannot duplicate. Gated by `metadata.allow_new_correspondents` and
-    // the same overwrite-existing guard as the closed-vocab path.
+    // null) but proposed a sender/issuer the document clearly names, carry
+    // the NAME forward. It is created in Paperless only when the patch is
+    // actually applied (full_auto right below, or on review approval) — never
+    // while the suggestion waits for review or in dry-run (#404). Gated by
+    // `metadata.allow_new_correspondents` and the same overwrite-existing
+    // guard as the closed-vocab path.
+    let mut pending_new_correspondent: Option<String> = None;
     if enabled.correspondent
         && settings.metadata.allow_new_correspondents
         && suggestion.correspondent.is_none()
@@ -2787,25 +3014,10 @@ async fn process_metadata(
             .map(str::trim)
             .filter(|name| !name.is_empty())
     {
-        match paperless.ensure_correspondent(new_name).await {
-            Ok(entity) => {
-                composite_patch.correspondent = Some(Some(entity.id));
-                applied_fields.push("correspondent");
-                info!(
-                    correspondent = %new_name,
-                    correspondent_id = entity.id,
-                    "created and assigned a new correspondent from the model proposal"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    correspondent = %new_name,
-                    "failed to create proposed new correspondent; leaving it unset"
-                );
-            }
-        }
+        pending_new_correspondent = Some(new_name.to_owned());
+        applied_fields.push("correspondent");
     }
+    let mut pending_new_tags: Vec<String> = Vec::new();
 
     // --- document_date ---
     if enabled.document_date
@@ -2898,46 +3110,59 @@ async fn process_metadata(
         ) {
             Ok(valid) => {
                 let selected_ids = tag_ids_for_names(pool, &valid.tags).await?;
-                let mut tag_ids = match settings.tagging.old_tag_strategy {
-                    OldTagStrategy::KeepExisting | OldTagStrategy::ReplaceAiManaged => {
-                        document.tags.clone()
-                    }
-                    OldTagStrategy::RemoveAllBusiness => Vec::new(),
-                };
-                for tag_id in selected_ids {
-                    if !tag_ids.contains(&tag_id) {
-                        tag_ids.push(tag_id);
-                    }
-                }
-                tag_ids.sort_unstable();
-                tag_ids.dedup();
+                // #411: honour old_tag_strategy for real; workflow and rule
+                // tags always survive.
+                let tag_ids =
+                    tags_for_old_tag_strategy(pool, settings, &document, &selected_ids).await?;
                 composite_patch.tags = Some(tag_ids);
+                // #411: validated new_tags (only non-empty with allow_new_tags)
+                // are applied too — created at apply time (#404).
+                pending_new_tags = valid.new_tags.clone();
                 composite_warnings.extend(valid.warnings);
                 applied_fields.push("tags");
             }
             Err(errors) => {
                 // Validation failed (e.g. low confidence, count over max_tags). Resolve the raw
                 // LLM names to integer IDs BEFORE creating the review_item so the apply path can
-                // deserialize `suggested_patch.tags` as `Vec<i32>` without 500-ing. Unknown names
-                // are either created in Paperless (allow_new_tags == true) or dropped.
-                let tag_ids = resolve_tag_names_to_ids(
-                    pool,
-                    paperless,
-                    &tags.tags,
-                    settings.tagging.allow_new_tags,
-                )
-                .await?;
-                review_items.push((
-                    json!({
-                        "tags": tag_ids,
-                        "standard_metadata": {
-                            "field": "tags",
-                            "confidence": tags.confidence,
-                            "suggested_names": tags.tags,
-                        }
-                    }),
-                    json!(errors),
-                ));
+                // deserialize `suggested_patch.tags` as `Vec<i32>` without 500-ing.
+                //
+                // #403: the review patch is `current ∪ suggested` so approving it can only ADD
+                // tags (the apply path treats `baseline − desired` as removals); workflow tags
+                // are never taken from model output.
+                // #404: unknown names are NOT created here; with allow_new_tags they travel as
+                // pending names and are created only if the review is approved.
+                let (known_ids, unknown) =
+                    resolve_known_tag_names(pool, &tags.tags, &settings.workflow.tags).await?;
+                let mut tag_ids = document.tags.clone();
+                tag_ids.extend(known_ids);
+                tag_ids.sort_unstable();
+                tag_ids.dedup();
+                let pending = if settings.tagging.allow_new_tags {
+                    archivist_apply::PendingNewObjects::new(
+                        unknown.into_iter().chain(tags.new_tags.iter().cloned()),
+                        None,
+                        &settings.workflow.tags,
+                    )
+                } else {
+                    for name in &unknown {
+                        warn!(
+                            unknown_tag = %name,
+                            "dropping unknown tag from review_item suggested_patch (allow_new_tags is false)"
+                        );
+                    }
+                    archivist_apply::PendingNewObjects::default()
+                };
+                let mut review_patch = json!({
+                    "tags": tag_ids,
+                    "standard_metadata": {
+                        "field": "tags",
+                        "confidence": tags.confidence,
+                        "suggested_names": tags.tags,
+                        "new_tag_names": pending.tags,
+                    }
+                });
+                pending.attach_to(&mut review_patch);
+                review_items.push((review_patch, json!(errors)));
             }
         }
     }
@@ -2961,10 +3186,9 @@ async fn process_metadata(
                 let ids = custom_field_ids_for_names(pool, &names).await?;
                 let mut values = Vec::new();
                 for field in &valid.fields {
-                    let Some((_, id, data_type)) = ids
-                        .iter()
-                        .find(|(name, _, _)| name.eq_ignore_ascii_case(&field.name))
-                    else {
+                    let Some((_, id, data_type)) = ids.iter().find(|(name, _, _)| {
+                        archivist_core::catalog_names_equal(name, &field.name)
+                    }) else {
                         continue;
                     };
                     match archivist_core::coerce_custom_field_value(
@@ -3019,6 +3243,14 @@ async fn process_metadata(
         review_items = review_items.len(),
         skipped_fields = ?skipped_fields,
         "consolidated metadata stage planned outcome"
+    );
+
+    // Model-proposed objects that do not exist in Paperless yet. Capped and
+    // stripped of workflow tag names; created only at apply time (#404).
+    let pending_new_objects = archivist_apply::PendingNewObjects::new(
+        pending_new_tags,
+        pending_new_correspondent,
+        &settings.workflow.tags,
     );
 
     // Routing:
@@ -3085,14 +3317,38 @@ async fn process_metadata(
                 json!([]),
             ));
         }
+        if let Some(name) = pending_new_objects.correspondent.clone() {
+            // #404: name only; the correspondent is created on approval.
+            let mut patch = json!({
+                "standard_metadata": {
+                    "field": "correspondent",
+                    "auto_validated": true,
+                    "suggested_name": name,
+                    "new_object": true,
+                }
+            });
+            archivist_apply::PendingNewObjects {
+                tags: Vec::new(),
+                correspondent: Some(name),
+            }
+            .attach_to(&mut patch);
+            review_items.push((patch, json!([])));
+        }
         if let Some(tags) = composite_patch.tags.clone() {
-            review_items.push((
-                json!({
-                    "tags": tags,
-                    "standard_metadata": { "field": "tags", "auto_validated": true }
-                }),
-                json!([]),
-            ));
+            let mut patch = json!({
+                "tags": tags,
+                "standard_metadata": {
+                    "field": "tags",
+                    "auto_validated": true,
+                    "new_tag_names": pending_new_objects.tags,
+                }
+            });
+            archivist_apply::PendingNewObjects {
+                tags: pending_new_objects.tags.clone(),
+                correspondent: None,
+            }
+            .attach_to(&mut patch);
+            review_items.push((patch, json!([])));
         }
         if let Some(custom_fields) = composite_patch.custom_fields.clone() {
             review_items.push((
@@ -3121,6 +3377,34 @@ async fn process_metadata(
         Ok(())
     } else if !applied_fields.is_empty() {
         if auto_apply {
+            // #404: full_auto + validated is the apply moment, so create the
+            // proposed objects now. A creation failure degrades to applying
+            // the rest of the patch, as before.
+            if !pending_new_objects.is_empty() {
+                match archivist_apply::materialize_pending_new_objects(
+                    paperless,
+                    &pending_new_objects,
+                    archivist_apply::NewObjectPolicy::from_settings(settings),
+                    &mut composite_patch,
+                )
+                .await
+                {
+                    Ok(new_tag_ids) if !new_tag_ids.is_empty() => {
+                        let tags = composite_patch
+                            .tags
+                            .get_or_insert_with(|| document.tags.clone());
+                        tags.extend(new_tag_ids);
+                        tags.sort_unstable();
+                        tags.dedup();
+                    }
+                    Ok(_) => {}
+                    Err(error) => warn!(
+                        document_id = job.paperless_document_id,
+                        error = %error,
+                        "failed to create proposed Paperless objects; applying without them"
+                    ),
+                }
+            }
             let final_run_stage = is_last_active_job(pool, job.run_id, job.id).await?;
             let execution = apply_patch_with_workflow_tags(
                 pool,
@@ -3159,7 +3443,8 @@ async fn process_metadata(
             // manual_review (or dry_run): a single composite review item with all validated
             // suggestions so the operator approves the whole set atomically.
             let baseline = review_apply_baseline(&document);
-            let composite_review_patch = serde_json::to_value(&composite_patch)?;
+            let mut composite_review_patch = serde_json::to_value(&composite_patch)?;
+            pending_new_objects.attach_to(&mut composite_review_patch);
             if create_review_item(
                 pool,
                 job,
@@ -3202,6 +3487,10 @@ async fn process_metadata(
                 document_id = job.paperless_document_id,
                 "lease lost before completion; another worker owns this job — skipping"
             );
+        } else {
+            // #400: terminal without a patch — retire the trigger tags.
+            retire_trigger_tags_after_terminal_outcome(pool, paperless, settings, job, false)
+                .await;
         }
         Ok(())
     } else {
@@ -3222,6 +3511,9 @@ async fn process_metadata(
                 document_id = job.paperless_document_id,
                 "lease lost before completion; another worker owns this job — skipping"
             );
+        } else {
+            // #400: terminal without a patch — retire the trigger tags.
+            retire_trigger_tags_after_terminal_outcome(pool, paperless, settings, job, false).await;
         }
         Ok(())
     }
@@ -3499,6 +3791,115 @@ async fn handle_patch_result(
     Ok(())
 }
 
+/// Which workflow tags a terminal outcome that wrote no business patch must
+/// remove and add (#400). A permanent failure aborts the whole run, so every
+/// trigger goes and the failure markers are set; a skip retires only the
+/// triggers of this stage, plus `trigger_process` when it was the run's last
+/// active stage (mirroring the success path).
+fn terminal_trigger_tag_plan(
+    tags: &archivist_core::WorkflowTags,
+    stage: Stage,
+    final_run_stage: bool,
+    failed: bool,
+) -> (Vec<&str>, Vec<&str>) {
+    if failed {
+        return (
+            tags.all_trigger_tags(),
+            vec![tags.failed.as_str(), tags.failed_tag_for_stage(stage)],
+        );
+    }
+    let mut removals = tags.trigger_tags_requesting_stage(stage);
+    if final_run_stage {
+        removals.push(tags.trigger_process.as_str());
+    }
+    (removals, Vec::new())
+}
+
+/// #400: a job that ends without applying a patch (skip, omission, all fields
+/// invalid, permanent failure) must still retire its trigger tags, otherwise
+/// the trigger poll re-creates a run for the same unchanged document every
+/// minute. Best-effort: errors are logged, and the poller additionally skips
+/// documents whose latest run is terminal and newer than their Paperless
+/// `modified` timestamp. In dry-run nothing is written to Paperless; the
+/// poller guard alone prevents the loop there.
+async fn retire_trigger_tags_after_terminal_outcome(
+    pool: &DbPool,
+    paperless: &PaperlessClient,
+    settings: &RuntimeSettings,
+    job: &JobRecord,
+    failed: bool,
+) {
+    if settings.workflow.dry_run {
+        info!(
+            document_id = job.paperless_document_id,
+            "dry-run: leaving trigger tags in Paperless after terminal outcome"
+        );
+        return;
+    }
+    let result: Result<()> = async {
+        let final_run_stage = failed || is_last_active_job(pool, job.run_id, job.id).await?;
+        let (remove_names, add_names) =
+            terminal_trigger_tag_plan(&settings.workflow.tags, job.stage, final_run_stage, failed);
+        let mut catalog = paperless.list_tags().await?;
+        let removals: Vec<i32> = catalog
+            .iter()
+            .filter(|tag| {
+                remove_names
+                    .iter()
+                    .any(|name| tag.name.eq_ignore_ascii_case(name))
+            })
+            .map(|tag| tag.id)
+            .collect();
+        let mut additions = Vec::new();
+        for name in add_names {
+            additions.push(ensure_tag_cached(paperless, &mut catalog, name).await?.id);
+        }
+        let document = paperless.get_document(job.paperless_document_id).await?;
+        let needs_change = document.tags.iter().any(|id| removals.contains(id))
+            || additions.iter().any(|id| !document.tags.contains(id));
+        if needs_change {
+            paperless
+                .add_and_remove_tags(job.paperless_document_id, &additions, &removals)
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        warn!(
+            document_id = job.paperless_document_id,
+            error = %error,
+            failed,
+            "could not retire trigger tags after terminal outcome; poller guard prevents a requeue loop"
+        );
+    }
+}
+
+/// Mirror of `fail_job`'s retry decision so the caller knows whether the
+/// failure it just recorded was terminal (#400).
+fn failure_is_terminal(job: &JobRecord, retryable: bool, retry_ceiling: Option<i32>) -> bool {
+    let ceiling = retry_ceiling
+        .map(|ceiling| ceiling.max(job.max_attempts))
+        .unwrap_or(job.max_attempts);
+    !(retryable && job.attempts < ceiling)
+}
+
+/// #400 poller guard: skip a trigger-tagged document whose most recent run
+/// is terminal and finished at or after the document's last Paperless
+/// modification — the trigger simply survived that run (dry-run, rejected
+/// review, tag removal failed). Re-adding the trigger tag bumps `modified`
+/// and therefore queues exactly one new run. Without a `modified` timestamp
+/// the old behaviour (queue) is kept.
+fn trigger_already_handled(
+    latest_terminal_run_finished_at: Option<DateTime<Utc>>,
+    document_modified_at: Option<DateTime<Utc>>,
+) -> bool {
+    matches!(
+        (latest_terminal_run_finished_at, document_modified_at),
+        (Some(finished), Some(modified)) if finished >= modified
+    )
+}
+
 async fn apply_patch_with_workflow_tags(
     pool: &DbPool,
     paperless: &PaperlessClient,
@@ -3530,12 +3931,14 @@ async fn apply_patch_with_workflow_tags(
             tag_ids.push(full.id);
         }
     }
-    for trigger_name in [
-        settings.workflow.tags.trigger_tag_for_stage(job.stage),
-        final_run_stage.then_some(settings.workflow.tags.trigger_process.as_str()),
-    ]
-    .into_iter()
-    .flatten()
+    // #400: retire every trigger that requested this stage (incl. the legacy
+    // per-field metadata triggers), not just the stage's primary trigger.
+    for trigger_name in settings
+        .workflow
+        .tags
+        .trigger_tags_requesting_stage(job.stage)
+        .into_iter()
+        .chain(final_run_stage.then_some(settings.workflow.tags.trigger_process.as_str()))
     {
         if let Some(trigger) = tags
             .iter()
@@ -3827,7 +4230,17 @@ async fn apply_autopilot_drain_patch(
         .edited_patch
         .clone()
         .unwrap_or_else(|| review.suggested_patch.clone());
-    let patch: DocumentPatch = serde_json::from_value(patch_value)?;
+    let pending_new_objects =
+        archivist_apply::PendingNewObjects::from_patch_value(&patch_value, &settings.workflow.tags);
+    let mut patch: DocumentPatch = serde_json::from_value(patch_value)?;
+    // #404: objects proposed by the model are created only now, at apply.
+    let new_tag_ids = archivist_apply::materialize_pending_new_objects(
+        paperless,
+        &pending_new_objects,
+        archivist_apply::NewObjectPolicy::from_settings(settings),
+        &mut patch,
+    )
+    .await?;
     // run_id is None only for review items whose run was pruned by retention;
     // those never reach the drain (retention deletes terminal runs only, and
     // a pending review keeps its run in 'waiting_review').
@@ -3849,12 +4262,18 @@ async fn apply_autopilot_drain_patch(
     if final_run_stage {
         additions.push(completion_full.id);
     }
-    if let Some(trigger_name) = settings.workflow.tags.trigger_tag_for_stage(review.stage)
-        && let Some(tag) = tag_cache
+    additions.extend(new_tag_ids);
+    for trigger_name in settings
+        .workflow
+        .tags
+        .trigger_tags_requesting_stage(review.stage)
+    {
+        if let Some(tag) = tag_cache
             .iter()
             .find(|tag| tag.name.eq_ignore_ascii_case(trigger_name))
-    {
-        removals.push(tag.id);
+        {
+            removals.push(tag.id);
+        }
     }
     if final_run_stage
         && let Some(tag) = tag_cache.iter().find(|tag| {
@@ -4125,6 +4544,28 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
     // the document set and the tag catalog are large.
     let tags_by_id: HashMap<i32, &PaperlessTag> =
         snapshot.tags.iter().map(|tag| (tag.id, tag)).collect();
+    // #400: one batched lookup of the latest terminal run per triggered doc.
+    let triggered_ids: Vec<i32> = snapshot
+        .documents
+        .iter()
+        .filter(|document| {
+            let names = document
+                .tags
+                .iter()
+                .filter_map(|id| tags_by_id.get(id))
+                .map(|tag| tag.name.clone())
+                .collect::<Vec<_>>();
+            !settings
+                .workflow
+                .tags
+                .stages_requested_by_tags(&names)
+                .is_empty()
+        })
+        .map(|document| document.id)
+        .collect();
+    let latest_terminal_runs =
+        archivist_db::latest_terminal_run_finished_at(pool, &triggered_ids).await?;
+    let mut trigger_skipped_unchanged = 0_u64;
     for document in snapshot.documents {
         let tag_names = document
             .tags
@@ -4135,6 +4576,13 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
         let stages = settings.workflow.tags.stages_requested_by_tags(&tag_names);
         if !stages.is_empty() {
             trigger_matches += 1;
+            if trigger_already_handled(
+                latest_terminal_runs.get(&document.id).copied(),
+                archivist_db::parse_paperless_modified_at(document.modified.as_deref()),
+            ) {
+                trigger_skipped_unchanged += 1;
+                continue;
+            }
             let trigger = if tag_names
                 .iter()
                 .any(|tag| tag.eq_ignore_ascii_case(&settings.workflow.tags.trigger_process))
@@ -4160,7 +4608,7 @@ async fn poll_paperless_triggers(pool: &DbPool, config: &AppConfig) -> Result<()
     }
     info!(
         trigger_matches,
-        "trigger polling inspected Paperless documents"
+        trigger_skipped_unchanged, "trigger polling inspected Paperless documents"
     );
     if settings.workflow.mode.auto_select_documents() {
         let safety = get_workflow_safety_status(pool, &settings).await?;
@@ -4323,12 +4771,45 @@ async fn sync_metadata(
         upsert_paperless_custom_field(&mut tx, field.id, &field.name, field.data_type.as_deref())
             .await?;
     }
+    // #408: the catalog upserts above are small; commit them now instead of
+    // holding one transaction (and every inventory row lock) across the whole
+    // document sync, where `claim_jobs`/`complete_job`/`fail_job` queued up
+    // behind it.
+    tx.commit().await?;
     // O(1) id→name lookups: building this map once avoids the previous
     // O(documents × tags) nested linear scan, which was pure CPU burned inside
     // the sync transaction on instances with many tags/documents.
     let tag_names_by_id: HashMap<i32, &str> =
         tags.iter().map(|tag| (tag.id, tag.name.as_str())).collect();
-    for document in &documents {
+    // #408: upsert in short, id-ordered batches — each batch locks at most
+    // SYNC_UPSERT_BATCH_SIZE inventory rows, always in ascending id order (the
+    // same order `claim_jobs` locks them in), so there is no long-held lock
+    // set and no lock-order deadlock with the claim path.
+    let mut ordered: Vec<&PaperlessDocumentSummary> = documents.iter().collect();
+    ordered.sort_unstable_by_key(|document| document.id);
+    for batch in ordered.chunks(SYNC_UPSERT_BATCH_SIZE) {
+        let mut tx = pool.begin().await?;
+        upsert_inventory_batch(&mut tx, batch, &tag_names_by_id, settings).await?;
+        tx.commit().await?;
+    }
+    // The cursor only advances after every batch landed; a crash mid-sync
+    // re-covers the same window on the next run.
+    let mut tx = pool.begin().await?;
+    update_paperless_sync_cursor(&mut tx, &archive_name, sync_mode, sync_started_at).await?;
+    tx.commit().await?;
+    Ok(PaperlessSyncSnapshot { tags, documents })
+}
+
+/// Inventory rows upserted per sync transaction. #408
+const SYNC_UPSERT_BATCH_SIZE: usize = 500;
+
+async fn upsert_inventory_batch(
+    tx: &mut archivist_db::DbTransaction<'_>,
+    documents: &[&PaperlessDocumentSummary],
+    tag_names_by_id: &HashMap<i32, &str>,
+    settings: &RuntimeSettings,
+) -> Result<()> {
+    for document in documents {
         let tag_names = document
             .tags
             .iter()
@@ -4336,7 +4817,7 @@ async fn sync_metadata(
             .map(|name| name.to_owned())
             .collect::<Vec<_>>();
         upsert_inventory_item(
-            &mut tx,
+            tx,
             &archivist_db::InventoryUpsert {
                 paperless_document_id: document.id,
                 title: document.title.clone(),
@@ -4364,9 +4845,7 @@ async fn sync_metadata(
         )
         .await?;
     }
-    update_paperless_sync_cursor(&mut tx, &archive_name, sync_mode, sync_started_at).await?;
-    tx.commit().await?;
-    Ok(PaperlessSyncSnapshot { tags, documents })
+    Ok(())
 }
 
 async fn paperless_client(
@@ -4374,19 +4853,11 @@ async fn paperless_client(
     config: &AppConfig,
     settings: &RuntimeSettings,
 ) -> Result<PaperlessClient> {
-    let active_profile = settings.paperless.archive_profiles.iter().find(|profile| {
-        profile.enabled
-            && profile
-                .name
-                .eq_ignore_ascii_case(&settings.paperless.active_archive)
-    });
-    let base_url = active_profile
-        .map(|profile| profile.base_url.as_str())
-        .unwrap_or(&settings.paperless.base_url);
-    let secret_id = active_profile
-        .and_then(|profile| profile.token_secret_id)
-        .or(settings.paperless.token_secret_id)
-        .ok_or_else(|| anyhow!("Paperless token is not configured"))?;
+    // The global token is only inherited by a same-origin profile. #396
+    let (base_url, secret_id) = settings.paperless.active_connection();
+    let secret_id = secret_id.ok_or_else(|| {
+        anyhow!("Paperless token is not configured for the active archive profile")
+    })?;
     let token = resolve_secret(pool, &config.secret_key, secret_id)
         .await?
         .ok_or_else(|| anyhow!("Paperless token secret reference does not exist"))?;
@@ -4902,6 +5373,31 @@ mod tests {
     }
 
     #[test]
+    fn ocr_setup_lease_keepalive_renews_well_within_the_lease() {
+        // #413: every pre-page phase runs under the keepalive, so the longest
+        // unrenewed stretch is one keepalive interval — a third of the lease —
+        // regardless of the download (10x HTTP timeout) or render budget.
+        for lease in [BASE_JOB_LEASE_SECONDS, 420, 3600] {
+            let interval = lease_keepalive_interval(lease).as_secs() as i64;
+            assert!(interval * 3 <= lease && interval >= 1, "lease {lease}");
+        }
+        // The #407 watchdog only fires after a full lease window plus grace
+        // without renewal, so it never races a working keepalive.
+        let lease = job_lease_seconds(&RuntimeSettings::default());
+        assert!((lease_keepalive_interval(lease).as_secs() as i64) < lease);
+    }
+
+    #[test]
+    fn continuous_claim_only_fills_free_slots() {
+        // #407: long-running jobs keep their slots; the rest are claimable.
+        assert_eq!(claim_capacity(4, 0), 4);
+        assert_eq!(claim_capacity(4, 1), 3);
+        assert_eq!(claim_capacity(4, 4), 0);
+        // Downscale below the in-flight count claims nothing, aborts nothing.
+        assert_eq!(claim_capacity(2, 5), 0);
+    }
+
+    #[test]
     fn job_lease_outlives_the_slowest_enabled_provider_call_budget() {
         // Default presets leave request_timeout_seconds unset → 180s. The
         // enabled OpenAI preset can make the one-shot Auto schema fallback,
@@ -5120,7 +5616,7 @@ mod tests {
         };
         let pool = connect(&database_url, 10)
             .await
-            .expect("connect test database");
+            .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
         archivist_db::migrate(&pool)
             .await
             .expect("apply migrations");
@@ -5744,6 +6240,17 @@ mod tests {
     }
 
     #[test]
+    fn diff_known_tag_names_folds_non_ascii_capitals() {
+        // The SQL lookup returns the catalog spelling; a lowercase request must
+        // not be treated as unknown (and re-created in Paperless). #409
+        let requested = vec!["ärzte".to_owned(), "Übersetzung".to_owned()];
+        let known = vec![("Ärzte".to_owned(), 21), ("übersetzung".to_owned(), 22)];
+        let (ids, unknown) = diff_known_tag_names(&requested, &known);
+        assert_eq!(ids, vec![21, 22]);
+        assert!(unknown.is_empty(), "unexpected unknown tags: {unknown:?}");
+    }
+
+    #[test]
     fn diff_known_tag_names_empty_inputs() {
         let (ids, unknown) = diff_known_tag_names(&[], &[]);
         assert!(ids.is_empty());
@@ -5756,6 +6263,142 @@ mod tests {
         let (ids, unknown) = diff_known_tag_names(&requested, &[]);
         assert!(ids.is_empty());
         assert_eq!(unknown, requested);
+    }
+
+    // ---- #411: old_tag_strategy semantics ----
+    // Fixture: 1 = user tag "Inbox" (protected by an include/exclude rule),
+    // 2 = workflow tag "archivist-ocr", 3 = earlier AI-added business tag,
+    // 4 = user-added business tag, 5 = newly selected AI tag.
+    fn strategy_fixture() -> (Vec<i32>, Vec<i32>, HashSetI32, HashSetI32) {
+        (
+            vec![1, 2, 3, 4],
+            vec![5],
+            [1, 2].into_iter().collect(),
+            [3].into_iter().collect(),
+        )
+    }
+    type HashSetI32 = std::collections::HashSet<i32>;
+
+    #[test]
+    fn keep_existing_strategy_only_adds() {
+        let (current, selected, protected, ai) = strategy_fixture();
+        assert_eq!(
+            merge_tags_for_strategy(
+                &OldTagStrategy::KeepExisting,
+                &current,
+                &selected,
+                &protected,
+                &ai
+            ),
+            vec![1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn replace_ai_managed_strategy_drops_only_earlier_ai_tags() {
+        let (current, selected, protected, ai) = strategy_fixture();
+        assert_eq!(
+            merge_tags_for_strategy(
+                &OldTagStrategy::ReplaceAiManaged,
+                &current,
+                &selected,
+                &protected,
+                &ai
+            ),
+            vec![1, 2, 4, 5]
+        );
+        // A protected tag is kept even if Archivist once added it.
+        let ai_including_workflow: HashSetI32 = [2, 3].into_iter().collect();
+        assert_eq!(
+            merge_tags_for_strategy(
+                &OldTagStrategy::ReplaceAiManaged,
+                &current,
+                &selected,
+                &protected,
+                &ai_including_workflow
+            ),
+            vec![1, 2, 4, 5]
+        );
+        // Re-selecting an AI tag keeps it.
+        assert_eq!(
+            merge_tags_for_strategy(
+                &OldTagStrategy::ReplaceAiManaged,
+                &current,
+                &[3],
+                &protected,
+                &ai
+            ),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn remove_all_business_strategy_keeps_workflow_and_rule_tags() {
+        let (current, selected, protected, ai) = strategy_fixture();
+        assert_eq!(
+            merge_tags_for_strategy(
+                &OldTagStrategy::RemoveAllBusiness,
+                &current,
+                &selected,
+                &protected,
+                &ai
+            ),
+            vec![1, 2, 5]
+        );
+    }
+
+    // ---- #400: terminal outcomes retire trigger tags ----
+
+    #[test]
+    fn terminal_skip_retires_stage_triggers_and_process_only_when_final() {
+        let tags = archivist_core::WorkflowTags::default();
+        let (remove, add) = terminal_trigger_tag_plan(&tags, Stage::Metadata, false, false);
+        assert!(add.is_empty());
+        assert!(remove.contains(&"ai-title"));
+        assert!(!remove.contains(&"ai-process"));
+        let (remove, _) = terminal_trigger_tag_plan(&tags, Stage::Metadata, true, false);
+        assert!(remove.contains(&"ai-process"));
+        assert!(remove.contains(&"ai-tags"));
+        assert!(!remove.contains(&"ai-ocr"));
+    }
+
+    #[test]
+    fn terminal_failure_retires_every_trigger_and_marks_failure() {
+        let tags = archivist_core::WorkflowTags::default();
+        let (remove, add) = terminal_trigger_tag_plan(&tags, Stage::Ocr, false, true);
+        assert_eq!(remove, tags.all_trigger_tags());
+        assert_eq!(add, vec!["ai-failed", "ai-failed-ocr"]);
+    }
+
+    #[test]
+    fn failure_is_terminal_mirrors_fail_job_retry_budget() {
+        let mut job = vision_test_job();
+        job.max_attempts = 3;
+        job.attempts = 1;
+        assert!(!failure_is_terminal(&job, true, None));
+        assert!(failure_is_terminal(&job, false, None));
+        job.attempts = 3;
+        assert!(failure_is_terminal(&job, true, None));
+        // A higher infrastructure ceiling keeps it retryable (#305).
+        assert!(!failure_is_terminal(&job, true, Some(10)));
+        // A ceiling never lowers the budget.
+        job.attempts = 2;
+        assert!(!failure_is_terminal(&job, true, Some(1)));
+    }
+
+    #[test]
+    fn trigger_poll_skips_documents_unchanged_since_their_terminal_run() {
+        let finished = Utc::now();
+        let before = finished - ChronoDuration::seconds(30);
+        let after = finished + ChronoDuration::seconds(30);
+        // Unchanged since the run ended: exactly one run per trigger.
+        assert!(trigger_already_handled(Some(finished), Some(before)));
+        assert!(trigger_already_handled(Some(finished), Some(finished)));
+        // Operator re-added the trigger (modified moved on): queue again.
+        assert!(!trigger_already_handled(Some(finished), Some(after)));
+        // No terminal run (never processed / still active) or unknown modified.
+        assert!(!trigger_already_handled(None, Some(before)));
+        assert!(!trigger_already_handled(Some(finished), None));
     }
 
     #[test]

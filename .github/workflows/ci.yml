@@ -56,6 +56,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: frontend
       - run: node --test scripts/verify/kubernetes_monitoring_contract.test.mjs
+      - run: node --test scripts/verify/kubernetes_image_version_contract.test.mjs
       - run: |
           docker run --rm -v "$PWD:/workspace" -w /workspace \
             --entrypoint kubectl \

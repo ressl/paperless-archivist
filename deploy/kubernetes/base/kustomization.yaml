@@ -8,3 +8,13 @@ resources:
   - service.yaml
   - ingress.yaml
   - networkpolicy.yaml
+
+# Deployments reference the logical image name `paperless-archivist`; this
+# stanza resolves it. `newName` is a public-safe placeholder: point it (and
+# ideally a `digest`) at your registry in an overlay. `newTag` tracks the
+# release version and is checked against Cargo.toml by
+# scripts/verify/kubernetes_image_version_contract.test.mjs. #436
+images:
+  - name: paperless-archivist
+    newName: ghcr.io/example/paperless-archivist
+    newTag: "1.18.1"

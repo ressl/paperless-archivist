@@ -4,46 +4,18 @@
 
 use std::sync::LazyLock;
 
-use archivist_core::{ProcessingMode, Stage};
+use archivist_core::{ProcessingMode, Stage, WorkflowRules};
 use archivist_db::{
-    begin_completion_tag_reconcile_guard, completed_document_ids_missing_full_tag, connect,
-    create_run_with_jobs, migrate,
+    completed_document_ids_missing_full_tag, connect, create_run_with_jobs, migrate,
+    queue_missing_pipeline, release_completion_tag_reservation, reserve_completion_tag_reconcile,
 };
-use sqlx::{Executor, PgPool};
+use sqlx::{Executor, Row};
 use tokio::{
     sync::Mutex,
-    time::{Duration, Instant, sleep, timeout},
+    time::{Duration, timeout},
 };
 
 static DB_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-async fn wait_for_advisory_waiter(pool: &PgPool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let waiting: bool = sqlx::query_scalar(
-            r#"
-            select exists (
-              select 1
-                from pg_stat_activity
-               where datname = current_database()
-                 and pid <> pg_backend_pid()
-                 and wait_event = 'advisory'
-            )
-            "#,
-        )
-        .fetch_one(pool)
-        .await
-        .expect("inspect advisory-lock waiters");
-        if waiting {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "parallel run never reached the document advisory lock"
-        );
-        sleep(Duration::from_millis(10)).await;
-    }
-}
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
@@ -52,7 +24,7 @@ async fn completion_candidates_require_every_enabled_stage_to_be_terminal() {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL test database");
     let pool = connect(&database_url, 10)
         .await
-        .expect("connect test database");
+        .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"
@@ -98,7 +70,7 @@ async fn completion_reconcile_guard_rechecks_after_candidate_selection() {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL test database");
     let pool = connect(&database_url, 10)
         .await
-        .expect("connect test database");
+        .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"
@@ -130,23 +102,27 @@ async fn completion_reconcile_guard_rechecks_after_candidate_selection() {
     .await
     .expect("start a run after initial selection");
 
-    let guard = begin_completion_tag_reconcile_guard(&pool, 10, &[Stage::Ocr, Stage::Metadata])
+    let reserved = reserve_completion_tag_reconcile(&pool, 10, &[Stage::Ocr, Stage::Metadata])
         .await
         .expect("recheck candidate under lock");
     assert!(
-        guard.is_none(),
+        !reserved,
         "an active run created after candidate selection must cancel the write"
     );
 }
 
+/// #410: the reservation commits immediately (no advisory lock or pooled
+/// connection held across the Paperless PATCH), records the tag in the
+/// inventory so neither reconciliation nor the auto-selector pick the
+/// document again, and can be released when the Paperless write fails.
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
-async fn completion_reconcile_guard_serializes_parallel_run_creation() {
+async fn completion_reconcile_reservation_does_not_hold_locks_across_http() {
     let _db_lock = DB_LOCK.lock().await;
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL test database");
     let pool = connect(&database_url, 10)
         .await
-        .expect("connect test database");
+        .expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"
@@ -161,36 +137,71 @@ async fn completion_reconcile_guard_serializes_parallel_run_creation() {
     .await
     .expect("seed lock candidate");
 
-    let guard = begin_completion_tag_reconcile_guard(&pool, 11, &[Stage::Ocr, Stage::Metadata])
-        .await
-        .expect("acquire reconcile guard")
-        .expect("candidate remains eligible");
+    let stages = [Stage::Ocr, Stage::Metadata];
+    assert!(
+        reserve_completion_tag_reconcile(&pool, 11, &stages)
+            .await
+            .expect("reserve")
+    );
+    let row = sqlx::query(
+        "select has_full_completion_tag, complete from document_inventory where paperless_document_id = 11",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inventory");
+    assert!(row.get::<bool, _>("has_full_completion_tag"));
+    assert!(row.get::<bool, _>("complete"));
+    assert!(
+        completed_document_ids_missing_full_tag(&pool, &stages)
+            .await
+            .expect("candidates")
+            .is_empty()
+    );
+    // A second reservation for the same document is refused.
+    assert!(
+        !reserve_completion_tag_reconcile(&pool, 11, &stages)
+            .await
+            .expect("second reserve")
+    );
+    let queued = queue_missing_pipeline(
+        &pool,
+        &stages,
+        ProcessingMode::ManualReview,
+        "auto-selector",
+        "worker",
+        &WorkflowRules::default(),
+        Some(10),
+    )
+    .await
+    .expect("auto-selector");
+    assert_eq!(queued, 0, "reserved document is not auto-selected");
 
-    let run_pool = pool.clone();
-    let run_task = tokio::spawn(async move {
+    // No lock is held while the Paperless write would run: run creation for
+    // the same document is not blocked.
+    timeout(
+        Duration::from_secs(2),
         create_run_with_jobs(
-            &run_pool,
+            &pool,
             11,
             &[Stage::Ocr],
             ProcessingMode::ManualReview,
             "parallel-run-test",
             "test",
-        )
-        .await
-    });
-    tokio::pin!(run_task);
-    wait_for_advisory_waiter(&pool).await;
-    assert!(
-        timeout(Duration::from_millis(150), &mut run_task)
-            .await
-            .is_err(),
-        "parallel run creation must wait while the external write is guarded"
-    );
+        ),
+    )
+    .await
+    .expect("run creation is not blocked by the reservation")
+    .expect("run created");
 
-    guard.commit().await.expect("release reconcile guard");
-    timeout(Duration::from_secs(5), &mut run_task)
+    release_completion_tag_reservation(&pool, 11)
         .await
-        .expect("parallel run unblocks after guard commit")
-        .expect("parallel run task completes")
-        .expect("parallel run succeeds");
+        .expect("release");
+    let row = sqlx::query(
+        "select has_full_completion_tag, complete from document_inventory where paperless_document_id = 11",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inventory");
+    assert!(!row.get::<bool, _>("has_full_completion_tag"));
+    assert!(!row.get::<bool, _>("complete"));
 }

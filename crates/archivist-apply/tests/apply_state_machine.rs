@@ -92,7 +92,7 @@ async fn mock_client(invalid_first_response: bool) -> (PaperlessClient, Arc<Mute
 
 async fn fresh_pool() -> Option<DbPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = connect(&url, 10).await.expect("connect test database");
+    let pool = connect(&url, 10).await.expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         "truncate paperless_apply_intents, review_items, pipeline_runs, document_inventory, audit_events, metrics_counters restart identity cascade",
@@ -361,4 +361,78 @@ async fn confirmed_human_intent_finalizes_local_review_after_restart() {
             .state,
         "finalized"
     );
+}
+
+/// Paperless whose first PATCH answers 503 without applying anything (a
+/// proxy/gateway error in front of a healthy instance). #389
+async fn transient_failure_mock() -> (PaperlessClient, Arc<Mutex<MockPaperless>>) {
+    async fn flaky_patch(
+        State(state): State<Arc<Mutex<MockPaperless>>>,
+        Path(id): Path<i32>,
+        Json(patch): Json<Value>,
+    ) -> Response {
+        let first = {
+            let mut guard = state.lock().await;
+            guard.patch_count += 1;
+            guard.patch_count == 1
+        };
+        if first {
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response();
+        }
+        state.lock().await.patch_count -= 1;
+        patch_document(State(state), Path(id), Json(patch)).await
+    }
+
+    let (_, state) = mock_client(false).await;
+    let app = Router::new()
+        .route("/api/documents/{id}/", get(get_document).patch(flaky_patch))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let address = listener.local_addr().expect("mock address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve mock");
+    });
+    let client = PaperlessClient::new(
+        &format!("http://{address}/"),
+        SecretString::from("test-token".to_owned()),
+        5,
+    )
+    .expect("client");
+    (client, state)
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn transient_patch_failure_keeps_the_same_patch_retryable() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    let (client, state) = transient_failure_mock().await;
+    let request = request(title_patch());
+
+    let error = apply_document(&pool, &client, request.clone())
+        .await
+        .expect_err("503 must surface as an error");
+    assert!(error.to_string().contains("will be retried"), "{error:#}");
+    let hash = patch_hash(&request.patch).expect("hash");
+    let state_after_failure: String = sqlx::query_scalar(
+        "select state from paperless_apply_intents where source_key = $1 and patch_hash = $2",
+    )
+    .bind(&request.source_key)
+    .bind(&hash)
+    .fetch_one(&pool)
+    .await
+    .expect("intent state");
+    assert_eq!(
+        state_after_failure, "prepared",
+        "a transient failure must not block the patch terminally"
+    );
+
+    let retried = apply_document(&pool, &client, request)
+        .await
+        .expect("the same patch applies on retry");
+    assert!(matches!(retried, ApplyExecution::Confirmed { .. }));
+    let guard = state.lock().await;
+    assert_eq!(guard.patch_count, 2);
+    assert_eq!(guard.document["title"], "new");
 }

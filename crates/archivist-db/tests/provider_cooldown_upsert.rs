@@ -13,7 +13,7 @@ use sqlx::Executor;
 
 async fn fresh_pool() -> Option<DbPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = connect(&url, 10).await.expect("connect test database");
+    let pool = connect(&url, 10).await.expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(r#"truncate ai_provider_cooldowns;"#)
         .await

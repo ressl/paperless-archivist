@@ -1,9 +1,11 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, GitCompare, History, Info, Play, RotateCcw, Save } from 'lucide-react';
 import { api, Prompt, PromptExperiment, PromptTestResponse, PromptUsage, Stage } from '../api/client';
 import { promptStageOrder, resolvePromptStageHelp, type PromptStageHelp } from '../data/promptHelp';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
-import { Button, PageHeader, Status, localizedErrorMessage, run, useFocusTrap } from '../lib/ui';
+import { Button, PageHeader, Status, localizedErrorMessage, run } from '../lib/ui';
+import { ConfirmDialog, useConfirm } from '../lib/ConfirmDialog';
+import { useUnsavedChangesGuard } from '../lib/unsavedChanges';
 import { formatMs } from '../lib/format';
 import { lineDiffStats } from './lineDiff';
 import { useResource } from '../lib/useResource';
@@ -50,6 +52,7 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const [saving, setSaving] = useState(false);
   const [activating, setActivating] = useState(false);
   const [pendingSelection, setPendingSelection] = useState<PendingPromptSelection | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const usageByPromptId = useMemo(() => {
     const byId = new Map<string, PromptUsage>();
     usage.forEach((entry) => byId.set(entry.prompt_id, entry));
@@ -82,6 +85,8 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
   const promptDirty = selectedPrompt
     ? editorName.trim() !== selectedPrompt.name || editorContent.trimEnd() !== selectedPrompt.content.trimEnd()
     : editorName.trim() !== 'default' || editorContent.trimEnd() !== '';
+  // Leaving the Prompts page (sidebar / reload) with a dirty draft asks first (#423).
+  useUnsavedChangesGuard(promptDirty);
   const stageHelp = resolvePromptStageHelp(selectedStage, t);
   const promptStats = promptTextStats(editorContent);
   const diffStats = comparePrompt && selectedPrompt ? lineDiffStats(comparePrompt.content, editorContent) : null;
@@ -152,6 +157,8 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
     }
     applySelection(selection);
   };
+
+  const cancelPendingSelection = useCallback(() => setPendingSelection(null), []);
 
   const discardDraftAndSwitch = () => {
     const selection = pendingSelection;
@@ -282,13 +289,29 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
                   variant="secondary"
                   icon={<Check size={16} />}
                   disabled={activating || !selectedPrompt || selectedPrompt.active}
-                  onClick={() =>
-                    selectedPrompt &&
-                    run(setActivating, setError, async () => {
+                  onClick={async () => {
+                    if (!selectedPrompt) return;
+                    // Activation switches the prompt every new run of this
+                    // stage uses, so confirm with the exact version (#417).
+                    const confirmed = await confirm({
+                      title: t('prompts.activate_confirm.title'),
+                      description: t('prompts.activate_confirm.description', {
+                        name: selectedPrompt.name,
+                        version: selectedPrompt.version,
+                        stage: stageHelp.label
+                      }),
+                      confirmLabel: t('prompts.activate_selected'),
+                      tone: 'default',
+                      details: activePrompt
+                        ? t('prompts.activate_confirm.replaces', { name: activePrompt.name, version: activePrompt.version })
+                        : undefined
+                    });
+                    if (!confirmed) return;
+                    await run(setActivating, setError, async () => {
                       await api.activatePrompt(selectedPrompt.id);
                       await load();
-                    }, t)
-                  }
+                    }, t);
+                  }}
                 >
                   {activating ? t('prompts.activating') : t('prompts.activate_selected')}
                 </Button>
@@ -501,59 +524,17 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
         )}
       </section>
       {pendingSelection && (
-        <PromptDraftDialog
-          onCancel={() => setPendingSelection(null)}
-          onDiscard={discardDraftAndSwitch}
+        <ConfirmDialog
+          title={t('prompts.draft_dialog.title')}
+          description={t('prompts.draft_dialog.description')}
+          cancelLabel={t('prompts.draft_dialog.cancel')}
+          confirmLabel={t('prompts.draft_dialog.discard')}
+          onCancel={cancelPendingSelection}
+          onConfirm={discardDraftAndSwitch}
         />
       )}
+      {confirmDialog}
     </section>
-  );
-}
-
-function PromptDraftDialog({ onCancel, onDiscard }: { onCancel: () => void; onDiscard: () => void }) {
-  const { t } = useI18n();
-  const dialogRef = useRef<HTMLElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  const titleId = useId();
-  const descriptionId = useId();
-  useFocusTrap(true, dialogRef);
-
-  useEffect(() => {
-    cancelRef.current?.focus();
-    const cancelOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel();
-    };
-    window.addEventListener('keydown', cancelOnEscape);
-    return () => window.removeEventListener('keydown', cancelOnEscape);
-  }, [onCancel]);
-
-  return (
-    <div className="prompt-draft-dialog-root">
-      <div className="prompt-draft-dialog-backdrop" aria-hidden="true" onClick={onCancel} />
-      <section
-        className="prompt-draft-dialog"
-        ref={dialogRef}
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descriptionId}
-        tabIndex={-1}
-      >
-        <header>
-          <AlertTriangle size={20} aria-hidden="true" />
-          <h3 id={titleId}>{t('prompts.draft_dialog.title')}</h3>
-        </header>
-        <p id={descriptionId}>{t('prompts.draft_dialog.description')}</p>
-        <div className="prompt-draft-dialog-actions">
-          <button ref={cancelRef} className="secondary-button" type="button" onClick={onCancel}>
-            {t('prompts.draft_dialog.cancel')}
-          </button>
-          <button className="primary-button danger-button" type="button" onClick={onDiscard}>
-            {t('prompts.draft_dialog.discard')}
-          </button>
-        </div>
-      </section>
-    </div>
   );
 }
 

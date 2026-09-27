@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { axe, toHaveNoViolations } from 'jest-axe';
 import { I18nProvider } from '../i18n/I18nProvider';
+import { UnsavedChangesProvider, useNavigationGuard } from '../lib/unsavedChanges';
+import { useState } from 'react';
 import type { Prompt } from '../api/client';
 
 expect.extend(toHaveNoViolations);
@@ -182,5 +184,39 @@ describe('<Prompts> unsaved draft navigation guard', () => {
     await waitFor(() => expect(version.value).toBe('ocr-v1'));
     expect(content.value).toBe('OCR version one');
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('asks before leaving the Prompts page with a dirty draft (#423)', async () => {
+    const { Prompts } = await import('./Prompts');
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      const requestNavigation = useNavigationGuard();
+      return (
+        <>
+          <button type="button" onClick={() => requestNavigation(() => setOpen(false))}>Leave prompts</button>
+          {open ? <Prompts setError={() => undefined} /> : <p>Left prompts</p>}
+        </>
+      );
+    }
+    render(
+      <I18nProvider>
+        <UnsavedChangesProvider>
+          <Harness />
+        </UnsavedChangesProvider>
+      </I18nProvider>
+    );
+    const content = (await screen.findByRole('textbox', { name: 'Prompt content' })) as HTMLTextAreaElement;
+    await waitFor(() => expect(content.value).toBe('OCR version two'));
+    fireEvent.change(content, { target: { value: 'unsaved page draft' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Leave prompts' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave with unsaved changes?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Stay on page' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(content.value).toBe('unsaved page draft');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Leave prompts' }));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Discard and leave' }));
+    expect(await screen.findByText('Left prompts')).toBeInTheDocument();
   });
 });

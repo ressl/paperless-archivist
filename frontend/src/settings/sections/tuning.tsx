@@ -612,6 +612,8 @@ const STRUCTURED_OUTPUT_OPTIONS = [
   { value: 'off', labelKey: 'settings.tuning.structured_output.off' }
 ] as const;
 
+const OLLAMA_HINTS_DEBOUNCE_MS = 400;
+
 function OllamaServerHints({ providerName }: { providerName: string }) {
   const { t } = useI18n();
   const [hints, setHints] = useState<AiRuntimeHints | null>(null);
@@ -621,22 +623,27 @@ function OllamaServerHints({ providerName }: { providerName: string }) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    api
-      .aiRuntimeHints(providerName)
-      .then((data) => {
-        if (!cancelled) {
-          setHints(data);
-          setLoading(false);
-        }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(errorToString(err));
-          setLoading(false);
-        }
-      });
+    // Debounced: the name is edited in place, and each keystroke would
+    // otherwise probe the runtime-hints endpoint with a partial name. #416
+    const timer = window.setTimeout(() => {
+      api
+        .aiRuntimeHints(providerName)
+        .then((data) => {
+          if (!cancelled) {
+            setHints(data);
+            setLoading(false);
+          }
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) {
+            setError(errorToString(err));
+            setLoading(false);
+          }
+        });
+    }, OLLAMA_HINTS_DEBOUNCE_MS);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [providerName]);
   const reachable = Boolean(hints?.reachable);

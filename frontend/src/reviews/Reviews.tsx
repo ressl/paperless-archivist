@@ -3,6 +3,8 @@ import { AlertTriangle, Check, ChevronDown, ListChecks, Save, Wrench, X } from '
 import { api, ReviewItem, Stage } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { PageHeader, localizedErrorMessage, run } from '../lib/ui';
+import { useConfirm } from '../lib/ConfirmDialog';
+import { EmptyState, ErrorState, LoadingState } from '../lib/states';
 import { stageLabel } from '../lib/format';
 import { DebugContextDetails } from '../lib/DebugContextDetails';
 
@@ -45,19 +47,42 @@ export function Reviews({
   const [busy, setBusy] = useState(false);
   const [limit, setLimit] = useState(REVIEW_PAGE_SIZE);
   const [loaded, setLoaded] = useState(false);
-  const load = useCallback(
-    () =>
-      api
-        .reviews(limit)
-        .then((data) => {
-          setItems(data.items);
-          setTotal(data.total);
-          setServerHasMore(data.has_more);
-          setLoaded(true);
-        })
-        .catch((err) => setError(localizedErrorMessage(err, t))),
-    [limit, setError, t]
-  );
+  // #429: distinguish "loading", "empty queue" and "could not load".
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  // #419: monotonic request id. Card actions, "Load more" and batch actions
+  // all reload; only the newest response may replace the list, so a slower,
+  // older response can never resurrect an item that was just decided.
+  const requestIdRef = useRef(0);
+
+  const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    try {
+      const data = await api.reviews(limit);
+      if (requestId !== requestIdRef.current) return;
+      setItems(data.items);
+      setTotal(data.total);
+      setServerHasMore(data.has_more);
+      setLoadError(null);
+      setLoaded(true);
+      // #418: a selection may only reference items that are still pending in
+      // the freshly loaded list; decided/removed ids are dropped here.
+      const loadedIds = new Set(data.items.map((item) => item.id));
+      setSelected((current) => {
+        const next = current.filter((id) => loadedIds.has(id));
+        return next.length === current.length ? current : next;
+      });
+    } catch (err) {
+      if (requestId !== requestIdRef.current) return;
+      const message = localizedErrorMessage(err, t);
+      setLoadError(message);
+      setError(message);
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false);
+    }
+  }, [limit, setError, t]);
 
   useEffect(() => {
     void load();
@@ -83,12 +108,46 @@ export function Reviews({
     setLimit((current) => Math.min(current + REVIEW_PAGE_SIZE, REVIEW_MAX_LIMIT));
   }, []);
 
+  // Selection as rendered: only ids that are visible right now (#418).
+  const visibleSelected = useMemo(() => {
+    const visibleIds = new Set(items.map((item) => item.id));
+    return selected.filter((id) => visibleIds.has(id));
+  }, [items, selected]);
+  const allSelected = items.length > 0 && visibleSelected.length === items.length;
+
   const toggleSelected = useCallback((id: string) => {
     setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   }, []);
+
+  // A single-card decision removes that id from the selection immediately,
+  // before the reload lands (#418).
+  const onItemDecided = useCallback(
+    (id: string) => {
+      setSelected((current) => current.filter((item) => item !== id));
+      return load();
+    },
+    [load]
+  );
+
   const batch = async (decision: 'approve' | 'reject') => {
+    const ids = visibleSelected;
+    if (ids.length === 0) return;
+    // #417: batch decisions write to Paperless (approve) or discard AI work
+    // (reject) for every selected item, so confirm with the exact count.
+    const approve = decision === 'approve';
+    const confirmed = await confirm({
+      title: approve
+        ? t('review.batch_confirm.approve_title', { count: ids.length })
+        : t('review.batch_confirm.reject_title', { count: ids.length }),
+      description: approve
+        ? t('review.batch_confirm.approve_description', { count: ids.length })
+        : t('review.batch_confirm.reject_description', { count: ids.length }),
+      confirmLabel: approve ? t('review.approve_selected') : t('review.reject_selected'),
+      tone: approve ? 'default' : 'danger'
+    });
+    if (!confirmed) return;
     await run(setBusy, setError, async () => {
-      const result = await api.batchReview(selected, decision);
+      const result = await api.batchReview(ids, decision);
       if (result.failed.length > 0) {
         setError(t('review.failed_batch', { count: result.failed.length, error: result.failed[0].error }));
       }
@@ -104,13 +163,22 @@ export function Reviews({
     // no banner, no busy reset, the button just did nothing. (#266)
     await run(setBusy, setError, async () => {
       const preview = await api.autoFixReviewPreview(items.length);
-      const confirmed = window.confirm(
-        t('review.auto_fix_confirm', {
-          count: preview.total_pending,
-        })
-      );
+      // #421: the confirmed count and the processed batch are the same
+      // number. The preview reports how many pending items the server will
+      // touch; the bulk call is then capped to exactly that count.
+      const count = preview.total_pending;
+      if (count === 0) {
+        setSuccess(t('review.auto_fix_nothing'));
+        return;
+      }
+      const confirmed = await confirm({
+        title: t('review.auto_fix_confirm_title', { count }),
+        description: t('review.auto_fix_confirm', { count }),
+        confirmLabel: t('review.auto_fix_all'),
+        details: t('review.auto_fix_confirm_breakdown', { apply: preview.would_apply, reject: preview.would_reject })
+      });
       if (!confirmed) return;
-      const result = await api.autoFixReviewBulk(items.length);
+      const result = await api.autoFixReviewBulk(count);
       setSelected([]);
       await load();
       // Positive outcome → success banner, not the red error box (#228).
@@ -124,59 +192,75 @@ export function Reviews({
     }, t);
   };
 
-  const autoFixOne = async (id: string) => {
-    await run(setBusy, setError, async () => {
-      const result = await api.autoFixReviewSingle(id);
-      await load();
-      // Positive outcome → success banner, not the red error box (#228).
-      setSuccess(
-        t('review.auto_fix_result', {
-          applied: result.action === 'applied' ? 1 : 0,
-          rejected: result.action === 'rejected' ? 1 : 0,
-          errors: 0,
-        })
-      );
-    }, t);
-  };
+  const autoFixOne = useCallback(
+    async (id: string) => {
+      await run(setBusy, setError, async () => {
+        const result = await api.autoFixReviewSingle(id);
+        await onItemDecided(id);
+        // Positive outcome → success banner, not the red error box (#228).
+        setSuccess(
+          t('review.auto_fix_result', {
+            applied: result.action === 'applied' ? 1 : 0,
+            rejected: result.action === 'rejected' ? 1 : 0,
+            errors: 0,
+          })
+        );
+      }, t);
+    },
+    [onItemDecided, setError, setSuccess, t]
+  );
 
   return (
     <section className="page">
       <PageHeader title={t('review.title')} />
       <div className="toolbar">
-        <button disabled={items.length === 0} onClick={() => setSelected(selected.length === items.length ? [] : items.map((item) => item.id))}>
-          <ListChecks size={16} /> {selected.length === items.length ? t('review.clear_selection') : t('review.select_all')}
+        <button disabled={items.length === 0} onClick={() => setSelected(allSelected ? [] : items.map((item) => item.id))}>
+          <ListChecks size={16} /> {allSelected ? t('review.clear_selection') : t('review.select_all')}
         </button>
-        <button disabled={busy || selected.length === 0} onClick={() => void batch('approve')}>
+        <button disabled={busy || visibleSelected.length === 0} onClick={() => void batch('approve')}>
           <Check size={16} /> {t('review.approve_selected')}
         </button>
-        <button disabled={busy || selected.length === 0} onClick={() => void batch('reject')}>
+        <button disabled={busy || visibleSelected.length === 0} onClick={() => void batch('reject')}>
           <X size={16} /> {t('review.reject_selected')}
         </button>
         <button disabled={busy || items.length === 0} onClick={() => void autoFixAll()} title={t('review.auto_fix_all')}>
           <Wrench size={16} /> {t('review.auto_fix_all')}
         </button>
         <small className="field-hint">{t('reviews.count', { shown: items.length, total })}</small>
+        {visibleSelected.length > 0 && (
+          <small className="field-hint">{t('review.selected_count', { count: visibleSelected.length })}</small>
+        )}
       </div>
       {focusMissing && (
         <p className="field-hint" role="status">
           {t('review.deep_link_missing')}
         </p>
       )}
-      <div className="review-list">
-        {items.map((item) => (
-          <ReviewCardMemo
-            key={item.id}
-            item={item}
-            selected={selected.includes(item.id)}
-            focused={item.id === focusReviewId}
-            onSelect={toggleSelected}
-            onReload={load}
-            onAutoFix={autoFixOne}
-            setError={setError}
-            t={t}
-          />
-        ))}
-      </div>
+      {items.length === 0 ? (
+        loading ? (
+          <LoadingState label={t('review.loading')} />
+        ) : loadError ? (
+          <ErrorState title={t('review.load_error')} detail={loadError} onRetry={() => void load()} />
+        ) : (
+          <EmptyState message={t('review.empty')} />
+        )
+      ) : (
+        <div className="review-list" aria-busy={loading}>
+          {items.map((item) => (
+            <ReviewCardMemo
+              key={item.id}
+              item={item}
+              selected={selected.includes(item.id)}
+              focused={item.id === focusReviewId}
+              onSelect={toggleSelected}
+              onDecided={onItemDecided}
+              onAutoFix={autoFixOne}
+              setError={setError}
+              t={t}
+            />
+          ))}
+        </div>
+      )}
       {hasMore && (
         <div className="toolbar">
           <button disabled={busy} onClick={loadMore}>
@@ -184,6 +268,7 @@ export function Reviews({
           </button>
         </div>
       )}
+      {confirmDialog}
     </section>
   );
 }
@@ -193,13 +278,13 @@ type ReviewCardProps = {
   selected: boolean;
   focused: boolean;
   onSelect: (id: string) => void;
-  onReload: () => void;
+  onDecided: (id: string) => Promise<void>;
   onAutoFix: (id: string) => void;
   setError: (error: string | null) => void;
   t: TFunction;
 };
 
-function ReviewCard({ item, selected, focused, onSelect, onReload, onAutoFix, setError, t }: ReviewCardProps) {
+function ReviewCard({ item, selected, focused, onSelect, onDecided, onAutoFix, setError, t }: ReviewCardProps) {
   const { formatPercent } = useI18n();
   const patch = asReviewPatch(item.suggested_patch);
   const metadata = asReviewPatch(patch?.standard_metadata);
@@ -213,7 +298,14 @@ function ReviewCard({ item, selected, focused, onSelect, onReload, onAutoFix, se
   const patchKey = useMemo(() => JSON.stringify(item.suggested_patch ?? null), [item.suggested_patch]);
   const latestPatch = useRef(patch);
   latestPatch.current = patch;
+  // The form was seeded from this suggestion on mount; only a later change
+  // re-seeds it (a mount-time reset could clobber input typed before the
+  // passive effect ran).
+  const seededFor = useRef(`${item.id}\u0000${patchKey}`);
   useEffect(() => {
+    const key = `${item.id}\u0000${patchKey}`;
+    if (seededFor.current === key) return;
+    seededFor.current = key;
     setEdit(reviewEditStateFromPatch(latestPatch.current));
   }, [item.id, patchKey]);
 
@@ -229,27 +321,27 @@ function ReviewCard({ item, selected, focused, onSelect, onReload, onAutoFix, se
     }
     await run(setBusy, setError, async () => {
       await api.editReview(item.id, editedPatch);
-      onReload();
+      await onDecided(item.id);
     }, t);
-  }, [patch, edit, item.id, onReload, setError, t]);
+  }, [patch, edit, item.id, onDecided, setError, t]);
 
   // Wrap approve/reject in the shared busy guard so `disabled={busy}` actually
   // blocks a double-click — otherwise a second click fired a duplicate POST
-  // before onReload removed the card. (#296)
+  // before the reload removed the card. (#296)
   const approve = useCallback(
     () => run(setBusy, setError, async () => {
       await api.approveReview(item.id);
-      onReload();
+      await onDecided(item.id);
     }, t),
-    [item.id, onReload, setError, t]
+    [item.id, onDecided, setError, t]
   );
 
   const reject = useCallback(
     () => run(setBusy, setError, async () => {
       await api.rejectReview(item.id);
-      onReload();
+      await onDecided(item.id);
     }, t),
-    [item.id, onReload, setError, t]
+    [item.id, onDecided, setError, t]
   );
 
   const handleSelect = useCallback(() => onSelect(item.id), [onSelect, item.id]);
@@ -349,7 +441,7 @@ const ReviewCardMemo = memo(
     if (prev.selected !== next.selected) return false;
     if (prev.focused !== next.focused) return false;
     if (prev.onSelect !== next.onSelect) return false;
-    if (prev.onReload !== next.onReload) return false;
+    if (prev.onDecided !== next.onDecided) return false;
     if (prev.onAutoFix !== next.onAutoFix) return false;
     if (prev.setError !== next.setError) return false;
     const a = prev.item;

@@ -115,6 +115,9 @@ impl From<reqwest::Error> for PaperlessError {
 /// sized for small JSON calls; a large scanned PDF streamed over a slow link
 /// needs considerably more headroom before it should be considered transient.
 const DOWNLOAD_TIMEOUT_MULTIPLIER: u32 = 10;
+/// Fields of [`PaperlessDocumentSummary`] requested from document lists. #408
+const DOCUMENT_SUMMARY_FIELDS: &str =
+    "id,title,created,modified,tags,correspondent,document_type,original_file_name";
 
 /// Hard ceiling on the size of a downloaded original. The body is streamed and
 /// aborted once this is exceeded so a malicious or accidentally huge document
@@ -134,6 +137,30 @@ fn accumulate_download_size(running_total: u64, chunk_len: u64, cap: u64) -> Res
         ));
     }
     Ok(total)
+}
+
+/// Resolve a pagination `next` link against the configured base URL. Only
+/// the path and query are taken from `next`; scheme, host and port always come
+/// from the configured base, because Paperless behind a TLS-terminating proxy
+/// commonly advertises `http://internal-host/...` links. The path must stay
+/// under the configured `<base>/api/` prefix, so a `next` link can never steer
+/// the (token-bearing) client to another endpoint or host. #398
+fn rebase_next_page_url(base_url: &Url, next: &str) -> Result<Url> {
+    let parsed = Url::parse(next)
+        .or_else(|_| base_url.join(next))
+        .context("parse Paperless next page URL")?;
+    let api_prefix = format!("{}/api/", base_url.path().trim_end_matches('/'));
+    if !parsed.path().starts_with(&api_prefix) {
+        return Err(PaperlessError::Protocol(format!(
+            "Paperless pagination next URL left the API prefix {api_prefix}"
+        ))
+        .into());
+    }
+    let mut rebased = base_url.clone();
+    rebased.set_path(parsed.path());
+    rebased.set_query(parsed.query());
+    rebased.set_fragment(None);
+    Ok(rebased)
 }
 
 #[derive(Clone)]
@@ -222,19 +249,40 @@ impl PaperlessClient {
         self.get_paginated("api/custom_fields/").await
     }
 
+    /// List every document as a [`PaperlessDocumentSummary`] without its OCR
+    /// `content` (see [`Self::document_summary_url`]). The inventory sync runs
+    /// this every minute; it used to pull the complete OCR text of the whole
+    /// archive although no list caller reads it. #408
     pub async fn list_documents(&self) -> Result<Vec<PaperlessDocumentSummary>> {
-        self.get_paginated("api/documents/").await
+        self.get_paginated_url(self.document_summary_url()?).await
+    }
+
+    /// List documents without their OCR `content`, for callers that only
+    /// compare metadata, such as the consistency check. #386
+    pub async fn list_documents_for_consistency(&self) -> Result<Vec<PaperlessDocumentSummary>> {
+        self.list_documents().await
     }
 
     pub async fn list_documents_modified_since(
         &self,
         since: &str,
     ) -> Result<Vec<PaperlessDocumentSummary>> {
+        let mut url = self.document_summary_url()?;
+        url.query_pairs_mut().append_pair("modified__gt", since);
+        self.get_paginated_url(url).await
+    }
+
+    /// `/api/documents/` restricted to the summary fields: `fields` limits the
+    /// serializer on Paperless-ngx 2.x and `truncate_content` bounds the text
+    /// on servers that ignore `fields`. Single-document `get_document` still
+    /// returns the full `content`. #386, #408
+    fn document_summary_url(&self) -> Result<Url> {
         let mut url = self.url("api/documents/")?;
         url.query_pairs_mut()
             .append_pair("page_size", "100")
-            .append_pair("modified__gt", since);
-        self.get_paginated_url(url).await
+            .append_pair("fields", DOCUMENT_SUMMARY_FIELDS)
+            .append_pair("truncate_content", "true");
+        Ok(url)
     }
 
     pub async fn get_document(&self, id: i32) -> Result<PaperlessDocumentDetail> {
@@ -242,6 +290,10 @@ impl PaperlessClient {
         self.get_json(url).await
     }
 
+    /// Download the document file. Despite the name, Paperless' `/download/`
+    /// endpoint (without `original=true`) returns the archive PDF whenever one
+    /// exists and the original upload otherwise, so the bytes may not match
+    /// `original_file_name`; OCR classifies inputs by magic bytes. #405
     pub async fn download_original(&self, id: i32) -> Result<Bytes> {
         let url = self.url(&format!("api/documents/{id}/download/"))?;
         // Override the JSON-tuned client timeout with a larger budget so big
@@ -462,15 +514,7 @@ impl PaperlessClient {
             let Some(next) = page.next else {
                 return Ok(items);
             };
-            let next_url = Url::parse(&next)
-                .or_else(|_| self.base_url.join(&next))
-                .context("parse Paperless next page URL")?;
-            if next_url.origin() != self.base_url.origin() {
-                return Err(PaperlessError::Protocol(
-                    "Paperless pagination next URL changed origin".to_owned(),
-                )
-                .into());
-            }
+            let next_url = rebase_next_page_url(&self.base_url, &next)?;
             // Guard against a non-advancing cursor that would otherwise loop
             // forever while `items` grows without bound.
             if next_url == url {
@@ -653,6 +697,128 @@ pub struct PaperlessDocumentDetail {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #408: document lists (full and delta sync) request the summary fields
+    /// only, so no OCR content crosses the wire during the minute-by-minute
+    /// inventory sync.
+    #[tokio::test]
+    async fn document_lists_request_summary_fields_without_content() {
+        use std::collections::HashMap as QueryMap;
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<QueryMap<String, String>>>> = Arc::default();
+        let recorder = Arc::clone(&seen);
+        let app = axum::Router::new().route(
+            "/api/documents/",
+            axum::routing::get(
+                move |axum::extract::Query(query): axum::extract::Query<
+                    QueryMap<String, String>,
+                >| {
+                    let recorder = Arc::clone(&recorder);
+                    async move {
+                        recorder.lock().unwrap().push(query);
+                        axum::Json(json!({
+                            "count": 1,
+                            "next": null,
+                            "previous": null,
+                            "results": [{
+                                "id": 7, "title": "Rechnung", "tags": [1],
+                                "correspondent": null, "document_type": null,
+                                "original_file_name": "scan.jpg"
+                            }]
+                        }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Paperless");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock Paperless");
+        });
+        let client = PaperlessClient::new(
+            &format!("http://{address}/"),
+            SecretString::from("token".to_owned()),
+            5,
+        )
+        .expect("client");
+
+        let documents = client.list_documents().await.expect("full list");
+        assert_eq!(documents[0].id, 7);
+        assert!(documents[0].content.is_none());
+        assert_eq!(documents[0].original_file_name.as_deref(), Some("scan.jpg"));
+        client
+            .list_documents_modified_since("2026-09-27T00:00:00Z")
+            .await
+            .expect("delta list");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for query in seen.iter() {
+            let fields = query.get("fields").expect("fields requested");
+            assert!(!fields.split(',').any(|field| field == "content"));
+            for needed in ["id", "tags", "modified", "original_file_name"] {
+                assert!(fields.split(',').any(|field| field == needed), "{needed}");
+            }
+            assert_eq!(
+                query.get("truncate_content").map(String::as_str),
+                Some("true")
+            );
+        }
+        assert_eq!(
+            seen[1].get("modified__gt").map(String::as_str),
+            Some("2026-09-27T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn next_page_url_is_rebased_onto_the_configured_origin() {
+        // #398: TLS-terminating proxy advertises http + internal host.
+        let base = Url::parse("https://paperless.example.com/").unwrap();
+        let next = rebase_next_page_url(
+            &base,
+            "http://paperless-internal:8000/api/documents/?page=2&page_size=100",
+        )
+        .expect("scheme/host drift is tolerated");
+        assert_eq!(
+            next.as_str(),
+            "https://paperless.example.com/api/documents/?page=2&page_size=100"
+        );
+
+        let prefixed = Url::parse("https://proxy.example.com/paperless/").unwrap();
+        let next = rebase_next_page_url(&prefixed, "http://10.0.0.5/paperless/api/tags/?page=3")
+            .expect("sub-path deployment keeps its prefix");
+        assert_eq!(
+            next.as_str(),
+            "https://proxy.example.com/paperless/api/tags/?page=3"
+        );
+
+        let relative = rebase_next_page_url(&base, "/api/tags/?page=2").expect("relative link");
+        assert_eq!(
+            relative.as_str(),
+            "https://paperless.example.com/api/tags/?page=2"
+        );
+    }
+
+    #[test]
+    fn next_page_url_outside_the_api_prefix_is_rejected() {
+        let base = Url::parse("https://paperless.example.com/paperless/").unwrap();
+        for next in [
+            "https://attacker.example/admin/?page=2",
+            "https://paperless.example.com/api/documents/?page=2",
+            "https://paperless.example.com/paperless/api/../admin/",
+            "/paperless/other/?page=2",
+        ] {
+            assert!(
+                rebase_next_page_url(&base, next).is_err(),
+                "{next} must be rejected"
+            );
+        }
+    }
 
     fn reconciliation_document() -> PaperlessDocumentDetail {
         PaperlessDocumentDetail {

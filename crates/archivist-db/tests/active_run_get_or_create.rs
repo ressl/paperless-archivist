@@ -19,7 +19,7 @@ const ACTIVE_RUN_LOCK_NAME: &str = "paperless_archivist_active_run_document";
 async fn fresh_pool() -> Option<(MutexGuard<'static, ()>, String, DbPool)> {
     let guard = DB_TABLE_LOCK.lock().await;
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = connect(&url, 10).await.expect("connect test database");
+    let pool = connect(&url, 10).await.expect("connect test database (DB integration tests share one database: run them serially with `-- --ignored --test-threads=1`, see scripts/verify/migration_smoke.sh)");
     migrate(&pool).await.expect("apply migrations");
     pool.execute(
         r#"
@@ -655,6 +655,85 @@ async fn vision_requeue_reactivates_only_the_newest_terminal_run_per_document() 
         .unwrap(),
         1
     );
+}
+
+/// #406: the startup requeue restores the metadata sibling that `fail_job`
+/// cancelled, and raises `max_attempts` only once across restarts.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn vision_requeue_restores_siblings_and_bumps_attempts_once() {
+    let Some((_guard, _url, pool)) = fresh_pool().await else {
+        return;
+    };
+    let document_id = 5_812;
+    let run_id = create_run_with_jobs(
+        &pool,
+        document_id,
+        &[Stage::Ocr, Stage::Metadata],
+        ProcessingMode::ManualReview,
+        "test-crash",
+        "test",
+    )
+    .await
+    .expect("create run");
+    let fail_run = |pool: DbPool| async move {
+        sqlx::query(
+            r#"
+            update jobs
+               set status = case when stage = 'ocr' then 'failed' else 'cancelled' end,
+                   error_message = case when stage = 'ocr' then 'GGML_ASSERT test' end
+             where run_id = $1
+            "#,
+        )
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("fail ocr + cancel metadata like fail_job");
+        sqlx::query(
+            "update pipeline_runs set status = 'failed', finished_at = now() where id = $1",
+        )
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("fail run");
+    };
+    fail_run(pool.clone()).await;
+
+    let summary = requeue_vision_crashed_jobs(&pool).await.expect("requeue");
+    assert_eq!(summary.jobs_requeued, 1);
+    let rows = sqlx::query(
+        "select stage, status, max_attempts from jobs where run_id = $1 order by stage",
+    )
+    .bind(run_id)
+    .fetch_all(&pool)
+    .await
+    .expect("jobs");
+    let states: Vec<(String, String, i32)> = rows
+        .iter()
+        .map(|row| (row.get("stage"), row.get("status"), row.get("max_attempts")))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            ("metadata".to_owned(), "queued".to_owned(), 3),
+            ("ocr".to_owned(), "queued".to_owned(), 4),
+        ],
+        "OCR and its metadata sibling both run again"
+    );
+
+    // The job crashes again and the pod restarts: no second bump.
+    fail_run(pool.clone()).await;
+    let summary = requeue_vision_crashed_jobs(&pool)
+        .await
+        .expect("requeue again");
+    assert_eq!(summary.jobs_requeued, 0);
+    let max_attempts: i32 =
+        sqlx::query_scalar("select max_attempts from jobs where run_id = $1 and stage = 'ocr'")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("ocr job");
+    assert_eq!(max_attempts, 4);
 }
 
 #[tokio::test]

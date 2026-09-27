@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { MessageSquare, Send } from 'lucide-react';
 import { api, DocumentChatMessage, DocumentChatSession } from '../api/client';
 import { useI18n } from '../i18n/I18nProvider';
@@ -30,6 +30,13 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
     { onError }
   );
   const messages = messagesResource.data ?? NO_MESSAGES;
+  // #428: optimistic user message + "thinking" indicator while the answer is
+  // generated. `sessionId` null means the session is still being created.
+  const [pending, setPending] = useState<{ sessionId: string | null; question: string } | null>(null);
+  // Auto-scroll only while the reader is at (or near) the bottom, so reading
+  // older messages is not interrupted by a new answer.
+  const logRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
 
   const selectSession = (sessionId: string) => {
     if (activeSessionIdRef.current === sessionId) return;
@@ -68,25 +75,57 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
       return;
     }
 
-    const sessionId = activeSessionId ?? (await api.createChatSession(chatTitleFromQuestion(trimmed))).id;
-    if (!activeSessionId) {
-      selectSession(sessionId);
-      await loadSessions();
-    }
-
-    await api.postChatMessage(sessionId, {
-      question: trimmed,
-      document_ids: ids,
-      max_sources: 6
-    });
+    // Show the question immediately and follow it to the bottom (#428).
     setQuestion('');
-    await loadSessions();
-    // Avoid an unnecessary request after a switch; a switch during this refresh
-    // supersedes it inside useResource. (#286)
-    if (activeSessionIdRef.current === sessionId) {
-      await messagesResource.reload();
+    stickToBottomRef.current = true;
+    setPending({ sessionId: activeSessionId, question: trimmed });
+    try {
+      const sessionId = activeSessionId ?? (await api.createChatSession(chatTitleFromQuestion(trimmed))).id;
+      if (!activeSessionId) {
+        setPending((current) => (current ? { ...current, sessionId } : current));
+        selectSession(sessionId);
+        await loadSessions();
+      }
+
+      await api.postChatMessage(sessionId, {
+        question: trimmed,
+        document_ids: ids,
+        max_sources: 6
+      });
+      await loadSessions();
+      // Avoid an unnecessary request after a switch; a switch during this
+      // refresh supersedes it inside useResource. (#286)
+      if (activeSessionIdRef.current === sessionId) {
+        await messagesResource.reload();
+      }
+    } catch (err) {
+      // Give the unsent question back unless the user already typed a new one.
+      setQuestion((current) => current || trimmed);
+      throw err;
+    } finally {
+      setPending(null);
     }
   };
+
+  const showPending = pending !== null && pending.sessionId === activeSessionId;
+
+  const onLogScroll = () => {
+    const log = logRef.current;
+    if (!log) return;
+    stickToBottomRef.current = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  };
+
+  // Keep the newest message in view when the reader is following along.
+  useLayoutEffect(() => {
+    const log = logRef.current;
+    if (!log || !stickToBottomRef.current) return;
+    log.scrollTop = log.scrollHeight;
+  }, [messages, showPending, activeSessionId]);
+
+  // A session switch starts at the latest message again.
+  useEffect(() => {
+    stickToBottomRef.current = true;
+  }, [activeSessionId]);
 
   return (
     <section className="page chat-page">
@@ -118,8 +157,18 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
           </div>
         </aside>
         <div className="chat-panel">
-          <div className="chat-messages">
-            {messages.length === 0 && <div className="empty-state">{t('chat.no_messages')}</div>}
+          {/* #428: transcript is a polite live log, so new answers (and the
+              thinking indicator) are announced without stealing focus. */}
+          <div
+            className="chat-messages"
+            ref={logRef}
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions"
+            aria-label={t('chat.transcript')}
+            onScroll={onLogScroll}
+          >
+            {messages.length === 0 && !showPending && <div className="empty-state">{t('chat.no_messages')}</div>}
             {messages.map((message) => (
               <article className={`chat-message ${message.role}`} key={message.id}>
                 <header>
@@ -142,6 +191,25 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
                 )}
               </article>
             ))}
+            {showPending && pending && (
+              <>
+                <article className="chat-message user pending">
+                  <header>
+                    <strong>{t('chat.role_user')}</strong>
+                  </header>
+                  <p>{pending.question}</p>
+                </article>
+                <article className="chat-message assistant pending">
+                  <header>
+                    <strong>{t('chat.role_assistant')}</strong>
+                  </header>
+                  <p className="chat-thinking">
+                    <span className="chat-thinking-dots" aria-hidden="true"><i /><i /><i /></span>
+                    {t('chat.thinking')}
+                  </p>
+                </article>
+              </>
+            )}
           </div>
           <form
             className="chat-composer"
@@ -159,7 +227,7 @@ export function DocumentChat({ setError }: { setError: (error: string | null) =>
               <textarea value={question} onChange={(event) => setQuestion(event.target.value)} required />
             </label>
             <Button variant="primary" icon={<Send size={16} />} title={t('chat.send')} disabled={busy || !question.trim()}>
-              {t('chat.send')}
+              {pending ? t('chat.sending') : t('chat.send')}
             </Button>
           </form>
         </div>

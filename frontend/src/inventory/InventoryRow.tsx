@@ -10,6 +10,8 @@ import { formatLanguageDetection } from './types';
 export type InventoryRowProps = {
   item: InventoryItem;
   selected: boolean;
+  /** A trigger request for this row is in flight (#426). */
+  pending?: boolean;
   onToggleSelect: (documentId: number) => void;
   languages: ReturnType<typeof languageOptions>;
   t: TFunction;
@@ -20,7 +22,10 @@ export type InventoryRowProps = {
 };
 
 export const InventoryRow = memo(
-  function InventoryRow({ item, selected, onToggleSelect, languages, t, onTriggerOcr, onTriggerMetadata, onTriggerPipeline, onDiagnose }: InventoryRowProps) {
+  function InventoryRow({ item, selected, pending = false, onToggleSelect, languages, t, onTriggerOcr, onTriggerMetadata, onTriggerPipeline, onDiagnose }: InventoryRowProps) {
+    const id = item.paperless_document_id;
+    // Icon-only buttons get a document-specific accessible name (#426).
+    const actionLabel = (action: string) => t('inventory.action_for', { action, id });
     return (
       // `content-visibility: auto` lets the browser skip layout/paint for rows
       // outside the viewport, keeping a long (load-more) list cheap to render.
@@ -43,17 +48,43 @@ export const InventoryRow = memo(
         <td>{item.current_run_status || '-'}</td>
         <td><DebugContextDetails context={item.debug_context} compact /></td>
         <td className="row-actions">
-          <button title={t('inventory.trigger_ocr')} onClick={() => onTriggerOcr(item.paperless_document_id)}>
-            <FileText size={16} />
+          <button
+            type="button"
+            title={t('inventory.trigger_ocr')}
+            aria-label={actionLabel(t('inventory.trigger_ocr'))}
+            disabled={pending}
+            aria-busy={pending}
+            onClick={() => onTriggerOcr(id)}
+          >
+            <FileText size={16} aria-hidden="true" />
           </button>
-          <button title={t('inventory.trigger_metadata')} onClick={() => onTriggerMetadata(item.paperless_document_id)}>
-            <Tags size={16} />
+          <button
+            type="button"
+            title={t('inventory.trigger_metadata')}
+            aria-label={actionLabel(t('inventory.trigger_metadata'))}
+            disabled={pending}
+            aria-busy={pending}
+            onClick={() => onTriggerMetadata(id)}
+          >
+            <Tags size={16} aria-hidden="true" />
           </button>
-          <button title={t('inventory.trigger_pipeline')} onClick={() => onTriggerPipeline(item.paperless_document_id)}>
-            <Sparkles size={16} />
+          <button
+            type="button"
+            title={t('inventory.trigger_pipeline')}
+            aria-label={actionLabel(t('inventory.trigger_pipeline'))}
+            disabled={pending}
+            aria-busy={pending}
+            onClick={() => onTriggerPipeline(id)}
+          >
+            <Sparkles size={16} aria-hidden="true" />
           </button>
-          <button title={t('inventory.diagnose.button')} onClick={() => onDiagnose(item.paperless_document_id)}>
-            <Stethoscope size={16} />
+          <button
+            type="button"
+            title={t('inventory.diagnose.button')}
+            aria-label={actionLabel(t('inventory.diagnose.button'))}
+            onClick={() => onDiagnose(id)}
+          >
+            <Stethoscope size={16} aria-hidden="true" />
           </button>
         </td>
       </tr>
@@ -62,6 +93,7 @@ export const InventoryRow = memo(
   (prev, next) => {
     if (prev.t !== next.t) return false;
     if (prev.selected !== next.selected) return false;
+    if (prev.pending !== next.pending) return false;
     if (prev.onToggleSelect !== next.onToggleSelect) return false;
     if (prev.languages !== next.languages) return false;
     if (prev.onTriggerOcr !== next.onTriggerOcr) return false;
