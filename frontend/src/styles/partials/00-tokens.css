@@ -1,0 +1,72 @@
+/* Design tokens: colours, spacing, radius, type scale, elevation, tile floors. */
+
+:root {
+  color-scheme: light;
+  --ink: #172331;
+  --ink-2: #263545;
+  --text: #1e2933;
+  --muted: #566474; /* >= 4.5:1 on base, surfaces and tone-soft fills (#430) */
+  --line: #d8e0e6;
+  --line-strong: #b9c4ce;
+  --surface: #ffffff;
+  --surface-2: #f7f9fa;
+  --base: #f6f3ed;
+  --paper: #f6f3ed;
+  --teal: #147f7a;
+  --teal-soft: #d9eeee;
+  --brass: #a9782b;
+  --brass-soft: #f1e5d0;
+  --danger: #a6403a;
+  --danger-soft: #f5dddd;
+  --info: #28649b;
+  --info-soft: #dbe9f5;
+  --success: #147f7a;
+  --success-soft: #d9eeee;
+  --warning: #a9782b;
+  --warning-soft: #f1e5d0;
+
+  /* Tone surfaces — named from the de-facto hexes the .metric.{tone} and
+     .range-tabs rules used inline; lifting them here is a pixel-identical
+     refactor (same values), it just removes the raw hexes. */
+  --success-border: #b7d8cf;
+  --success-bg: #f3fbf7;
+  --warning-border: #e0c999;
+  --danger-border: #e0a09b;
+  --info-border: #b7d3e6;
+  --teal-border: #b7d8cf;
+  --teal-fg: #0f5f5b;
+
+  /* Spacing scale — replaces ad-hoc 4/8/10/12/14/16/24px paddings & gaps */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Radius scale — replaces 2/3/4/6/8/18/999px ad-hoc radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Typography scale — replaces 11..42px hardcoded font sizes */
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-md: 16px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
+  --font-size-2xl: 28px;
+  --font-size-3xl: 42px;
+
+  /* Elevation scale — replaces one-off box-shadows */
+  --shadow-sm: 0 1px 2px rgb(23 35 49 / 8%);
+  --shadow-md: 0 8px 24px rgb(23 35 49 / 12%);
+  --shadow-lg: 0 20px 60px rgb(23 35 49 / 14%);
+
+  /* Canonical card-grid tile floors — replaces 6+ ad-hoc minmax() values */
+  --tile-compact: 140px;
+  --tile-default: 220px;
+  --tile-wide: 280px;
+}

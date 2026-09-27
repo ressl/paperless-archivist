@@ -1,0 +1,75 @@
+/* Shared controls: toolbar, primary/secondary buttons, tables, row actions, status badges. */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.primary-button {
+  border-color: var(--teal);
+  background: var(--teal);
+  color: white;
+  font-weight: 700;
+}
+
+.secondary-button {
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 650;
+}
+
+.table-wrap {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.compact-table table {
+  min-width: 780px;
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: #edf1f3;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.status svg {
+  flex: 0 0 auto;
+}
+
+.status.success {
+  background: var(--teal-soft);
+  color: #0f5f5b;
+}
+
+.status.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.status.info {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.status.review {
+  background: var(--brass-soft);
+  color: var(--brass);
+}

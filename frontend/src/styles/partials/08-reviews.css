@@ -1,0 +1,152 @@
+/* Review queue: review cards, metadata rows, warnings, debug context. */
+
+.review-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.review-item {
+  display: grid;
+  gap: var(--space-3);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+/* Target of a /reviews/<id> deep link (#424). */
+.review-item--focused {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px var(--teal-soft);
+}
+
+.review-item:focus {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.review-item header,
+.review-item footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.review-item pre {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.metadata-review {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.metadata-review-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr) minmax(180px, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #f8fbfb;
+}
+
+.metadata-review-row.low-confidence {
+  border-color: #e7bb5f;
+  background: #fff8e8;
+}
+
+.metadata-review-row div,
+.metadata-review-row label {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.metadata-review-row small {
+  color: var(--ink-2);
+}
+
+.review-warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-warnings span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--brass-soft);
+  color: var(--brass);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.review-conflict {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px 12px;
+  border: 1px solid #d97706;
+  border-radius: var(--radius-md);
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.review-conflict svg {
+  flex: 0 0 auto;
+}
+
+.debug-context {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.debug-context.compact {
+  min-width: 260px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.debug-context summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-weight: 700;
+}
+
+.debug-context dl {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.debug-context dl div {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: var(--space-2);
+}
+
+.debug-context dt {
+  color: var(--muted);
+}
+
+.debug-context dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

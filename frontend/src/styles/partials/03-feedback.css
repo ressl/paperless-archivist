@@ -1,0 +1,116 @@
+/* Feedback + metric primitives: banners, deltas, error boundary, KPI tiles. */
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  margin-bottom: 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.banner.error {
+  border-color: #e0a09b;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.banner.success {
+  border-color: var(--teal);
+  background: var(--success-soft);
+  color: var(--teal);
+}
+
+.banner.info {
+  border-color: var(--info);
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+/* Change indicator — colour encodes good/bad (see deltaTone), not just up/down. */
+.delta {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--muted);
+}
+.delta.good { color: var(--success); }
+.delta.bad { color: var(--danger); }
+
+.error-boundary {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  margin: var(--space-4);
+  border: 1px solid #e0a09b;
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger);
+  max-width: 640px;
+}
+
+.error-boundary h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.error-boundary p {
+  margin: 0;
+}
+
+.metric {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.metric span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.metric strong {
+  color: var(--ink);
+  font-size: 28px;
+}
+
+.metric em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.metric em.up {
+  color: var(--info);
+}
+
+.metric em.down {
+  color: var(--teal);
+}
+
+.metric.success {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+}
+
+.metric.warning {
+  border-color: var(--warning-border);
+  background: var(--brass-soft);
+}
+
+.metric.danger {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.metric.info,
+.metric.review {
+  border-color: var(--info-border);
+  background: var(--info-soft);
+}

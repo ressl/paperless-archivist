@@ -1,0 +1,66 @@
+/* Responsive <= 860px: single-column shell with collapsible navigation, stacked forms. */
+
+@media (max-width: 860px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+    height: auto;
+    grid-template-rows: auto;
+    gap: 0;
+  }
+
+  /* Collapsed by default so the page content starts right below the brand
+     bar; the Menu toggle expands the navigation in place (#431). */
+  .sidebar-toggle {
+    display: inline-flex;
+    width: auto;
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+
+  .sidebar-panel {
+    display: none;
+  }
+
+  .sidebar--open .sidebar-panel {
+    display: grid;
+    gap: 18px;
+    padding-top: 18px;
+  }
+
+  .sidebar nav {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .workspace {
+    padding: var(--space-4);
+  }
+
+  .compact-form {
+    grid-template-columns: 1fr;
+  }
+
+  .metadata-review-row {
+    grid-template-columns: 1fr;
+  }
+
+  .prompt-workbench,
+  .prompt-lab-grid,
+  .prompt-diff {
+    grid-template-columns: 1fr;
+  }
+
+  .prompt-editor-grid,
+  .prompt-test-grid,
+  .prompt-stats-grid,
+  .prompt-diff-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .prompt-editor-field textarea {
+    min-height: 320px;
+  }
+}

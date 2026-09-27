@@ -1,0 +1,376 @@
+/* Dashboard panels: cost, tabs, quality strip, ops grid, charts, live processing, failures. */
+
+.cost-panel-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: 14px;
+  align-items: stretch;
+}
+
+.cost-total-card {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--teal-soft);
+}
+
+.cost-total-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cost-total-card strong {
+  color: #0f5f5b;
+  font-size: 32px;
+  line-height: 1;
+}
+
+.cost-total-card em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.cost-sparkline {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 60px;
+  margin-top: 8px;
+  padding: var(--space-1);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.cost-sparkline span {
+  flex: 1;
+  min-width: 2px;
+  background: var(--teal);
+  border-radius: 2px 2px 0 0;
+}
+
+.cost-breakdown {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+}
+
+.cost-breakdown > strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.cost-breakdown ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cost-breakdown-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.cost-breakdown-label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cost-breakdown-row strong {
+  color: var(--ink);
+}
+
+.cost-breakdown-track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--paper);
+  overflow: hidden;
+}
+
+.cost-breakdown-fill {
+  height: 100%;
+  background: var(--teal);
+  border-radius: inherit;
+}
+
+@media (max-width: 1100px) {
+  /* .live-processing-panel position reset now lives on .dashboard-ops-grid.is-compact */
+  .operations-strip {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dashboard-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.dashboard-tabs button {
+  min-height: 32px;
+  padding: 4px 12px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dashboard-tabs button.active {
+  border-color: var(--teal);
+  background: var(--teal);
+  color: #fff;
+}
+
+.is-hidden {
+  display: none !important;
+}
+
+@media (max-width: 900px) {
+  .cost-panel-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 800px) {
+  .drawer {
+    width: 100vw;
+    padding: 14px;
+  }
+  .dashboard-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .dashboard-heading-actions {
+    justify-content: flex-start;
+  }
+  .health-badge {
+    flex-wrap: wrap;
+  }
+  .health-badge .freshness-indicator {
+    padding-left: 0;
+    border-left: none;
+    margin-left: 0;
+    width: 100%;
+  }
+}
+
+.quality-strip {
+  display: grid;
+  /* self-wrapping so it never overflows/squishes between breakpoints (was a
+     rigid repeat(5, ...)) */
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.quality-strip div {
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.quality-strip span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.quality-strip strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--ink);
+  font-size: 20px;
+}
+
+.dashboard-ops-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: 14px;
+  align-items: start;
+  min-width: 0;
+}
+
+/* JS (Dashboard.tsx `compactLayout` @1100px) is the single source of truth for
+   the dashboard reflow: it emits `.is-compact` and gates the tab bar + the
+   `.is-hidden` panels at the same 1100px. Collapse the grid AND drop the sticky
+   live panel via that SAME class — never a parallel @media. The removed
+   `@media (max-width: 1300px)` collapsed the grid 200px early, so in the
+   1101–1300px band the grid was already one column while JS still thought it was
+   wide: the `position: sticky` live panel then pinned inside the oversized
+   single-column cell and floated over the stacked charts (the reported broken
+   layout). `.dashboard-ops-grid.is-compact` (0-2-0) beats the base rule. */
+.dashboard-ops-grid.is-compact {
+  grid-template-columns: minmax(0, 1fr);
+}
+.dashboard-ops-grid.is-compact .live-processing-panel {
+  position: static;
+  top: auto;
+}
+
+.dashboard-analytics {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+}
+
+.dashboard-analytics .chart-panel.wide {
+  grid-column: auto;
+}
+
+.chart-panel {
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.chart-panel.wide {
+  /* Full width across whatever grid it sits in. `span 2` assumed a 2-column
+     parent (the removed .dashboard-grid); as a direct child of the
+     single-column .dashboard-page it was forcing an implicit 2nd column and
+     breaking the whole dashboard. `1 / -1` spans all tracks in any grid. */
+  grid-column: 1 / -1;
+}
+
+.chart-panel h3 {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.recharts-wrapper {
+  font-size: 12px;
+}
+
+.live-processing-panel {
+  position: sticky;
+  top: 18px;
+  display: grid;
+  gap: 14px;
+  padding: var(--space-4);
+}
+
+.live-processing-panel > header,
+.live-summary,
+.live-job {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.live-processing-panel > header strong {
+  display: block;
+  color: var(--ink);
+  font-size: 18px;
+}
+
+.live-summary {
+  display: grid;
+  /* self-wrapping so it never overflows the narrow live panel on phones
+     (was a rigid repeat(3, 1fr)) */
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.live-summary div {
+  display: grid;
+  gap: var(--space-1);
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+
+.live-summary strong {
+  color: var(--ink);
+  font-size: 20px;
+}
+
+.live-debug-section {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.live-debug-section h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.live-job,
+.live-event,
+.live-failure {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+
+.live-job strong,
+.live-event strong,
+.live-failure strong {
+  display: block;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.live-job small,
+.live-event span,
+.live-failure span,
+.live-failure small {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.live-failure {
+  border-color: #e0a09b;
+  background: var(--danger-soft);
+}
+
+.live-failure.retry {
+  border-color: #9bb7d4;
+  background: var(--info-soft);
+}
+
+.failure-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.failure-heading .status {
+  flex: 0 0 auto;
+}
+
+.empty-state.compact {
+  min-height: auto;
+  padding: 10px;
+  font-size: 13px;
+}
+
+.dashboard-queue-actions {
+  padding-top: 2px;
+}

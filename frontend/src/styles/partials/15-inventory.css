@@ -1,0 +1,99 @@
+/* Inventory: search bar, filter chips, advanced filter panel. */
+
+/* Inventory search + filters */
+.inventory-search-bar {
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  align-items: center;
+}
+.inventory-search-input {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 4px 10px;
+  flex: 1 1 320px;
+  max-width: 480px;
+  color: var(--text);
+}
+.inventory-search-input:focus-within {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px var(--teal-soft);
+}
+.inventory-search-input svg {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.inventory-search-input input {
+  border: 0;
+  outline: 0;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  caret-color: var(--text);
+}
+.inventory-search-input input::placeholder {
+  color: var(--muted);
+}
+.inventory-chips {
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.chip-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-pill);
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip-button.active {
+  background: var(--teal-soft);
+  border-color: var(--teal);
+  color: var(--teal);
+  font-weight: 600;
+}
+.chip-button:hover {
+  border-color: var(--teal);
+}
+.advanced-filter-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--tile-wide), 1fr));
+  gap: var(--space-3);
+  padding: var(--space-3);
+  margin: 8px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+}
+.advanced-filter-panel fieldset {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  color: var(--text);
+}
+.advanced-filter-panel legend {
+  color: var(--ink);
+  font-weight: 600;
+}
+.advanced-filter-panel .checkbox-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+.empty-row {
+  text-align: center;
+  padding: var(--space-5);
+  color: var(--muted);
+  font-style: italic;
+}

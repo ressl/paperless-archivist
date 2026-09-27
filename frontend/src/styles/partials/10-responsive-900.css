@@ -1,0 +1,61 @@
+/* Responsive <= 900px: dashboard, maintenance and chat layouts collapse. */
+
+@media (max-width: 900px) {
+  .dashboard-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dashboard-heading-actions,
+	  .operations-strip,
+	  .dashboard-ops-grid,
+	  .maintenance-grid,
+	  .first-run-steps,
+	  .quality-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-heading-actions {
+    align-items: stretch;
+    flex-direction: column;
+    justify-content: stretch;
+  }
+
+  .range-tabs {
+    justify-content: center;
+  }
+
+  .autopilot-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recovery-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mode-button-group {
+    flex-basis: auto;
+  }
+
+  .chart-panel.wide {
+    grid-column: auto;
+  }
+
+  .chat-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-panel {
+    grid-template-rows: auto auto;
+  }
+
+  .chat-messages {
+    max-height: none;
+  }
+
+  .chat-composer {
+    grid-template-columns: 1fr;
+  }
+}

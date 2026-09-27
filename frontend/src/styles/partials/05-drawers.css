@@ -1,0 +1,258 @@
+/* Drawers: shared drawer chrome and the inventory metadata diagnose drawer. */
+
+.drawer-root {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+.drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 33, 41, 0.4);
+  backdrop-filter: blur(2px);
+}
+
+.drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(420px, 100vw);
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: var(--space-3);
+  padding: 18px;
+  background: var(--surface);
+  box-shadow: -8px 0 20px rgba(20, 33, 41, 0.18);
+  overflow-y: auto;
+}
+
+.drawer header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawer header strong {
+  font-size: 16px;
+  color: var(--ink);
+}
+
+.drawer-close {
+  min-width: 32px;
+  min-height: 32px;
+  padding: var(--space-1);
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.drawer-close:hover {
+  color: var(--ink);
+}
+
+.drawer .recovery-panel,
+.drawer .paperless-maintenance-panel {
+  display: grid;
+  gap: 10px;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+}
+
+.drawer-section {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+
+.drawer-section strong {
+  display: block;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.drawer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diagnose-drawer {
+  width: min(560px, 100vw);
+}
+
+.diagnose-body {
+  display: grid;
+  gap: var(--space-3);
+  overflow-y: auto;
+}
+
+.diagnose-state {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0;
+}
+
+.diagnose-state > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.diagnose-state-span {
+  grid-column: 1 / -1;
+}
+
+.diagnose-state dt {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.diagnose-state dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.diagnose-state code {
+  font-size: 11px;
+  background: #edf1f3;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.diagnose-state-tags {
+  grid-column: 1 / -1;
+}
+
+.diagnose-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.diagnose-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.diagnose-warning-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--brass-soft);
+  color: var(--brass);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.diagnose-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--tile-default), 1fr));
+  gap: 10px;
+}
+
+.diagnose-field-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.diagnose-field-card.tone-success {
+  border-color: #b7d8cf;
+  background: #f3fbf7;
+}
+
+.diagnose-field-card.tone-review {
+  border-color: #e0c999;
+  background: var(--brass-soft);
+}
+
+.diagnose-field-card.tone-danger {
+  border-color: #e0a09b;
+  background: var(--danger-soft);
+}
+
+.diagnose-field-card.tone-neutral {
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+
+.diagnose-field-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0;
+  border: 0;
+}
+
+.diagnose-field-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.diagnose-field-value {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.diagnose-field-confidence,
+.diagnose-field-reason {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.diagnose-raw {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.diagnose-raw summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.diagnose-raw pre {
+  margin: 0;
+  padding: var(--space-2);
+  background: #f4f6f7;
+  border-radius: 4px;
+  font-size: 11px;
+  overflow-x: auto;
+  max-height: 280px;
+}

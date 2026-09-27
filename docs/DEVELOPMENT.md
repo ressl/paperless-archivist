@@ -104,7 +104,8 @@ The frontend is a React + TypeScript Vite app. It uses:
 - generated OpenAPI types in `frontend/src/api/schema.ts`
 - Recharts for dashboard analytics
 - lucide-react for icons
-- CSS in `frontend/src/styles/app.css`
+- CSS in `frontend/src/styles/partials/*.css`, imported in cascade order by
+  `frontend/src/styles/app.css`
 
 Frontend implementation guidelines:
 

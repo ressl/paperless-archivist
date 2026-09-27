@@ -1,0 +1,373 @@
+/* App shell: login, sidebar navigation (skip link, mobile menu), language selector, first-run wizard, page frame. */
+
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+  background: var(--base);
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 28px;
+  box-shadow: var(--shadow-lg);
+}
+
+.login-panel img {
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+}
+
+.login-panel h1 {
+  margin: 12px 0 24px;
+  font-size: 28px;
+  color: var(--ink);
+}
+
+.login-panel form,
+.compact-form {
+  display: grid;
+  gap: 14px;
+}
+
+.sso-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--teal);
+  border-radius: var(--radius-md);
+  background: var(--teal);
+  color: white;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.login-divider {
+  height: 1px;
+  margin: 18px 0;
+  background: var(--line);
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+}
+
+/* Tablet rail: the 280px sidebar starves content in the ~861–1024px band.
+   Narrow it so the workspace breathes before the full mobile stack (@860). */
+@media (max-width: 1024px) {
+  .app-shell {
+    grid-template-columns: 220px 1fr;
+  }
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  gap: 18px;
+  padding: 18px;
+  background: var(--ink);
+  color: #eef3f3;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.brand img {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+
+.brand strong,
+.brand span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.brand span {
+  margin-top: 2px;
+  color: #b7c5cc;
+  font-size: 12px;
+}
+
+.sidebar nav {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+}
+
+.nav-group {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.nav-group-label {
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgb(220 231 233 / 55%);
+}
+
+/* Sidebar entries are links (<a class="nav-link">, #424/#431); give them the
+   shared button box so they look exactly like the former nav buttons. */
+.sidebar nav .nav-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  text-decoration: none;
+}
+
+.sidebar nav .nav-link:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.sidebar nav button,
+.sidebar nav .nav-link,
+.ghost-button {
+  justify-content: flex-start;
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
+  color: #dce7e9;
+}
+
+.sidebar nav button.active,
+.sidebar nav button:hover,
+.sidebar nav .nav-link.active,
+.sidebar nav .nav-link:hover,
+.ghost-button:hover {
+  background: rgb(255 255 255 / 9%);
+}
+
+/* Current-section affordance: a left accent rail so the active page reads at a
+   glance, not only by a faint background. box-sizing:border-box (global) means
+   the 2px border eats content width rather than shifting the row. */
+.sidebar nav button,
+.sidebar nav .nav-link {
+  border-left: 2px solid transparent;
+}
+.sidebar nav button.active,
+.sidebar nav .nav-link.active {
+  border-left-color: var(--teal);
+}
+
+/* Desktop: the collapsible panel is layout-transparent, so nav / language /
+   version / logout stay direct rows of the sidebar grid. It only becomes a
+   real, collapsible box on narrow screens (see @media 860px). */
+.sidebar-panel {
+  display: contents;
+}
+
+.sidebar-toggle {
+  display: none;
+}
+
+/* Skip link (#431): first focusable element, visible only while focused. */
+.skip-link {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: 1000;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-md);
+  font-weight: 600;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: none;
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.workspace:focus {
+  outline: none;
+}
+
+.sidebar-version {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px 0;
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  color: #b7c5cc;
+  font-size: 12px;
+}
+
+.sidebar-version span,
+.sidebar-version strong,
+.sidebar-version small {
+  display: block;
+}
+
+.sidebar-version span {
+  letter-spacing: 0;
+}
+
+.sidebar-version strong {
+  color: #eef3f3;
+  font-size: 13px;
+}
+
+.sidebar-version small {
+  color: #b7c5cc;
+  font-size: 11px;
+}
+
+.language-selector {
+  display: grid;
+  gap: 6px;
+  color: #b7c5cc;
+  font-size: 12px;
+}
+
+.language-selector select {
+  min-height: 34px;
+  border-color: rgb(255 255 255 / 18%);
+  background: rgb(255 255 255 / 8%);
+  color: #eef3f3;
+}
+
+.language-selector select option {
+  color: var(--ink);
+}
+
+.language-selector small {
+  color: #b7c5cc;
+  line-height: 1.35;
+}
+
+.language-selector.compact {
+  margin: 0 0 18px;
+  color: var(--muted);
+}
+
+.language-selector.compact select {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--ink);
+}
+
+.settings-language-row {
+  max-width: 360px;
+  margin: 0 0 18px;
+}
+
+.first-run-wizard {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: var(--space-4);
+  border: 1px solid #c9dbe8;
+  border-radius: var(--radius-md);
+  background: #f8fbfd;
+}
+
+.first-run-wizard header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.first-run-wizard header strong {
+  color: var(--ink);
+}
+
+.first-run-wizard header p,
+.first-run-steps p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.first-run-wizard header span {
+  padding: 5px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--info-soft);
+  color: var(--info);
+  font-weight: 800;
+}
+
+.first-run-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.first-run-steps article {
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+
+.first-run-steps article.complete {
+  border-color: #b7d8cf;
+  background: #f3fbf7;
+}
+
+.first-run-steps article > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.workspace {
+  min-width: 0;
+  padding: var(--space-5);
+  overflow-x: hidden;
+}
+
+.page {
+  /* Single-column page stack. The EXPLICIT track is load-bearing: a descendant
+     that declares `grid-column: span 2` (e.g. .chart-panel.wide on the dashboard
+     and statistics pages) would otherwise make this grid spawn an implicit 2nd
+     column, collapsing the whole page into a broken two-column layout (v1.15.2). */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 24px;
+  color: var(--ink);
+}

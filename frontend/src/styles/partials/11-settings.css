@@ -1,0 +1,323 @@
+/* Settings: provider cards, model selects, connection feedback, tuning disclosure, tooltips. */
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--tile-wide), 1fr));
+  gap: 14px;
+}
+
+.provider-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--tile-wide), 1fr));
+  gap: 14px;
+}
+
+.settings-field {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.model-select-block {
+  display: grid;
+  gap: 6px;
+}
+
+.model-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.icon-button,
+.info-button {
+  width: 38px;
+  min-width: 38px;
+  padding: 0;
+}
+
+.info-button {
+  position: relative;
+  width: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.info-button:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.field-hint.error {
+  color: var(--danger);
+}
+
+.field-hint.warning {
+  color: #7b5d20;
+}
+
+.connection-feedback {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.connection-feedback header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink);
+}
+
+.connection-feedback p,
+.connection-feedback ul {
+  margin: 0;
+}
+
+.connection-feedback ul {
+  padding-left: 18px;
+}
+
+.connection-feedback li + li {
+  margin-top: 4px;
+}
+
+.connection-feedback.success {
+  border-color: #b7d8cf;
+  background: #f3fbf7;
+}
+
+.connection-feedback.success header {
+  color: var(--teal);
+}
+
+.connection-feedback.error {
+  border-color: #e0a09b;
+  background: var(--danger-soft);
+}
+
+.connection-feedback.error header {
+  color: var(--danger);
+}
+
+.connection-feedback.running {
+  border-color: #b7d3e6;
+  background: var(--info-soft);
+}
+
+.connection-feedback.running header {
+  color: var(--info);
+}
+
+.connection-feedback details {
+  display: grid;
+  gap: 6px;
+}
+
+.connection-feedback summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.connection-feedback code {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* --- Per-provider tuning disclosure (v1.6.2) ------------------------- */
+
+.provider-tuning {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--base);
+}
+
+.provider-tuning > summary {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.provider-tuning > summary:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.provider-tuning-body {
+  display: grid;
+  gap: 10px;
+  padding: 8px 12px 12px;
+}
+
+.provider-tuning-section {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.provider-tuning-section > summary {
+  padding: 6px 10px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-tuning-section[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.provider-tuning-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--tile-default), 1fr));
+  gap: 10px;
+  padding: 10px;
+}
+
+.provider-tuning-field {
+  display: grid;
+  gap: var(--space-1);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.provider-tuning-field > span {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.provider-tuning-reset {
+  margin: 0 10px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: start;
+  justify-self: start;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.provider-tuning-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.provider-tuning-meta dt {
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.provider-tuning-meta dd {
+  margin: 0;
+  color: var(--ink);
+}
+
+.provider-tuning-meta ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.status-dot.ok {
+  background: var(--teal);
+}
+
+.status-dot.down {
+  background: var(--danger);
+}
+
+.connection-feedback.warning {
+  border-color: #d8c082;
+  background: #fbf6e6;
+  color: var(--ink-2);
+}
+
+.connection-feedback.warning header {
+  color: #7b5d20;
+}
+
+.ollama-kubectl-example {
+  margin: 6px 0 0;
+  padding: var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-x: auto;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tooltip-shell {
+  position: relative;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.hardware-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 6px;
+  width: min(300px, calc(100vw - 40px));
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 14px 36px rgb(23 35 49 / 16%);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.hardware-tooltip code {
+  color: var(--teal);
+  font-weight: 700;
+}

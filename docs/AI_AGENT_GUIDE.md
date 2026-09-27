@@ -319,7 +319,8 @@ Use existing patterns:
 - `frontend/src/App.tsx` contains page components
 - `frontend/src/api/client.ts` wraps API calls
 - `frontend/src/api/schema.ts` is generated, do not hand-edit
-- `frontend/src/styles/app.css` contains global styling
+- `frontend/src/styles/app.css` is the stylesheet index; styles live in
+  ordered feature partials under `frontend/src/styles/partials/`
 - use lucide icons already present in the app
 - keep controls dense, predictable, and keyboard accessible
 
