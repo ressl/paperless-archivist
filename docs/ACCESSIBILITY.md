@@ -12,7 +12,7 @@ core workflows.
 | Area | v1.0 status |
 | --- | --- |
 | Login | Labelled username/password fields, language selector, SSO link, visible focus. |
-| Dashboard | Main landmark, labelled range tabs, labelled workflow mode controls, live status text. |
+| Dashboard | Main landmark, labelled range tabs, labelled workflow mode controls, status text (badges are plain text, not live regions). |
 | Inventory | Reload and trigger actions use accessible button names and table text. |
 | Review | Selection checkbox, batch actions, editable fields, approve/reject actions. |
 | Settings | Labelled inputs, provider model dropdown labels, connection feedback live region. |

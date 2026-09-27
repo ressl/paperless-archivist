@@ -41,7 +41,9 @@ const checks = [
   ['dashboard range group label', inAnySource("aria-label={t('dashboard.range_label')}")],
   ['workflow mode button group label', inAnySource("aria-label={t('dashboard.auto.processing_mode')}")],
   ['dashboard tablist has role and label', dashboard.includes('role="tablist"') && dashboard.includes("aria-label={t('dashboard.title')}")],
-  ['status pills expose aria-label', ui.includes('role="status" aria-label={label}')],
+  // Status badges are rendered by the hundred (inventory rows, debug console
+  // polling); they must stay plain text, not live regions. (#425)
+  ['status pills are not live regions', ui.includes('<span className={`status ${tone}`}>')],
   ['connection feedback live region', inAnySource('aria-live="polite"')],
   ['model selects have accessible labels', settings.includes('aria-label={`${provider.name} ${capability} model`}')],
   ['tooltip uses describedby', inAnySource('aria-describedby={open ? tooltipId : undefined}')],

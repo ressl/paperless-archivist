@@ -299,8 +299,11 @@ export function Status({ value }: { value: string }) {
     return 'neutral';
   }, [value]);
   const label = statusLabel(value, t);
+  // Plain text badge, deliberately NOT a live region: tables render hundreds of
+  // these and pollers re-render them, which would flood screen readers. The
+  // visible label is the accessible text; the icon is decorative. (#425)
   return (
-    <span className={`status ${tone}`} role="status" aria-label={label}>
+    <span className={`status ${tone}`}>
       {STATUS_ICONS[tone]}
       <span className="status-label">{label}</span>
     </span>

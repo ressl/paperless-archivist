@@ -22,11 +22,17 @@ describe('dashboard a11y smoke', () => {
     cleanup();
   });
 
-  it('status pill carries an accessible name', async () => {
-    const { getByRole } = renderWithI18n(<Status value="failed" />);
-    const node = getByRole('status');
-    expect(node).toBeTruthy();
-    expect(node.getAttribute('aria-label')).toBeTruthy();
+  it('status pill exposes its label as text and is not a live region (#425)', async () => {
+    const { container, getAllByText, queryByRole } = renderWithI18n(
+      <div>
+        {Array.from({ length: 20 }, (_, index) => (
+          <Status key={index} value={index % 2 ? 'failed' : 'succeeded'} />
+        ))}
+      </div>
+    );
+    expect(getAllByText('Failed', { selector: '.status-label' })).toHaveLength(10);
+    expect(queryByRole('status')).toBeNull();
+    expect(container.querySelector('[aria-live], [role="status"], [role="alert"]')).toBeNull();
     cleanup();
   });
 

@@ -106,7 +106,7 @@ describe('<Prompts> metadata test runner', () => {
     await renderMetadataPromptTester();
 
     expect(await screen.findByText('sglang / ressl/MiniMax-M3-uncensored-NVFP4')).toBeInTheDocument();
-    expect(screen.getByRole('status', { name: 'Valid' })).toBeInTheDocument();
+    expect(screen.getByText('Valid', { selector: '.status-label' })).toBeInTheDocument();
     expect(screen.getByText(/"title": "Invoice 41"/)).toBeInTheDocument();
     expect(screen.getByText(promptTestResponse.raw_text)).toBeInTheDocument();
     expect(testPrompt).toHaveBeenCalledWith({
@@ -144,7 +144,7 @@ describe('<Prompts> metadata test runner', () => {
 
     await renderMetadataPromptTester();
 
-    expect(await screen.findByRole('status', { name: 'Failed' })).toBeInTheDocument();
+    expect(await screen.findByText('Failed', { selector: '.status-label' })).toBeInTheDocument();
     expect(
       screen.getByText('metadata field(s) have wrong types or unknown nested properties: tags')
     ).toBeInTheDocument();
