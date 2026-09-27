@@ -8,6 +8,9 @@ export default defineConfig({
     globals: false,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
-    css: false
+    css: false,
+    // jsdom + axe page scans are CPU-bound and run slower on shared CI
+    // runners than locally; the 5 s default caused spurious timeouts.
+    testTimeout: 15_000
   }
 });

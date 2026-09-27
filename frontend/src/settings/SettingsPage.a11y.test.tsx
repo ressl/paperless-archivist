@@ -131,5 +131,7 @@ describe('<SettingsPage> a11y shell', () => {
       }
     });
     expect(results).toHaveNoViolations();
-  });
+    // The page wait alone may take up to 5 s and axe over the full settings
+    // page is slow on shared CI runners; keep the test budget above both.
+  }, 30_000);
 });
