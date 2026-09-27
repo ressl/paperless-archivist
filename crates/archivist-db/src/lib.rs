@@ -9747,6 +9747,9 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
              or j.error_message ilike $2
              or j.error_message ilike $3
            )
+           -- #406: one-shot per job; a crash-looping pod must not raise
+           -- max_attempts again on every start.
+           and not coalesce((j.payload ->> 'vision_requeued')::boolean, false)
            and not exists (
              select 1
                from pipeline_runs active
@@ -9781,6 +9784,7 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
                or j.error_message ilike $2
                or j.error_message ilike $3
              )
+             and not coalesce((j.payload ->> 'vision_requeued')::boolean, false)
              and not exists (
                select 1
                  from pipeline_runs active
@@ -9801,11 +9805,13 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
                or j.error_message ilike $2
                or j.error_message ilike $3
              )
+             and not coalesce((j.payload ->> 'vision_requeued')::boolean, false)
            for update of j
         )
         update jobs j
            set status = 'queued',
                max_attempts = j.max_attempts + 1,
+               payload = j.payload || '{"vision_requeued": true}'::jsonb,
                run_after = now(),
                lease_owner = null,
                lease_until = null,
@@ -9850,6 +9856,26 @@ pub async fn requeue_vision_crashed_jobs(pool: &DbPool) -> Result<VisionCrashReq
                updated_at = now()
          where id = any($1)
            and status = 'failed'
+        "#,
+    )
+    .bind(&run_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    // #406: `fail_job` cancelled the run's later-stage siblings (metadata)
+    // when OCR failed. Restore them too, otherwise the OCR job looks like the
+    // run's last active job, sets the global completion tag and metadata
+    // never runs for this document.
+    sqlx::query(
+        r#"
+        update jobs
+           set status = 'queued',
+               run_after = now(),
+               lease_owner = null,
+               lease_until = null,
+               updated_at = now()
+         where run_id = any($1)
+           and status = 'cancelled'
         "#,
     )
     .bind(&run_ids)
