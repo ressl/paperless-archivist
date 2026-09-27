@@ -123,27 +123,7 @@ export function CommaListInput({
   );
 }
 
-/**
- * Numeric input that holds a raw string draft while editing and only
- * parses/clamps on blur. A controlled `value={number}` with
- * `onChange={Number(...)}` clamps on every keystroke (so multi-digit values
- * become untypeable) and turns a cleared field into `0`/`NaN`; this commits
- * once, on blur, clamped into [min, max], falling back to `min` (or 0) for an
- * empty/invalid entry, and shows the committed value back. (#284)
- */
-export function NumberField({
-  value,
-  onCommit,
-  min,
-  max,
-  step,
-  integer = true,
-  id,
-  placeholder,
-  ariaLabel
-}: {
-  value: number;
-  onCommit: (value: number) => void;
+type NumberFieldBaseProps = {
   min?: number;
   max?: number;
   step?: number;
@@ -151,8 +131,29 @@ export function NumberField({
   id?: string;
   placeholder?: string;
   ariaLabel?: string;
-}) {
-  const text = String(value);
+};
+
+export type NumberFieldProps = NumberFieldBaseProps &
+  (
+    | { nullable?: false; value: number; onCommit: (value: number) => void }
+    | { nullable: true; value: number | null | undefined; onCommit: (value: number | null) => void }
+  );
+
+/**
+ * Numeric input that holds a raw string draft while editing and only
+ * parses/clamps on blur. A controlled `value={number}` with
+ * `onChange={Number(...)}` clamps on every keystroke (so multi-digit values
+ * become untypeable) and turns a cleared field into `0`/`NaN`; this commits
+ * once, on blur, clamped into [min, max], falling back to `min` (or 0) for an
+ * empty/invalid entry, and shows the committed value back. (#284)
+ *
+ * With `nullable`, an empty field means "no value": it renders `null` as empty
+ * and commits `null` for an empty/invalid entry (used by the provider tuning
+ * overrides, where null inherits the global default).
+ */
+export function NumberField(props: NumberFieldProps) {
+  const { value, min, max, step, integer = true, id, placeholder, ariaLabel } = props;
+  const text = value === null || value === undefined ? '' : String(value);
   const [raw, setRaw] = useState(text);
   useEffect(() => {
     setRaw(text);
@@ -160,11 +161,18 @@ export function NumberField({
   const commit = () => {
     const trimmed = raw.trim();
     let next = trimmed === '' ? NaN : Number(trimmed);
-    if (!Number.isFinite(next)) next = min ?? 0;
+    if (!Number.isFinite(next)) {
+      if (props.nullable) {
+        props.onCommit(null);
+        setRaw('');
+        return;
+      }
+      next = min ?? 0;
+    }
     if (integer) next = Math.round(next);
     if (min != null) next = Math.max(min, next);
     if (max != null) next = Math.min(max, next);
-    onCommit(next);
+    props.onCommit(next);
     setRaw(String(next));
   };
   return (

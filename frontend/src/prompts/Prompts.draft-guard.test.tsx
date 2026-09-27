@@ -132,36 +132,22 @@ describe('<Prompts> unsaved draft navigation guard', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   });
 
-  it('guards an unsaved activate-after-save choice even when text is unchanged', async () => {
+  it('does not treat unchecking activate-after-save as an unsaved draft (#435)', async () => {
     const { version } = await renderWorkbench();
     const activate = screen.getByRole('checkbox', {
       name: 'Activate after save'
     }) as HTMLInputElement;
     expect(activate.checked).toBe(true);
     fireEvent.click(activate);
-
-    fireEvent.click(metadataStageButton());
-    const dialog = await screen.findByRole('alertdialog');
-    expect(version.value).toBe('ocr-v2');
     expect(activate.checked).toBe(false);
-
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
-    expect(version.value).toBe('ocr-v2');
-    expect(activate.checked).toBe(false);
-  });
-
-  it('resets a checkbox-only draft to the synced activate baseline', async () => {
-    await renderWorkbench();
-    const activate = screen.getByRole('checkbox', {
-      name: 'Activate after save'
-    }) as HTMLInputElement;
-    fireEvent.click(activate);
-    expect(screen.getByText('unsaved edits')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
-
-    expect(activate.checked).toBe(true);
     expect(screen.queryByText('unsaved edits')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled();
+
+    // Switching away is not blocked; the new selection starts from the default.
+    fireEvent.click(metadataStageButton());
+    await waitFor(() => expect(version.value).toBe('metadata-v1'));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(activate.checked).toBe(true);
   });
 
   it('cancels a dirty version switch with Escape and restores focus', async () => {

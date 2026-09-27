@@ -7,7 +7,7 @@ import {
   RuntimeSettings
 } from '../../api/client';
 import { useI18n } from '../../i18n/I18nProvider';
-import { errorToString } from '../../lib/ui';
+import { NumberField, errorToString } from '../../lib/ui';
 import {
   isSglangMinimaxM3Provider,
   SGLANG_MINIMAX_M3_TUNING
@@ -498,34 +498,6 @@ export function TuningNumberField({
   onChange: (next: number | null) => void;
 }) {
   const { t } = useI18n();
-  // value === null / undefined => render empty (operator sees "inherits default").
-  // value === 0 => render '0' (explicit zero is preserved).
-  const text = value === null || value === undefined ? '' : String(value);
-  const [raw, setRaw] = useState(text);
-  useEffect(() => {
-    setRaw(text);
-  }, [text]);
-  // Blur-commit like lib/ui's NumberField (#284): hold the raw draft while
-  // typing and only parse on blur, rounded (most fields are unsigned integers
-  // on the backend — Option<u32>/u16) and clamped into [min, max]. The old
-  // per-keystroke commit let negatives/fractions through, and the backend
-  // rejected the whole settings save with an opaque body-level 422 (#314).
-  // Empty or unparsable input commits `null` = "inherit the global default".
-  const commit = () => {
-    const trimmed = raw.trim();
-    const parsed = trimmed === '' ? NaN : Number(trimmed);
-    if (!Number.isFinite(parsed)) {
-      onChange(null);
-      setRaw('');
-      return;
-    }
-    let next = parsed;
-    if (integer) next = Math.round(next);
-    if (min != null) next = Math.max(min, next);
-    if (max != null) next = Math.min(max, next);
-    onChange(next);
-    setRaw(String(next));
-  };
   const labelKey = `settings.tuning.field.${field}` as Parameters<typeof t>[0];
   const renderedDefault =
     defaultLabel ??
@@ -535,15 +507,19 @@ export function TuningNumberField({
   return (
     <label className="provider-tuning-field">
       <span>{t(labelKey)}</span>
-      <input
-        type="number"
+      {/* Shared blur-commit field (#284, #435): rounded for the unsigned
+          integer fields (Option<u32>/u16 on the backend) and clamped into
+          [min, max] so a save is never rejected with an opaque 422 (#314).
+          null / empty = "inherit the global default"; an explicit 0 stays 0. */}
+      <NumberField
+        nullable
+        value={value}
+        onCommit={onChange}
         min={min}
         max={max}
         step={step}
-        value={raw}
+        integer={integer}
         placeholder={defaultValue !== null && defaultValue !== undefined ? String(defaultValue) : ''}
-        onChange={(event) => setRaw(event.target.value)}
-        onBlur={commit}
       />
       <small className="field-hint">{renderedDefault}</small>
     </label>

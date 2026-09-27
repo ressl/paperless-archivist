@@ -5,6 +5,7 @@ import { promptStageOrder, resolvePromptStageHelp, type PromptStageHelp } from '
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
 import { Button, PageHeader, Status, localizedErrorMessage, run, useFocusTrap } from '../lib/ui';
 import { formatMs } from '../lib/format';
+import { lineDiffStats } from './lineDiff';
 
 type PendingPromptSelection =
   | { kind: 'stage'; stage: Stage }
@@ -55,15 +56,15 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
     stagePrompts.find((prompt) => prompt.id === selectedPromptId) ?? activePrompt ?? stagePrompts[0] ?? null;
   const comparePrompt = comparePromptId ? stagePrompts.find((prompt) => prompt.id === comparePromptId) ?? null : null;
   const selectedUsage = selectedPrompt ? usageByPromptId.get(selectedPrompt.id) : undefined;
-  const promptDirty =
-    !activate ||
-    (selectedPrompt
-      ? editorName.trim() !== selectedPrompt.name ||
-        editorContent.trimEnd() !== selectedPrompt.content.trimEnd()
-      : editorName.trim() !== 'default' || editorContent.trimEnd() !== '');
+  // Only the prompt itself (name + content) is a draft. "Activate after save"
+  // is a save option, not content: unchecking it must not raise the unsaved
+  // changes pill or the discard dialog (#435).
+  const promptDirty = selectedPrompt
+    ? editorName.trim() !== selectedPrompt.name || editorContent.trimEnd() !== selectedPrompt.content.trimEnd()
+    : editorName.trim() !== 'default' || editorContent.trimEnd() !== '';
   const stageHelp = resolvePromptStageHelp(selectedStage, t);
   const promptStats = promptTextStats(editorContent);
-  const diffStats = comparePrompt && selectedPrompt ? promptDiffStats(comparePrompt.content, editorContent) : null;
+  const diffStats = comparePrompt && selectedPrompt ? lineDiffStats(comparePrompt.content, editorContent) : null;
   const load = async () => {
     setLoading(true);
     try {
@@ -109,17 +110,19 @@ export function Prompts({ setError }: { setError: (error: string | null) => void
 
   useEffect(() => {
     const selectedId = selectedPrompt?.id ?? null;
-    if (editorSyncedPromptIdRef.current === selectedId && promptDirtyRef.current) return;
+    const selectionChanged = editorSyncedPromptIdRef.current !== selectedId;
+    if (!selectionChanged && promptDirtyRef.current) return;
     editorSyncedPromptIdRef.current = selectedId;
     if (selectedPrompt) {
       setEditorName(selectedPrompt.name);
       setEditorContent(selectedPrompt.content);
-      setActivate(true);
     } else {
       setEditorName('default');
       setEditorContent('');
-      setActivate(true);
     }
+    // A background reload of the same prompt keeps the operator's save option;
+    // only a different selection starts again from "activate after save".
+    if (selectionChanged) setActivate(true);
     setComparePromptId((current) => {
       if (current && stagePrompts.some((prompt) => prompt.id === current && prompt.id !== selectedPrompt?.id)) return current;
       if (activePrompt && activePrompt.id !== selectedPrompt?.id) return activePrompt.id;
@@ -565,21 +568,6 @@ function promptTextStats(value: string) {
     lines: value ? value.split(/\r?\n/).length : 0,
     words: trimmed ? trimmed.split(/\s+/).length : 0,
     characters: value.length
-  };
-}
-
-function promptDiffStats(before: string, after: string) {
-  const beforeLines = before.split(/\r?\n/);
-  const afterLines = after.split(/\r?\n/);
-  const max = Math.max(beforeLines.length, afterLines.length);
-  let changedLines = 0;
-  for (let index = 0; index < max; index += 1) {
-    if ((beforeLines[index] ?? '') !== (afterLines[index] ?? '')) changedLines += 1;
-  }
-  return {
-    changedLines,
-    addedLines: Math.max(afterLines.length - beforeLines.length, 0),
-    removedLines: Math.max(beforeLines.length - afterLines.length, 0)
   };
 }
 

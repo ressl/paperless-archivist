@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ChevronDown, ListChecks, Save, Wrench, X } from 'lucide-react';
 import { api, ReviewItem, Stage } from '../api/client';
 import { useI18n, type TFunction } from '../i18n/I18nProvider';
@@ -206,9 +206,16 @@ function ReviewCard({ item, selected, focused, onSelect, onReload, onAutoFix, se
   const [edit, setEdit] = useState<ReviewEditState>(() => reviewEditStateFromPatch(patch));
   const [busy, setBusy] = useState(false);
 
+  // Re-seed the edit form when the card shows another review or the server's
+  // suggestion changed. Keyed by the suggestion's content, not its object
+  // identity: every queue reload delivers new objects, and resetting on those
+  // would wipe in-progress edits. (#435)
+  const patchKey = useMemo(() => JSON.stringify(item.suggested_patch ?? null), [item.suggested_patch]);
+  const latestPatch = useRef(patch);
+  latestPatch.current = patch;
   useEffect(() => {
-    setEdit(reviewEditStateFromPatch(patch));
-  }, [item.id]);
+    setEdit(reviewEditStateFromPatch(latestPatch.current));
+  }, [item.id, patchKey]);
 
   const applyEdited = useCallback(async () => {
     if (!patch) {

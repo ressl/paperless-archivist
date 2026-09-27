@@ -56,4 +56,20 @@ describe('NumberField', () => {
     fireEvent.blur(input);
     expect(onCommit).toHaveBeenCalledWith(0.85);
   });
+
+  it('nullable mode renders null as empty and commits null when cleared (#435)', () => {
+    const onCommit = vi.fn();
+    const { getByRole } = render(<NumberField nullable value={null} min={0} onCommit={onCommit} />);
+    const input = getByRole('spinbutton') as HTMLInputElement;
+    expect(input.value).toBe('');
+
+    fireEvent.change(input, { target: { value: '-4.6' } });
+    fireEvent.blur(input);
+    expect(onCommit).toHaveBeenLastCalledWith(0);
+
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.blur(input);
+    expect(onCommit).toHaveBeenLastCalledWith(null);
+    expect(input.value).toBe('');
+  });
 });
