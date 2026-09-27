@@ -117,6 +117,45 @@ logs for `OCR lease lost` and the structured `vision_phase` value (`primary`,
 usually means Worker replicas or database latency exceed the configured model
 capacity; inspect expired leases and queue age before raising concurrency.
 
+### Paperless inventory sync (#408)
+
+The Worker syncs the Paperless document list every minute (full list unless
+`paperless.delta_sync_enabled`). Since 2026-09 the sync:
+
+- requests `/api/documents/?fields=id,title,created,modified,tags,correspondent,document_type,original_file_name&truncate_content=true`,
+  so no OCR `content` is transferred or deserialized (the same helper serves
+  the API sync and the consistency check);
+- commits the tag/correspondent/type/custom-field catalog first, then upserts
+  inventory rows in id-ordered transactions of 500 rows, and only then advances
+  the sync cursor (a crash mid-sync re-covers the window next time);
+- locks inventory rows in ascending id order in `claim_jobs` as well, so the
+  claim path and the sync cannot deadlock.
+
+The operator-triggered sync in the API still upserts in a single transaction
+(it now also skips `content`); batching it the same way is a follow-up.
+
+Expected impact (estimated, not yet measured on a production archive): the
+list payload shrinks from roughly `documents × average OCR text` (about
+10-50 KB per document, i.e. hundreds of MB per minute at 20k documents) to
+about 0.3 KB per document (~6 MB at 20k); peak Worker memory during the sync
+drops by the same order; the longest sync transaction holds at most 500 row
+locks instead of the whole archive, so `claim_jobs`, `complete_job` and
+`fail_job` wait at most one batch. Record measured before/after numbers here
+with `scripts/perf/run_postgres_inventory_benchmark.sh` and Worker RSS when a
+large archive is available. The `delta_sync_enabled` default stays `false`:
+the full list is now cheap, and flipping the default would change the
+runtime-settings contract.
+
+### Claim query plan (#412)
+
+`claim_jobs` claims in up to three passes, each served by an index in
+`ORDER BY` order and stopped after `limit` rows: expired leases via
+`jobs_lease_until_idx`, queued retries via the partial `idx_jobs_claim_retry`
+(migration 0053), and remaining queued jobs via `idx_jobs_claim`. The ignored
+DB test `claim_job_passes_use_ordered_indexes`
+(`crates/archivist-db/tests/claim_jobs_stale_lease.rs`) asserts via `EXPLAIN`
+that each pass scans its index and plans no `Sort` node.
+
 ## Operational Targets
 
 Use these as practical targets, not strict promises:

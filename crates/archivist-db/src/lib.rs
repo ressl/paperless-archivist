@@ -28,6 +28,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub type DbPool = PgPool;
+/// Transaction handle for callers that batch several helpers in one TX
+/// without depending on sqlx directly (worker sync batches, #408).
+pub type DbTransaction<'a> = Transaction<'a, Postgres>;
 
 const LAST_ENABLED_ADMIN_REJECTION: &str = "last enabled administrator mutation rejected";
 static AUDIT_INTEGRITY_VERIFY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -6218,13 +6221,23 @@ pub async fn claim_jobs(
         .execute(&mut *tx)
         .await?;
 
+        // #408: lock the inventory rows in ascending id order (the order the
+        // batched Paperless sync upserts them in) so the two cannot deadlock.
         sqlx::query(
             r#"
-            update document_inventory
+            with locked as (
+              select paperless_document_id
+                from document_inventory
+               where paperless_document_id = any($1::int[])
+                 and current_run_status in ('queued', 'running', 'waiting_review')
+               order by paperless_document_id
+               for update
+            )
+            update document_inventory di
                set current_run_status = 'running',
                    updated_at = now()
-             where paperless_document_id = any($1::int[])
-               and current_run_status in ('queued', 'running', 'waiting_review')
+              from locked
+             where di.paperless_document_id = locked.paperless_document_id
             "#,
         )
         .bind(&document_ids)

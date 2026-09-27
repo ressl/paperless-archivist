@@ -4466,12 +4466,45 @@ async fn sync_metadata(
         upsert_paperless_custom_field(&mut tx, field.id, &field.name, field.data_type.as_deref())
             .await?;
     }
+    // #408: the catalog upserts above are small; commit them now instead of
+    // holding one transaction (and every inventory row lock) across the whole
+    // document sync, where `claim_jobs`/`complete_job`/`fail_job` queued up
+    // behind it.
+    tx.commit().await?;
     // O(1) id→name lookups: building this map once avoids the previous
     // O(documents × tags) nested linear scan, which was pure CPU burned inside
     // the sync transaction on instances with many tags/documents.
     let tag_names_by_id: HashMap<i32, &str> =
         tags.iter().map(|tag| (tag.id, tag.name.as_str())).collect();
-    for document in &documents {
+    // #408: upsert in short, id-ordered batches — each batch locks at most
+    // SYNC_UPSERT_BATCH_SIZE inventory rows, always in ascending id order (the
+    // same order `claim_jobs` locks them in), so there is no long-held lock
+    // set and no lock-order deadlock with the claim path.
+    let mut ordered: Vec<&PaperlessDocumentSummary> = documents.iter().collect();
+    ordered.sort_unstable_by_key(|document| document.id);
+    for batch in ordered.chunks(SYNC_UPSERT_BATCH_SIZE) {
+        let mut tx = pool.begin().await?;
+        upsert_inventory_batch(&mut tx, batch, &tag_names_by_id, settings).await?;
+        tx.commit().await?;
+    }
+    // The cursor only advances after every batch landed; a crash mid-sync
+    // re-covers the same window on the next run.
+    let mut tx = pool.begin().await?;
+    update_paperless_sync_cursor(&mut tx, &archive_name, sync_mode, sync_started_at).await?;
+    tx.commit().await?;
+    Ok(PaperlessSyncSnapshot { tags, documents })
+}
+
+/// Inventory rows upserted per sync transaction. #408
+const SYNC_UPSERT_BATCH_SIZE: usize = 500;
+
+async fn upsert_inventory_batch(
+    tx: &mut archivist_db::DbTransaction<'_>,
+    documents: &[&PaperlessDocumentSummary],
+    tag_names_by_id: &HashMap<i32, &str>,
+    settings: &RuntimeSettings,
+) -> Result<()> {
+    for document in documents {
         let tag_names = document
             .tags
             .iter()
@@ -4479,7 +4512,7 @@ async fn sync_metadata(
             .map(|name| name.to_owned())
             .collect::<Vec<_>>();
         upsert_inventory_item(
-            &mut tx,
+            tx,
             &archivist_db::InventoryUpsert {
                 paperless_document_id: document.id,
                 title: document.title.clone(),
@@ -4507,9 +4540,7 @@ async fn sync_metadata(
         )
         .await?;
     }
-    update_paperless_sync_cursor(&mut tx, &archive_name, sync_mode, sync_started_at).await?;
-    tx.commit().await?;
-    Ok(PaperlessSyncSnapshot { tags, documents })
+    Ok(())
 }
 
 async fn paperless_client(
