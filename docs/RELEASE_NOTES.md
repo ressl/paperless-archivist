@@ -24,6 +24,8 @@ _No changes yet._
   at most 100 items and refresh after partial progress (#455).
 - Frontend tests explicitly unmount their React roots before jsdom teardown,
   preventing pending React work from failing CI after all tests have passed.
+- Update locked source-map-js, quinn-proto, and rustls dependencies to their
+  patched versions to address the release security audit findings (#456–#458).
 
 No database migration is required. Roll back API and worker together to
 `v1.19.0` if needed; the previous release does not include these review fixes.
