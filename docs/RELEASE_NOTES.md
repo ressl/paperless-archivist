@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+_No changes yet._
+
+## v1.19.1 — Review apply recovery and edited metadata
+
 - Review apply recovery now shares a PostgreSQL execution lock with active
   API applies and the autopilot drain, preventing recovery from failing a
   PATCH that is still running (#452). Update API and worker together so
@@ -18,6 +22,11 @@
   apply, subject to the existing creation policy and limits (#454).
 - Bulk review approval and rejection now split selections into requests of
   at most 100 items and refresh after partial progress (#455).
+- Frontend tests explicitly unmount their React roots before jsdom teardown,
+  preventing pending React work from failing CI after all tests have passed.
+
+No database migration is required. Roll back API and worker together to
+`v1.19.0` if needed; the previous release does not include these review fixes.
 
 ## v1.19.0 — Audit 2026-09: safer pipeline, review workflow, and UI overhaul
 
