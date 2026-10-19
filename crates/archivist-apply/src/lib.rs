@@ -13,12 +13,13 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use archivist_core::DocumentPatch;
 use archivist_db::{
-    ApplyIntentInput, ApplyIntentRecord, DbPool, fail_apply_intent, finalize_apply_intent,
-    finalize_failed_apply_intent, get_apply_intent, get_recoverable_apply_intent_by_source_key,
-    get_review_status, list_recoverable_review_apply_intents, mark_apply_intent_confirmed,
+    ApplyIntentInput, ApplyIntentRecord, DbConnection, DbPool, fail_apply_intent,
+    finalize_apply_intent, finalize_failed_apply_intent, get_apply_intent,
+    get_recoverable_apply_intent_by_source_key, get_review_status,
+    list_recoverable_review_apply_intents, mark_apply_intent_confirmed,
     mark_apply_intent_in_flight, mark_review_applied, mark_review_auto_applied,
     prepare_apply_intent, reconcile_apply_intent, release_transient_apply_intent,
-    revert_review_from_applying,
+    revert_review_from_applying, try_lock_apply_source,
 };
 use archivist_paperless::{
     PaperlessClient, PaperlessDocumentDetail, PaperlessError, document_matches_patch,
@@ -50,6 +51,19 @@ pub struct ApplyRequest {
     /// part of the request with HTTP 400. The rejected attempt remains audited.
     pub allow_custom_fields_fallback: bool,
 }
+
+/// Another process still owns this logical apply. Callers must retry rather
+/// than treating lock contention as a permanent document failure.
+#[derive(Debug, Clone, Copy)]
+pub struct ApplySourceBusy;
+
+impl Display for ApplySourceBusy {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Paperless apply source is already executing")
+    }
+}
+
+impl std::error::Error for ApplySourceBusy {}
 
 /// Field-scoped optimistic-concurrency input for review-backed applies.
 /// Direct worker applies deliberately omit it because they are generated and
@@ -412,30 +426,7 @@ pub fn patch_hash(patch: &DocumentPatch) -> Result<String> {
 pub async fn apply_document(
     pool: &DbPool,
     client: &PaperlessClient,
-    request: ApplyRequest,
-) -> Result<ApplyExecution> {
-    apply_document_inner(pool, client, request, false).await
-}
-
-/// Resume an unfinished logical source using its persisted body. Job callers
-/// invoke this before rebuilding/pruning a patch after lease loss.
-pub async fn resume_apply_source(
-    pool: &DbPool,
-    client: &PaperlessClient,
-    source_key: &str,
-) -> Result<Option<ApplyExecution>> {
-    let Some(intent) = get_recoverable_apply_intent_by_source_key(pool, source_key).await? else {
-        return Ok(None);
-    };
-    let request = request_from_intent(&intent)?;
-    apply_document(pool, client, request).await.map(Some)
-}
-
-async fn apply_document_inner(
-    pool: &DbPool,
-    client: &PaperlessClient,
     mut request: ApplyRequest,
-    mut custom_fields_dropped: bool,
 ) -> Result<ApplyExecution> {
     if let Some(precondition) = request.review_precondition.take() {
         let current = client
@@ -450,11 +441,51 @@ async fn apply_document_inner(
         )?;
         request.before = Some(audit_before_for_patch(&current, &request.patch));
     }
+    let Some(mut guard) = try_lock_apply_source(pool, &request.source_key).await? else {
+        return Err(ApplySourceBusy.into());
+    };
+    let result = apply_document_inner(guard.connection(), client, request, false).await;
+    guard.release().await?;
+    result
+}
+
+/// Resume an unfinished logical source using its persisted body. Job callers
+/// invoke this before rebuilding/pruning a patch after lease loss.
+pub async fn resume_apply_source(
+    pool: &DbPool,
+    client: &PaperlessClient,
+    source_key: &str,
+) -> Result<Option<ApplyExecution>> {
+    let Some(mut guard) = try_lock_apply_source(pool, source_key).await? else {
+        return Err(ApplySourceBusy.into());
+    };
+    let result = async {
+        let Some(intent) =
+            get_recoverable_apply_intent_by_source_key(guard.connection(), source_key).await?
+        else {
+            return Ok(None);
+        };
+        let request = request_from_intent(&intent)?;
+        apply_document_inner(guard.connection(), client, request, false)
+            .await
+            .map(Some)
+    }
+    .await;
+    guard.release().await?;
+    result
+}
+
+async fn apply_document_inner(
+    connection: &mut DbConnection,
+    client: &PaperlessClient,
+    mut request: ApplyRequest,
+    mut custom_fields_dropped: bool,
+) -> Result<ApplyExecution> {
     loop {
         let patch = serde_json::to_value(&request.patch)
             .context("serialize Paperless patch for apply intent")?;
         let intent = prepare_apply_intent(
-            pool,
+            &mut *connection,
             &ApplyIntentInput {
                 source: request.source.clone(),
                 source_key: request.source_key.clone(),
@@ -503,21 +534,36 @@ async fn apply_document_inner(
                 ));
             }
             "in_flight" => {
-                return reconcile_existing(pool, client, &request, &intent, custom_fields_dropped)
-                    .await;
+                return reconcile_existing(
+                    &mut *connection,
+                    client,
+                    &request,
+                    &intent,
+                    custom_fields_dropped,
+                )
+                .await;
             }
             "prepared" => {}
             state => return Err(anyhow!("unknown Paperless apply state {state}")),
         }
 
-        if !mark_apply_intent_in_flight(pool, intent.attempt_id, &request.owner_id).await? {
-            let current = get_apply_intent(pool, intent.attempt_id)
+        if !mark_apply_intent_in_flight(&mut *connection, intent.attempt_id, &request.owner_id)
+            .await?
+        {
+            let current = get_apply_intent(&mut *connection, intent.attempt_id)
                 .await?
                 .ok_or_else(|| anyhow!("Paperless apply intent disappeared after claim race"))?;
             if current.state == "prepared" {
                 continue;
             }
-            return resume_existing(pool, client, &request, current, custom_fields_dropped).await;
+            return resume_existing(
+                &mut *connection,
+                client,
+                &request,
+                current,
+                custom_fields_dropped,
+            )
+            .await;
         }
 
         let started = Instant::now();
@@ -530,7 +576,7 @@ async fn apply_document_inner(
                     .context("serialize confirmed Paperless response")?;
                 let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
                 if mark_apply_intent_confirmed(
-                    pool,
+                    &mut *connection,
                     intent.attempt_id,
                     &request.owner_id,
                     Some(response),
@@ -544,18 +590,24 @@ async fn apply_document_inner(
                         custom_fields_dropped,
                     });
                 }
-                let current = get_apply_intent(pool, intent.attempt_id)
+                let current = get_apply_intent(&mut *connection, intent.attempt_id)
                     .await?
                     .ok_or_else(|| anyhow!("Paperless apply intent disappeared after PATCH"))?;
-                return resume_existing(pool, client, &request, current, custom_fields_dropped)
-                    .await;
+                return resume_existing(
+                    &mut *connection,
+                    client,
+                    &request,
+                    current,
+                    custom_fields_dropped,
+                )
+                .await;
             }
             Err(patch_error) => match client.get_document(request.paperless_document_id).await {
                 Ok(document) if document_matches_patch(&document, &request.patch) => {
                     let response = serde_json::to_value(document)
                         .context("serialize reconciled Paperless response")?;
                     if reconcile_apply_intent(
-                        pool,
+                        &mut *connection,
                         intent.attempt_id,
                         &request.owner_id,
                         Some(response),
@@ -568,13 +620,19 @@ async fn apply_document_inner(
                             custom_fields_dropped,
                         });
                     }
-                    let current = get_apply_intent(pool, intent.attempt_id)
+                    let current = get_apply_intent(&mut *connection, intent.attempt_id)
                         .await?
                         .ok_or_else(|| {
                             anyhow!("Paperless apply intent disappeared during reconciliation")
                         })?;
-                    return resume_existing(pool, client, &request, current, custom_fields_dropped)
-                        .await;
+                    return resume_existing(
+                        &mut *connection,
+                        client,
+                        &request,
+                        current,
+                        custom_fields_dropped,
+                    )
+                    .await;
                 }
                 Ok(_) => {
                     let message = format!(
@@ -586,7 +644,7 @@ async fn apply_document_inner(
                     // forever. Only definitive failures become terminal. #389
                     if is_transient_paperless_error(&patch_error)
                         && release_transient_apply_intent(
-                            pool,
+                            &mut *connection,
                             intent.attempt_id,
                             &request.owner_id,
                             &message,
@@ -599,7 +657,13 @@ async fn apply_document_inner(
                             intent.attempt_id
                         ));
                     }
-                    fail_apply_intent(pool, intent.attempt_id, &request.owner_id, &message).await?;
+                    fail_apply_intent(
+                        &mut *connection,
+                        intent.attempt_id,
+                        &request.owner_id,
+                        &message,
+                    )
+                    .await?;
 
                     if request.allow_custom_fields_fallback
                         && request.patch.custom_fields.is_some()
@@ -639,76 +703,69 @@ pub async fn recover_review_apply_intents(
     };
 
     for intent in intents {
-        if intent.state == "failed" {
-            match settle_failed_review(pool, &intent).await {
-                Ok(()) => summary.failed_settled += 1,
-                Err(error) => {
-                    summary.deferred += 1;
-                    tracing::warn!(
-                        attempt_id = %intent.attempt_id,
-                        error = %error,
-                        "failed to settle terminal Paperless review intent"
-                    );
-                }
-            }
+        let Some(mut guard) = try_lock_apply_source(pool, &intent.source_key).await? else {
+            summary.deferred += 1;
             continue;
-        }
-
-        let request = match request_from_intent(&intent) {
-            Ok(request) => request,
+        };
+        let result =
+            recover_review_apply_intent(guard.connection(), client, intent.attempt_id).await;
+        guard.release().await?;
+        match result {
+            Ok(ReviewIntentRecovery::Applied) => summary.applied += 1,
+            Ok(ReviewIntentRecovery::FailedSettled) => summary.failed_settled += 1,
+            Ok(ReviewIntentRecovery::AlreadyFinalized) => {}
             Err(error) => {
                 summary.deferred += 1;
                 tracing::warn!(
                     attempt_id = %intent.attempt_id,
                     error = %error,
-                    "failed to decode persisted Paperless review patch"
+                    "Paperless review intent remains deferred"
                 );
-                continue;
-            }
-        };
-
-        match apply_document(pool, client, request).await {
-            Ok(execution) => {
-                match settle_applied_review(pool, &intent, execution.attempt_id()).await {
-                    Ok(()) => summary.applied += 1,
-                    Err(error) => {
-                        summary.deferred += 1;
-                        tracing::warn!(
-                            attempt_id = %intent.attempt_id,
-                            error = %error,
-                            "failed to finalize recovered Paperless review intent"
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                let current = get_apply_intent(pool, intent.attempt_id).await?;
-                if let Some(current) = current
-                    && current.state == "failed"
-                {
-                    match settle_failed_review(pool, &current).await {
-                        Ok(()) => summary.failed_settled += 1,
-                        Err(settle_error) => {
-                            summary.deferred += 1;
-                            tracing::warn!(
-                                attempt_id = %intent.attempt_id,
-                                error = %settle_error,
-                                "failed to settle reconciled mismatch"
-                            );
-                        }
-                    }
-                } else {
-                    summary.deferred += 1;
-                    tracing::warn!(
-                        attempt_id = %intent.attempt_id,
-                        error = %error,
-                        "Paperless review intent remains deferred"
-                    );
-                }
             }
         }
     }
     Ok(summary)
+}
+
+enum ReviewIntentRecovery {
+    Applied,
+    FailedSettled,
+    AlreadyFinalized,
+}
+
+async fn recover_review_apply_intent(
+    connection: &mut DbConnection,
+    client: &PaperlessClient,
+    attempt_id: Uuid,
+) -> Result<ReviewIntentRecovery> {
+    // The listing is only a candidate snapshot. Re-read after obtaining
+    // exclusive execution ownership, including before settling a failure.
+    let intent = get_apply_intent(&mut *connection, attempt_id)
+        .await?
+        .ok_or_else(|| anyhow!("Paperless review intent disappeared"))?;
+    if intent.finalized_at.is_some() {
+        return Ok(ReviewIntentRecovery::AlreadyFinalized);
+    }
+    if intent.state == "failed" {
+        settle_failed_review(&mut *connection, &intent).await?;
+        return Ok(ReviewIntentRecovery::FailedSettled);
+    }
+    let request = request_from_intent(&intent)?;
+    match apply_document_inner(&mut *connection, client, request, false).await {
+        Ok(execution) => {
+            settle_applied_review(&mut *connection, &intent, execution.attempt_id()).await?;
+            Ok(ReviewIntentRecovery::Applied)
+        }
+        Err(error) => {
+            if let Some(current) = get_apply_intent(&mut *connection, attempt_id).await?
+                && current.state == "failed"
+            {
+                settle_failed_review(&mut *connection, &current).await?;
+                return Ok(ReviewIntentRecovery::FailedSettled);
+            }
+            Err(error)
+        }
+    }
 }
 
 fn request_from_intent(intent: &ApplyIntentRecord) -> Result<ApplyRequest> {
@@ -735,14 +792,14 @@ fn request_from_intent(intent: &ApplyIntentRecord) -> Result<ApplyRequest> {
 }
 
 async fn settle_applied_review(
-    pool: &DbPool,
+    connection: &mut DbConnection,
     intent: &ApplyIntentRecord,
     attempt_id: Uuid,
 ) -> Result<()> {
     let review_id = intent
         .review_id
         .ok_or_else(|| anyhow!("review apply intent has no review ID"))?;
-    let status = get_review_status(pool, review_id)
+    let status = get_review_status(&mut *connection, review_id)
         .await?
         .ok_or_else(|| anyhow!("review apply intent references a missing review"))?;
     if status != "applying" && status != "applied" {
@@ -754,30 +811,37 @@ async fn settle_applied_review(
         "human_review" => {
             let actor_id = Uuid::parse_str(&intent.owner_id)
                 .context("persisted human review owner is not a UUID")?;
-            mark_review_applied(pool, review_id, actor_id).await?;
+            mark_review_applied(&mut *connection, review_id, actor_id).await?;
         }
-        "autopilot_drain" => mark_review_auto_applied(pool, review_id).await?,
+        "autopilot_drain" => mark_review_auto_applied(&mut *connection, review_id).await?,
         source => return Err(anyhow!("unknown review apply source {source}")),
     }
-    if get_review_status(pool, review_id).await?.as_deref() != Some("applied") {
+    if get_review_status(&mut *connection, review_id)
+        .await?
+        .as_deref()
+        != Some("applied")
+    {
         return Err(anyhow!("review did not reach applied during recovery"));
     }
-    finalize_apply_intent(pool, attempt_id).await?;
+    finalize_apply_intent(&mut *connection, attempt_id).await?;
     Ok(())
 }
 
-async fn settle_failed_review(pool: &DbPool, intent: &ApplyIntentRecord) -> Result<()> {
+async fn settle_failed_review(
+    connection: &mut DbConnection,
+    intent: &ApplyIntentRecord,
+) -> Result<()> {
     let review_id = intent
         .review_id
         .ok_or_else(|| anyhow!("review apply intent has no review ID"))?;
     // The API settles a human failure itself and a later decision may then
     // re-prepare the same intent (#389). Never act on a stale snapshot: that
     // would revert a review whose fresh attempt is already in progress.
-    let current = get_apply_intent(pool, intent.attempt_id).await?;
+    let current = get_apply_intent(&mut *connection, intent.attempt_id).await?;
     if !current.is_some_and(|current| current.state == "failed" && current.finalized_at.is_none()) {
         return Ok(());
     }
-    let current_status = get_review_status(pool, review_id)
+    let current_status = get_review_status(&mut *connection, review_id)
         .await?
         .ok_or_else(|| anyhow!("review apply intent references a missing review"))?;
     // #439: one revert transition for both owners; only the target differs.
@@ -790,22 +854,22 @@ async fn settle_failed_review(pool: &DbPool, intent: &ApplyIntentRecord) -> Resu
         source => return Err(anyhow!("unknown review apply source {source}")),
     };
     if current_status == "applying" {
-        revert_review_from_applying(pool, review_id, revert_to).await?;
+        revert_review_from_applying(&mut *connection, review_id, revert_to).await?;
     }
     let expected = intent.review_revert_status.as_deref().unwrap_or("pending");
-    let status = get_review_status(pool, review_id).await?;
+    let status = get_review_status(&mut *connection, review_id).await?;
     if status.as_deref() != Some(expected) {
         return Err(anyhow!(
             "failed review intent expected review status {expected}, got {}",
             status.as_deref().unwrap_or("missing")
         ));
     }
-    finalize_failed_apply_intent(pool, intent.attempt_id).await?;
+    finalize_failed_apply_intent(&mut *connection, intent.attempt_id).await?;
     Ok(())
 }
 
 async fn reconcile_existing(
-    pool: &DbPool,
+    connection: &mut DbConnection,
     client: &PaperlessClient,
     request: &ApplyRequest,
     intent: &ApplyIntentRecord,
@@ -825,11 +889,23 @@ async fn reconcile_existing(
             "ambiguous in-flight Paperless apply attempt {} does not match current document",
             intent.attempt_id
         );
-        fail_apply_intent(pool, intent.attempt_id, &request.owner_id, &message).await?;
+        fail_apply_intent(
+            &mut *connection,
+            intent.attempt_id,
+            &request.owner_id,
+            &message,
+        )
+        .await?;
         return Err(anyhow!(message));
     }
     let response = serde_json::to_value(document).context("serialize reconciled document")?;
-    reconcile_apply_intent(pool, intent.attempt_id, &request.owner_id, Some(response)).await?;
+    reconcile_apply_intent(
+        &mut *connection,
+        intent.attempt_id,
+        &request.owner_id,
+        Some(response),
+    )
+    .await?;
     Ok(ApplyExecution::Reconciled {
         attempt_id: intent.attempt_id,
         applied_patch: request.patch.clone(),
@@ -838,7 +914,7 @@ async fn reconcile_existing(
 }
 
 async fn resume_existing(
-    pool: &DbPool,
+    connection: &mut DbConnection,
     client: &PaperlessClient,
     request: &ApplyRequest,
     intent: ApplyIntentRecord,
@@ -846,7 +922,14 @@ async fn resume_existing(
 ) -> Result<ApplyExecution> {
     match intent.state.as_str() {
         "in_flight" => {
-            reconcile_existing(pool, client, request, &intent, custom_fields_dropped).await
+            reconcile_existing(
+                &mut *connection,
+                client,
+                request,
+                &intent,
+                custom_fields_dropped,
+            )
+            .await
         }
         "confirmed" => Ok(ApplyExecution::Confirmed {
             attempt_id: intent.attempt_id,

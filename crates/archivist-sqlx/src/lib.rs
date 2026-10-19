@@ -5,10 +5,12 @@
 //! used by this project keeps the lockfile limited to PostgreSQL without
 //! changing application call sites or enabling SQLx macros.
 
+pub use sqlx_core::acquire::Acquire;
 pub use sqlx_core::connection::Connection;
 pub use sqlx_core::error::{Error, Result};
 pub use sqlx_core::executor::Executor;
 pub use sqlx_core::migrate;
+pub use sqlx_core::pool::PoolConnection;
 pub use sqlx_core::query::{query, query_with};
 pub use sqlx_core::query_builder::QueryBuilder;
 pub use sqlx_core::query_scalar::{query_scalar, query_scalar_with};

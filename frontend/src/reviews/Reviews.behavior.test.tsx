@@ -80,6 +80,61 @@ describe('<Reviews> behaviour', () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.mocked(api.batchReview).mockImplementation(async (ids: string[]) => ({ ok: true, succeeded: ids, failed: [] }));
+  });
+
+  it.each(['approve', 'reject'] as const)('splits large %s selections into batches of at most 100 (#455)', async (decision) => {
+    const items = Array.from({ length: 205 }, (_, index) => review(`batch-${index}`, 1000 + index));
+    reviewsMock.mockResolvedValue(page(items));
+    await renderReviews();
+    await screen.findByText('Document 1000');
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    const action = decision === 'approve' ? /Approve selected/ : /Reject selected/;
+    fireEvent.click(screen.getByRole('button', { name: action }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('205');
+    fireEvent.click(within(dialog).getByRole('button', { name: action }));
+
+    await waitFor(() => expect(api.batchReview).toHaveBeenCalledTimes(3));
+    const calls = vi.mocked(api.batchReview).mock.calls;
+    expect(calls.map(([ids]) => ids.length)).toEqual([100, 100, 5]);
+    expect(calls.flatMap(([ids]) => ids)).toEqual(items.map((item) => item.id));
+    expect(calls.every(([, value]) => value === decision)).toBe(true);
+    await waitFor(() => expect(reviewsMock).toHaveBeenCalledTimes(2));
+  });
+
+  it('aggregates item failures across chunks and still processes the remaining selection (#455)', async () => {
+    const items = Array.from({ length: 101 }, (_, index) => review(`partial-${index}`, 2000 + index));
+    reviewsMock.mockResolvedValue(page(items));
+    vi.mocked(api.batchReview)
+      .mockResolvedValueOnce({ ok: false, succeeded: [], failed: [{ id: items[0].id, error: 'conflict' }] })
+      .mockResolvedValueOnce({ ok: false, succeeded: [], failed: [{ id: items[100].id, error: 'missing' }] });
+    const { setError } = await renderReviews();
+    await screen.findByText('Document 2000');
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Approve selected/ }));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /Approve selected/ }));
+
+    await waitFor(() => expect(api.batchReview).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(setError).toHaveBeenCalledWith(expect.stringMatching(/2.*conflict/)));
+    expect(reviewsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes after a later chunk fails at the transport level (#455)', async () => {
+    const items = Array.from({ length: 101 }, (_, index) => review(`network-${index}`, 3000 + index));
+    reviewsMock.mockResolvedValueOnce(page(items)).mockResolvedValue(page(items.slice(100)));
+    vi.mocked(api.batchReview)
+      .mockImplementationOnce(async (ids) => ({ ok: true, succeeded: ids, failed: [] }))
+      .mockRejectedValueOnce(new Error('network down'));
+    const { setError } = await renderReviews();
+    await screen.findByText('Document 3000');
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Reject selected/ }));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /Reject selected/ }));
+
+    await waitFor(() => expect(setError).toHaveBeenCalledWith('network down'));
+    await waitFor(() => expect(screen.queryByText('Document 3000')).not.toBeInTheDocument());
+    expect(screen.getByText('Document 3100')).toBeInTheDocument();
   });
 
   it('drops a single-decided item from the selection (#418)', async () => {

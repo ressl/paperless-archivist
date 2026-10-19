@@ -39,6 +39,8 @@ export type ReviewEditState = {
 // reach further pending items without a paginated (offset) endpoint.
 const REVIEW_PAGE_SIZE = 100;
 const REVIEW_MAX_LIMIT = 500;
+// Keep each decision request within the backend's batch safety limit (#455).
+const REVIEW_BATCH_SIZE = 100;
 
 /** DOM id of a review card; the target of `/reviews/<id>` deep links. */
 function reviewAnchorId(id: string): string {
@@ -184,12 +186,21 @@ export function Reviews({
     });
     if (!confirmed) return;
     await run(setBusy, setError, async () => {
-      const result = await api.batchReview(ids, decision);
-      if (result.failed.length > 0) {
-        setError(t('review.failed_batch', { count: result.failed.length, error: result.failed[0].error }));
+      const failed: Array<{ id: string; error: string }> = [];
+      try {
+        for (let offset = 0; offset < ids.length; offset += REVIEW_BATCH_SIZE) {
+          const result = await api.batchReview(ids.slice(offset, offset + REVIEW_BATCH_SIZE), decision);
+          failed.push(...result.failed);
+        }
+        if (failed.length > 0) {
+          setError(t('review.failed_batch', { count: failed.length, error: failed[0].error }));
+        }
+      } finally {
+        // Earlier chunks may already have committed when a later request
+        // fails. Always refresh so decided items cannot remain actionable.
+        setSelected([]);
+        await load();
       }
-      setSelected([]);
-      await load();
     }, t);
   };
 

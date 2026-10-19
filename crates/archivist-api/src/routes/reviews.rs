@@ -687,7 +687,17 @@ pub(crate) async fn auto_fix_apply_one(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct EditReviewRequest {
-    pub(crate) patch: DocumentPatch,
+    pub(crate) patch: EditedReviewPatch,
+}
+
+/// Review-only names must survive edits without entering the Paperless PATCH
+/// body. The apply path reads and sanitizes this sidecar separately (#454).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct EditedReviewPatch {
+    #[serde(flatten)]
+    pub(crate) document: DocumentPatch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) archivist_new_objects: Option<archivist_apply::PendingNewObjects>,
 }
 
 pub(crate) async fn edit_review(

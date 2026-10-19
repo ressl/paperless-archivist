@@ -74,6 +74,12 @@ const PAPERLESS_INFRA_RETRY_CEILING: i32 = 20;
 /// a documented last resort.
 pub(crate) fn classify_processing_failure(error: &anyhow::Error) -> ProcessingFailureClass {
     for cause in error.chain() {
+        if cause
+            .downcast_ref::<archivist_apply::ApplySourceBusy>()
+            .is_some()
+        {
+            return ProcessingFailureClass::Transient;
+        }
         if let Some(paperless_error) = cause.downcast_ref::<PaperlessError>() {
             // A transient Paperless failure is an *infrastructure* outage of the
             // system of record (network/timeout/5xx/gateway-404) — it blocks
@@ -322,6 +328,15 @@ pub(crate) async fn release_lease_for_cooldown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_source_contention_is_retryable() {
+        let error = anyhow::Error::new(archivist_apply::ApplySourceBusy).context("resume apply");
+        assert_eq!(
+            classify_processing_failure(&error),
+            ProcessingFailureClass::Transient
+        );
+    }
     use anyhow::anyhow;
 
     #[test]

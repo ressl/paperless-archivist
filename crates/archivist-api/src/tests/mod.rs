@@ -8,6 +8,7 @@ mod inventory;
 mod oidc;
 mod paperless;
 mod providers;
+mod reviews;
 mod security;
 mod settings;
 mod ssrf;

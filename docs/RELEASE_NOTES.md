@@ -8,7 +8,16 @@
 
 ## Unreleased
 
-_No changes yet._
+- Review apply recovery now shares a PostgreSQL execution lock with active
+  API applies and the autopilot drain, preventing recovery from failing a
+  PATCH that is still running (#452). Update API and worker together so
+  every executor honors the lock.
+- Clearing a review's correspondent or document type now preserves explicit
+  nulls through persistence and recovery (#453).
+- Editing a review retains its proposed new tags and correspondent until
+  apply, subject to the existing creation policy and limits (#454).
+- Bulk review approval and rejection now split selections into requests of
+  at most 100 items and refresh after partial progress (#455).
 
 ## v1.19.0 — Audit 2026-09: safer pipeline, review workflow, and UI overhaul
 

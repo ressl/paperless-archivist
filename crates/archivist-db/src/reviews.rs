@@ -672,8 +672,8 @@ fn apply_audit_patch(patch: &Value) -> Value {
 
 /// Persist the immutable intent for one logical Paperless PATCH. Repeating the
 /// same source-key/hash pair returns its original attempt ID and state.
-pub async fn prepare_apply_intent(
-    pool: &DbPool,
+pub async fn prepare_apply_intent<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
     input: &ApplyIntentInput,
 ) -> Result<ApplyIntentRecord> {
     if input.source.trim().is_empty()
@@ -689,7 +689,7 @@ pub async fn prepare_apply_intent(
         return Err(anyhow!("invalid Paperless apply intent"));
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = executor.begin().await?;
     let inserted = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         insert into paperless_apply_intents (
@@ -805,15 +805,15 @@ pub async fn prepare_apply_intent(
     Ok(record)
 }
 
-pub async fn get_apply_intent(
-    pool: &DbPool,
+pub async fn get_apply_intent<'a>(
+    executor: impl sqlx::PgExecutor<'a>,
     attempt_id: Uuid,
 ) -> Result<Option<ApplyIntentRecord>> {
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "select {APPLY_INTENT_COLUMNS} from paperless_apply_intents where attempt_id = $1"
     )))
     .bind(attempt_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     row.map(apply_intent_from_row).transpose()
 }
@@ -821,8 +821,8 @@ pub async fn get_apply_intent(
 /// Return the durable unfinished attempt for a logical caller. This lets a
 /// reacquired job lease resume the original body even when a fresh Paperless
 /// read would prune fields that were already applied.
-pub async fn get_recoverable_apply_intent_by_source_key(
-    pool: &DbPool,
+pub async fn get_recoverable_apply_intent_by_source_key<'a>(
+    executor: impl sqlx::PgExecutor<'a>,
     source_key: &str,
 ) -> Result<Option<ApplyIntentRecord>> {
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -837,15 +837,15 @@ pub async fn get_recoverable_apply_intent_by_source_key(
         "#
     )))
     .bind(source_key)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     row.map(apply_intent_from_row).transpose()
 }
 
 /// Claim a prepared attempt immediately before HTTP. A recovery worker may
 /// take over a prepared intent because no request has started yet.
-pub async fn mark_apply_intent_in_flight(
-    pool: &DbPool,
+pub async fn mark_apply_intent_in_flight<'a>(
+    executor: impl sqlx::PgExecutor<'a>,
     attempt_id: Uuid,
     owner_id: &str,
 ) -> Result<bool> {
@@ -859,19 +859,19 @@ pub async fn mark_apply_intent_in_flight(
     )
     .bind(attempt_id)
     .bind(owner_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(updated.rows_affected() == 1)
 }
 
-pub async fn mark_apply_intent_confirmed(
-    pool: &DbPool,
+pub async fn mark_apply_intent_confirmed<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
     attempt_id: Uuid,
     owner_id: &str,
     response: Option<Value>,
     duration_ms: i64,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = executor.begin().await?;
     let row = sqlx::query(
         r#"
         update paperless_apply_intents
@@ -927,13 +927,13 @@ pub async fn mark_apply_intent_confirmed(
     Ok(true)
 }
 
-pub async fn reconcile_apply_intent(
-    pool: &DbPool,
+pub async fn reconcile_apply_intent<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
     attempt_id: Uuid,
     reconciled_by: &str,
     response: Option<Value>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = executor.begin().await?;
     let row = sqlx::query(
         r#"
         update paperless_apply_intents
@@ -983,13 +983,13 @@ pub async fn reconcile_apply_intent(
     Ok(true)
 }
 
-pub async fn fail_apply_intent(
-    pool: &DbPool,
+pub async fn fail_apply_intent<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
     attempt_id: Uuid,
     failed_by: &str,
     error: &str,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = executor.begin().await?;
     let row = sqlx::query(
         r#"
         update paperless_apply_intents
@@ -1044,14 +1044,14 @@ pub async fn fail_apply_intent(
 /// instead of the patch being blocked forever. Bounded by `max_retries`
 /// (tracked in `metadata.transient_failures`); returns `false` once the budget
 /// is exhausted, in which case the caller fails the intent terminally. #389
-pub async fn release_transient_apply_intent(
-    pool: &DbPool,
+pub async fn release_transient_apply_intent<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
     attempt_id: Uuid,
     owner_id: &str,
     error: &str,
     max_retries: i32,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = executor.begin().await?;
     let row = sqlx::query(
         r#"
         update paperless_apply_intents
@@ -1107,7 +1107,10 @@ pub async fn release_transient_apply_intent(
     Ok(true)
 }
 
-pub async fn finalize_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bool> {
+pub async fn finalize_apply_intent<'a>(
+    executor: impl sqlx::PgExecutor<'a>,
+    attempt_id: Uuid,
+) -> Result<bool> {
     let updated = sqlx::query(
         r#"
         update paperless_apply_intents
@@ -1116,7 +1119,7 @@ pub async fn finalize_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bo
         "#,
     )
     .bind(attempt_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(updated.rows_affected() == 1)
 }
@@ -1124,7 +1127,10 @@ pub async fn finalize_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bo
 /// Mark a failed intent as locally settled without making it look successful.
 /// Keeping `state = 'failed'` ensures the same source key/hash cannot later be
 /// mistaken for an already-applied request.
-pub async fn finalize_failed_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Result<bool> {
+pub async fn finalize_failed_apply_intent<'a>(
+    executor: impl sqlx::PgExecutor<'a>,
+    attempt_id: Uuid,
+) -> Result<bool> {
     let updated = sqlx::query(
         r#"
         update paperless_apply_intents
@@ -1133,7 +1139,7 @@ pub async fn finalize_failed_apply_intent(pool: &DbPool, attempt_id: Uuid) -> Re
         "#,
     )
     .bind(attempt_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(updated.rows_affected() == 1)
 }
@@ -1176,14 +1182,19 @@ pub async fn review_has_nonterminal_apply_intent(pool: &DbPool, review_id: Uuid)
     .map_err(Into::into)
 }
 
-pub async fn get_review_status(pool: &DbPool, review_id: Uuid) -> Result<Option<String>> {
+pub async fn get_review_status<'a>(
+    executor: impl sqlx::PgExecutor<'a>,
+    review_id: Uuid,
+) -> Result<Option<String>> {
     sqlx::query_scalar("select status from review_items where id = $1")
         .bind(review_id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
         .map_err(Into::into)
 }
 
+/// Recovery candidates, not an execution claim. Callers must acquire the
+/// source's [`ApplySourceLock`] and re-read its state before acting (#452).
 pub async fn list_recoverable_review_apply_intents(
     pool: &DbPool,
     limit: i64,
@@ -1406,8 +1417,12 @@ async fn finalize_review_aggregate_tx(
     Ok(true)
 }
 
-pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid) -> Result<()> {
-    settle_review_applied(pool, review_id, Some(actor_id)).await
+pub async fn mark_review_applied<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
+    review_id: Uuid,
+    actor_id: Uuid,
+) -> Result<()> {
+    settle_review_applied(executor, review_id, Some(actor_id)).await
 }
 
 /// [`ReviewTransition::Applied`] for both apply owners: a human apply
@@ -1416,12 +1431,12 @@ pub async fn mark_review_applied(pool: &DbPool, review_id: Uuid, actor_id: Uuid)
 /// Gated on `applying`: the caller claimed the row before patching
 /// Paperless, so the terminal transition is only valid from that owned
 /// state; a missing row means another actor already finished it. #253, #439
-async fn settle_review_applied(
-    pool: &DbPool,
+async fn settle_review_applied<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
     review_id: Uuid,
     actor_id: Option<Uuid>,
 ) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = executor.begin().await?;
     let Some(row) = sqlx::query(
         r#"
         update review_items
@@ -1756,8 +1771,11 @@ pub async fn claim_pending_review_for_autopilot_drain(
 /// Mark a review_item as applied via the autopilot drain: the worker-actor
 /// variant of [`mark_review_applied`] (same transition, `trigger =
 /// "autopilot_drain"` audit metadata).
-pub async fn mark_review_auto_applied(pool: &DbPool, review_id: Uuid) -> Result<()> {
-    settle_review_applied(pool, review_id, None).await
+pub async fn mark_review_auto_applied<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
+    review_id: Uuid,
+) -> Result<()> {
+    settle_review_applied(executor, review_id, None).await
 }
 
 /// Record a field-level optimistic-concurrency conflict without exposing the
@@ -1826,13 +1844,13 @@ pub async fn mark_review_apply_conflict(
 /// [`mark_review_apply_conflict`], which shares the same transition. The API
 /// and the drain revert to `pending` (#388); `approved`/`edited` remain
 /// accepted for legacy intents persisted with that revert status. #253, #439
-pub async fn revert_review_from_applying(
-    pool: &DbPool,
+pub async fn revert_review_from_applying<'a>(
+    executor: impl sqlx::Acquire<'a, Database = Postgres>,
     review_id: Uuid,
     to_status: &str,
 ) -> Result<()> {
     let to = review_revert_target(to_status)?;
-    let mut tx = pool.begin().await?;
+    let mut tx = executor.begin().await?;
     revert_review_from_applying_tx(&mut tx, review_id, to, None).await?;
     tx.commit().await?;
     Ok(())
