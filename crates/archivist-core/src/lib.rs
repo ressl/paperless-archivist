@@ -4281,14 +4281,31 @@ pub struct DocumentPatch {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<i32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_reference",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub correspondent: Option<Option<i32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_reference",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub document_type: Option<Option<i32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_fields: Option<Value>,
+}
+
+/// Missing reference fields leave Paperless unchanged; present nulls clear
+/// them. Serde's ordinary nested Option decoder collapses those two states.
+fn deserialize_patch_reference<'de, D>(deserializer: D) -> Result<Option<Option<i32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i32>::deserialize(deserializer).map(Some)
 }
 
 impl DocumentPatch {

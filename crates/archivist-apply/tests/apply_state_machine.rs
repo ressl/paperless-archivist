@@ -20,13 +20,21 @@ use secrecy::SecretString;
 use serde_json::{Value, json};
 use sqlx::Executor;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 #[derive(Clone)]
 struct MockPaperless {
     document: Value,
     patch_count: usize,
     invalid_first_response: bool,
+    patch_gate: Option<Arc<PatchGate>>,
+}
+
+#[derive(Default)]
+struct PatchGate {
+    started: Notify,
+    finish: Notify,
+    applied: Notify,
 }
 
 async fn get_document(
@@ -41,11 +49,19 @@ async fn patch_document(
     Path(_id): Path<i32>,
     Json(patch): Json<Value>,
 ) -> Response {
+    let gate = state.lock().await.patch_gate.clone();
+    if let Some(gate) = &gate {
+        gate.started.notify_one();
+        gate.finish.notified().await;
+    }
     let mut state = state.lock().await;
     state.patch_count += 1;
     let document = state.document.as_object_mut().expect("document object");
     for (key, value) in patch.as_object().expect("patch object") {
         document.insert(key.clone(), value.clone());
+    }
+    if let Some(gate) = gate {
+        gate.applied.notify_one();
     }
     if state.invalid_first_response && state.patch_count == 1 {
         return (StatusCode::OK, "response-lost-after-commit").into_response();
@@ -69,6 +85,7 @@ async fn mock_client(invalid_first_response: bool) -> (PaperlessClient, Arc<Mute
         }),
         patch_count: 0,
         invalid_first_response,
+        patch_gate: None,
     }));
     let app = Router::new()
         .route(
@@ -435,4 +452,214 @@ async fn transient_patch_failure_keeps_the_same_patch_retryable() {
     let guard = state.lock().await;
     assert_eq!(guard.patch_count, 2);
     assert_eq!(guard.document["title"], "new");
+}
+
+async fn human_review_request(pool: &DbPool) -> ApplyRequest {
+    let actor_id = uuid::Uuid::now_v7();
+    sqlx::query("insert into users (id, username, password_hash) values ($1, $2, 'test-hash')")
+        .bind(actor_id)
+        .bind(format!("reviewer-{actor_id}"))
+        .execute(pool)
+        .await
+        .expect("review actor");
+    let review_id = sqlx::query_scalar(
+        "insert into review_items (paperless_document_id, stage, status, suggested_patch, validation_warnings, reviewed_at) values (1, 'metadata', 'applying', '{\"title\":\"new\"}', '[]', now()) returning id",
+    ).fetch_one(pool).await.expect("review");
+    ApplyRequest {
+        source: "human_review".to_owned(),
+        source_key: format!("review:{review_id}"),
+        owner_type: "user".to_owned(),
+        owner_id: actor_id.to_string(),
+        review_id: Some(review_id),
+        review_revert_status: Some("pending".to_owned()),
+        ..request(title_patch())
+    }
+}
+
+async fn prepare_request(pool: &DbPool, request: &ApplyRequest) -> uuid::Uuid {
+    prepare_apply_intent(
+        pool,
+        &ApplyIntentInput {
+            source: request.source.clone(),
+            source_key: request.source_key.clone(),
+            owner_type: request.owner_type.clone(),
+            owner_id: request.owner_id.clone(),
+            paperless_document_id: request.paperless_document_id,
+            run_id: request.run_id,
+            job_id: request.job_id,
+            review_id: request.review_id,
+            patch_hash: patch_hash(&request.patch).expect("hash"),
+            patch: serde_json::to_value(&request.patch).expect("patch"),
+            before: request.before.clone(),
+            metadata: request.metadata.clone(),
+            review_revert_status: request.review_revert_status.clone(),
+        },
+    )
+    .await
+    .expect("prepare intent")
+    .attempt_id
+}
+
+async fn wait_for(signal: &Notify) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), signal.notified())
+        .await
+        .expect("mock Paperless reached the expected request phase");
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn recovery_does_not_fail_a_live_review_patch() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    let request = human_review_request(&pool).await;
+    let source_key = request.source_key.clone();
+    let (client, state) = mock_client(false).await;
+    let gate = Arc::new(PatchGate::default());
+    state.lock().await.patch_gate = Some(gate.clone());
+    let task_pool = pool.clone();
+    let task_client = client.clone();
+    let apply =
+        tokio::spawn(async move { apply_document(&task_pool, &task_client, request).await });
+    wait_for(&gate.started).await;
+
+    // Paperless still returns the old title while the API's PATCH is alive.
+    let sweep = recover_review_apply_intents(&pool, &client, 10)
+        .await
+        .expect("sweep");
+    assert_eq!(sweep.examined, 1);
+    assert_eq!(sweep.deferred, 1);
+    assert_eq!(sweep.failed_settled, 0);
+    let intent = archivist_db::get_recoverable_apply_intent_by_source_key(&pool, &source_key)
+        .await
+        .expect("intent")
+        .expect("active intent");
+    assert_eq!(intent.state, "in_flight");
+
+    gate.finish.notify_one();
+    assert!(matches!(
+        apply.await.expect("join").expect("apply"),
+        ApplyExecution::Confirmed { .. }
+    ));
+    let sweep = recover_review_apply_intents(&pool, &client, 10)
+        .await
+        .expect("settle");
+    assert_eq!(sweep.applied, 1);
+    assert_eq!(state.lock().await.patch_count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn concurrent_recovery_workers_do_not_take_over_each_others_patch() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    let request = human_review_request(&pool).await;
+    prepare_request(&pool, &request).await;
+    let (client, state) = mock_client(false).await;
+    let gate = Arc::new(PatchGate::default());
+    state.lock().await.patch_gate = Some(gate.clone());
+    let task_pool = pool.clone();
+    let task_client = client.clone();
+    let first =
+        tokio::spawn(
+            async move { recover_review_apply_intents(&task_pool, &task_client, 10).await },
+        );
+    wait_for(&gate.started).await;
+
+    let second = recover_review_apply_intents(&pool, &client, 10)
+        .await
+        .expect("competing recovery");
+    assert_eq!(second.deferred, 1);
+    assert_eq!(second.failed_settled, 0);
+    gate.finish.notify_one();
+    assert_eq!(
+        first.await.expect("join").expect("first recovery").applied,
+        1
+    );
+    assert_eq!(state.lock().await.patch_count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn cancelled_execution_releases_ownership_and_recovers_without_second_patch() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    let request = human_review_request(&pool).await;
+    let source_key = request.source_key.clone();
+    let (client, state) = mock_client(false).await;
+    let gate = Arc::new(PatchGate::default());
+    state.lock().await.patch_gate = Some(gate.clone());
+    let task_pool = pool.clone();
+    let task_client = client.clone();
+    let apply =
+        tokio::spawn(async move { apply_document(&task_pool, &task_client, request).await });
+    wait_for(&gate.started).await;
+    let intent = archivist_db::get_recoverable_apply_intent_by_source_key(&pool, &source_key)
+        .await
+        .expect("intent")
+        .expect("active intent");
+    // Block local confirmation while letting the remote PATCH commit, so
+    // cancellation occurs precisely between the HTTP and database writes.
+    let mut confirmation_fence = pool.begin().await.expect("confirmation fence");
+    sqlx::query("select attempt_id from paperless_apply_intents where attempt_id = $1 for update")
+        .bind(intent.attempt_id)
+        .fetch_one(&mut *confirmation_fence)
+        .await
+        .expect("lock intent");
+    gate.finish.notify_one();
+    wait_for(&gate.applied).await;
+    apply.abort();
+    assert!(apply.await.expect_err("cancelled task").is_cancelled());
+    confirmation_fence
+        .rollback()
+        .await
+        .expect("release confirmation fence");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let sweep = recover_review_apply_intents(&pool, &client, 10)
+                .await
+                .expect("recovery");
+            if sweep.applied == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("session lock released after cancellation");
+    assert_eq!(state.lock().await.patch_count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing to a disposable PostgreSQL 18 database"]
+async fn recovery_preserves_null_clears_and_uses_only_one_pool_connection() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    let mut request = human_review_request(&pool).await;
+    request.patch.correspondent = Some(None);
+    request.patch.document_type = Some(None);
+    prepare_request(&pool, &request).await;
+    let (client, state) = mock_client(false).await;
+    state.lock().await.document["correspondent"] = json!(7);
+    state.lock().await.document["document_type"] = json!(9);
+    let single = connect(&std::env::var("DATABASE_URL").expect("database URL"), 1)
+        .await
+        .expect("single connection pool");
+
+    let sweep = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        recover_review_apply_intents(&single, &client, 10),
+    )
+    .await
+    .expect("no second connection required")
+    .expect("recovery");
+    assert_eq!(sweep.applied, 1);
+    let state = state.lock().await;
+    assert_eq!(state.document["correspondent"], Value::Null);
+    assert_eq!(state.document["document_type"], Value::Null);
+    assert_eq!(state.patch_count, 1);
 }

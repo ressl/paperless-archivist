@@ -1,4 +1,11 @@
 import '@testing-library/jest-dom/vitest';
+import { cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+// Vitest globals are disabled, so Testing Library cannot register its usual
+// automatic cleanup. Unmount before jsdom removes window; otherwise pending
+// React work can run after the environment has already been destroyed.
+afterEach(cleanup);
 
 if (typeof window !== 'undefined' && !window.matchMedia) {
   Object.defineProperty(window, 'matchMedia', {

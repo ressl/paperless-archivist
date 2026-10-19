@@ -175,6 +175,9 @@ impl From<anyhow::Error> for ApiError {
                 ReviewDecisionError::NotPending => Self::conflict(decision.to_string()),
             };
         }
+        if let Some(busy) = error.downcast_ref::<archivist_apply::ApplySourceBusy>() {
+            return Self::conflict(busy.to_string());
+        }
         if let Some(conflict) = error.downcast_ref::<ReviewApplyConflict>() {
             warn!(
                 fields = ?conflict.fields(),

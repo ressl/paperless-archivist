@@ -446,11 +446,19 @@ pub struct ImageInput {
     pub bytes: Vec<u8>,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates a must_use attribute on the already must-use boxed future"
+)]
 #[async_trait]
 pub trait TextProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> Result<AiResponse>;
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates a must_use attribute on the already must-use boxed future"
+)]
 #[async_trait]
 pub trait VisionProvider: Send + Sync {
     async fn vision(&self, request: VisionRequest) -> Result<AiResponse>;

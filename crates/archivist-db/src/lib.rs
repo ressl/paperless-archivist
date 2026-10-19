@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 mod transitions;
 
+mod apply_lock;
 mod artifacts;
 mod audit;
 mod chat;
@@ -42,6 +43,7 @@ mod startup_repairs;
 mod stats;
 mod users;
 
+pub use apply_lock::*;
 pub use artifacts::*;
 pub use audit::*;
 pub use chat::*;
@@ -66,6 +68,7 @@ use transitions::{
 };
 
 pub type DbPool = PgPool;
+pub type DbConnection = PgConnection;
 /// Transaction handle for callers that batch several helpers in one TX
 /// without depending on sqlx directly (worker sync batches, #408).
 pub type DbTransaction<'a> = Transaction<'a, Postgres>;
